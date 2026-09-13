@@ -6,8 +6,8 @@ const settingsDialogSource = readFileSync(new URL("../../../components/editor/Ed
 
 describe("settings page navigation", () => {
   it("keeps query, settings, and driver-manager surfaces mutually exclusive", () => {
-    expect(appSource).toContain('type MainContentSurface = "query" | "settings" | "driverStore";');
-    expect(appSource).toMatch(/function activateMainContentSurface\(surface: MainContentSurface\) \{\s*settingsStore\.settingsPageActive = surface === "settings";\s*driverStoreActive\.value = surface === "driverStore";/);
+    expect(appSource).toContain('type MainContentSurface = "query" | "settings" | "driverStore" | "pluginCenter";');
+    expect(appSource).toMatch(/function activateMainContentSurface\(surface: MainContentSurface\) \{\s*settingsStore\.settingsPageActive = surface === "settings";\s*driverStoreActive\.value = surface === "driverStore";\s*pluginCenterActive\.value = surface === "pluginCenter";/);
     expect(appSource).toMatch(/function activateSettingsPage\(\) \{\s*settingsPageTabOpen\.value = true;\s*activateMainContentSurface\("settings"\);/);
     expect(appSource).toMatch(/function activateQuerySurface\(\) \{\s*activateMainContentSurface\("query"\);/);
     expect(appSource).toMatch(/driverStoreTabOpen\.value = true;\s*activateMainContentSurface\("driverStore"\);/);

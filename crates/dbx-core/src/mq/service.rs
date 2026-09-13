@@ -948,6 +948,10 @@ mod tests {
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             external_config: Some(serde_json::json!({
                 "systemKind": "pulsar",
                 "adminUrl": "http://127.0.0.1:8080",

@@ -113,6 +113,13 @@ pub(super) fn original_is_mysql_generated_column(column: &EditableStructureColum
 pub(super) fn column_extra_clause(dialect: StructureDialect, column: &EditableStructureColumn) -> Option<String> {
     let extra = column.extra.as_ref()?;
     match dialect {
+        StructureDialect::Sqlite => {
+            if extra.auto_increment.unwrap_or(false) && column.is_primary_key {
+                Some("AUTOINCREMENT".to_string())
+            } else {
+                None
+            }
+        }
         StructureDialect::Mysql => {
             let mut clauses = Vec::new();
             if extra.auto_increment.unwrap_or(false) {

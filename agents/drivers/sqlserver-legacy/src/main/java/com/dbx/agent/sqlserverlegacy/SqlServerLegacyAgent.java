@@ -428,7 +428,39 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<IndexInfo> listIndexes(String schema, String table) {
-        return super.listIndexes(metadataSchema(schema, table), table);
+        String resolvedSchema = metadataSchema(schema, table);
+        List<IndexInfo> indexes = super.listIndexes(resolvedSchema, table);
+        return markPrimaryKeyIndex(indexes, resolvedSchema, table);
+    }
+
+    // SQL Server names a primary-key index after its constraint (PK__<table>__<hex>
+    // or a user-chosen name), so the shared JDBC metadata layer's "PRIMARY"
+    // index-name convention never matches and is_primary stayed false. Resolve
+    // the flag from DatabaseMetaData.getPrimaryKeys() PK_NAME instead, so table
+    // cloning, the index tree badge, and DDL output see the real primary key.
+    private List<IndexInfo> markPrimaryKeyIndex(List<IndexInfo> indexes, String schema, String table) {
+        if (indexes.isEmpty()) {
+            return indexes;
+        }
+        try {
+            String primaryKeyName = null;
+            try (java.sql.ResultSet rs = requireConnection().getMetaData().getPrimaryKeys(null, schema, table)) {
+                if (rs.next()) {
+                    primaryKeyName = rs.getString("PK_NAME");
+                }
+            }
+            if (primaryKeyName == null || primaryKeyName.trim().isEmpty()) {
+                return indexes;
+            }
+            for (IndexInfo index : indexes) {
+                if (primaryKeyName.equals(index.getName())) {
+                    index.setIs_primary(true);
+                }
+            }
+        } catch (Exception ignored) {
+            // Fail soft: keep the metadata-layer flags when primary-key lookup is unavailable.
+        }
+        return indexes;
     }
 
     @Override

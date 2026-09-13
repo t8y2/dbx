@@ -403,6 +403,37 @@ async fn main() {
         .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
+        .route("/plugins/trusted-keys", get(routes::plugins::list_plugin_trusted_keys))
+        .route("/plugins/trusted-keys/save", post(routes::plugins::save_plugin_trusted_key))
+        .route("/plugins/trusted-keys/remove", post(routes::plugins::remove_plugin_trusted_key))
+        .route("/plugins/repositories", get(routes::plugins::list_plugin_repositories))
+        .route("/plugins/repositories/save", post(routes::plugins::save_plugin_repository))
+        .route("/plugins/repositories/remove", post(routes::plugins::remove_plugin_repository))
+        .route("/plugins/marketplace/catalogs", get(routes::plugins::fetch_plugin_marketplace_catalogs))
+        .route("/plugins/marketplace/install", post(routes::plugins::install_marketplace_plugin))
+        .route(
+            "/plugins/install",
+            post(routes::plugins::install_plugin).layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
+        .route("/plugins/rollback", post(routes::plugins::rollback_plugin))
+        .route("/plugins/uninstall", post(routes::plugins::uninstall_plugin))
+        .route("/plugins/activate", post(routes::plugins::activate_plugin))
+        .route("/plugins/active", get(routes::plugins::list_active_plugins))
+        .route("/plugins/stop", post(routes::plugins::stop_plugin))
+        .route("/plugins/invoke", post(routes::plugins::invoke_plugin))
+        .route("/plugins/connection-action", post(routes::plugins::invoke_plugin_connection_action))
+        .route("/plugins/notify", post(routes::plugins::notify_plugin))
+        .route("/plugins/binary", post(routes::plugins::send_plugin_binary))
+        .route("/plugins/filesystem/list", post(routes::plugins::list_plugin_filesystem_entries))
+        .route("/plugins/filesystem/read", post(routes::plugins::read_plugin_filesystem_file))
+        .route("/plugins/filesystem/write", post(routes::plugins::write_plugin_filesystem_file))
+        .route("/plugins/filesystem/create-directory", post(routes::plugins::create_plugin_filesystem_directory))
+        .route("/plugins/filesystem/delete", post(routes::plugins::delete_plugin_filesystem_entry))
+        .route("/plugins/filesystem/rename", post(routes::plugins::rename_plugin_filesystem_entry))
+        .route("/plugins/events", get(routes::plugins::plugin_events))
+        .route("/plugins/{pluginId}/assets/{*path}", get(routes::plugins::plugin_asset))
+        .route("/plugins/{pluginId}/ui", get(routes::plugins::plugin_ui_entry))
+        .route("/plugins/{pluginId}/ui/{*path}", get(routes::plugins::plugin_ui_asset))
         // JDBC
         .route("/jdbc/drivers", get(routes::jdbc::list_jdbc_drivers).post(routes::jdbc::import_jdbc_drivers))
         .route(
@@ -941,6 +972,21 @@ async fn main() {
         .route("/mongo/find-one-and-update", post(routes::mongo::find_one_and_update))
         .route("/mongo/find-one-and-replace", post(routes::mongo::find_one_and_replace))
         .route("/mongo/find-one-and-delete", post(routes::mongo::find_one_and_delete))
+        .route(
+            "/mongo/import/preview",
+            post(routes::mongodb_import_export::preview_import).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/import/preview-source", post(routes::mongodb_import_export::preview_uploaded_import))
+        .route("/mongo/import/source/release", post(routes::mongodb_import_export::release_import_source))
+        .route("/mongo/import/execute", post(routes::mongodb_import_export::execute_import))
+        .route("/mongo/import/progress/{importId}", get(routes::mongodb_import_export::import_progress))
+        .route("/mongo/import/cancel", post(routes::mongodb_import_export::cancel_import))
+        .route("/mongo/export", post(routes::mongodb_import_export::start_export))
+        .route("/mongo/export/progress/{exportId}", get(routes::mongodb_import_export::export_progress))
+        .route("/mongo/export/download/{exportId}", get(routes::mongodb_import_export::export_download))
+        .route("/mongo/export/cancel", post(routes::mongodb_import_export::cancel_export))
         // History
         .route("/history", get(routes::history::load_history).delete(routes::history::clear_history))
         .route("/history/save", post(routes::history::save_history))

@@ -60,6 +60,7 @@ const showDeleteDialog = ref(false);
 const deleting = ref(false);
 const clearBacklogTarget = ref<SubscriptionInfo>();
 const showClearBacklogDialog = ref(false);
+const clearBacklogError = ref<string>();
 const clearingBacklog = ref(false);
 
 const formData = ref({
@@ -440,6 +441,7 @@ function handleClearBacklog(sub: SubscriptionInfo) {
     return;
   }
   clearBacklogTarget.value = sub;
+  clearBacklogError.value = undefined;
   showClearBacklogDialog.value = true;
 }
 
@@ -450,13 +452,13 @@ async function confirmClearBacklog() {
   const topicRef = getPulsarTopicRef();
   if (!topicRef) return;
   clearingBacklog.value = true;
-  error.value = undefined;
+  clearBacklogError.value = undefined;
   try {
     await mqClearBacklog(props.connectionId, topicRef, sub.name);
     showClearBacklogDialog.value = false;
     await loadSubscriptions();
   } catch (e: unknown) {
-    error.value = formatError(e);
+    clearBacklogError.value = formatError(e);
   } finally {
     clearingBacklog.value = false;
   }
@@ -829,7 +831,11 @@ onBeforeUnmount(() => {
       :loading="clearingBacklog"
       :close-on-confirm="false"
       @confirm="confirmClearBacklog"
-    />
+    >
+      <template #options>
+        <div v-if="clearBacklogError" class="form-error" role="alert">{{ clearBacklogError }}</div>
+      </template>
+    </DangerConfirmDialog>
   </div>
 </template>
 

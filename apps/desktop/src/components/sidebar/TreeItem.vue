@@ -39,11 +39,14 @@ import {
   CircleX,
   RefreshCw,
 } from "@lucide/vue";
+import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
+const showDatabaseLinks = ref(false);
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -361,6 +364,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Braces, colorClass: "text-amber-500" };
     case "sequence":
       return { icon: ListTree, colorClass: "text-emerald-500" };
+    case "oracle-db-links":
+    case "oracle-db-link":
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
     case "job":
@@ -432,7 +437,7 @@ function displayLabel(node: TreeNode): string {
   // internationalized; those nodes may still contain the old Chinese text.
   if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
   if (node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "meilisearch-system") return t(node.label);
-  if (node.type === "linked-server-root") return t(node.label);
+  if (node.type === "oracle-db-links" || node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
   if (node.type === "mqtt-topic" && node.id.endsWith(":mqtt-topic:__console__")) return t(node.label);
   if (node.label === "tree.defaultDatabase") return t(node.label);
@@ -821,7 +826,7 @@ const canExpand = computed(() => {
   return canTreeNodeShowExpander({
     type: activeNode.value.type,
     childCount: activeNode.value.children?.length ?? 0,
-    explicitContainer: (activeNode.value.type === "package" && activeNode.value.children !== undefined) || activeNode.value.xuguTypeMembersExpandable === true,
+    explicitContainer: activeNode.value.type === "oracle-db-links" || (activeNode.value.type === "package" && activeNode.value.children !== undefined) || activeNode.value.xuguTypeMembersExpandable === true,
   });
 });
 
@@ -960,6 +965,13 @@ function connectionIconType(connectionId?: string) {
   const config = connectionId ? connectionStore.getConfig(connectionId) : undefined;
   return config?.driver_profile || config?.db_type || "postgres";
 }
+
+const pluginConnectionIcon = computed(() => {
+  if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return undefined;
+  const config = connectionStore.getConfig(activeNode.value.connectionId);
+  if (config?.db_type !== "plugin" || !config.plugin_id) return undefined;
+  return { pluginId: config.plugin_id, contributionId: config.plugin_connection_provider };
+});
 
 const connectionColor = computed(() => {
   const connectionId = activeNode.value.connectionId;
@@ -1454,14 +1466,27 @@ function onClick(event: MouseEvent) {
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
   if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
+  if (props.node.type === "oracle-db-link") {
+    showDatabaseLinks.value = true;
+    return;
+  }
   treeRuntime.handleRowClick(props.node, event.detail);
 }
 
 function onDoubleClick(event: MouseEvent) {
+  if (props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") {
+    showDatabaseLinks.value = true;
+    return;
+  }
   treeRuntime.handleRowDoubleClick(props.node, event);
 }
 
 function onTreeItemContextMenu(event: MouseEvent) {
+  if (props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") {
+    event.preventDefault();
+    showDatabaseLinks.value = true;
+    return;
+  }
   if (!connectionStore.selectedTreeNodeIds.includes(props.node.id)) selectSingleTreeNode(props.node);
   else connectionStore.selectedTreeNodeId = props.node.id;
   rowRef.value?.focus({ preventScroll: true });
@@ -1469,6 +1494,11 @@ function onTreeItemContextMenu(event: MouseEvent) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if ((props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") && event.key === "Enter") {
+    event.preventDefault();
+    showDatabaseLinks.value = true;
+    return;
+  }
   treeRuntime.handleRowKeydown(props.node, event);
 }
 </script>
@@ -1548,7 +1578,8 @@ function onKeydown(event: KeyboardEvent) {
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
         <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false }">
-          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
+          <PluginIcon v-if="node.type === 'connection' && pluginConnectionIcon" :plugin-id="pluginConnectionIcon.pluginId" :contribution-id="pluginConnectionIcon.contributionId" class="h-3.5 w-3.5 shrink-0" />
+          <DatabaseIcon v-else-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
@@ -1579,6 +1610,9 @@ function onKeydown(event: KeyboardEvent) {
               ]"
               >{{ visibleLabel(node) }}</span
             >
+            <button v-if="node.type === 'oracle-db-links'" class="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted" :aria-label="t('databaseLinks.manage')" :title="t('databaseLinks.manage')" @click.stop="showDatabaseLinks = true" @dblclick.stop>
+              <TableProperties class="h-3.5 w-3.5" />
+            </button>
             <span v-if="treeNodeSecondaryValue(node)" class="flex min-w-0 max-w-[55%] shrink items-center gap-1 text-xs text-muted-foreground" :title="node.type === 'elasticsearch-index' ? undefined : treeNodeSecondaryValue(node)">
               <Link2 v-if="node.type === 'elasticsearch-index'" class="h-3 w-3 shrink-0 text-sky-400" />
               <span class="min-w-0 truncate">{{ treeNodeSecondaryValue(node) }}</span>
@@ -1718,6 +1752,15 @@ function onKeydown(event: KeyboardEvent) {
       </template>
     </LightTooltip>
   </div>
+  <OracleDatabaseLinksDialog
+    v-if="showDatabaseLinks && node.connectionId"
+    v-model:open="showDatabaseLinks"
+    :connection-id="node.connectionId"
+    :database="node.database || ''"
+    :name="node.type === 'oracle-db-link' ? node.label : undefined"
+    :owner="node.schema"
+    @changed="connectionStore.refreshOracleDatabaseLinks(node.connectionId)"
+  />
 </template>
 
 <style>

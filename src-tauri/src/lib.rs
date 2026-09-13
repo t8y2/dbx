@@ -1604,6 +1604,7 @@ pub fn run() {
             }));
             let state = Arc::new(state);
             app.manage(state.clone());
+            commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
             let mcp_http_state = state.clone();
@@ -1811,6 +1812,33 @@ pub fn run() {
             commands::connection::save_sidebar_layout,
             commands::connection::load_sidebar_layout,
             commands::plugins::list_plugins,
+            commands::plugins::list_plugin_trusted_keys,
+            commands::plugins::save_plugin_trusted_key,
+            commands::plugins::remove_plugin_trusted_key,
+            commands::plugins::list_plugin_repositories,
+            commands::plugins::save_plugin_repository,
+            commands::plugins::remove_plugin_repository,
+            commands::plugins::fetch_plugin_marketplace_catalogs,
+            commands::plugins::install_marketplace_plugin,
+            commands::plugins::install_plugin_package,
+            commands::plugins::rollback_plugin,
+            commands::plugins::uninstall_plugin,
+            commands::plugins::activate_plugin,
+            commands::plugins::list_active_plugins,
+            commands::plugins::stop_plugin,
+            commands::plugins::invoke_plugin,
+            commands::plugins::invoke_plugin_connection_action,
+            commands::plugins::notify_plugin,
+            commands::plugins::send_plugin_binary,
+            commands::plugins::list_plugin_filesystem_entries,
+            commands::plugins::read_plugin_filesystem_file,
+            commands::plugins::write_plugin_filesystem_file,
+            commands::plugins::create_plugin_filesystem_directory,
+            commands::plugins::delete_plugin_filesystem_entry,
+            commands::plugins::rename_plugin_filesystem_entry,
+            commands::plugins::read_plugin_ui_entry,
+            commands::plugins::read_plugin_asset,
+            commands::plugins::read_plugin_ui_asset,
             commands::plugins::list_jdbc_drivers,
             commands::plugins::list_jdbc_maven_bundles,
             commands::plugins::list_jdbc_local_bundles,
@@ -1981,6 +2009,11 @@ pub fn run() {
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
+            commands::mongodb_import_export::preview_mongodb_import_file,
+            commands::mongodb_import_export::import_mongodb_file,
+            commands::mongodb_import_export::cancel_mongodb_import,
+            commands::mongodb_import_export::export_mongodb_query,
+            commands::mongodb_import_export::cancel_mongodb_export,
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,

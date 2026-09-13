@@ -647,7 +647,15 @@ describe("connectionStore metadata loading", () => {
     const listTables = vi.fn().mockResolvedValue([{ name: "sheet", table_type: "TABLE", comment: null }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    const executeQuery = vi.fn().mockResolvedValue({
+      columns: ["OWNER", "DB_LINK", "USERNAME", "HOST", "CREATED"],
+      rows: [
+        ["DBX_TEST", "PRIVATE.EXAMPLE", "REMOTE", "service", ""],
+        ["PUBLIC", "PUBLIC.EXAMPLE", "REMOTE", "service", ""],
+      ],
+    });
     vi.doMock("@/lib/backend/api", () => ({
+      executeQuery,
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
@@ -674,7 +682,23 @@ describe("connectionStore metadata loading", () => {
 
     expect(listDatabases).not.toHaveBeenCalled();
     expect(listSchemas).toHaveBeenCalledWith(connection.id, "");
-    expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"]]);
+    expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([
+      ["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"],
+      ["oracle-db-links", "tree.databaseLinks", "", undefined],
+    ]);
+
+    const linkRoot = connectionNode.children!.find((node) => node.type === "oracle-db-links")!;
+    await store.loadTreeNodeChildren(linkRoot, { force: true });
+    expect(executeQuery).toHaveBeenCalledWith(connection.id, "", expect.stringContaining("SESSION_USER"), undefined, undefined, { maxRows: 10000, timeoutSecs: 15 });
+    expect(linkRoot.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
+      ["oracle-db-link", "PRIVATE.EXAMPLE", "DBX_TEST"],
+      ["oracle-db-link", "PUBLIC.EXAMPLE", "PUBLIC"],
+    ]);
+    expect(linkRoot.objectCount).toBe(2);
+    executeQuery.mockResolvedValue({ columns: ["OWNER", "DB_LINK"], rows: [] });
+    await store.refreshOracleDatabaseLinks(connection.id);
+    expect(linkRoot.children).toEqual([]);
+    expect(linkRoot.objectCount).toBe(0);
 
     const schemaNode = connectionNode.children?.[0];
     expect(schemaNode).toBeDefined();

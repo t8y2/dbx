@@ -900,6 +900,7 @@ export interface EditorSettings {
 export interface ToolbarItems {
   dataTransfer: boolean;
   driverManager: boolean;
+  pluginCenter: boolean;
   sqlFile: boolean;
   schemaDiff: boolean;
   dataCompare: boolean;
@@ -916,6 +917,7 @@ export interface ToolbarItems {
 export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   dataTransfer: true,
   driverManager: true,
+  pluginCenter: true,
   sqlFile: true,
   schemaDiff: true,
   dataCompare: true,
@@ -1138,7 +1140,7 @@ export const STORAGE_KEY = "dbx-editor-settings";
 const OLD_FONT_SIZE_KEY = "dbx-query-editor-font-size";
 const EXPORT_BATCH_SIZE_DEFAULT_MIGRATION_KEY = "dbx-export-batch-size-default-migrated-v1";
 const LEGACY_DEFAULT_EXPORT_BATCH_SIZE = 10000;
-const MIN_UI_SCALE = 0.75;
+const MIN_UI_SCALE = 0.7;
 const MAX_UI_SCALE = 2;
 
 export function normalizeGlobalQueryTimeoutSecs(value: unknown): number {
@@ -1369,6 +1371,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
   return {
     dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
     driverManager: items.driverManager ?? defaults.driverManager,
+    pluginCenter: items.pluginCenter ?? defaults.pluginCenter,
     sqlFile: items.sqlFile ?? defaults.sqlFile,
     schemaDiff: items.schemaDiff ?? defaults.schemaDiff,
     dataCompare: items.dataCompare ?? defaults.dataCompare,

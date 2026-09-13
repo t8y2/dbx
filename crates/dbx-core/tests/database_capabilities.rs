@@ -455,3 +455,13 @@ fn goldendb_declares_data_transfer_support() {
     assert!(goldendb.capabilities.table_import);
     assert!(goldendb.capabilities.data_transfer);
 }
+
+#[test]
+fn highgo_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let highgo =
+        manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Highgo).expect("HighGo manifest entry");
+
+    assert!(highgo.capabilities.table_import);
+    assert!(highgo.capabilities.data_transfer);
+}

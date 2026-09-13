@@ -79,6 +79,48 @@ fn mysql_table_engine_change_generates_alter_table() {
 }
 
 #[test]
+fn sqlite_autoincrement_normalizes_integer_aliases_to_exact_integer() {
+    let mut id = column("id");
+    id.data_type = "bigint".to_string();
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+
+    let options = structure_change_options(DatabaseType::Sqlite, None, "items", vec![id, column("value")]);
+    let result = build_create_table_sql(options);
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_eq!(
+        result.statements[0],
+        "CREATE TABLE \"items\" (\n  \"id\" INTEGER PRIMARY KEY AUTOINCREMENT,\n  \"value\" varchar(255)\n);"
+    );
+}
+
+#[test]
+fn sqlite_autoincrement_rejects_composite_primary_keys_and_non_integer_types() {
+    let mut a = column("a");
+    a.data_type = "int".to_string();
+    a.is_primary_key = true;
+    a.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    let mut b = column("b");
+    b.data_type = "int".to_string();
+    b.is_primary_key = true;
+
+    let options = structure_change_options(DatabaseType::Sqlite, None, "items", vec![a, b]);
+    let result = build_create_table_sql(options);
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.iter().any(|w| w.contains("composite primary keys")), "{:?}", result.warnings);
+
+    let mut text_id = column("id");
+    text_id.data_type = "text".to_string();
+    text_id.is_primary_key = true;
+    text_id.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    let options = structure_change_options(DatabaseType::Sqlite, None, "items2", vec![text_id]);
+    let result = build_create_table_sql(options);
+    assert!(result.statements.is_empty());
+    assert!(result.warnings.iter().any(|w| w.contains("must use an integer type")), "{:?}", result.warnings);
+}
+
+#[test]
 fn mysql_create_table_includes_engine_before_comment() {
     let mut options = structure_change_options(DatabaseType::Mysql, Some("dbx_test"), "archive", vec![column("id")]);
     options.mysql_engine = Some("MyISAM".to_string());

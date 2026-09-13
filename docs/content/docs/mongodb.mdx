@@ -99,14 +99,30 @@ The GridFS workspace manages buckets and files:
 
 Dropping a bucket removes its files and chunks. Verify the bucket name and backup before doing this in production.
 
-## Copy and Export
+## Import and Export
 
-- Copy the current document, selected documents, or field values
-- Copy as plain JSON or Extended JSON that preserves type information
-- Use multi-format copy and export from the grid result
-- Exporting a MongoDB `find` result continues through the full result scope instead of only the currently displayed page, subject to query and export limits
+Collection documents have a dedicated CSV/JSON import and CSV/NDJSON export workflow. This is separate from relational Table Import: each CSV row becomes a document, nested values stay nested, and Extended JSON types such as `$oid` and `$date` can be preserved.
 
-Narrow filters before exporting a large collection and monitor server cursor use, network transfer, and local file size.
+### Import data
+
+1. Right-click a collection and choose **Import data**.
+2. Select a `.csv`, `.json`, or `.ndjson` file. Desktop reads the local path; Web uploads it to a temporary server file.
+3. Review encoding, delimiter, header, empty-value, and type settings against the preview.
+4. Confirm append-only insert. Duplicate `_id` values stop the import. Batches that already committed are not rolled back.
+
+CSV follows MongoDB Compass: a header row, nested fields as dotted paths (`address.city`), array indices (`tags[0]`, `matrix[0][1]`), ObjectId as 24-character hex, dates as ISO-8601, and empty cells as null. Import samples the first 1000 rows to infer column types; `_id` hex is restored as ObjectId, and `recognizeObjectIdHex` extends this to other columns. JSON/NDJSON use Extended JSON (`$oid`, `$date`). All strings keeps every cell as text.
+
+Type fidelity: `Double` exports and reimports as `Decimal128` (lossless for decimal text). Non-`_id` ObjectId fields round-trip as String unless `recognizeObjectIdHex` is on. Small `Int64` may narrow to `Int32`; ISO-date-looking strings become `DateTime`. Extended JSON types (`$binary`, `$regularExpression`, `$timestamp`, `$minKey`, `$maxKey`, `$code`) round-trip through JSON-text cells. Empty array `[]` and empty object `{}` round-trip correctly.
+
+First-release limits: append only (no truncate or upsert), no per-field type override, CSV export discovers fields from the first 10000 documents (later fields are silently dropped; use NDJSON for variable schemas), no JSON-array export format, no Excel/GridFS/BSON binary import, and no automatic retry of failed batches.
+
+### Export data
+
+- Right-click a collection and choose **Export data**, then CSV or NDJSON. This opens the save-file dialog immediately, the same as table export.
+- CSV writes nested objects as dotted columns (`address.city`) and arrays as indexed columns (`tags[0]`, `tags[1]`). NDJSON writes one canonical Extended JSON document per line.
+- Collections with more than 256 distinct fields should use NDJSON.
+
+Copy the current document, selected documents, or field values as plain JSON or Extended JSON from the grid when you only need the visible selection.
 
 ## Safety and Compatibility Boundaries
 

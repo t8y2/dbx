@@ -27,6 +27,7 @@ pub const MQTT_AUTH_PASSWORD_KEY: &str = "mqtt.auth.password";
 pub const CASSANDRA_TLS_SECRET_PREFIX: &str = "cassandra.tls.";
 pub const CASSANDRA_TRUSTSTORE_PASSWORD_KEY: &str = "cassandra.tls.truststore_password";
 pub const CASSANDRA_KEYSTORE_PASSWORD_KEY: &str = "cassandra.tls.keystore_password";
+pub const PLUGIN_CONNECTION_SECRET_PREFIX: &str = "plugin_connection.";
 
 pub trait ConnectionSecretStore {
     fn set_secret(&self, connection_id: &str, key: &str, secret: &str) -> Result<(), String>;
@@ -947,6 +948,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,

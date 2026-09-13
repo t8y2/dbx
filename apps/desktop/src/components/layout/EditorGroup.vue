@@ -159,6 +159,8 @@ const groupExecutableSql = computed(() => {
         @close-settings="toolbar.closeSettingsPage()"
         @activate-driver-store="toolbar.activateDriverStore()"
         @close-driver-store="toolbar.closeDriverStore()"
+        @activate-plugin-center="toolbar.activatePluginCenter()"
+        @close-plugin-center="toolbar.closePluginCenter()"
       />
     </Teleport>
     <!-- The toolbar stays at the top of the pane's content column in every
@@ -190,8 +192,8 @@ const groupExecutableSql = computed(() => {
         @commit="activeTab && queryStore.commitTransaction(activeTab.id)"
         @rollback="activeTab && queryStore.rollbackTransaction(activeTab.id)"
         @dismiss-txn-rolled-back="activeTab && (activeTab.txnAutoRolledBack = false)"
-        @execute-pointer-down="toolbar.captureExecutionSnapshot()"
-        @toolbar-execute="toolbar.toolbarExecute($event)"
+        @execute-pointer-down="toolbar.captureExecutionSnapshot(activeTab.id)"
+        @toolbar-execute="toolbar.toolbarExecute($event, activeTab.id)"
         @multi-execute="toolbar.multiExecute()"
         @preview-changes="activeTab && toolbar.previewChanges(activeTab.id)"
         @cancel="activeTab && toolbar.cancelExecution(activeTab.id)"

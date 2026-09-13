@@ -1101,7 +1101,7 @@ test("normalizeEditorSettings falls back to the default UI scale", () => {
 });
 
 test("normalizeEditorSettings clamps UI scale into the supported range", () => {
-  assert.equal(normalizeEditorSettings({ uiScale: 0.2 }).uiScale, 0.75);
+  assert.equal(normalizeEditorSettings({ uiScale: 0.2 }).uiScale, 0.7);
   assert.equal(normalizeEditorSettings({ uiScale: 2.8 }).uiScale, 2);
 });
 

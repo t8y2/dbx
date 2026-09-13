@@ -20,6 +20,9 @@ system-fonts = ["font-kit"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+semver = "1"
+ed25519-dalek = "2"
+fs2 = "0.4"
 utoipa = { version = "5.5", optional = true }
 unicode-width = "0.2"
 unicode-ident = "1"
@@ -89,9 +92,6 @@ notify = { version = "7", default-features = false, features = ["macos_kqueue"] 
 arc-swap = "1"
 insta = { version = "1", features = ["json", "glob"] }
 tempfile = "3"
-
-[target.'cfg(not(all(windows, target_vendor = "win7")))'.dependencies]
-iana-time-zone = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }

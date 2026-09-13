@@ -83,6 +83,9 @@ export interface DuplicateTableStructureSqlOptions {
   targetName: string;
   tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
+  /** SQL Server only: source primary-key columns recreated on the clone, because
+   * `SELECT ... INTO` copies columns (and IDENTITY) but drops constraints. */
+  primaryKeyColumns?: string[];
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
    * table-data SQL options. */
@@ -262,6 +265,25 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
       throw new Error(result.warnings.join("\n") || "Failed to generate Dameng clone DDL.");
     }
     return { sql: result.statements.join("\n"), sourceColumns: columns, executeAsScript: true };
+  }
+
+  // `SELECT TOP 0 * INTO` copies columns and the IDENTITY property but drops constraints, so the
+  // cloned table silently loses its primary key (t8y2/dbx#8931). Load the source primary key and
+  // let the backend append an `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY` for it.
+  if (options.databaseType === "sqlserver") {
+    const indexes = await api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const primaryKeyColumns = indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
+    const sql = await buildDuplicateTableStructureSql({
+      databaseType: options.databaseType,
+      schema: options.schema,
+      sourceName: options.sourceName,
+      targetName: options.targetName,
+      tableComment: options.tableComment,
+      columnComments: [],
+      primaryKeyColumns,
+      identifierQuote: options.identifierQuote,
+    });
+    return { sql, sourceColumns: options.sourceColumns, executeAsScript: primaryKeyColumns.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
   const sql = await buildDuplicateTableStructureSql({

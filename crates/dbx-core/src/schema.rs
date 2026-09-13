@@ -3409,6 +3409,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: HashMap::new(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -3636,8 +3640,14 @@ done
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..PluginManifest::default()
             },
             path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),

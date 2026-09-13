@@ -292,6 +292,41 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["input_id", "tenant_id"]);
   });
 
+  it("ignores MySQL user variables assigned by GET DIAGNOSTICS", () => {
+    const sql = `
+      get diagnostics condition 1 @err_state = returned_sqlstate, @err_msg = message_text;
+      select concat('failed: ', @err_state, ' ', @err_msg) as result;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("ignores GET CURRENT/STACKED DIAGNOSTICS targets and the statement-level row count", () => {
+    const sql = `
+      get diagnostics @affected = row_count;
+      get current diagnostics condition 1 @current_state = returned_sqlstate;
+      get stacked diagnostics condition 1 @stacked_state = returned_sqlstate;
+      select @affected, @current_state, @stacked_state;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("keeps ordinary MySQL template parameters next to GET DIAGNOSTICS targets", () => {
+    const sql = `
+      get diagnostics condition 1 @err_msg = message_text;
+      select * from audit_log where tenant_id = @tenant_id and note = @err_msg;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["tenant_id"]);
+  });
+
+  it("keeps a template parameter on a column named get", () => {
+    const sql = "select get from api_methods where tenant_id = @tenant_id";
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["tenant_id"]);
+  });
+
   it("ignores SQL Server procedure parameters declared in routine definitions", () => {
     const sql = `
       create procedure dbo.search_orders

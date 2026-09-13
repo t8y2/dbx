@@ -28,17 +28,53 @@ test("uncached tab activation restores the saved cursor and scroll position", ()
 
 test("uncached tabs without saved state do not inherit the previous tab position", () => {
   const source = activateTabDocumentSource();
-  assert.match(source, /restoreEditorSelection\(props\.initialSelection \?\? \{ anchor: 0, head: 0 \}\);/);
+  assert.match(source, /restoreEditorSelection\(props\.initialSelection \?\? \{ anchor: 0, head: 0 \}, !props\.initialViewport\);/);
   assert.match(source, /restoreEditorViewport\(props\.initialViewport \?\? \{ scrollTop: 0, scrollLeft: 0 \}\);/);
 });
 
 test("cached tab activation keeps restoring selection and viewport", () => {
   const source = activateTabDocumentSource();
   assert.match(source, /currentView\.setState\(cached\);/);
-  assert.match(source, /currentView\.setState\(cached\);[\s\S]*?restoreEditorSelection\(\);\s*restoreEditorViewport\(\);/);
+  assert.match(source, /currentView\.setState\(cached\);[\s\S]*?restoreEditorSelection\(undefined, !props\.initialViewport\);\s*restoreEditorViewport\(\);/);
 });
 
 test("viewport restore prefers the per-tab saved viewport", () => {
   const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
   assert.match(source, /function restoreEditorViewport\(viewport = props\.initialViewport \?\? latestViewport\) \{/);
+});
+
+test("captures the outgoing editor viewport before KeepAlive deactivation", () => {
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  assert.match(source, /function captureEditorStateBeforeTabSwitch\(event: Event\) \{/);
+  assert.match(source, /fromTabId !== props\.tabId/);
+  assert.match(source, /captureEditorStateBeforeTabSwitch[\s\S]*?flushEditorViewport\(\);[\s\S]*?flushEditorSelection\(\);[\s\S]*?emit\("editorStateFlushed"\);/);
+  assert.match(source, /window\.addEventListener\(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch\)/);
+  assert.match(source, /window\.removeEventListener\(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch\)/);
+});
+
+test("does not flush a reset viewport after a tab-switch capture", () => {
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  assert.match(source, /let tabSwitchStateCaptured = false;/);
+  assert.match(source, /tabSwitchStateCaptured = true;/);
+  assert.match(source, /const stateWasCapturedBeforeTabSwitch = tabSwitchStateCaptured;[\s\S]*?tabSwitchStateCaptured = false;[\s\S]*?if \(editorIsActive && !stateWasCapturedBeforeTabSwitch\) \{[\s\S]*?flushEditorViewport\(\);/);
+  assert.match(source, /if \(!tabSwitchStateCaptured\) flushEditorViewport\(\);/);
+});
+
+test("does not flush an editor again when KeepAlive evicts it after deactivation", () => {
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  assert.match(source, /if \(editorIsActive && !stateWasCapturedBeforeTabSwitch\) \{[\s\S]*?flushEditorViewport\(\);/);
+});
+
+test("restores a saved cursor into view when no viewport was persisted", () => {
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  assert.match(source, /restoreEditorSelection\(props\.initialSelection, !props\.initialViewport\);/);
+  assert.match(source, /function restoreEditorSelection\(selection = props\.initialSelection \?\? latestSelection, scrollIntoView = false\)/);
+  assert.match(source, /view\.value\.dispatch\(\{ selection: normalizedSelection, scrollIntoView \}\);/);
+});
+
+test("re-applies the viewport when saved SQL content hydrates after mount", () => {
+  const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
+  assert.match(source, /watch\(\s*\(\) => props\.initialViewport,[\s\S]*?previousViewport[\s\S]*?latestViewport = \{ \.\.\.viewport \};[\s\S]*?restoreEditorViewport\(viewport\);/);
+  assert.match(source, /watch\(\s*\(\) => props\.initialSelection,[\s\S]*?previousSelection[\s\S]*?restoreEditorSelection\(selection, !props\.initialViewport\);/);
+  assert.match(source, /if \(attempts >= 32\)/);
 });

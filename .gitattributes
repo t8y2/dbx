@@ -11,6 +11,9 @@ apps/desktop/tsconfig.json text eol=lf
 apps/desktop/*.ts text eol=lf
 src-tauri/windows/nsis/**/*.nsi text eol=lf
 
+# Keep plugin dev-host formatting checks consistent on Windows checkouts.
+plugins/sdk/dev-host/** text=auto eol=lf
+
 # Keep tests available for review and CI without counting them as shipped code
 # in GitHub's repository language breakdown.
 packages/app-tests/** linguist-vendored

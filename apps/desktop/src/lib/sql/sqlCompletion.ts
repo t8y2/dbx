@@ -2652,11 +2652,14 @@ function isInOrderOrGroupByContext(beforeCursor: string): boolean {
     .toLowerCase();
   const lastOrderBy = cleaned.lastIndexOf("order by");
   const lastGroupBy = cleaned.lastIndexOf("group by");
-  const lastContext = Math.max(lastOrderBy, lastGroupBy);
+  // MySQL (and DuckDB-like engines) also resolve SELECT aliases inside HAVING,
+  // so aliases stay visible there just like in ORDER BY/GROUP BY.
+  const lastHaving = cleaned.lastIndexOf("having");
+  const lastContext = Math.max(lastOrderBy, lastGroupBy, lastHaving);
   if (lastContext < 0) return false;
 
   const segment = cleaned.slice(lastContext);
-  return !/\b(?:where|having|limit|offset|union|intersect|except|join|from)\b/.test(segment);
+  return !/\b(?:where|limit|offset|union|intersect|except|join|from)\b/.test(segment);
 }
 
 function isInGroupByContext(beforeCursor: string): boolean {

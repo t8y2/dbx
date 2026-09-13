@@ -34,7 +34,7 @@ import {
   type DriverInstallProgress,
 } from "@/lib/connection/driverInstallProgressUi";
 import { installRegisteredManagedJdbcDriver, isManagedJdbcDriver, managedJdbcDriverRows, uninstallRegisteredManagedJdbcDriver } from "@/lib/database/managedJdbcDrivers";
-import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
+import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import { isOfflineDriverPackage, webDriverImportAccept } from "@/lib/driverStore/driverImportSelection";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { runAgentOfflineExportAction } from "@/lib/driverStore/agentOfflineExportFlow";
@@ -55,7 +55,7 @@ function backendError(e: unknown): string {
 const props = withDefaults(
   defineProps<{
     updateNotificationsEnabled?: boolean;
-    activeTab?: "agent" | "jdbc" | "storage" | "runtime";
+    activeTab?: DriverStoreTab;
     focusTarget?: DriverStoreFocus | null;
   }>(),
   {
@@ -67,12 +67,12 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   "update-count-change": [count: number];
-  "update:activeTab": [tab: "agent" | "jdbc" | "storage" | "runtime"];
+  "update:activeTab": [tab: DriverStoreTab];
 }>();
 
 const driverStoreTab = computed({
   get: () => props.activeTab,
-  set: (tab: "agent" | "jdbc" | "storage" | "runtime") => emit("update:activeTab", tab),
+  set: (tab: DriverStoreTab) => emit("update:activeTab", tab),
 });
 
 // ──────────── Driver store path ────────────

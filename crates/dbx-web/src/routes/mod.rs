@@ -17,6 +17,7 @@ pub mod jdbc;
 pub mod layout;
 pub mod mcp_policy;
 pub mod mongo;
+pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;

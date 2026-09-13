@@ -80,6 +80,7 @@ import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject,
 import { usesOracleCurrentSchemaCompletion } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
+import { ORACLE_DATABASE_LINKS_SQL, oracleDatabaseLinksFromResult } from "@/lib/database/oracleDatabaseLinks";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
@@ -551,6 +552,17 @@ export const useConnectionStore = defineStore("connection", () => {
     database: string;
     schema?: string;
     tableName?: string;
+  } | null>(null);
+  const mongoImportSource = ref<{
+    connectionId: string;
+    database: string;
+    collection: string;
+  } | null>(null);
+  const mongoImportCompleted = ref<{
+    connectionId: string;
+    database: string;
+    collection: string;
+    at: number;
   } | null>(null);
   const tableDataGenerateSource = ref<{
     connectionId: string;
@@ -1494,7 +1506,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // as metadata children, withConnectionUtilityNodes would keep the old copies
     // AND append fresh ones on every useCachedChildren pass, duplicating the
     // 用户/角色 menus once per refresh cycle.
-    return node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
+    return node.type === "oracle-db-links" || node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -1807,6 +1819,49 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildOracleDatabaseLinksNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "oracle") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "oracle-db-links");
+    return { ...existing, id: `${connectionId}:__oracle_db_links`, label: "tree.databaseLinks", type: "oracle-db-links", connectionId, database: config?.database || "", isExpanded: existing?.isExpanded ?? false, children: existing?.children ?? [] };
+  }
+
+  async function listOracleDatabaseLinks(connectionId: string, database: string) {
+    if (effectiveDatabaseTypeForConnection(getConfig(connectionId)) !== "oracle") return [];
+    await ensureConnected(connectionId);
+    return oracleDatabaseLinksFromResult(await api.executeQuery(connectionId, database, ORACLE_DATABASE_LINKS_SQL, undefined, undefined, { maxRows: 10000, timeoutSecs: 15 }));
+  }
+
+  async function refreshOracleDatabaseLinks(connectionId: string) {
+    const root = findNode(treeNodes.value, `${connectionId}:__oracle_db_links`);
+    if (root) await loadOracleDatabaseLinks(root, { force: true });
+  }
+
+  async function loadOracleDatabaseLinks(node: TreeNode, options?: LoadTreeOptions) {
+    if (!node.connectionId) return;
+    await runConnectionTreeMetadataLoad(node.connectionId, node, async (load) => {
+      if (useCachedChildren(node, options, load)) return;
+      const links = await listOracleDatabaseLinks(node.connectionId!, node.database || "");
+      const target = treeNodeLoadTarget(load);
+      if (!target) return;
+      setChildren(
+        target,
+        links.map((link) => ({
+          id: `${node.id}:${encodeURIComponent(link.owner)}:${encodeURIComponent(link.name)}`,
+          label: link.name,
+          type: "oracle-db-link" as const,
+          connectionId: node.connectionId,
+          database: node.database,
+          schema: link.owner,
+          comment: `${link.owner} · ${link.username} · ${link.host}`,
+          isExpanded: false,
+        })),
+      );
+      target.objectCount = links.length;
+      target.isExpanded = true;
+    });
+  }
+
   function withConnectionUtilityNodes(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
     const nonUtilityChildren = connectionMetadataChildren(children);
     const userAdminNode = buildUserAdminNode(connectionId, existingConnectionNode);
@@ -1814,7 +1869,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -3813,6 +3868,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMqttTopics(connectionId);
     } else if (config.db_type === "nacos") {
       await loadNacosNamespaces(connectionId, { force: true });
+    } else if (config.db_type === "plugin") {
+      return;
     } else {
       await loadDatabases(connectionId, { force: true });
     }
@@ -3909,8 +3966,10 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureLocalConnectionAttemptActiveAfterConnectResult(config.id, localAttempt, id);
       activeConnectionId.value = id;
       connectedIds.value.add(id);
-      void refreshConnectedDatabaseInfo(id, { ...config, id });
-      await refreshConnectionIdentifierQuote(id, { ...config, id });
+      if (config.db_type !== "plugin") {
+        void refreshConnectedDatabaseInfo(id, { ...config, id });
+        await refreshConnectionIdentifierQuote(id, { ...config, id });
+      }
       if (id !== config.id) markSuccessfulLocalConnectionAttempt(config.id, localAttempt);
       markSuccessfulLocalConnectionAttempt(id, localAttempt);
       markConnectionHealthChecked(id);
@@ -4166,8 +4225,10 @@ export const useConnectionStore = defineStore("connection", () => {
       await syncMongoLegacyDriverFallback(connectionId, config);
       await ensureLocalConnectionAttemptActiveAfterConnectResult(connectionId, localAttempt, id);
       connectedIds.value.add(connectionId);
-      void refreshConnectedDatabaseInfo(connectionId, config);
-      await refreshConnectionIdentifierQuote(connectionId, config);
+      if (config.db_type !== "plugin") {
+        void refreshConnectedDatabaseInfo(connectionId, config);
+        await refreshConnectionIdentifierQuote(connectionId, config);
+      }
       markSuccessfulLocalConnectionAttempt(connectionId, localAttempt);
       markConnectionHealthChecked(connectionId);
       clearConnectionError(connectionId);
@@ -6732,6 +6793,8 @@ export const useConnectionStore = defineStore("connection", () => {
       } else {
         await loadDatabases(node.connectionId, options);
       }
+    } else if (node.type === "oracle-db-links") {
+      await loadOracleDatabaseLinks(node, options);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await loadMongoCollections(node.connectionId, node.database);
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
@@ -9092,6 +9155,8 @@ export const useConnectionStore = defineStore("connection", () => {
     loadMoreObjectGroupChildren,
     loadAllObjectGroupChildren,
     loadTableGroups,
+    listOracleDatabaseLinks,
+    refreshOracleDatabaseLinks,
     loadTreeNodeChildren,
     loadColumns,
     loadIndexes,
@@ -9144,6 +9209,8 @@ export const useConnectionStore = defineStore("connection", () => {
     diagramSource,
     docsSource,
     tableImportSource,
+    mongoImportSource,
+    mongoImportCompleted,
     tableDataGenerateSource,
     fieldLineageSource,
     databaseSearchSource,

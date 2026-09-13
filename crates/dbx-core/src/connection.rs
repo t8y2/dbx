@@ -29,7 +29,7 @@ use crate::models::connection::{
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
-use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
+use crate::plugins::{PluginConnectionHandle, PluginDriverSession, PluginHost, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
 use crate::session_credentials::SessionCredentialStore;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
@@ -110,6 +110,7 @@ pub enum PoolKind {
         config: Arc<ConnectionConfig>,
         session: Arc<PluginDriverSession>,
     },
+    PluginConnection(PluginConnectionHandle),
     /// Message queue admin connection (not a data query pool; serves as a
     /// marker that this connection_id is a valid MQ admin connection).
     MessageQueue,
@@ -331,6 +332,7 @@ pub struct AppState {
     pub http_tunnels: HttpTunnelManager,
     pub storage: Storage,
     pub plugins: PluginRegistry,
+    pub plugin_host: PluginHost,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
     duckdb_worker_process_isolation: AtomicBool,
@@ -1345,6 +1347,7 @@ impl AppState {
         app_version: impl Into<String>,
     ) -> Self {
         let data_dir = storage.data_dir().to_path_buf();
+        let app_version = app_version.into();
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -1357,7 +1360,8 @@ impl AppState {
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),
             storage,
-            plugins: PluginRegistry::new(plugin_dir),
+            plugins: PluginRegistry::new_with_app_version(plugin_dir.clone(), app_version.clone()),
+            plugin_host: PluginHost::new(PluginRegistry::new_with_app_version(plugin_dir, app_version.clone())),
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,
@@ -2777,6 +2781,7 @@ impl AppState {
                 }
                 self.external_driver_pool("jdbc", &jdbc_config).await?
             }
+            DatabaseType::Plugin => return Err("Plugin-owned connections use the plugin host".to_string()),
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 // MQ admin connections don't hold a data query pool. We just test
@@ -3833,6 +3838,7 @@ impl AppState {
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => false,
+                PoolKind::PluginConnection(handle) => !handle.is_running(),
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => false,
             }
@@ -4310,22 +4316,35 @@ impl AppState {
     }
 
     pub async fn close_database_pool(&self, connection_id: &str, database: Option<&str>) -> Result<bool, String> {
-        let db_type = {
+        let (db_type, default_database) = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs
+                .get(connection_id)
+                .map_or((None, None), |config| (Some(config.db_type), config.effective_database().map(str::to_string)))
         };
         if database.is_some() && db_type.is_some_and(|db_type| shares_database_pool_with_connection(&db_type)) {
             return Ok(false);
         }
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
-        let session_prefix = format!("{base_pool_key}:session:");
-        let metadata_role_key = format!("{base_pool_key}:role:metadata");
+        let target_database = database.map(str::trim).filter(|database| !database.is_empty());
+        let mut base_pool_keys = vec![base_pool_key_for(db_type, connection_id, target_database, false)];
+        if target_database.is_some() && target_database == default_database.as_deref() {
+            let connection_pool_key = base_pool_key_for(db_type, connection_id, None, false);
+            if !base_pool_keys.contains(&connection_pool_key) {
+                base_pool_keys.push(connection_pool_key);
+            }
+        }
+        let session_prefixes: Vec<String> = base_pool_keys.iter().map(|key| format!("{key}:session:")).collect();
+        let metadata_role_keys: Vec<String> = base_pool_keys.iter().map(|key| format!("{key}:role:metadata")).collect();
         let keys_to_remove: Vec<String> = self
             .connections
             .read()
             .await
             .keys()
-            .filter(|key| *key == &base_pool_key || *key == &metadata_role_key || key.starts_with(&session_prefix))
+            .filter(|key| {
+                base_pool_keys.iter().any(|base_key| *key == base_key)
+                    || metadata_role_keys.iter().any(|metadata_key| *key == metadata_key)
+                    || session_prefixes.iter().any(|prefix| key.starts_with(prefix))
+            })
             .cloned()
             .collect();
         self.stop_keepalive_tasks(&keys_to_remove).await;
@@ -4867,6 +4886,7 @@ impl AppState {
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => true,
+                PoolKind::PluginConnection(handle) => handle.is_running(),
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(redis) => match db::redis_driver::test_connection(redis).await {
@@ -4971,6 +4991,20 @@ impl AppState {
         self.pool_routing_control().close_removed(removed).await;
     }
 
+    pub async fn remove_plugin_connection_pools(&self, plugin_id: &str) {
+        let removed = self.drain_plugin_connection_pools(plugin_id).await;
+        self.pool_routing_control().close_removed(removed).await;
+    }
+
+    pub async fn invoke_plugin_connection_action(
+        &self,
+        config: ConnectionConfig,
+        action_id: &str,
+    ) -> Result<crate::plugins::PluginConnectionActionResult, String> {
+        let (host, port) = self.connection_host_port(&config.id, &config).await?;
+        self.plugin_host.invoke_connection_action(&config, action_id, &host, port).await
+    }
+
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
         let pool_prefix = format!("{connection_id}:");
         let keys_to_remove: Vec<String> = self
@@ -5043,6 +5077,34 @@ impl AppState {
                 PoolKind::ExternalDriver { driver_id: pool_driver_id, .. } if pool_driver_id == driver_id => {
                     Some(key.clone())
                 }
+                _ => None,
+            })
+            .collect();
+        self.stop_keepalive_tasks(&keys_to_remove).await;
+        {
+            let mut activity = self.pool_activity.write().await;
+            for key in &keys_to_remove {
+                activity.remove(key);
+            }
+        }
+        let mut conns = self.connections.write().await;
+        let mut removed = Vec::with_capacity(keys_to_remove.len());
+        for key in keys_to_remove {
+            if let Some(pool) = conns.remove(&key) {
+                removed.push((key, pool));
+            }
+        }
+        removed
+    }
+
+    async fn drain_plugin_connection_pools(&self, plugin_id: &str) -> Vec<(String, PoolKind)> {
+        let keys_to_remove: Vec<String> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter_map(|(key, pool)| match pool {
+                PoolKind::PluginConnection(handle) if handle.plugin_id == plugin_id => Some(key.clone()),
                 _ => None,
             })
             .collect();
@@ -5601,7 +5663,41 @@ fn pool_key_for_session_role(
 
 #[cfg(test)]
 fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
-    pool.clone()
+    match pool {
+        PoolKind::Mysql(p, mode) => PoolKind::Mysql(p.clone(), *mode),
+        PoolKind::Postgres(p) => PoolKind::Postgres(p.clone()),
+        PoolKind::Sqlite(p) => PoolKind::Sqlite(p.clone()),
+        PoolKind::Rqlite(client) => PoolKind::Rqlite(client.clone()),
+        PoolKind::Turso(client) => PoolKind::Turso(client.clone()),
+        PoolKind::CloudflareD1(client) => PoolKind::CloudflareD1(client.clone()),
+        #[cfg(feature = "duckdb-sidecar")]
+        PoolKind::DuckDbWorker(client) => PoolKind::DuckDbWorker(client.clone()),
+        #[cfg(not(feature = "duckdb-sidecar"))]
+        PoolKind::DuckDbWorker(_) => PoolKind::DuckDbWorker(()),
+        PoolKind::MongoDb(client) => PoolKind::MongoDb(client.clone()),
+        PoolKind::DynamoDb(client) => PoolKind::DynamoDb(client.clone()),
+        PoolKind::ClickHouse(client) => PoolKind::ClickHouse(client.clone()),
+        PoolKind::SqlServer(client) => PoolKind::SqlServer(client.clone()),
+        PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
+        PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
+        PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
+        PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
+        PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
+        PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::InfluxDb3(client) => PoolKind::InfluxDb3(client.clone()),
+        PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
+        PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
+        PoolKind::ExternalDriver { driver_id, config, session } => {
+            PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
+        }
+        PoolKind::PluginConnection(handle) => PoolKind::PluginConnection(handle.clone()),
+        PoolKind::MessageQueue => PoolKind::MessageQueue,
+        PoolKind::Nacos => PoolKind::Nacos,
+        PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
+        PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
+    }
 }
 
 async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
@@ -5667,6 +5763,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::ExternalDriver { session, .. } => {
             session.shutdown().await;
+        }
+        PoolKind::PluginConnection(handle) => {
+            handle.disconnect().await?;
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
@@ -6078,6 +6177,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -9186,6 +9289,30 @@ for line in sys.stdin:
         assert!(!conns.contains_key("conn:analytics:role:metadata"));
         assert!(!conns.contains_key("conn:analytics:session:tab-1"));
         assert!(conns.contains_key("conn:billing"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn close_database_pool_removes_default_connection_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Postgres;
+        config.database = Some("analytics".to_string());
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+
+        {
+            let mut conns = state.connections.write().await;
+            conns.insert("conn".to_string(), PoolKind::Sqlite(pool.clone()));
+            conns.insert("conn:analytics".to_string(), PoolKind::Sqlite(pool.clone()));
+            conns.insert("conn:analytics:role:metadata".to_string(), PoolKind::Sqlite(pool.clone()));
+            conns.insert("conn:analytics:session:tab-1".to_string(), PoolKind::Sqlite(pool));
+        }
+
+        assert!(state.close_database_pool("conn", Some("analytics")).await.unwrap());
+        assert!(state.connections.read().await.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }

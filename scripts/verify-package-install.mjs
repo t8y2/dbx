@@ -7,6 +7,7 @@ const packageDirectory = resolve(process.argv[2] ?? "/tmp/dbx-pack-check");
 const expectedPackages = [
   "@dbx-app/cli",
   "@dbx-app/mcp-server",
+  "@dbx-app/plugin-cli",
 ];
 const tarballs = readdirSync(packageDirectory)
   .filter((file) => file.endsWith(".tgz"))

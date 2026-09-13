@@ -79,6 +79,34 @@ export const readKeychainPassword = forward("readKeychainPassword");
 export const readKeychainPasswords = forward("readKeychainPasswords");
 export const decryptConfig = forward("decryptConfig");
 export const listPlugins = forward("listPlugins");
+export const listPluginTrustedKeys = forward("listPluginTrustedKeys");
+export const savePluginTrustedKey = forward("savePluginTrustedKey");
+export const removePluginTrustedKey = forward("removePluginTrustedKey");
+export const listPluginRepositories = forward("listPluginRepositories");
+export const savePluginRepository = forward("savePluginRepository");
+export const removePluginRepository = forward("removePluginRepository");
+export const fetchPluginMarketplaceCatalogs = forward("fetchPluginMarketplaceCatalogs");
+export const installMarketplacePlugin = forward("installMarketplacePlugin");
+export const installPluginPackage = forward("installPluginPackage");
+export const rollbackPlugin = forward("rollbackPlugin");
+export const uninstallPlugin = forward("uninstallPlugin");
+export const activatePlugin = forward("activatePlugin");
+export const listActivePlugins = forward("listActivePlugins");
+export const stopPlugin = forward("stopPlugin");
+export const invokePlugin = forward("invokePlugin");
+export const invokePluginConnectionAction = forward("invokePluginConnectionAction");
+export const notifyPlugin = forward("notifyPlugin");
+export const sendPluginBinary = forward("sendPluginBinary");
+export const listPluginFilesystemEntries = forward("listPluginFilesystemEntries");
+export const readPluginFilesystemFile = forward("readPluginFilesystemFile");
+export const writePluginFilesystemFile = forward("writePluginFilesystemFile");
+export const createPluginFilesystemDirectory = forward("createPluginFilesystemDirectory");
+export const deletePluginFilesystemEntry = forward("deletePluginFilesystemEntry");
+export const renamePluginFilesystemEntry = forward("renamePluginFilesystemEntry");
+export const readPluginAsset = forward("readPluginAsset");
+export const readPluginUiEntry = forward("readPluginUiEntry");
+export const readPluginUiAsset = forward("readPluginUiAsset");
+export const subscribePluginEvents = forward("subscribePluginEvents");
 export const listJdbcDrivers = forward("listJdbcDrivers");
 export const listJdbcMavenBundles = forward("listJdbcMavenBundles");
 export const listJdbcLocalBundles = forward("listJdbcLocalBundles");
@@ -458,6 +486,12 @@ export const previewTableImportFile = forward("previewTableImportFile");
 export const importTableFile = forward("importTableFile");
 export const cancelTableImport = forward("cancelTableImport");
 export const releaseTableImportSource = forward("releaseTableImportSource");
+export const previewMongodbImportFile = forward("previewMongodbImportFile");
+export const importMongodbFile = forward("importMongodbFile");
+export const cancelMongodbImport = forward("cancelMongodbImport");
+export const releaseMongodbImportSource = forward("releaseMongodbImportSource");
+export const exportMongodbQuery = forward("exportMongodbQuery");
+export const cancelMongodbExport = forward("cancelMongodbExport");
 
 // Database Export
 export const beginDatabaseBackupSnapshot = forward("beginDatabaseBackupSnapshot");
@@ -995,6 +1029,19 @@ export type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  MongoImportFormat,
+  MongoImportTypeMode,
+  MongoImportIssue,
+  MongoImportParseOptions,
+  MongoImportPreviewRequest,
+  MongoImportPreview,
+  MongoImportRequest,
+  MongoImportProgress,
+  MongoImportSummary,
+  MongoExportFormat,
+  MongoExportRequest,
+  MongoExportProgress,
+  MongoExportSummary,
   DatabaseExportRequest,
   ExportProgress,
   TableExportProgress,

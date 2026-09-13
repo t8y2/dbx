@@ -5,6 +5,8 @@ description: 通过向导将 CSV、TSV、文本、JSON、Excel 或 SQL 数据导
 
 表数据导入用于把文件数据写入数据库表。DBX 会先解析和预览文件，再让你确认解析选项、目标表、字段映射和执行方式，而不是选中文件后立即写入。
 
+MongoDB Collection 不走这条关系型导入流程。请在 Collection 文档页使用 CSV/JSON 导入，参见 [MongoDB 工作区](/cn/docs/mongodb)。
+
 <Callout type="warn">导入会真实写入数据库。连接的只读保护会阻止导入，但数据库权限仍是最终边界。生产环境使用前请确认目标连接、目标表和备份方案。</Callout>
 
 ## 两种目标方式

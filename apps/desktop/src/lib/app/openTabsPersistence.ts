@@ -47,6 +47,8 @@ export interface SavedOpenTab {
   whereInput?: string;
   pinned?: boolean;
   mode?: QueryTab["mode"];
+  pluginWorkbench?: QueryTab["pluginWorkbench"];
+  pluginFilesystem?: QueryTab["pluginFilesystem"];
   autoCommit?: boolean;
   mqTenant?: string;
   mqInitialTab?: QueryTab["mqInitialTab"];
@@ -180,6 +182,8 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
     pinned: tab.pinned,
     mode: tab.mode,
+    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+    ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
     ...(tab.mode === "query" && tab.autoCommit !== undefined ? { autoCommit: tab.autoCommit } : {}),
     ...(tab.mqTenant !== undefined ? { mqTenant: tab.mqTenant } : {}),
     ...(tab.mqInitialTab !== undefined ? { mqInitialTab: tab.mqInitialTab } : {}),
@@ -213,6 +217,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
     ...(tab.mode === "query" && typeof tab.resultAutoSave === "boolean" ? { resultAutoSave: tab.resultAutoSave } : {}),
     ...(tab.uiState ? { uiState: sanitizeTabUiState(tab.uiState) } : {}),
+    ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
   }));
 }
 

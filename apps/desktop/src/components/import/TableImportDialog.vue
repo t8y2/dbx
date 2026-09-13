@@ -24,10 +24,12 @@ import {
   requiredImportTargetColumns,
   resolveTableImportElapsed,
   suggestImportTargetDataTypes,
+  TABLE_IMPORT_ENCODING_OPTIONS,
   tableImportProgressPercent,
   validateImportMappings,
   type TableImportWizardStep,
 } from "@/lib/table/tableImport";
+import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
@@ -139,13 +141,7 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "sql", icon: FileCode, labelKey: "tableImport.formatSql", descriptionKey: "tableImport.formatSqlDescription" },
 ];
 
-const encodingOptions: Array<{ value: api.TableImportTextEncoding; labelKey: string }> = [
-  { value: "auto", labelKey: "tableImport.encodingAuto" },
-  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
-  { value: "gbk", labelKey: "tableImport.encodingGbk" },
-  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
-  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
-];
+const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
 
 const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
   { value: "source", labelKey: "tableImport.stepSource" },
@@ -331,7 +327,7 @@ function suggestedTableName(name: string) {
 }
 
 function sourceName(source: ImportSource): string {
-  return typeof source === "string" ? source.split(/[\\/]/).pop() || source : source.name;
+  return importSourceDisplayName(source);
 }
 
 function uniqueTableName(baseName: string, usedNames: Set<string>): string {
@@ -556,9 +552,9 @@ async function loadTargetColumns() {
 }
 
 async function previewSelectedImportFile(fileOrPath: string | File) {
-  const reusablePreview = preview.value?.sourceRef ? preview.value : null;
-  return api.previewTableImportFile(reusablePreview?.filePath || fileOrPath, {
-    sourceRef: reusablePreview?.sourceRef || null,
+  const input = importPreviewInput(uploadedImportSourceFromPreview(preview.value), fileOrPath);
+  return api.previewTableImportFile(input.fileOrPath, {
+    sourceRef: input.sourceRef,
     sourceFormat: sourceFormat.value,
     parseOptions: parseOptions.value,
     previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -648,11 +644,11 @@ async function prepareBatchSources(sources: ImportSource[]) {
       });
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
-        const reusableSource = initialPreview.sourceRef ? initialPreview.filePath : source;
+        const input = importPreviewInput(uploadedImportSourceFromPreview(initialPreview), source);
         const effectiveSheetName = sheetName && sheetName === initialPreview.sheets?.[0] ? "" : sheetName;
         const taskPreview = effectiveSheetName
-          ? await api.previewTableImportFile(reusableSource, {
-              sourceRef: initialPreview.sourceRef || null,
+          ? await api.previewTableImportFile(input.fileOrPath, {
+              sourceRef: input.sourceRef,
               sourceFormat: format,
               parseOptions: taskParseOptions(format, effectiveSheetName),
               previewLimit: Math.max(1, Number(previewLimit.value) || 50),
@@ -1025,9 +1021,9 @@ async function reloadBatchPreviewsForEncoding() {
     for (const task of batchTasks.value) {
       // SQL 脚本同样是文本源，编码变化时需要重新预览
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
-      const reusableSource = task.preview.sourceRef ? task.preview.filePath : task.source;
-      const nextPreview = await api.previewTableImportFile(reusableSource, {
-        sourceRef: task.preview.sourceRef || null,
+      const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
+      const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
+        sourceRef: input.sourceRef,
         sourceFormat: task.format,
         parseOptions: taskParseOptions(task.format, task.sheetName),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),

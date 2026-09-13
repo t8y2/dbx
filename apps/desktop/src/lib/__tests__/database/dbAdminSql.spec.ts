@@ -425,6 +425,44 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(plan).toEqual({ sql: 'CREATE TABLE "copy" (LIKE "source" INCLUDING ALL);', sourceColumns: undefined, executeAsScript: false });
   });
 
+  it("recreates the SQL Server primary key that SELECT INTO drops", async () => {
+    apiMock.listIndexes.mockResolvedValue([
+      { name: "PK_ORDERS", columns: ["ID", "SEQ"], is_unique: true, is_primary: true },
+      { name: "IDX_ORDERS_CUSTOMER", columns: ["CUSTOMER"], is_unique: false, is_primary: false },
+    ]);
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue("SELECT TOP 0 * INTO [dbo].[orders_copy] FROM [dbo].[orders];\nALTER TABLE [dbo].[orders_copy] ADD CONSTRAINT [PK_orders_copy] PRIMARY KEY ([ID], [SEQ]);");
+
+    const plan = await buildDuplicateTableStructurePlan({
+      connectionId: "mssql-1",
+      database: "app",
+      databaseType: "sqlserver",
+      schema: "dbo",
+      sourceName: "orders",
+      targetName: "orders_copy",
+    });
+
+    expect(apiMock.listIndexes).toHaveBeenCalledWith("mssql-1", "app", "dbo", "orders", undefined);
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "sqlserver", primaryKeyColumns: ["ID", "SEQ"] }));
+    expect(plan.executeAsScript).toBe(true);
+  });
+
+  it("keeps primary-key-free SQL Server clones on a single statement", async () => {
+    apiMock.listIndexes.mockResolvedValue([{ name: "IDX_ORDERS_CUSTOMER", columns: ["CUSTOMER"], is_unique: false, is_primary: false }]);
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue("SELECT TOP 0 * INTO [orders_copy] FROM [orders];");
+
+    const plan = await buildDuplicateTableStructurePlan({
+      connectionId: "mssql-1",
+      database: "app",
+      databaseType: "sqlserver",
+      schema: undefined,
+      sourceName: "orders",
+      targetName: "orders_copy",
+    });
+
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "sqlserver", primaryKeyColumns: [] }));
+    expect(plan).toEqual({ sql: "SELECT TOP 0 * INTO [orders_copy] FROM [orders];", sourceColumns: undefined, executeAsScript: false });
+  });
+
   it("forwards the connection identifier quote so dual-dialect clones stay executable", async () => {
     // Cloud Spanner's PostgreSQL dialect quotes with double quotes while GoogleSQL uses backticks,
     // and only the connected agent knows which. Dropping the quote here would make the backend fall

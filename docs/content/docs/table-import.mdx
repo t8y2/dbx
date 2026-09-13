@@ -5,6 +5,8 @@ description: Use a guided workflow to import CSV, TSV, text, JSON, Excel, or SQL
 
 Table Import writes file data into database tables. DBX parses and previews the source first, then asks you to review parsing options, the target, column mappings, and execution settings before any rows are written.
 
+MongoDB collections do not use this relational workflow. Import CSV/JSON documents from the collection document page instead; see [MongoDB Workspace](/en/docs/mongodb).
+
 <Callout type="warn">Import performs real database writes. Connection read-only protection blocks the operation, but database privileges remain the final boundary. Verify the target connection, target table, and backup plan before importing into production.</Callout>
 
 ## Target Modes

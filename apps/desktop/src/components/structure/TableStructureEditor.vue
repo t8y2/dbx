@@ -1153,6 +1153,18 @@ function setMysqlAutoIncrement(column: EditableStructureColumn, checked: boolean
     void loadMysqlAutoIncrementCounter(true);
   }
 }
+function isSqliteAutoIncrement(column: EditableStructureColumn): boolean {
+  return structureDialect.value === "sqlite" && column.isPrimaryKey && isSqliteIntegerType(column.dataType) && column.extra.autoIncrement === true;
+}
+function canEditSqliteAutoIncrement(column: EditableStructureColumn): boolean {
+  return structureDialect.value === "sqlite" && column.isPrimaryKey && isSqliteIntegerType(column.dataType) && !columns.value.some((candidate) => candidate !== column && candidate.isPrimaryKey && candidate.extra.autoIncrement);
+}
+function setSqliteAutoIncrement(column: EditableStructureColumn, checked: boolean) {
+  column.extra.autoIncrement = checked;
+}
+function isSqliteIntegerType(dataType: string): boolean {
+  return /^(integer|int|tinyint|smallint|mediumint|bigint)$/i.test(dataType.trim().split("(")[0]);
+}
 function onMysqlAutoIncrementInput(event: Event) {
   const input = event.target as HTMLInputElement;
   if (/^\d*$/.test(input.value)) {
@@ -4698,6 +4710,12 @@ watch(
                           </template>
                         </template>
                         <!-- MySQL: AUTO_INCREMENT + ON UPDATE CURRENT_TIMESTAMP -->
+                        <template v-else-if="structureDialect === 'sqlite'">
+                          <label :class="[structurePropertyLabelClass, 'shrink-0 pr-1']" :title="t('structureEditor.autoIncrement')">
+                            <input :checked="isSqliteAutoIncrement(column)" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" :disabled="!canEditSqliteAutoIncrement(column)" @change="setSqliteAutoIncrement(column, ($event.target as HTMLInputElement).checked)" />
+                            <span>{{ t("structureEditor.autoIncrement") }}</span>
+                          </label>
+                        </template>
                         <template v-else-if="structureDialect === 'mysql'">
                           <label :class="[structurePropertyLabelClass, 'shrink-0 pr-1']" :title="t('structureEditor.autoIncrement')">
                             <input :checked="column.extra.autoIncrement" type="checkbox" :class="[structureCheckboxClass, 'shrink-0']" @change="setMysqlAutoIncrement(column, ($event.target as HTMLInputElement).checked)" />

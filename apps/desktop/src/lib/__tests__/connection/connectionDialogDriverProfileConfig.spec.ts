@@ -22,6 +22,12 @@ describe("ConnectionDialog driver profile configuration", () => {
     const submitConfig = connectionConfigForSubmitSource();
 
     expect(submitConfig).toContain("setGaussdbTargetServerType(config, targetServerType)");
-    expect(submitConfig).toContain("else if (!isDoltDriverProfile(config.driver_profile))");
+    expect(submitConfig).toContain('else if (config.db_type !== "plugin" && !isDoltDriverProfile(config.driver_profile))');
+  });
+
+  it("preserves plugin external configuration on submit", () => {
+    const submitConfig = connectionConfigForSubmitSource();
+
+    expect(submitConfig).toContain('else if (config.db_type !== "plugin" && !isDoltDriverProfile(config.driver_profile))');
   });
 });

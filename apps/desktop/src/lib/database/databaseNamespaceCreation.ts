@@ -93,6 +93,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   influxdb3: { deferred: "database creation on InfluxDB 3.x goes through the /api/v3/configure/database admin endpoint, which is not part of the SQL execution path" },
   victoriametrics: { deferred: "metric namespaces are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
+  plugin: { deferred: "plugin-owned namespaces are managed by the provider workbench" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },
   consul: { deferred: "Consul namespaces and partitions are connection scopes, not KV resources" },

@@ -1976,40 +1976,39 @@ async fn do_execute_typed(
             let prefer_text_protocol = postgres_prefers_text_protocol(pool_db_type);
             let execution_mode = options.execution_mode;
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
-            if execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
-                db::postgres::execute_query_in_read_only_transaction_with_rollback(
-                    &p,
-                    schema.as_deref(),
-                    sql,
-                    max_rows,
-                    cancel_token,
-                    operation_budget.clone(),
-                    cancel_context,
-                )
-                .await
-            } else if let Some(schema) = schema {
-                db::postgres::execute_query_with_schema_and_max_rows_and_cancel(
-                    &p,
-                    &schema,
-                    sql,
-                    max_rows,
-                    cancel_token,
-                    operation_budget.clone(),
-                    cancel_context,
-                    prefer_text_protocol,
-                )
-                .await
-            } else {
-                db::postgres::execute_query_with_max_rows_and_cancel(
-                    &p,
-                    sql,
-                    max_rows,
-                    cancel_token,
-                    operation_budget.clone(),
-                    cancel_context,
-                    prefer_text_protocol,
-                )
-                .await
+            let result = execute_postgres_pool_statement(
+                &p,
+                schema.as_deref(),
+                sql,
+                max_rows,
+                prefer_text_protocol,
+                execution_mode,
+                cancel_token.clone(),
+                operation_budget.clone(),
+                cancel_context.clone(),
+            )
+            .await;
+            let retry_sql =
+                result.as_ref().err().and_then(|error| postgres_preview_fallback_retry_sql(&options, error, sql));
+            match retry_sql {
+                Some(fallback_sql) => {
+                    log::warn!(
+                        "[query][postgres] preview failed with invalid UTF-8; retrying without generated left() wrappers"
+                    );
+                    execute_postgres_pool_statement(
+                        &p,
+                        schema.as_deref(),
+                        &fallback_sql,
+                        max_rows,
+                        prefer_text_protocol,
+                        execution_mode,
+                        cancel_token,
+                        operation_budget,
+                        cancel_context,
+                    )
+                    .await
+                }
+                None => result,
             }
         }
         PoolKind::Sqlite(p) => {
@@ -2444,6 +2443,71 @@ async fn invoke_external_driver_query_with_preview_retry(
 fn is_external_driver_invalid_utf8_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     normalized.contains("invalid byte sequence for encoding") && normalized.contains("utf8")
+}
+
+/// Returns the SQL to retry when a native PostgreSQL table-data preview dies
+/// with the server's invalid-UTF-8 error. On SQL_ASCII databases the generated
+/// `left()` preview slices by byte and can split a multi-byte UTF-8 sequence
+/// (#8919); like the JDBC path, re-run once without the generated wrappers and
+/// let marker extraction truncate the value client-side. Only generated
+/// preview SELECTs are rewritten — user SQL is never touched, and a genuinely
+/// invalid value simply surfaces the original error again.
+fn postgres_preview_fallback_retry_sql(options: &QueryExecutionOptions, error: &str, sql: &str) -> Option<String> {
+    if !options.table_data_preview || !is_external_driver_invalid_utf8_error(error) {
+        return None;
+    }
+    external_driver_preview_fallback_sql(sql)
+}
+
+/// Dispatches one statement on a native PostgreSQL pool according to the
+/// connection's execution mode and schema context.
+#[allow(clippy::too_many_arguments)]
+async fn execute_postgres_pool_statement(
+    pool: &deadpool_postgres::Pool,
+    schema: Option<&str>,
+    sql: &str,
+    max_rows: Option<usize>,
+    prefer_text_protocol: bool,
+    execution_mode: QueryExecutionMode,
+    cancel_token: Option<CancellationToken>,
+    budget: DbOperationBudget,
+    cancel_context: Option<db::postgres::PostgresCancelContext>,
+) -> Result<db::QueryResult, String> {
+    if execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
+        db::postgres::execute_query_in_read_only_transaction_with_rollback(
+            pool,
+            schema,
+            sql,
+            max_rows,
+            cancel_token,
+            budget,
+            cancel_context,
+        )
+        .await
+    } else if let Some(schema) = schema {
+        db::postgres::execute_query_with_schema_and_max_rows_and_cancel(
+            pool,
+            schema,
+            sql,
+            max_rows,
+            cancel_token,
+            budget,
+            cancel_context,
+            prefer_text_protocol,
+        )
+        .await
+    } else {
+        db::postgres::execute_query_with_max_rows_and_cancel(
+            pool,
+            sql,
+            max_rows,
+            cancel_token,
+            budget,
+            cancel_context,
+            prefer_text_protocol,
+        )
+        .await
+    }
 }
 
 fn is_sql_word_byte(byte: u8) -> bool {
@@ -8641,6 +8705,28 @@ for line in sys.stdin:
         ));
         assert!(!is_external_driver_invalid_utf8_error("ERROR: invalid byte sequence for encoding \"LATIN1\": 0xe2"));
         assert!(!is_external_driver_invalid_utf8_error("Incorrect syntax near SELECT"));
+    }
+
+    #[test]
+    fn postgres_preview_fallback_retries_only_generated_projections() {
+        let options = QueryExecutionOptions { table_data_preview: true, ..Default::default() };
+        let sql = concat!(
+            "SELECT \"id\", left(\"content\", 227) AS \"content\", ",
+            "'T:226' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"t_large\" LIMIT 100"
+        );
+        let error = "ERROR: invalid byte sequence for encoding \"UTF8\": 0xe5 0xa4";
+        assert_eq!(
+            postgres_preview_fallback_retry_sql(&options, error, sql).as_deref(),
+            Some(
+                "SELECT \"id\", \"content\" AS \"content\", 'T:226' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"t_large\" LIMIT 100"
+            )
+        );
+
+        // User SQL without the generated marker is never rewritten, unrelated
+        // errors never trigger a retry, and the data-grid flag is required.
+        assert!(postgres_preview_fallback_retry_sql(&options, error, "SELECT left(value, 10) FROM t").is_none());
+        assert!(postgres_preview_fallback_retry_sql(&options, "ERROR: syntax error at or near \"left\"", sql).is_none());
+        assert!(postgres_preview_fallback_retry_sql(&QueryExecutionOptions::default(), error, sql).is_none());
     }
 
     #[cfg(unix)]

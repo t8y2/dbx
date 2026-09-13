@@ -3643,7 +3643,11 @@ done
                 ..PluginManifest::default()
             },
             path: dir.clone(),
-            compatibility: crate::plugins::PluginCompatibility { compatible: true, ..Default::default() },
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),

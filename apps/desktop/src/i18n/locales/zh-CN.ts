@@ -753,6 +753,7 @@ export default withEnglishFallback({
     etcdClientCertPlaceholder: "/path/to/client.crt",
     etcdClientKeyPlaceholder: "/path/to/client.key",
     etcdClientCertHint: "etcd 要求 mTLS 时，客户端证书和私钥必须一起填写。",
+    clientCertHint: "要求 mTLS 时，客户端证书和私钥必须一起填写。",
     etcdClientCertBrowse: "选择客户端证书",
     etcdClientKeyBrowse: "选择客户端私钥",
     etcdClientCertPairRequired: "客户端证书和私钥必须一起填写。",

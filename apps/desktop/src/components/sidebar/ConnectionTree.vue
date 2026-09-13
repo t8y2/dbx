@@ -10,6 +10,7 @@ import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import {
+  filterLocallySearchedTables,
   createSidebarSearchSubtreePreserver,
   filterSidebarSearchRootsByConnectionState,
   filterSidebarTree,
@@ -18,15 +19,13 @@ import {
   mergeSidebarRegexIndexScopes,
   resolveSidebarFilterGuards,
   resolveSidebarObjectSearchFilter,
-  reuseLiveSidebarTreeNodes,
   type SidebarRegexIndexScope,
   type SidebarRegexScopeIdentity,
 } from "@/lib/sidebar/sidebarSearchTree";
-import { createSidebarLabelMatcher, matchSidebarLabel } from "@/lib/sidebar/sidebarSearch";
+import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
-import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
 import { sidebarNodeSupportsDdlView } from "@/lib/sidebar/sidebarTreeDdlShortcut";
 import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
@@ -658,28 +657,6 @@ type InvalidatedTableSearchScope = SidebarRegexScopeIdentity & { parentNodeId: s
 const pendingInvalidatedTableSearchScopes = new Map<string, InvalidatedTableSearchScope>();
 const regexTableSearchScopes = shallowRef<SidebarRegexIndexScope[]>([]);
 
-const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
-const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
-
-function filterLocallySearchedTables(nodes: TreeNode[]): TreeNode[] {
-  return nodes.map((node) => {
-    const children = node.children ? filterLocallySearchedTables(node.children) : undefined;
-    const query = settingsStore.editorSettings.sidebarTableSearchLocal && localTableSearchParentTypes.has(node.type) ? store.sidebarTableSearchQueries[node.id]?.trim() : "";
-    if (!query || !children) return children === node.children ? node : { ...node, children };
-
-    const indexed = localTableSearchResults.value[node.id];
-    // matchSidebarLabel compares case-insensitively internally and needs the
-    // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
-    const matchingChildren =
-      indexed === null
-        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
-        : indexed
-          ? reuseLiveSidebarTreeNodes(buildTableTreeNodes({ nodeId: node.id, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, tables: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }), children)
-          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
-    return { ...node, children: matchingChildren };
-  });
-}
-
 async function loadRegexTableSearchIndexes() {
   if (!regexMode.value || !deferredSearchQuery.value) return;
   const loadedScopes = await collectSidebarRegexIndexScopes(
@@ -781,7 +758,7 @@ const filteredNodes = computed(() => {
     nodes = filterSidebarTreeToConnectedConnections(nodes, store.connectedIds);
   }
 
-  nodes = filterLocallySearchedTables(nodes);
+  nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value });
   nodes = filterGloballyIndexedRegexTables(nodes);
 
   const q = deferredSearchQuery.value;

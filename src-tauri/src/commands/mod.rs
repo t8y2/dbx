@@ -24,6 +24,7 @@ pub mod fs_open;
 pub mod hbase_cmd;
 pub mod history;
 pub mod keychain;
+pub mod launch_args;
 pub mod list_sql_files;
 pub mod mcp;
 pub mod mcp_bridge;

@@ -2431,7 +2431,6 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "zookeeper") {
       form.value.database = undefined;
       form.value.connection_string = "";
-      form.value.ssl = false;
     }
     if (profile.type === "nacos") {
       resetNacosFields();
@@ -4115,7 +4114,6 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       config.port = firstEndpoint.port;
     }
     config.database = undefined;
-    config.ssl = false;
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
     config.client_cert_path = config.client_cert_path?.trim() || "";
     config.client_key_path = config.client_key_path?.trim() || "";

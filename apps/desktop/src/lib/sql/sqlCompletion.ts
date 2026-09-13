@@ -19,7 +19,7 @@ import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/c
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
-import { supportsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
+import { rejectsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -2664,10 +2664,11 @@ function isInOrderOrGroupByContext(beforeCursor: string, databaseType?: Database
     .toLowerCase();
   const lastOrderBy = cleaned.lastIndexOf("order by");
   const lastGroupBy = cleaned.lastIndexOf("group by");
-  // MySQL (and DuckDB-like engines) also resolve SELECT aliases inside HAVING,
-  // so aliases stay visible there just like in ORDER BY/GROUP BY — but only
-  // for dialects that accept them: PostgreSQL, SQL Server, and DB2 reject
-  // HAVING alias references, and their "Unknown column" diagnostic must keep
+  // SELECT aliases may be referenced inside HAVING for permissive engines
+  // (MySQL family, SQLite family, DuckDB, BigQuery, Spark, Snowflake, ...),
+  // so aliases stay visible there just like in ORDER BY/GROUP BY — but
+  // confirmed rejecters (PostgreSQL family, SQL Server, DB2, Oracle family,
+  // Trino, ...) hide them, and their "Unknown column" diagnostic keeps
   // flagging those (t8y2/dbx#8953 review).
   const lastHaving = lastStandaloneKeywordIndex(cleaned, "having");
   const lastContext = Math.max(lastOrderBy, lastGroupBy, lastHaving);
@@ -2676,8 +2677,10 @@ function isInOrderOrGroupByContext(beforeCursor: string, databaseType?: Database
   const segment = cleaned.slice(lastContext);
   if (/\b(?:where|limit|offset|union|intersect|except|join|from)\b/.test(segment)) return false;
   // An unknown database type keeps the permissive legacy behavior; only
-  // dialects known to reject HAVING aliases lose the alias visibility.
-  if (lastContext === lastHaving && databaseType !== undefined && !supportsAliasReferenceInHaving(databaseType)) return false;
+  // dialects known to reject HAVING aliases lose the alias visibility
+  // (everything else — Spark, Snowflake, Hive family, unlisted types —
+  // stays permissive).
+  if (lastContext === lastHaving && rejectsAliasReferenceInHaving(databaseType)) return false;
   return true;
 }
 

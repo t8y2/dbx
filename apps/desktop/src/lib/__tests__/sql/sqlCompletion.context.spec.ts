@@ -1418,4 +1418,18 @@ describe("select alias visibility", () => {
     expect(context.prioritizeSelectAliases).toBe(true);
     expect(context.selectAliases).toContain("uid");
   });
+
+  it("keeps HAVING alias priority for unlisted dialects (deny-list polarity)", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    for (const databaseType of ["spark", "databricks", "snowflake", "hive"] as const) {
+      const context = getSqlCompletionContext(sql, sql.length, { databaseType });
+
+      expect(context.prioritizeSelectAliases, databaseType).toBe(true);
+      expect(context.selectAliases, databaseType).toContain("cnt");
+    }
+    // No database type at all keeps the permissive legacy behavior.
+    const untyped = getSqlCompletionContext(sql, sql.length, {});
+    expect(untyped.prioritizeSelectAliases).toBe(true);
+    expect(untyped.selectAliases).toContain("cnt");
+  });
 });

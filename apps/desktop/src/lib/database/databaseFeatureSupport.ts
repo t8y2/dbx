@@ -268,21 +268,48 @@ export function supportsTransaction(dbType?: string): boolean {
   return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
 }
 
-// Engines that resolve SELECT projection aliases inside HAVING just like they
-// do in ORDER BY: the MySQL family (MySQL, Doris, StarRocks, GoldenDB,
-// ClickHouse, Databend, Manticore), the SQLite family (SQLite, rqlite, Turso,
-// Cloudflare D1), DuckDB, and BigQuery. Standard engines (PostgreSQL and its
-// relatives, SQL Server, DB2, Oracle) reject aliases there, so semantic
-// diagnostics must keep flagging such references for them.
-const HAVING_ALIAS_DATABASE_TYPES: readonly string[] = ["mysql", "doris", "starrocks", "goldendb", "clickhouse", "databend", "manticoresearch", "duckdb", "sqlite", "rqlite", "turso", "cloudflare-d1", "bigquery"];
+// Engines confirmed to reject SELECT projection aliases inside HAVING (they
+// resolve only source columns there): the PostgreSQL family (PostgreSQL,
+// Redshift, Kingbase, HighGo, UXDB, Vastbase, GaussDB, openGauss, KwDB), SQL
+// Server, DB2, the Oracle family (Oracle, OceanBase Oracle mode, Yashandb,
+// Dameng, Oscar, Xugu), Informix, Firebird, Exasol, Trino, and PrestoSQL.
+// Everything else — including Spark, Databricks, Hive-family engines, and
+// Snowflake, which all resolve SELECT aliases in HAVING — keeps the
+// permissive behavior, mirroring DBeaver's permissive-default
+// ProjectionAliasVisibilityScope with a deny list of known rejecters.
+const HAVING_ALIAS_REJECTED_DATABASE_TYPES: ReadonlySet<string> = new Set([
+  "postgres",
+  "redshift",
+  "kingbase",
+  "highgo",
+  "uxdb",
+  "vastbase",
+  "gaussdb",
+  "opengauss",
+  "kwdb",
+  "sqlserver",
+  "db2",
+  "oracle",
+  "oceanbase-oracle",
+  "yashandb",
+  "dameng",
+  "oscar",
+  "xugu",
+  "informix",
+  "firebird",
+  "exasol",
+  "trino",
+  "prestosql",
+]);
 
 /**
- * Returns true when SELECT aliases may be referenced from the HAVING clause,
- * so alias completion applies there and the "Unknown column" diagnostic stays
- * silent for a projected alias used in HAVING.
+ * Returns true when the engine rejects SELECT alias references from the
+ * HAVING clause, so alias completion hides there and the "Unknown column"
+ * diagnostic keeps flagging a projected alias used in HAVING. Unknown or
+ * unlisted database types stay permissive.
  */
-export function supportsAliasReferenceInHaving(dbType?: string): boolean {
-  return !!dbType && HAVING_ALIAS_DATABASE_TYPES.includes(dbType);
+export function rejectsAliasReferenceInHaving(dbType?: string): boolean {
+  return !!dbType && HAVING_ALIAS_REJECTED_DATABASE_TYPES.has(dbType);
 }
 
 /**

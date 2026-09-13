@@ -2432,9 +2432,6 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.database = undefined;
       form.value.connection_string = "";
       form.value.ssl = false;
-      form.value.ca_cert_path = "";
-      form.value.client_cert_path = "";
-      form.value.client_key_path = "";
     }
     if (profile.type === "nacos") {
       resetNacosFields();

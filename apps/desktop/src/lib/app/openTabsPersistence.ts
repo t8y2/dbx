@@ -104,6 +104,13 @@ function shouldPersistTabSql(tab: QueryTab) {
   return tab.originalSql !== undefined && tab.sql !== tab.originalSql;
 }
 
+// Pending object-source tabs are transient work surfaces. Persisting one while
+// its request is in flight would restore an empty source tab after restart,
+// because the request itself is intentionally not durable.
+function shouldPersistOpenTab(tab: QueryTab): boolean {
+  return !tab.sourceLoad;
+}
+
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
   if (mode !== "query") return undefined;
   if (tab.externalSqlPath) return tab.originalSql ?? sql;
@@ -149,7 +156,7 @@ function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
 }
 
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
-  return tabs.map((tab) => ({
+  return tabs.filter(shouldPersistOpenTab).map((tab) => ({
     id: tab.id,
     ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
     title: tab.title,

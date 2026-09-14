@@ -2618,7 +2618,7 @@ function onEditTableStructure(table: SqlObjectNavigationTarget) {
   queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
 }
 
-async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
+function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
   const provisionalTarget = tableTargetFromActiveTab(table);
   if (!provisionalTarget) return;
   const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(provisionalTarget.connectionId));
@@ -2630,42 +2630,22 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
   const sourceName = sqlObjectNavigationSourceName(navigation);
   const sourceSchema = sqlObjectNavigationSourceSchema(navigation, target.schema || target.database);
   try {
-    await connectionStore.ensureConnected(target.connectionId);
-    connectionStore.activeConnectionId = target.connectionId;
-    // Align Ctrl/Cmd+click with sidebar "view source" (dialog vs data tab).
+    // Keep the editor navigation path aligned with the sidebar: create a visible
+    // pending tab first, then let the store own connection/source loading.
     if (settingsStore.editorSettings.routineSourceOpenMode === "query-tab") {
-      try {
-        const resolvedDatabaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
-        if (!resolvedDatabaseType) throw new Error("Connection type is unavailable.");
-        // Wrap Oracle bare ALL_SOURCE (`procedure name is ...`) as CREATE OR REPLACE for the editor.
-        const {
-          raw,
-          editableSource,
-          objectType: resolvedType,
-        } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
-          connectionId: target.connectionId,
-          database: target.database,
-          schema: sourceSchema || target.database,
-          name: sourceName,
-          objectType,
-          databaseType: resolvedDatabaseType,
-          signature: navigation.signature,
-        });
-        const tabId = queryStore.createTab(target.connectionId, target.database, `Source - ${sourceName}`, "query", sourceSchema, editableSource, target.catalog, { forceNew: true, sourceView: true });
-        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
-        if (sourceIsEditable) {
-          queryStore.setObjectSource(tabId, {
-            schema: sourceSchema || target.database,
-            name: sourceName,
-            objectType: resolvedType,
-            signature: navigation.signature,
-          });
-        }
-      } catch (e: any) {
-        toast(e?.message || String(e), 5000);
-      }
+      queryStore.openObjectSourceTabPending({
+        connectionId: target.connectionId,
+        database: target.database,
+        title: `Source - ${sourceName}`,
+        schema: sourceSchema || target.database,
+        catalog: target.catalog,
+        request: { name: sourceName, objectType, signature: navigation.signature },
+      });
       return;
     }
+
+    // The dialog owns ensureConnected so its existing loading/error/retry UI is
+    // mounted before a slow connection health check or Oracle metadata query.
     queryEditorObjectSourceTarget.value = {
       connectionId: target.connectionId,
       database: target.database,

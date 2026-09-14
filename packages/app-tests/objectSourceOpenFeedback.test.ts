@@ -64,6 +64,17 @@ test("query-tab entry no longer blocks the sidebar on connect", () => {
   assert.match(openBody, /sidebarObjectSourceOpen\.value = true/);
 });
 
+test("query-editor object source entry uses the same visible loading path", () => {
+  const app = read("apps/desktop/src/App.vue");
+  const openBody = functionBody(app, "onOpenObjectSource");
+
+  assert.match(openBody, /queryStore\.openObjectSourceTabPending\(\{/);
+  assert.match(openBody, /queryEditorObjectSourceTarget\.value =/);
+  assert.match(openBody, /showQueryEditorObjectSourceDialog\.value = true/);
+  assert.doesNotMatch(openBody, /ensureConnected\(/);
+  assert.doesNotMatch(openBody, /api\.getObjectSource\(/);
+});
+
 test("object source load state is runtime-only and never restored from disk", () => {
   const persistence = read("apps/desktop/src/lib/app/openTabsPersistence.ts");
   const types = read("apps/desktop/src/types/database.ts");

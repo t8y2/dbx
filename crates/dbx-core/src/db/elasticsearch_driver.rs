@@ -90,6 +90,7 @@ impl EsClient {
         .expect("failed to build Elasticsearch HTTP client")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_mode(
         url: &str,
         username: Option<&str>,

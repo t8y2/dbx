@@ -371,6 +371,10 @@ mod tls_tests {
         let csr = dir.join("client.csr");
         let client_key = dir.join("client.key");
         let client_crt = dir.join("client.crt");
+        // Extensions force an X.509 v3 client cert; some toolchains (e.g.
+        // OpenSSL 3.0 on CI) emit v1 without one, which rustls rejects.
+        let client_ext = dir.join("client.ext");
+        let _ = std::fs::write(&client_ext, "basicConstraints=critical,CA:FALSE\n");
         let _ = Command::new("openssl")
             .args([
                 "req",
@@ -417,6 +421,8 @@ mod tls_tests {
                 client_crt.to_str().unwrap(),
                 "-days",
                 "1",
+                "-extfile",
+                client_ext.to_str().unwrap(),
             ])
             .output();
         (ca_pem, client_crt, client_key)
@@ -428,14 +434,15 @@ mod tls_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (ca, client_crt, client_key) = gen_certs(&dir);
 
-        let builder = apply_tls_certificates(
+        let built = apply_tls_certificates(
             http_client_builder(Duration::from_secs(5)),
             ca.to_str(),
             client_crt.to_str(),
             client_key.to_str(),
-        );
-        assert!(builder.is_ok(), "client should build with CA + client cert");
-        assert!(builder.unwrap().build().is_ok(), "built client should be usable with CA + client cert");
+        )
+        .expect("client should build with CA + client cert")
+        .build();
+        assert!(built.is_ok(), "built client should be usable with CA + client cert: {:?}", built.err());
 
         // A misconfigured CA path must now surface a descriptive error instead of
         // silently degrading to the system trust store.

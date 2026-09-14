@@ -1640,7 +1640,6 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 commands::mcp_http_server::start_if_enabled(mcp_http_state, mcp_http_server).await;
             });
-            commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
             app.manage(commands::redis_pubsub_server::start_pubsub_server(state.clone()));
             app.manage(commands::saved_sql::SavedSqlStorageState { data_dir: data_dir.clone() });
             app.manage(commands::external_sql::ExternalSqlOpenState::default());

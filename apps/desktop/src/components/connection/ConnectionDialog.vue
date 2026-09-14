@@ -4104,6 +4104,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
+    config.save_password = form.value.save_password;
     config.is_production = form.value.is_production;
     config.production_databases = form.value.production_databases;
   } else {

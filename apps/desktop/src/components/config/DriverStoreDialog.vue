@@ -2264,7 +2264,7 @@ watch(driverStoreTab, (tab) => {
 .driver-store-tabs {
   display: grid !important;
   width: 480px !important;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
 }
 
 .driver-store-tabs-root {

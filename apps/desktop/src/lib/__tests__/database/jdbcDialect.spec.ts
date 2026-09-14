@@ -9,6 +9,7 @@ import {
   connectionQueryExecutionSchema,
   connectionShouldDiscoverJdbcSchemas,
   connectionShouldLoadIdentifierQuote,
+  connectionTableSqlSchema,
   connectionUsesConnectionRootSchemaMode,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
@@ -174,6 +175,12 @@ describe("jdbc dialect inference", () => {
   it("falls back to a flat table tree when GBase 8s reports no schemas", () => {
     expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldDiscoverJdbcSchemas({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
+  });
+
+  it("omits the metadata owner from GBase 8s table SQL", () => {
+    expect(connectionTableSqlSchema({ db_type: "gbase", driver_profile: "gbase8s" }, "gbasedbt")).toBeUndefined();
+    expect(connectionTableSqlSchema({ db_type: "gbase", driver_profile: "gbase8a" }, "analytics")).toBe("analytics");
+    expect(connectionTableSqlSchema({ db_type: "informix", driver_profile: "informix" }, "informix")).toBe("informix");
   });
 
   it("recognizes GaussDB reached through PostgreSQL-compatible JDBC drivers", () => {

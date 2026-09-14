@@ -11,6 +11,7 @@ import {
   editableRowIdentifierColumns,
   hasCompleteTdengineRowIdentity,
   isClickHouseExistingRowReadonlyColumn,
+  isHiddenGridColumn,
   isTdengineExistingRowReadonlyColumn,
   isTableDataEditable,
   supportsDataGridTransaction,
@@ -70,6 +71,13 @@ describe("tableEditing", () => {
     expect(shouldIncludeSyntheticRowId("xugu", [], "TEMPORARY TABLE")).toBe(true);
     expect(shouldIncludeSyntheticRowId("xugu", [], "VIEW")).toBe(false);
     expect(shouldIncludeSyntheticRowId("oracle", [], "TABLE")).toBe(false);
+  });
+
+  it("keeps Xugu's internal ROWID hidden after primary-key metadata arrives", () => {
+    expect(isHiddenGridColumn("xugu", DBX_ROWID_COLUMN, ["ID"], "TABLE")).toBe(true);
+    expect(isHiddenGridColumn("xugu", DBX_ROWID_COLUMN, [], "TABLE")).toBe(true);
+    expect(isHiddenGridColumn("xugu", DBX_ROWID_COLUMN, ["ID"], "VIEW")).toBe(false);
+    expect(isHiddenGridColumn("xugu", "ID", ["ID"], "TABLE")).toBe(false);
   });
 
   it("treats view data tabs as readonly", () => {

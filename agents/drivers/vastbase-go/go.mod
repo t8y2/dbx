@@ -1,6 +1,6 @@
 module github.com/t8y2/dbx/agents/drivers/vastbase-go
 
-go 1.22
+go 1.20
 
 require gitcode.com/opengauss/openGauss-connector-go-pq v1.0.8
 

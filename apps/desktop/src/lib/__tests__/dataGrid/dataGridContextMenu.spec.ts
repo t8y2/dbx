@@ -138,4 +138,87 @@ describe("dataGridContextMenu", () => {
     });
     expect(rowItems.find((item) => item.label === "delete")?.variant).toBe("destructive");
   });
+
+  function columnMenuItems(overrides: { hasColumnSelection?: boolean; selectedColumnCount?: number; visibleColumnCount?: number; hiddenColumnCount?: number }) {
+    const action = vi.fn();
+    const filter = createDataGridFilterSubmenu({
+      label: "filter",
+      icon,
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", isNull: "null", isNotNull: "not null", clear: "clear" },
+      apply: action,
+      clear: action,
+    });
+    return createDataGridColumnContextMenuItems({
+      headerColumn: true,
+      contextColumn: false,
+      canCopyAlterSql: false,
+      canFilter: false,
+      hasSort: false,
+      sortMode: "database",
+      contextVisibleColIdx: 0,
+      hasColumnSelection: false,
+      selectedColumnCount: 1,
+      visibleColumnCount: 3,
+      hiddenColumnCount: 0,
+      labels: {
+        copyName: "copy name",
+        copyNames: "copy names",
+        details: "details",
+        copyAlterSql: "alter",
+        databaseAscending: "db asc",
+        databaseDescending: "db desc",
+        localAscending: "local asc",
+        localDescending: "local desc",
+        clearSort: "clear sort",
+        freezeToColumn: "freeze to column",
+        freezeSelectedColumns: "freeze selected",
+        unfreezeColumns: "unfreeze",
+        hideColumn: "hide column",
+        hideSelectedColumns: "hide selected (3)",
+        showAllColumnsMenu: "show all columns",
+      },
+      icons: { copy: icon, columnDetails: icon, database: icon, ascending: icon, descending: icon, clearSort: icon },
+      actions: { copyName: action, copyNames: action, details: action, copyAlterSql: action, sort: action, freezeToColumn: action, freezeSelectedColumns: action, unfreezeColumns: action, hideColumn: action, hideSelectedColumns: action, showAllColumnsMenu: action },
+      filterSubmenu: filter,
+      ...overrides,
+    });
+  }
+
+  it("offers hide-this-column on a header and hides the recovery entry until a column is hidden", () => {
+    const labels = columnMenuItems({}).map((item) => item.label);
+
+    expect(labels).toContain("hide column");
+    expect(labels).not.toContain("hide selected (3)");
+    expect(labels).not.toContain("show all columns");
+  });
+
+  it("offers batch hiding for a multi-column selection and shows the recovery entry when columns are hidden", () => {
+    const items = columnMenuItems({ hasColumnSelection: true, selectedColumnCount: 3, visibleColumnCount: 5, hiddenColumnCount: 2 });
+    const hideSelected = items.find((item) => item.label === "hide selected (3)");
+
+    expect(hideSelected?.disabled).toBe(false);
+    expect(items.map((item) => item.label)).toContain("show all columns");
+  });
+
+  it("disables batch hiding when the selection covers every visible column", () => {
+    const items = columnMenuItems({ hasColumnSelection: true, selectedColumnCount: 3, visibleColumnCount: 3 });
+
+    expect(items.find((item) => item.label === "hide selected (3)")?.disabled).toBe(true);
+  });
+
+  it("disables hiding this column when only one column is visible", () => {
+    const items = columnMenuItems({ visibleColumnCount: 1 });
+    const hideColumn = items.find((item) => item.label === "hide column");
+
+    expect(hideColumn).toBeDefined();
+    expect(hideColumn?.disabled).toBe(true);
+  });
+
+  it("keeps hiding this column enabled for callers that omit the visible column count", () => {
+    const items = columnMenuItems({ visibleColumnCount: undefined });
+    const hideColumn = items.find((item) => item.label === "hide column");
+
+    expect(hideColumn).toBeDefined();
+    expect(hideColumn?.disabled).toBe(false);
+  });
 });

@@ -232,6 +232,83 @@ describe("useDataGridColumnLayout", () => {
     expect(JSON.parse(localStorage.getItem("dbx-data-grid-column-layout:visibility-null-column-layout")!)).toMatchObject({ hiddenKeys: ["empty\0\0"] });
   });
 
+  it("hides a batch of columns in one commit and persists the hidden keys", () => {
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "name", "email", "phone"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1, 2, 3]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["id\0\0", "name\0\0", "email\0\0", "phone\0\0"]),
+        layoutScopeKey: ref("batch-hide-layout"),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    state.hideColumns([1, 2]);
+    expect(state.visibleColumnIndexes.value).toEqual([0, 3]);
+    expect(state.hiddenColumnCount.value).toBe(2);
+
+    // 重复索引与已隐藏索引不会改变结果（幂等）
+    state.hideColumns([1, 2]);
+    expect(state.visibleColumnIndexes.value).toEqual([0, 3]);
+
+    state.showAllColumns();
+    expect(state.visibleColumnIndexes.value).toEqual([0, 1, 2, 3]);
+
+    state.hideColumns([3]);
+    state.toggleColumnVisibility(0);
+    scope.stop();
+
+    expect(loadDataGridColumnLayout("batch-hide-layout")?.hiddenKeys).toEqual(["id\0\0", "phone\0\0"]);
+  });
+
+  it("keeps at least one column visible when a batch would hide every column", () => {
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "name", "email"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1, 2]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["id\0\0", "name\0\0", "email\0\0"]),
+        layoutScopeKey: ref("batch-hide-last-layout"),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    state.hideColumns([1, 2]);
+    expect(state.visibleColumnIndexes.value).toEqual([0]);
+
+    // 只剩一列可见时再隐藏它：保持不变，不会变成空网格
+    state.hideColumns([0]);
+    expect(state.visibleColumnIndexes.value).toEqual([0]);
+    scope.stop();
+  });
+
+  it("treats an empty batch hide as a no-op", () => {
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["id", "name", "email"]),
+        sourceColumns: ref(undefined),
+        commentByColumn: ref(new Map()),
+        displayableColumnIndexes: ref([0, 1, 2]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["id\0\0", "name\0\0", "email\0\0"]),
+        layoutScopeKey: ref("batch-hide-empty-layout"),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    state.hideColumns([]);
+    expect(state.visibleColumnIndexes.value).toEqual([0, 1, 2]);
+    scope.stop();
+  });
+
   it("returns ordered layout options with visibility state and reorders hidden fields", () => {
     const scope = effectScope();
     const state = scope.run(() =>

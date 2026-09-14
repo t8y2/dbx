@@ -14,7 +14,7 @@ import {
   type TableDataGridColumnOrderChangedDetail,
 } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems, type DataGridColumnLookupItem } from "@/lib/dataGrid/dataGridColumnLookup";
-import { hiddenColumnIndexesForKeys, hiddenColumnIndexesWithAllNullColumns, hiddenColumnKeysForIndexes, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
+import { hiddenColumnIndexesAfterHiding, hiddenColumnIndexesForKeys, hiddenColumnIndexesWithAllNullColumns, hiddenColumnKeysForIndexes, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
 
 export type RenderedDataGridColumn = {
   visibleColIdx: number;
@@ -209,6 +209,24 @@ export function useDataGridColumnLayoutState(options: {
     if (!hiddenColumnIndexes.value.has(columnIndex) && autoHiddenNullColumnIndexes.value.delete(columnIndex)) {
       autoHiddenNullColumnIndexes.value = new Set(autoHiddenNullColumnIndexes.value);
     }
+    persistHiddenColumnKeys();
+  }
+
+  // 批量隐藏：一次 hiddenColumnIndexes 提交、一次持久化，供表头右键菜单使用。
+  function hideColumns(columnIndexes: Iterable<number>) {
+    const requestedIndexes = [...columnIndexes].filter((index) => Number.isInteger(index) && index >= 0);
+    if (requestedIndexes.length === 0) return;
+    hiddenColumnIndexes.value = hiddenColumnIndexesAfterHiding({
+      columnIndexes: requestedIndexes,
+      hiddenIndexes: hiddenColumnIndexes.value,
+      availableIndexes: toValue(options.displayableColumnIndexes),
+    });
+    // hiddenColumnIndexesAfterHiding 只做加法（绝不删列），且 invariant
+    // autoHiddenNullColumnIndexes 始终是 hiddenColumnIndexes 的子集，由
+    // applyNullColumnVisibility / showColumn / toggleColumnVisibility 共同维护，
+    // 所以这里不需要清理 autoHiddenNullColumnIndexes（与之等价的剪枝循环恒不可达）。
+    // 将来若允许传入「已隐藏」的列，正确做法与剪枝相反：该列属于手动隐藏，
+    // 必须从 autoHiddenNullColumnIndexes 中移除，而不是保留。
     persistHiddenColumnKeys();
   }
 
@@ -410,6 +428,7 @@ export function useDataGridColumnLayoutState(options: {
     filteredColumnLayoutOptions,
     isColumnVisible,
     toggleColumnVisibility,
+    hideColumns,
     showAllColumns,
     invertColumnVisibility,
     showColumn,

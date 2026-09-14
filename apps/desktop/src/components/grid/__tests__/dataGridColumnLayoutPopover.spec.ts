@@ -70,6 +70,7 @@ function createGrid(itemCount: number) {
       return normalizedSearch ? options.filter((option) => option.column.toLowerCase().includes(normalizedSearch)) : options;
     },
     toggleColumnVisibility,
+    hideColumns: vi.fn(),
     showAllColumns: vi.fn(),
     invertColumnVisibility: vi.fn(),
     hasCustomColumnOrder: false,

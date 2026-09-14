@@ -219,6 +219,118 @@ public final class DdlBuilder {
         return ddl.toString();
     }
 
+    /**
+     * Appends trailing SQL (e.g. GRANT statements) after a CREATE TABLE DDL script.
+     * Returns the original DDL unchanged when {@code trailingSql} is blank.
+     */
+    public static String appendTrailingSql(String ddl, String trailingSql) {
+        if (!notBlank(trailingSql)) {
+            return ddl == null ? "" : ddl;
+        }
+        String base = ddl == null ? "" : ddl.trim();
+        if (base.isEmpty()) {
+            return trailingSql.trim();
+        }
+        if (!base.endsWith(";")) {
+            base = base + ";";
+        }
+        String grants = trailingSql.trim();
+        return base + "\n\n" + grants + (grants.endsWith(";") ? "" : ";");
+    }
+
+    /**
+     * Builds Oracle-style object GRANT statements for table and column privileges.
+     * Privileges are grouped by grantee / grantable / privilege(+columns).
+     */
+    public static String buildOracleObjectGrantSql(
+        String schema,
+        String table,
+        List<OracleObjectPrivilege> privileges
+    ) {
+        if (privileges == null || privileges.isEmpty() || !notBlank(table)) {
+            return "";
+        }
+        String tableRef = qualifiedName(schema, table, false);
+
+        Map<String, List<String>> tablePrivileges = new LinkedHashMap<>();
+        Map<String, List<String>> columnPrivileges = new LinkedHashMap<>();
+        for (OracleObjectPrivilege privilege : privileges) {
+            if (privilege == null || !notBlank(privilege.grantee()) || !notBlank(privilege.privilege())) {
+                continue;
+            }
+            String privilegeName = privilege.privilege().trim().toUpperCase(Locale.ROOT);
+            String grantableKey = privilege.grantable() ? "1" : "0";
+            if (notBlank(privilege.columnName())) {
+                String key = privilege.grantee() + "\u0000" + privilegeName + "\u0000" + grantableKey;
+                columnPrivileges
+                    .computeIfAbsent(key, ignored -> new ArrayList<>())
+                    .add(privilege.columnName().trim());
+            } else {
+                String key = privilege.grantee() + "\u0000" + grantableKey;
+                List<String> names = tablePrivileges.computeIfAbsent(key, ignored -> new ArrayList<>());
+                if (!names.contains(privilegeName)) {
+                    names.add(privilegeName);
+                }
+            }
+        }
+
+        List<String> statements = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : tablePrivileges.entrySet()) {
+            String[] parts = entry.getKey().split("\u0000", -1);
+            String grantee = parts[0];
+            boolean grantable = "1".equals(parts[1]);
+            statements.add(formatOracleGrant(
+                join(entry.getValue(), ", "),
+                null,
+                tableRef,
+                grantee,
+                grantable
+            ));
+        }
+        for (Map.Entry<String, List<String>> entry : columnPrivileges.entrySet()) {
+            String[] parts = entry.getKey().split("\u0000", -1);
+            String grantee = parts[0];
+            String privilegeName = parts[1];
+            boolean grantable = "1".equals(parts[2]);
+            List<String> columns = new ArrayList<>();
+            for (String column : entry.getValue()) {
+                String quoted = quoteIdent(column, false);
+                if (!columns.contains(quoted)) {
+                    columns.add(quoted);
+                }
+            }
+            statements.add(formatOracleGrant(
+                privilegeName,
+                join(columns, ", "),
+                tableRef,
+                grantee,
+                grantable
+            ));
+        }
+        return join(statements, "\n");
+    }
+
+    private static String formatOracleGrant(
+        String privilegeList,
+        String columnList,
+        String tableRef,
+        String grantee,
+        boolean grantable
+    ) {
+        StringBuilder statement = new StringBuilder("GRANT ");
+        statement.append(privilegeList);
+        if (notBlank(columnList)) {
+            statement.append(" (").append(columnList).append(")");
+        }
+        statement.append(" ON ").append(tableRef);
+        statement.append(" TO ").append(quoteIdent(grantee, false));
+        if (grantable) {
+            statement.append(" WITH GRANT OPTION");
+        }
+        statement.append(";");
+        return statement.toString();
+    }
+
     private static List<ForeignKeyGroup> groupForeignKeys(List<ForeignKeyInfo> foreignKeys) {
         List<ForeignKeyGroup> result = new ArrayList<>();
         Map<String, ForeignKeyGroup> namedGroups = new LinkedHashMap<>();

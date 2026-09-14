@@ -25,6 +25,13 @@ describe("queryTimeout", () => {
     expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready' RETURNING id", "postgres", 30)).toBe(0);
   });
 
+  it("uses conservative package splitting for an unresolved openGauss mode", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+END pkg_utils;`;
+    expect(frontendQueryTimeoutSecsForSql(`${packageSpec}\n/\nSELECT 1;`, "opengauss", 30)).toBe(120);
+  });
+
   it("keeps the frontend guard for non-row PostgreSQL statements", () => {
     expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(60);
     expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(60);

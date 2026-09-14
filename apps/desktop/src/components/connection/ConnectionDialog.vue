@@ -4438,12 +4438,30 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
-  } else if (form.value.db_type !== "consul") {
+  } else if (form.value.db_type !== "consul" && config.db_type !== "zookeeper" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "consul" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics" && config.db_type !== "zookeeper") {
+  if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.etcdClientCertPairRequired"));
+    }
+  }
+  if (
+    config.db_type !== "mysql" &&
+    config.db_type !== "clickhouse" &&
+    config.db_type !== "etcd" &&
+    config.db_type !== "consul" &&
+    config.db_type !== "starrocks" &&
+    config.db_type !== "mongodb" &&
+    config.db_type !== "victoriametrics" &&
+    config.db_type !== "zookeeper" &&
+    config.db_type !== "elasticsearch" &&
+    config.db_type !== "easysearch"
+  ) {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -8394,7 +8412,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">

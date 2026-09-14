@@ -2757,15 +2757,15 @@ func fakeOracleColumnLoader(columns []oracleColumnMeta) oracleColumnMetaLoader {
 	}
 }
 
-func TestGetObjectSourceUsesOriginalViewNameWithDBMSMetadata(t *testing.T) {
+func TestGetObjectSourceUsesOriginalViewNameWithAllViews(t *testing.T) {
 	for _, viewName := range []string{"vEnginWJZ", "V_ENGINE_WJZ"} {
 		t.Run(viewName, func(t *testing.T) {
-			ddl := `CREATE OR REPLACE FORCE VIEW "ZTZS_ERP2"."` + viewName + `" AS SELECT source_id FROM "ZTZS_ERP2"."SOURCE_TABLE"`
+			source := `SELECT source_id FROM "ZTZS_ERP2"."SOURCE_TABLE"`
 			db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 				{
-					queryContains: "DBMS_METADATA.GET_DDL('VIEW'",
-					args:          []driver.Value{viewName, "ZTZS_ERP2"},
-					rows:          [][]driver.Value{{ddl}},
+					queryContains: "FROM ALL_VIEWS",
+					args:          []driver.Value{"ZTZS_ERP2", viewName},
+					rows:          [][]driver.Value{{source}},
 				},
 			})
 			s := newServer()
@@ -2775,7 +2775,7 @@ func TestGetObjectSourceUsesOriginalViewNameWithDBMSMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result["source"] != ddl {
+			if result["source"] != source {
 				t.Fatalf("unexpected view source: %#v", result["source"])
 			}
 			if scripted.next != len(scripted.steps) {
@@ -2982,19 +2982,19 @@ func TestGetObjectSourcePreservesQuotedSynonymName(t *testing.T) {
 	}
 }
 
-func TestGetObjectSourceFallsBackToAllViewsWithOriginalName(t *testing.T) {
+func TestGetObjectSourceFallsBackToDBMSMetadataWithOriginalName(t *testing.T) {
 	const viewName = "vEnginWJZ"
-	const source = `SELECT source_id FROM "ZTZS_ERP2"."SOURCE_TABLE"`
+	const ddl = `CREATE OR REPLACE FORCE VIEW "ZTZS_ERP2"."vEnginWJZ" AS SELECT source_id FROM "ZTZS_ERP2"."SOURCE_TABLE"`
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
-		{
-			queryContains: "DBMS_METADATA.GET_DDL('VIEW'",
-			args:          []driver.Value{viewName, "ZTZS_ERP2"},
-			err:           errors.New("ORA-31603: object not found"),
-		},
 		{
 			queryContains: "FROM ALL_VIEWS",
 			args:          []driver.Value{"ZTZS_ERP2", viewName},
-			rows:          [][]driver.Value{{source}},
+			err:           errors.New("ORA-00942: table or view does not exist"),
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL('VIEW'",
+			args:          []driver.Value{viewName, "ZTZS_ERP2"},
+			rows:          [][]driver.Value{{ddl}},
 		},
 	})
 	s := newServer()
@@ -3004,7 +3004,7 @@ func TestGetObjectSourceFallsBackToAllViewsWithOriginalName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result["source"] != source {
+	if result["source"] != ddl {
 		t.Fatalf("unexpected fallback source: %#v", result["source"])
 	}
 	if scripted.next != len(scripted.steps) {
@@ -3015,14 +3015,14 @@ func TestGetObjectSourceFallsBackToAllViewsWithOriginalName(t *testing.T) {
 func TestGetObjectSourceRejectsMissingViewSource(t *testing.T) {
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
 		{
-			queryContains: "DBMS_METADATA.GET_DDL('VIEW'",
-			args:          []driver.Value{"vEnginWJZ", "ZTZS_ERP2"},
-			err:           errors.New("ORA-31603: object not found"),
-		},
-		{
 			queryContains: "FROM ALL_VIEWS",
 			args:          []driver.Value{"ZTZS_ERP2", "vEnginWJZ"},
 			rows:          nil,
+		},
+		{
+			queryContains: "DBMS_METADATA.GET_DDL('VIEW'",
+			args:          []driver.Value{"vEnginWJZ", "ZTZS_ERP2"},
+			err:           errors.New("ORA-31603: object not found"),
 		},
 	})
 	s := newServer()

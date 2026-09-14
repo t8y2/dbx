@@ -25,7 +25,7 @@ export function executableStatementRangeCacheForDoc(
 ): ExecutableStatementRangeCache {
   const parameterOptions = typeof parameterOptionsOrParse === "function" ? undefined : parameterOptionsOrParse;
   const parse = typeof parameterOptionsOrParse === "function" ? parameterOptionsOrParse : customParse;
-  const parameterSyntaxKey = parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*";
+  const parameterSyntaxKey = `${parameterOptions?.enabledSyntaxes ? parameterOptions.enabledSyntaxes.join(",") : "*"}|compat=${parameterOptions?.compatibilityMode?.trim().toUpperCase() ?? ""}`;
   if (cache?.doc === doc && cache.databaseType === databaseType && cache.parameterSyntaxKey === parameterSyntaxKey) return cache;
 
   const byStart = new Map<number, SqlTextRange>();

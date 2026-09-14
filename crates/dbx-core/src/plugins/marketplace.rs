@@ -26,7 +26,8 @@ pub const MAX_PLUGIN_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 
 const REPOSITORIES_FILE: &str = ".repositories.json";
 const REPOSITORIES_LOCK_FILE: &str = ".repositories.lock";
-const OFFICIAL_CATALOG_URL: &str = "https://raw.githubusercontent.com/t8y2/dbx-store/main/catalog/index.json";
+const OFFICIAL_CATALOG_URL: &str = "https://dl.dbxio.com/catalog/index.json";
+const OFFICIAL_CATALOG_FALLBACK_URL: &str = "https://raw.githubusercontent.com/t8y2/dbx-store/main/catalog/index.json";
 const ADDITIONAL_OFFICIAL_TRUSTED_KEYS_JSON: Option<&str> = option_env!("DBX_PLUGIN_MARKETPLACE_TRUSTED_KEYS_JSON");
 const BUILTIN_OFFICIAL_TRUSTED_KEYS: &[(&str, &str)] = &[
     ("dbx-store-preview-2026", "VRb0VscZfWwuFa7LYfeD/wEOJeyNP8wPGND9br8Icmk="),
@@ -343,8 +344,27 @@ impl PluginMarketplace {
 
     pub async fn fetch_catalog(&self, repository: &PluginRepository) -> Result<PluginMarketplaceCatalog, String> {
         validate_repository(repository)?;
-        let catalog_url = repository_catalog_url(repository)?;
-        let raw = self.download_limited(catalog_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog").await?;
+        let primary_url = repository_catalog_url(repository)?;
+        let (raw, catalog_url) = match self
+            .download_limited(primary_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog")
+            .await
+        {
+            Ok(raw) => (raw, primary_url),
+            Err(primary_error) if repository.id == OFFICIAL_PLUGIN_REPOSITORY_ID => {
+                let fallback_url =
+                    Url::parse(OFFICIAL_CATALOG_FALLBACK_URL).expect("built-in catalog fallback URL is valid");
+                let raw = self
+                    .download_limited(fallback_url.clone(), MAX_PLUGIN_CATALOG_BYTES, "Plugin catalog")
+                    .await
+                    .map_err(|fallback_error| {
+                        format!(
+                            "Failed to download official plugin catalog from primary URL ({primary_error}) and fallback URL ({fallback_error})"
+                        )
+                    })?;
+                (raw, fallback_url)
+            }
+            Err(error) => return Err(error),
+        };
         let mut catalog: PluginMarketplaceCatalog = serde_json::from_slice(&raw)
             .map_err(|error| format!("Failed to parse plugin catalog from {catalog_url}: {error}"))?;
         validate_and_resolve_catalog(&mut catalog, repository, &catalog_url)?;
@@ -912,6 +932,7 @@ mod tests {
         assert_eq!(repository.id, OFFICIAL_PLUGIN_REPOSITORY_ID);
         assert_eq!(repository.kind, PluginRepositoryKind::Official);
         assert_eq!(repository.catalog_url.as_deref(), Some(OFFICIAL_CATALOG_URL));
+        assert_ne!(OFFICIAL_CATALOG_URL, OFFICIAL_CATALOG_FALLBACK_URL);
         assert!(repository.enabled);
         assert!(repository.managed);
     }

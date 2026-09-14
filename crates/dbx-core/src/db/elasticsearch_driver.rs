@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{http_client_builder, with_connection_timeout};
+use super::{apply_tls_certificates, http_client_builder, with_connection_timeout};
 use crate::db::document_result::DocumentQueryResult;
 use crate::types::QueryResult;
 
@@ -83,9 +83,14 @@ impl EsClient {
             "/".to_string(),
             false,
             None,
+            None,
+            None,
+            None,
         )
+        .expect("failed to build Elasticsearch HTTP client")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_mode(
         url: &str,
         username: Option<&str>,
@@ -96,19 +101,24 @@ impl EsClient {
         connectivity_check_path: String,
         connectivity_check_disabled: bool,
         index_grouping: Option<Regex>,
-    ) -> Self {
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+    ) -> Result<Self, String> {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
             _ => None,
         };
         let mut builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
+        builder = apply_tls_certificates(builder, ca_cert_path, client_cert_path, client_key_path)?;
         if let Some(addrs) = elasticsearch_localhost_resolve_addrs(&base_url, connectivity_check_disabled) {
             builder = builder.resolve_to_addrs("localhost", &addrs);
         }
-        let http = builder.build().unwrap_or_else(|_| HttpClient::new());
+        let http =
+            builder.build().map_err(|error| format!("Failed to initialize Elasticsearch HTTP client: {error}"))?;
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self {
+        Ok(Self {
             http,
             base_url,
             fallback_base_urls,
@@ -118,7 +128,7 @@ impl EsClient {
             connectivity_check_disabled,
             index_grouping,
             pit_search_supported: Arc::new(AtomicBool::new(true)),
-        }
+        })
     }
 
     pub fn from_config(
@@ -129,7 +139,10 @@ impl EsClient {
         url_params: Option<&str>,
         external_config: Option<&Value>,
         timeout: Duration,
-    ) -> Self {
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+    ) -> Result<Self, String> {
         let kibana_base_path = elasticsearch_kibana_base_path(external_config);
         let transport_mode = if kibana_base_path.is_some() {
             ElasticsearchTransportMode::KibanaProxy
@@ -150,6 +163,9 @@ impl EsClient {
             connectivity_check_path,
             connectivity_check_disabled,
             index_grouping,
+            ca_cert_path,
+            client_cert_path,
+            client_key_path,
         )
     }
 
@@ -3536,7 +3552,11 @@ mod tests {
             None,
             Some(&json!({ "connectivityCheckDisabled": "yes" })),
             Duration::from_secs(2),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
         let response = client.get("/_cluster/health").send().await.unwrap();
 
@@ -3554,7 +3574,11 @@ mod tests {
             Some("sslmode=disable"),
             None,
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
 
         assert_eq!(client.base_url, "https://localhost:9200");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:9200"]);
@@ -3589,7 +3613,11 @@ mod tests {
                 "connectivityCheckPath": "GET pro-logs-*/_search"
             })),
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         assert_eq!(client.connectivity_check_path, "/pro-logs-*/_search");
     }
 
@@ -3622,7 +3650,11 @@ mod tests {
             None,
             Some(&json!({ "connectivityCheckPath": "/pro-logs-*/_search" })),
             Duration::from_secs(2),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
         server.await.unwrap();
     }
@@ -3638,7 +3670,11 @@ mod tests {
             None,
             Some(&external_config),
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
 
         assert_eq!(client.base_url, "https://localhost:5601/kibana/s/analytics");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:5601/kibana/s/analytics"]);
@@ -5146,7 +5182,11 @@ mod tests {
             None,
             Some(&external_config),
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         let result =
             super::execute_rest_query(&client, "DELETE /missing/_doc/1?refresh=true\n{\"reason\":\"cleanup\"}")
                 .await
@@ -5499,7 +5539,11 @@ mod tests {
             None,
             Some(&external_config),
             Duration::from_secs(20),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(20)).await.unwrap();
 
         let index = format!("dbx-kibana-proxy-{}", uuid::Uuid::new_v4().simple());
@@ -5589,5 +5633,49 @@ mod tests {
             super::elasticsearch_document_body_and_routing_from_json(r#"{"z":1,"_id":"abc","a":2}"#, None).unwrap();
 
         assert_eq!(serde_json::to_string(&doc).unwrap(), r#"{"z":1,"a":2}"#);
+    }
+
+    // Integration test against a real TLS-enabled Elasticsearch. Gated by env vars
+    // so it stays a no-op in CI:
+    //   DBX_ELASTICSEARCH_TLS_TEST_URL            e.g. https://localhost:9200
+    //   DBX_ELASTICSEARCH_TLS_TEST_CA_CERT_PATH   path to the server's CA cert (PEM)
+    // Mirrors the ZooKeeper TLS integration test: tls_enabled=true loads the custom
+    // CA (and any client cert) through apply_tls_certificates, then connects over HTTPS.
+    #[tokio::test]
+    async fn tls_integration_connects_with_custom_ca() {
+        let url = match std::env::var("DBX_ELASTICSEARCH_TLS_TEST_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("skipping ES TLS integration test: DBX_ELASTICSEARCH_TLS_TEST_URL not set");
+                return;
+            }
+        };
+        let ca_cert_path = match std::env::var("DBX_ELASTICSEARCH_TLS_TEST_CA_CERT_PATH") {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("skipping ES TLS integration test: DBX_ELASTICSEARCH_TLS_TEST_CA_CERT_PATH not set");
+                return;
+            }
+        };
+        // Optional basic-auth credentials (required when the server has security enabled).
+        let username = std::env::var("DBX_ELASTICSEARCH_TLS_TEST_USERNAME").ok();
+        let password = std::env::var("DBX_ELASTICSEARCH_TLS_TEST_PASSWORD").ok();
+        let timeout = std::time::Duration::from_secs(15);
+        let mut client = EsClient::from_config(
+            &url,
+            username.as_deref(),
+            password.as_deref(),
+            true,
+            None,
+            None,
+            timeout,
+            Some(&ca_cert_path),
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch TLS client");
+        super::test_connection(&mut client, timeout)
+            .await
+            .expect("Elasticsearch TLS connection with custom CA should succeed");
     }
 }

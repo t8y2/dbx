@@ -27,7 +27,7 @@ import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
-import { formatGeneratedDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -346,7 +346,9 @@ async function fetchDdl(force = false) {
   ddlLoading.value = true;
   try {
     const { ddl } = await loadObjectDdl(ddlRequest(), { force });
-    ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
+    const dialect = sqlFormatDialectForDbType(databaseType.value);
+    const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
+    ddlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
     ddlFetched.value = true;
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e?.message || e}`;
@@ -1500,7 +1502,9 @@ async function hydrateRestoredDraftFromDatabase() {
     if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
       try {
         const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog });
-        ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
+        const dialect = sqlFormatDialectForDbType(databaseType.value);
+        const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
+        ddlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
       } catch {
@@ -2158,7 +2162,9 @@ async function loadStructure(
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
           const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog }, { force: options.forceDdl });
-          ddlContent.value = await formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseType.value), settingsStore.editorSettings.sqlFormatter);
+          const dialect = sqlFormatDialectForDbType(databaseType.value);
+          const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
+          ddlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
         } catch {

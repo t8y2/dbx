@@ -17,6 +17,10 @@ pub struct DatabaseInfo {
     pub default_charset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_collation: Option<String>,
+    /// Database-level compatibility mode reported by compatible engines.
+    /// openGauss uses values such as A, B, C, and PG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

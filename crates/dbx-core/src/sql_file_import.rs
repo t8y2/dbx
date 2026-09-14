@@ -31,10 +31,43 @@ mod table_restore;
 pub use table_restore::SqlFileTable;
 use table_restore::TableRestoreFilter;
 
+/// How the database compatibility mode used for SQL statement splitting was
+/// resolved. `Option<String>` cannot express the difference between "this
+/// database has no compatibility mode concept" and "the probe failed", and
+/// conflating those silently downgraded openGauss A-mode PL/SQL splitting to
+/// the plain PostgreSQL splitter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SqlCompatibilityMode {
+    /// The database type has no compatibility-mode concept (non-openGauss).
+    NotApplicable,
+    /// The database is openGauss but the probe failed or the pool was
+    /// unavailable. The parser must not fall back to PostgreSQL semantics;
+    /// it uses the PL/SQL-capable openGauss profile so an A-mode package body
+    /// is never split on its inner semicolons.
+    Unknown,
+    /// Probe succeeded; carries the catalog-reported mode (may be B/C/PG/...).
+    Resolved(String),
+}
+
+impl SqlCompatibilityMode {
+    /// The mode string for [`SqlParsingOptions::for_database_type_and_compatibility`],
+    /// or `None` when the database has no mode concept or the mode is unknown.
+    ///
+    /// `None` is interpreted as "unknown openGauss" by the parser (see that
+    /// function), which selects the conservative PL/SQL-capable profile.
+    fn as_mode_str(&self) -> Option<&str> {
+        match self {
+            Self::Resolved(mode) => Some(mode.as_str()),
+            Self::Unknown | Self::NotApplicable => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SqlFileImportTarget {
     db_type: DatabaseType,
     driver_profile: Option<String>,
+    compatibility_mode: SqlCompatibilityMode,
 }
 
 #[derive(Debug)]
@@ -343,11 +376,12 @@ pub async fn execute_sql_file_content(
     started_at: Instant,
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
-    let import_target = sql_file_import_target(state, &request.connection_id).await;
+    let import_target = sql_file_import_target(state, &request.connection_id, &request.database).await;
     validate_table_restore_target(request, import_target.as_ref(), 1)?;
     let mut statements = split_sql_file_import_statements_with_control(
         file_content,
         import_target.as_ref().map(|target| target.db_type),
+        import_target.as_ref().and_then(|target| target.compatibility_mode.as_mode_str()),
     );
 
     if let Some(selected) = &request.selected_tables {
@@ -413,9 +447,16 @@ pub async fn execute_sql_file_paths(
         return Err(error);
     }
 
-    let import_target = sql_file_import_target(state, &request.connection_id).await;
-    let options =
-        import_target.as_ref().map(|target| SqlParsingOptions::for_database_type(target.db_type)).unwrap_or_default();
+    let import_target = sql_file_import_target(state, &request.connection_id, &request.database).await;
+    let options = import_target
+        .as_ref()
+        .map(|target| {
+            SqlParsingOptions::for_database_type_and_compatibility(
+                target.db_type,
+                target.compatibility_mode.as_mode_str(),
+            )
+        })
+        .unwrap_or_default();
     let database_type = import_target.as_ref().map(|target| target.db_type);
     let mut progress = SqlFileExecutionProgress::new();
     // Validate the entire dump before any SQL reaches the database. This also
@@ -1300,7 +1341,7 @@ fn emit_sql_file_terminal_progress(
 
 #[cfg(test)]
 fn split_sql_file_import_statements(file_content: &str, db_type: Option<DatabaseType>) -> Vec<String> {
-    split_sql_file_import_statements_with_control(file_content, db_type)
+    split_sql_file_import_statements_with_control(file_content, db_type, None)
         .into_iter()
         .map(|statement| statement.sql)
         .collect()
@@ -1309,6 +1350,7 @@ fn split_sql_file_import_statements(file_content: &str, db_type: Option<Database
 fn split_sql_file_import_statements_with_control(
     file_content: &str,
     db_type: Option<DatabaseType>,
+    compatibility_mode: Option<&str>,
 ) -> Vec<SqlStatementWithControl> {
     if db_type == Some(DatabaseType::SqlServer) {
         // GO is a client-side batch delimiter, not T-SQL. SQL Server module DDL
@@ -1319,7 +1361,9 @@ fn split_sql_file_import_statements_with_control(
             .collect();
     }
 
-    let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
+    let options = db_type
+        .map(|db_type| SqlParsingOptions::for_database_type_and_compatibility(db_type, compatibility_mode))
+        .unwrap_or_default();
     let mut splitter = SqlStatementSplitter::with_options(options);
     let mut statements = splitter.push_chunk_with_control(file_content);
     statements.extend(splitter.finish_with_control());
@@ -1400,11 +1444,39 @@ fn sql_file_execution_error_progress(
     )
 }
 
-async fn sql_file_import_target(state: &AppState, connection_id: &str) -> Option<SqlFileImportTarget> {
-    let configs = state.configs.read().await;
-    configs
-        .get(connection_id)
-        .map(|config| SqlFileImportTarget { db_type: config.db_type, driver_profile: config.driver_profile.clone() })
+async fn sql_file_import_target(state: &AppState, connection_id: &str, database: &str) -> Option<SqlFileImportTarget> {
+    let config = state.configs.read().await.get(connection_id).cloned()?;
+    // Probing must never drop db_type: even when the pool is unavailable the file
+    // still uses the openGauss splitter. A failed probe is recorded as `Unknown`
+    // rather than `None` so the splitter keeps PL/SQL package bodies intact
+    // instead of silently falling back to PostgreSQL statement semantics.
+    let compatibility_mode = if config.db_type == DatabaseType::OpenGauss {
+        let pool = match state.get_or_create_pool(connection_id, Some(database)).await {
+            Ok(pool_key) => match state.pool_handle(&pool_key).await {
+                Some(PoolKind::Postgres(pool)) => Some(pool),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        match pool {
+            Some(pool) => match db::postgres::opengauss_compatibility_mode(&pool).await {
+                Ok(Some(mode)) => SqlCompatibilityMode::Resolved(mode),
+                // Catalog returned no row, or the probe errored (permissions,
+                // timeout, older kernel without pg_database.datcompatibility).
+                Ok(None) | Err(_) => {
+                    log::warn!(
+                        "[sql_file_import] openGauss compatibility mode probe failed for connection {connection_id}; \
+                         splitting with the conservative PL/SQL profile"
+                    );
+                    SqlCompatibilityMode::Unknown
+                }
+            },
+            None => SqlCompatibilityMode::Unknown,
+        }
+    } else {
+        SqlCompatibilityMode::NotApplicable
+    };
+    Some(SqlFileImportTarget { db_type: config.db_type, driver_profile: config.driver_profile, compatibility_mode })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2109,13 +2181,21 @@ mod tests {
         request.selected_tables = Some(vec![SqlFileTable { database: None, name: "a".to_string() }]);
         assert!(validate_table_restore_target(
             &request,
-            Some(&SqlFileImportTarget { db_type: DatabaseType::Postgres, driver_profile: None }),
+            Some(&SqlFileImportTarget {
+                db_type: DatabaseType::Postgres,
+                driver_profile: None,
+                compatibility_mode: SqlCompatibilityMode::NotApplicable
+            }),
             1
         )
         .is_err());
         assert!(validate_table_restore_target(
             &request,
-            Some(&SqlFileImportTarget { db_type: DatabaseType::Mysql, driver_profile: None }),
+            Some(&SqlFileImportTarget {
+                db_type: DatabaseType::Mysql,
+                driver_profile: None,
+                compatibility_mode: SqlCompatibilityMode::NotApplicable
+            }),
             2
         )
         .is_err());

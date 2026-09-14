@@ -130,6 +130,15 @@ describe("databaseObjectCapabilities", () => {
     }
   });
 
+  it("exposes packages only for openGauss A compatibility mode", () => {
+    expect(sidebarObjectKindsForDatabase("opengauss", "A")).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+    expect(sidebarObjectKindsForDatabase("opengauss", "a")).toContain("PACKAGE");
+    for (const mode of ["B", "C", "PG", undefined]) {
+      expect(sidebarObjectKindsForDatabase("opengauss", mode), String(mode)).not.toContain("PACKAGE");
+    }
+    expect(databaseObjectCapabilities("opengauss", "A").sourceReadable).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+  });
+
   it("enables custom type details only for verified PG-family databases", () => {
     for (const dbType of ["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"] as const) {
       expect(customTypeCapabilities(dbType), dbType).toEqual({ details: true, members: true, ddl: true });

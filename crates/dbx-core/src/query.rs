@@ -793,6 +793,21 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Opti
     configs.get(connection_id).map(|config| config.db_type)
 }
 
+async fn connection_sql_compatibility_mode(
+    state: &AppState,
+    pool_key: &str,
+    db_type: Option<DatabaseType>,
+) -> Option<String> {
+    if db_type != Some(DatabaseType::OpenGauss) {
+        return None;
+    }
+    let pool = match state.pool_handle(pool_key).await {
+        Some(PoolKind::Postgres(pool)) => pool,
+        _ => return None,
+    };
+    db::postgres::opengauss_compatibility_mode(&pool).await.ok().flatten()
+}
+
 async fn connection_mysql_query_dialect(state: &AppState, connection_id: &str) -> db::mysql::MySqlQueryDialect {
     let configs = state.configs.read().await;
     configs
@@ -3112,7 +3127,9 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         }
     };
 
-    let execution_plan = query_execution_plan(sql, db_type, is_sqlserver_agent);
+    let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
+    let execution_plan =
+        query_execution_plan_with_compatibility(sql, db_type, is_sqlserver_agent, compatibility_mode.as_deref());
     let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
     let statements = execution_plan.statements;
     if statements.is_empty() {
@@ -3305,13 +3322,26 @@ pub fn query_execution_plan(
     db_type: Option<DatabaseType>,
     preserve_sqlserver_batches: bool,
 ) -> crate::sql::SqlExecutionPlan {
+    query_execution_plan_with_compatibility(sql, db_type, preserve_sqlserver_batches, None)
+}
+
+/// Same as [`query_execution_plan`], but lets openGauss callers pass the
+/// database compatibility mode so A-mode PL/SQL (package) bodies are never split
+/// on inner semicolons. `None` keeps the conservative PL/SQL-capable openGauss
+/// profile while the probe is cold or unavailable.
+pub fn query_execution_plan_with_compatibility(
+    sql: &str,
+    db_type: Option<DatabaseType>,
+    preserve_sqlserver_batches: bool,
+    compatibility_mode: Option<&str>,
+) -> crate::sql::SqlExecutionPlan {
     if preserve_sqlserver_batches && db_type == Some(DatabaseType::SqlServer) {
         return crate::sql::SqlExecutionPlan { statements: split_sql_batches(sql), stop_on_error: false };
     }
 
     db_type.map_or_else(
         || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
-        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
+        |db_type| crate::sql::sql_execution_plan_for_database_with_compatibility(sql, db_type, compatibility_mode),
     )
 }
 
@@ -4191,10 +4221,41 @@ pub async fn execute_schema_diff_deploy(
     let now = chrono::Utc::now().to_rfc3339();
     let db_type = connection_database_type(state, connection_id).await;
 
+    // openGauss A-mode deploy scripts may contain CREATE PACKAGE … / blocks
+    // that must stay intact. Probe the database compatibility mode when a pool
+    // is available; on failure fall back to the plain openGauss splitter.
+    let compatibility_mode = if db_type == Some(DatabaseType::OpenGauss) {
+        let pool = match state
+            .get_or_create_pool(connection_id, if database.is_empty() { None } else { Some(database) })
+            .await
+        {
+            Ok(pool_key) => match state.pool_handle(&pool_key).await {
+                Some(PoolKind::Postgres(pool)) => Some(pool),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        match pool {
+            Some(pool) => db::postgres::opengauss_compatibility_mode(&pool).await.ok().flatten(),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let parsed: Vec<String> = statements
         .iter()
         .flat_map(|s| {
-            db_type.map_or_else(|| split_sql_statements(s), |dt| crate::sql::split_sql_statements_for_database(s, dt))
+            db_type.map_or_else(
+                || split_sql_statements(s),
+                |dt| {
+                    crate::sql::split_sql_statements_for_database_with_compatibility(
+                        s,
+                        dt,
+                        compatibility_mode.as_deref(),
+                    )
+                },
+            )
         })
         .map(|s| s.trim().to_string())
         .filter(|s| {
@@ -5352,9 +5413,16 @@ pub async fn execute_in_manual_transaction_with_options(
     };
 
     let db_type = connection_database_type(state, &connection_id).await;
+    let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
     let statements = db_type.map_or_else(
         || split_sql_statements(sql),
-        |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
+        |db_type| {
+            crate::sql::split_sql_statements_for_database_with_compatibility(
+                sql,
+                db_type,
+                compatibility_mode.as_deref(),
+            )
+        },
     );
     if statements.is_empty() {
         // Oracle-only UX marker: the no-op is Core's decision that the script

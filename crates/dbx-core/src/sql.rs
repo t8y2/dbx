@@ -246,6 +246,26 @@ impl SqlParsingOptions {
         Self::from_profile(SqlDialectProfile::for_database_type(db_type))
     }
 
+    pub fn for_database_type_and_compatibility(db_type: DatabaseType, compatibility_mode: Option<&str>) -> Self {
+        if db_type == DatabaseType::OpenGauss {
+            return match compatibility_mode.map(str::trim) {
+                // openGauss stores package specs/bodies as PL/SQL regardless of
+                // mode, and A mode is the only mode where the catalog reports
+                // them as packages. Any mode other than A keeps the PostgreSQL
+                // statement splitter.
+                Some(mode) if mode.eq_ignore_ascii_case("A") => Self::from_profile(SqlDialectProfile::gaussdb()),
+                Some(_) => Self::for_database_type(db_type),
+                // Unknown mode: the compatibility probe failed or the pool was
+                // unavailable. Falling back to the plain PostgreSQL profile would
+                // split an A-mode package body on its inner semicolons into
+                // fragments that the caller may then execute individually, so the
+                // conservative PL/SQL-capable profile is used instead.
+                None => Self::from_profile(SqlDialectProfile::gaussdb()),
+            };
+        }
+        Self::for_database_type(db_type)
+    }
+
     pub fn mysql_compatible() -> Self {
         Self::from_profile(SqlDialectProfile::mysql_compatible())
     }
@@ -677,6 +697,14 @@ pub fn split_sql_statements_for_database(sql: &str, db_type: DatabaseType) -> Ve
     sql_execution_plan_for_database(sql, db_type).statements
 }
 
+pub fn split_sql_statements_for_database_with_compatibility(
+    sql: &str,
+    db_type: DatabaseType,
+    compatibility_mode: Option<&str>,
+) -> Vec<String> {
+    sql_execution_plan_for_database_with_compatibility(sql, db_type, compatibility_mode).statements
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlExecutionPlan {
     pub statements: Vec<String>,
@@ -684,7 +712,21 @@ pub struct SqlExecutionPlan {
 }
 
 pub fn sql_execution_plan_for_database(sql: &str, db_type: DatabaseType) -> SqlExecutionPlan {
-    let options = SqlParsingOptions::for_database_type(db_type);
+    sql_execution_plan_with_options(sql, SqlParsingOptions::for_database_type(db_type))
+}
+
+pub fn sql_execution_plan_for_database_with_compatibility(
+    sql: &str,
+    db_type: DatabaseType,
+    compatibility_mode: Option<&str>,
+) -> SqlExecutionPlan {
+    sql_execution_plan_with_options(
+        sql,
+        SqlParsingOptions::for_database_type_and_compatibility(db_type, compatibility_mode),
+    )
+}
+
+fn sql_execution_plan_with_options(sql: &str, options: SqlParsingOptions) -> SqlExecutionPlan {
     if !options.profile.supports_psql_control_commands {
         return SqlExecutionPlan { statements: split_sql_statements_with_options(sql, options), stop_on_error: false };
     }
@@ -4335,6 +4377,23 @@ SELECT 1;";
                 "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
                 "SELECT 1"
             ]
+        );
+    }
+
+    #[test]
+    fn opengauss_a_mode_split_keeps_create_package_together() {
+        let sql = "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;\n/\nSELECT 1;";
+
+        assert_eq!(
+            super::split_sql_statements_for_database_with_compatibility(sql, DatabaseType::OpenGauss, Some("A")),
+            vec![
+                "CREATE OR REPLACE PACKAGE pkg_utils AS\n    FUNCTION get_version RETURN VARCHAR2;\n    PROCEDURE log_message(msg VARCHAR2);\nEND pkg_utils;",
+                "SELECT 1"
+            ]
+        );
+        assert_ne!(
+            super::split_sql_statements_for_database_with_compatibility(sql, DatabaseType::OpenGauss, Some("PG")),
+            super::split_sql_statements_for_database_with_compatibility(sql, DatabaseType::OpenGauss, Some("A"))
         );
     }
 

@@ -54,6 +54,7 @@ pub mod vector_driver;
 pub mod victoriametrics_driver;
 pub mod wkb;
 
+use crate::path_utils::expand_tilde;
 use reqwest::ClientBuilder;
 use reqwest::{Certificate, Identity};
 use std::fmt;
@@ -157,7 +158,8 @@ pub(crate) fn apply_tls_certificates(
     // every target.
     builder = builder.use_rustls_tls();
     if let Some(ca) = ca_cert_path.filter(|path| !path.is_empty()) {
-        let contents = std::fs::read(ca)
+        let ca = expand_tilde(ca);
+        let contents = std::fs::read(&ca)
             .map_err(|error| format!("Failed to read Elasticsearch CA certificate at {ca}: {error}"))?;
         let certificates = Certificate::from_pem_bundle(&contents)
             .map_err(|error| format!("Failed to parse Elasticsearch CA certificate at {ca}: {error}"))?;
@@ -168,7 +170,9 @@ pub(crate) fn apply_tls_certificates(
     if let (Some(cert_path), Some(key_path)) =
         (client_cert_path.filter(|path| !path.is_empty()), client_key_path.filter(|path| !path.is_empty()))
     {
-        let mut pem = std::fs::read(cert_path)
+        let cert_path = expand_tilde(cert_path);
+        let key_path = expand_tilde(key_path);
+        let mut pem = std::fs::read(&cert_path)
             .map_err(|error| format!("Failed to read Elasticsearch client certificate at {cert_path}: {error}"))?;
         // reqwest's rustls backend concatenates the cert and key as two PEM
         // blocks; ensure they are newline-separated so parsing succeeds even
@@ -177,7 +181,7 @@ pub(crate) fn apply_tls_certificates(
             pem.push(b'\n');
         }
         pem.extend(
-            std::fs::read(key_path)
+            std::fs::read(&key_path)
                 .map_err(|error| format!("Failed to read Elasticsearch client key at {key_path}: {error}"))?,
         );
         let identity = Identity::from_pem(&pem)

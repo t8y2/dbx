@@ -6582,6 +6582,27 @@ export const useQueryStore = defineStore("query", () => {
           clientSession: Boolean(executionClientSessionId),
         });
         executionDispatched = true;
+        if (useAgentResultSession && tab.mode === "query" && typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId) {
+          return (async () => {
+            let sessionId: string | undefined;
+            let skipped = 0;
+            while (true) {
+              const pageResults = await api.executeMulti(executionConnectionId, executionDatabase, sqlToExecute, executionSchema, executionId, {
+                ...executionOptions,
+                resultSessionId: sessionId,
+              });
+              const page = pageResults[0];
+              if (!page) return pageResults;
+              if (skipped + page.rows.length > pageOffset) {
+                const start = pageOffset - skipped;
+                return [{ ...page, rows: page.rows.slice(start, start + pageLimit!) }];
+              }
+              skipped += page.rows.length;
+              if (!page.has_more || !page.session_id) return [{ ...page, rows: [] }];
+              sessionId = page.session_id;
+            }
+          })();
+        }
         return tab.batchSqlExecution && tab.batchSqlExecution.total > 1
           ? api.executeMultiWithProgress(
               executionConnectionId,

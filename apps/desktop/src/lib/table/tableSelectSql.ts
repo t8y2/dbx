@@ -3,7 +3,7 @@ import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databa
 import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
-import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier } from "@/lib/sql/sqlIdentifier.ts";
+import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
@@ -33,7 +33,7 @@ export interface BuildTableSelectSqlOptions {
   database?: string;
   /** Include the active database when this dialect supports `database.table` references. */
   includeDatabaseName?: boolean;
-  /** Emit bare identifiers instead of dialect-specific identifier quotes. */
+  /** Omit optional identifier quotes while retaining quotes required by the dialect. */
   quoteIdentifiers?: boolean;
 }
 
@@ -105,14 +105,68 @@ export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined,
   return quoteTableIdentifier(databaseType, name);
 }
 
+function quoteWithDelimiter(name: string, delimiter: string): string {
+  if (delimiter === "[") return `[${name.replace(/\]/g, "]]")}]`;
+  return `${delimiter}${name.replaceAll(delimiter, delimiter + delimiter)}${delimiter}`;
+}
+
+function requiresIdentifierQuote(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): boolean {
+  if (isExplicitlyQuotedSqlIdentifier(name)) return false;
+  switch (databaseType) {
+    case "mysql":
+    case "clickhouse":
+    case "hive":
+    case "argo":
+    case "kyuubi":
+    case "impala":
+    case "spark":
+    case "databricks":
+    case "databend":
+    case "tdengine":
+    case "access":
+    case "doris":
+    case "starrocks":
+    case "goldendb":
+      return requiresMysqlIdentifierQuote(name);
+    case "oracle":
+      return requiresOracleIdentifierQuote(name);
+    case "dameng":
+      return requiresDamengIdentifierQuote(name);
+    case "postgres":
+    case "gaussdb":
+    case "opengauss":
+    case "kingbase":
+      return identifierQuote === "`" ? requiresMysqlIdentifierQuote(name) : requiresPostgresIdentifierQuote(name);
+    case "sqlserver":
+      return requiresMysqlIdentifierQuote(name);
+    case "jdbc":
+      return identifierQuote === "`" ? requiresMysqlIdentifierQuote(name) : requiresPostgresIdentifierQuote(name);
+    default:
+      return requiresMysqlIdentifierQuote(name);
+  }
+}
+
+/**
+ * Omits optional identifier quotes while preserving quotes needed for reserved,
+ * mixed-case, or otherwise non-bare identifiers.
+ */
+export function quoteTableIdentifierIfNeeded(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
+  if (isExplicitlyQuotedSqlIdentifier(name) || !requiresIdentifierQuote(databaseType, name, identifierQuote)) return name;
+  if (databaseType === "jdbc" && identifierQuote) return quoteWithDelimiter(name, identifierQuote);
+  if ((databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "kingbase") && identifierQuote) {
+    return quoteGaussDbJdbcIdentifier(name, identifierQuote);
+  }
+  return quoteTableIdentifier(databaseType, name);
+}
+
 function quoteCypherIdentifier(name: string): string {
   return `\`${name.replace(/`/g, "``")}\``;
 }
 
 export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "databaseType" | "driverProfile" | "identifierQuote" | "schema" | "tableName" | "catalog" | "database" | "includeDatabaseName" | "quoteIdentifiers">): string {
   const { databaseType, driverProfile, identifierQuote, schema, tableName, catalog, database, includeDatabaseName, quoteIdentifiers } = options;
-  const quoteTable = (name: string) => (quoteIdentifiers === false ? name : quoteTableIdentifier(databaseType, name));
-  const quoteTableData = (name: string) => (quoteIdentifiers === false ? name : quoteTableDataIdentifier(databaseType, name, identifierQuote));
+  const quoteTable = (name: string) => (quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, name, identifierQuote) : quoteTableIdentifier(databaseType, name));
+  const quoteTableData = (name: string) => (quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(databaseType, name, identifierQuote) : quoteTableDataIdentifier(databaseType, name, identifierQuote));
   if (databaseType === "informix" && driverProfile?.trim().toLowerCase() === "gbase8s") {
     return quoteTableData(tableName);
   }
@@ -175,7 +229,9 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   if ((isSchemaAware(databaseType) || databaseType === "sqlite") && !usesDatabaseObjectTreeMode(databaseType) && schema) {
     if (databaseType === "sqlserver") {
       const linked = parseSqlServerLinkedSchema(schema);
-      if (linked) return quoteIdentifiers === false ? [linked.server, linked.catalog, linked.schema, tableName].join(".") : sqlServerLinkedTableName(linked, tableName);
+      if (linked) {
+        return quoteIdentifiers === false ? [linked.server, linked.catalog, linked.schema, tableName].map((name) => quoteTableIdentifierIfNeeded(databaseType, name)).join(".") : sqlServerLinkedTableName(linked, tableName);
+      }
     }
     return `${quoteTable(schema)}.${quoteTable(tableName)}`;
   }

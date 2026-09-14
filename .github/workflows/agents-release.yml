@@ -237,7 +237,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -287,6 +286,20 @@ jobs:
             echo "Building $platform ($goos/$goarch)"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
+      # Go 1.20.14 is the last release supporting Windows 7.
+      - name: Build Windows x64 Kingbase agent for Windows 7
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/kingbase-go/go.sum
+      - name: Compile Windows x64 Kingbase agent
+        shell: bash
+        working-directory: agents/drivers/kingbase-go
+        run: |
+          output="../../../release-native/dbx-agent-kingbase-windows-x64.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$output" .
+          go version -m "$output" | tee /tmp/kingbase-windows-x64-build-info.txt
+          grep -q ': go1\.20\.14$' /tmp/kingbase-windows-x64-build-info.txt
           ls -lh ../../../release-native
       # Go 1.20 is the last release that supports Windows 7; keep other targets on Go 1.22.
       - name: Set up Go for Windows 7-compatible RabbitMQ agent

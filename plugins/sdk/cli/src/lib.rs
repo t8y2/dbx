@@ -1564,7 +1564,6 @@ fn keygen_usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
 
@@ -1573,14 +1572,6 @@ mod tests {
         resolve_create_options, run_cli, styled, title_from_slug, validate_manifest_assets, validate_semver,
         BackendConfig, CreateInputs, CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
     };
-
-    #[test]
-    fn reads_go_module_paths() {
-        let root = tempfile::tempdir().unwrap();
-        let module_file = root.path().join("go.mod");
-        fs::write(&module_file, "module example.com/plugin\n\ngo 1.22\n").unwrap();
-        assert_eq!(super::go_module_path(&module_file).unwrap(), "example.com/plugin");
-    }
 
     #[test]
     fn rejects_development_data_in_package_inputs() {

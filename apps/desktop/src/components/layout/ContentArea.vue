@@ -325,6 +325,7 @@ const consulOverviewRef = ref<{ refresh?: () => boolean }>();
 const consulWorkspaceRef = ref<SearchableBrowserHandle>();
 const databaseBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
+const pluginFilesystemTabRef = ref<{ refresh: () => Promise<unknown> }>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
 const activeResultExecutionTarget = computed(() => queryStore.activeResultExecutionTarget(props.activeTab.id));
@@ -969,6 +970,10 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "consul-overview") return consulOverviewRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "plugin-filesystem") {
+    void pluginFilesystemTabRef.value?.refresh();
+    return true;
+  }
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
     reloadUnavailableDataTab();
@@ -2540,6 +2545,7 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'plugin-filesystem' && activeTab.pluginFilesystem">
       <div class="flex h-full min-h-0 flex-col">
         <PluginFilesystemTab
+          ref="pluginFilesystemTabRef"
           :key="activeTab.id"
           :plugin-id="activeTab.pluginFilesystem.pluginId"
           :provider-id="activeTab.pluginFilesystem.providerId"

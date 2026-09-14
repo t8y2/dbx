@@ -83,6 +83,12 @@ export interface DuplicateTableStructureSqlOptions {
   targetName: string;
   tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
+  /** SQL Server only: source primary-key columns recreated on the clone, because
+   * `SELECT ... INTO` copies columns (and IDENTITY) but drops constraints. */
+  primaryKeyColumns?: string[];
+  /** SQL Server only: pre-computed PK constraint name for the clone (respecting
+   * the 128-character identifier limit and source-table index names). */
+  primaryKeyConstraintName?: string;
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
    * table-data SQL options. */
@@ -212,6 +218,29 @@ export function damengDuplicateTableCreateOptions(options: { schema?: string | n
   };
 }
 
+/** SQL Server caps identifiers at 128 characters. */
+export const SQLSERVER_IDENTIFIER_MAX_LENGTH = 128;
+
+/**
+ * Derives the clone's primary-key constraint name from `PK_{target}`, capped at
+ * SQL Server's 128-character identifier limit and de-duplicated against the
+ * source table's index names (schema-wide constraint names cannot be listed
+ * through the table-level index metadata, so a name taken by a *different*
+ * table still surfaces as a server-side error the user can act on).
+ */
+export function sqlServerClonePrimaryKeyConstraintName(indexes: IndexInfo[], targetName: string): string {
+  const base = `PK_${targetName}`;
+  const taken = new Set(indexes.map((index) => index.name.toLowerCase()));
+  let name = base.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH);
+  let suffix = 2;
+  while (taken.has(name.toLowerCase())) {
+    const tail = `_${suffix}`;
+    name = `${base.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH - tail.length)}${tail}`;
+    suffix += 1;
+  }
+  return name;
+}
+
 export async function buildDuplicateTableStructurePlan(options: DuplicateTableStructurePlanOptions): Promise<DuplicateTableStructurePlan> {
   if (options.databaseType === "oracle") {
     const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
@@ -262,6 +291,27 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
       throw new Error(result.warnings.join("\n") || "Failed to generate Dameng clone DDL.");
     }
     return { sql: result.statements.join("\n"), sourceColumns: columns, executeAsScript: true };
+  }
+
+  // `SELECT TOP 0 * INTO` copies columns and the IDENTITY property but drops constraints, so the
+  // cloned table silently loses its primary key (t8y2/dbx#8931). Load the source primary key and
+  // let the backend append an `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY` for it.
+  if (options.databaseType === "sqlserver") {
+    const indexes = await api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const primaryKeyColumns = indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
+    const primaryKeyConstraintName = sqlServerClonePrimaryKeyConstraintName(indexes, options.targetName);
+    const sql = await buildDuplicateTableStructureSql({
+      databaseType: options.databaseType,
+      schema: options.schema,
+      sourceName: options.sourceName,
+      targetName: options.targetName,
+      tableComment: options.tableComment,
+      columnComments: [],
+      primaryKeyColumns,
+      primaryKeyConstraintName,
+      identifierQuote: options.identifierQuote,
+    });
+    return { sql, sourceColumns: options.sourceColumns, executeAsScript: primaryKeyColumns.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
   const sql = await buildDuplicateTableStructureSql({

@@ -276,6 +276,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -1150,6 +1154,13 @@ async fn test_connection_with_info_inner(
     let idle_timeout = std::time::Duration::from_secs(config.idle_timeout_secs);
     let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
+    if config.db_type == DatabaseType::Plugin {
+        let result = state.plugin_host.test_connection(&config, &host, port).await;
+        if has_transport_layers {
+            state.reset_connection_transport_for_config(&tunnel_id, &config).await;
+        }
+        return result;
+    }
     let mut database_info = None;
     let result = match probe_result {
         Err(e) => Err(e),
@@ -1679,7 +1690,9 @@ pub async fn connect_db(
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
     }
-    probe_connection_endpoint(&db_config, &host, port).await?;
+    if db_config.db_type != DatabaseType::Plugin {
+        probe_connection_endpoint(&db_config, &host, port).await?;
+    }
     if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
@@ -2025,6 +2038,9 @@ pub async fn connect_db(
         #[cfg(not(feature = "mq-admin"))]
         DatabaseType::Mqtt => {
             return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
+        }
+        DatabaseType::Plugin => {
+            PoolKind::PluginConnection(state.plugin_host.connect_connection(&db_config, &host, port).await?)
         }
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };

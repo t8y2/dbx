@@ -635,6 +635,7 @@ export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date"
 export function supportsTableStructureExtendedProperties(databaseType?: DatabaseType): boolean {
   return (
     databaseType === "mysql" ||
+    databaseType === "sqlite" ||
     databaseType === "dameng" ||
     databaseType === "manticoresearch" ||
     databaseType === "sqlserver" ||
@@ -654,11 +655,11 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
   const lower = extra.toLowerCase().trim();
   if (!lower) return result;
 
-  if (databaseType === "mysql") {
-    if (lower.includes("auto_increment")) {
+  if (databaseType === "mysql" || databaseType === "sqlite") {
+    if (lower.includes("auto_increment") || lower.includes("autoincrement")) {
       result.autoIncrement = true;
     }
-    if (lower.includes("on update current_timestamp")) {
+    if (databaseType === "mysql" && lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
   } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {

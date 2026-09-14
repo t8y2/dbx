@@ -492,8 +492,29 @@ pub fn effective_delimited_config(
     })
 }
 
+/// Undo the `="..."` force-text wrapper that CSV export writes around temporal
+/// cells (see `temporal_format::wrap_csv_force_text`). Without this, exporting a
+/// table with a datetime column and importing the file straight back stores the
+/// literal `="2026-06-24 02:00:07"` instead of the timestamp, which every
+/// temporal column type then rejects.
+///
+/// Only the exact wrapper shape is unwrapped: a leading `="`, a trailing `"`,
+/// and no `"` in between. A genuine value that merely starts with `=` (or
+/// contains quotes of its own) is left untouched, so this cannot corrupt CSV
+/// files that dbx did not produce.
+fn unwrap_csv_force_text(value: &str) -> &str {
+    let Some(inner) = value.strip_prefix("=\"").and_then(|rest| rest.strip_suffix('"')) else {
+        return value;
+    };
+    if inner.contains('"') {
+        return value;
+    }
+    inner
+}
+
 pub fn csv_value_with_config(value: &str, config: DelimitedParseConfig) -> serde_json::Value {
     let value = if config.trim_values { value.trim() } else { value };
+    let value = unwrap_csv_force_text(value);
     if config.empty_string_as_null && value.is_empty() {
         serde_json::Value::Null
     } else {
@@ -516,7 +537,7 @@ pub fn csv_value(value: &str) -> serde_json::Value {
 const IMPORT_ENCODING_READ_CHUNK_BYTES: usize = 16 * 1024;
 
 // Decodes incrementally and rejects malformed input instead of silently inserting replacement characters.
-struct StrictTranscodingReader<R> {
+pub(crate) struct StrictTranscodingReader<R> {
     reader: R,
     decoder: encoding_rs::Decoder,
     encoding: TableImportTextEncoding,
@@ -681,7 +702,7 @@ fn auto_detect_text_encoding_from_bytes(bytes: &[u8]) -> Result<(TableImportText
     Err("Could not detect text encoding; select UTF-8, GBK / GB18030, or UTF-16 manually".to_string())
 }
 
-fn resolve_text_encoding_from_bytes(
+pub(crate) fn resolve_text_encoding_from_bytes(
     bytes: &[u8],
     requested: Option<TableImportTextEncoding>,
 ) -> Result<(TableImportTextEncoding, usize), String> {
@@ -782,7 +803,7 @@ fn auto_detect_text_encoding_from_file_with_progress(
     Err("Could not detect text encoding; select UTF-8, GBK / GB18030, or UTF-16 manually".to_string())
 }
 
-fn resolve_text_encoding_from_file_with_progress(
+pub(crate) fn resolve_text_encoding_from_file_with_progress(
     path: &str,
     requested: Option<TableImportTextEncoding>,
     on_progress: impl FnMut(u64),
@@ -815,6 +836,16 @@ fn resolve_and_validate_text_encoding_from_file(
         (requested, bom_len)
     };
     Ok((encoding, bom_len))
+}
+
+pub(crate) fn open_transcoded_text_file(
+    path: &str,
+    encoding: Option<TableImportTextEncoding>,
+) -> Result<(StrictTranscodingReader<File>, TableImportTextEncoding), String> {
+    let (encoding, bom_len) = resolve_text_encoding_from_file_with_progress(path, encoding, |_| {})?;
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(bom_len as u64)).map_err(|error| error.to_string())?;
+    Ok((StrictTranscodingReader::new(file, encoding)?, encoding))
 }
 
 fn open_delimited_csv_reader_with_progress(
@@ -4016,10 +4047,12 @@ fn has_numeric_leading_zero(value: &str) -> bool {
 }
 
 fn is_likely_date(value: &str) -> bool {
+    let value = crate::temporal_format::strip_csv_force_text_wrapper(value);
     ["%Y-%m-%d", "%Y/%m/%d"].iter().any(|format| NaiveDate::parse_from_str(value, format).is_ok())
 }
 
 fn is_likely_timestamp(value: &str) -> bool {
+    let value = crate::temporal_format::strip_csv_force_text_wrapper(value);
     if DateTime::parse_from_rfc3339(value).is_ok() {
         return true;
     }
@@ -9481,6 +9514,10 @@ mod tests {
         assert_eq!(xlsx_cell_value(&duration_cell), serde_json::json!("60:00:00"));
         assert_eq!(infer_value_type(&date_value), Some(ImportInferredType::Timestamp));
         assert_eq!(infer_value_type(&time_value), Some(ImportInferredType::Decimal));
+        assert_eq!(
+            infer_value_type(&serde_json::json!("=\"2026-06-24 02:00:07\"")),
+            Some(ImportInferredType::Timestamp)
+        );
     }
 
     #[test]
@@ -9682,6 +9719,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text_batches[0].sql, "INSERT INTO \"issue_6491\" (\"amount\") VALUES\n('1,234.56'),\n('12,345')");
+    }
+
+    #[test]
+    fn csv_import_unwraps_the_force_text_wrapper_written_by_csv_export() {
+        // Export wraps temporal cells as `="..."` so spreadsheets stop re-typing
+        // them; re-importing that file has to produce the plain timestamp again.
+        let parsed = parse_csv_bytes(b"insert_time,id\n\"=\"\"2026-06-24 02:00:07\"\"\",695350\n", 10).unwrap();
+
+        assert_eq!(parsed.rows[0][0], serde_json::Value::String("2026-06-24 02:00:07".to_string()));
+        assert_eq!(parsed.rows[0][1], serde_json::Value::String("695350".to_string()));
+
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "insert_time".to_string(),
+                target_column: "insert_time".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+            },
+        ];
+        let batches = build_import_insert_batches(
+            &parsed,
+            &mappings,
+            &[("insert_time".to_string(), "datetime".to_string()), ("id".to_string(), "bigint".to_string())],
+            "issue_8803",
+            "",
+            &DatabaseType::Mysql,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            batches[0].sql,
+            "INSERT INTO `issue_8803` (`insert_time`, `id`) VALUES\n('2026-06-24 02:00:07', 695350)"
+        );
+    }
+
+    #[test]
+    fn csv_import_keeps_values_that_only_look_like_the_force_text_wrapper() {
+        // Formula-looking data that dbx did not write must survive untouched,
+        // otherwise importing a third-party CSV silently rewrites its cells.
+        let parsed = parse_csv_bytes(
+            b"expr\n\"=\"\"a\"\"&\"\"b\"\"\"\n=SUM(A1:A2)\n\"=\"\"unterminated\"\n\"just \"\"quoted\"\" text\"\n",
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.rows[0][0], serde_json::Value::String("=\"a\"&\"b\"".to_string()));
+        assert_eq!(parsed.rows[1][0], serde_json::Value::String("=SUM(A1:A2)".to_string()));
+        assert_eq!(parsed.rows[2][0], serde_json::Value::String("=\"unterminated".to_string()));
+        assert_eq!(parsed.rows[3][0], serde_json::Value::String("just \"quoted\" text".to_string()));
     }
 
     #[test]

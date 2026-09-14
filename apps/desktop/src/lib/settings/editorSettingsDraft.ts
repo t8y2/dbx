@@ -66,6 +66,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
   "flatteningMultiLineText",
+  "dataGridShowWhitespace",
   "tableColumnTemplateFields",
   "shortcuts",
   "sqlFormatter",

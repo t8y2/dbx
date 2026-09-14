@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onBeforeUnmount } from "vue";
+import { computed, ref, watch, onBeforeUnmount, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -8,20 +8,28 @@ import { useToast } from "@/composables/useToast";
 import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 import FieldMappingDialog from "@/components/diff/FieldMappingDialog.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
+import SchemaDiffRoutineList from "@/components/diff/SchemaDiffRoutineList.vue";
 import SchemaDiffDdlPanel from "@/components/diff/SchemaDiffDdlPanel.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue";
+import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideBySideTextDiff.vue";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
-import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjects, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
+import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
+import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
+import { schemaDiffRoutineObjectTypesIntersection } from "@/lib/database/databaseObjectCapabilities";
+import { loadObjectSourceWithRoutineFallback } from "@/lib/table/objectSourceLoad";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
-import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry, SchemaDiffTableMapping } from "@/types/schemaDiff";
+import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping } from "@/types/schemaDiff";
 import { getSchemaDiffSession, schemaDiffSessionObjects, startSchemaDiffSession, type SchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import {
@@ -57,6 +65,8 @@ import { swapSchemaDiffTableMappings } from "@/lib/schema/schemaDiffTableMapping
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 
+type SchemaDiffResultTab = "tables" | "routines";
+
 const { t } = useI18n();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
@@ -70,6 +80,8 @@ const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillSchema?: string;
+  prefillSelectedRoutines?: string[];
+  prefillResultTab?: "tables" | "routines";
   sessionId?: string | null;
 }>();
 
@@ -122,8 +134,19 @@ let appliedSessionResult: SchemaDiffPreparation | null = null;
 let shownSessionError = "";
 let componentUnmounted = false;
 const diffObjects = ref<SchemaDiffObject[]>([]);
-const diffGroups = ref<OperationGroup[]>([]);
-const selectedObjectId = ref<string | null>(null);
+const tableDiffGroups = ref<OperationGroup[]>([]);
+const routineDiffGroups = ref<OperationGroup[]>([]);
+const resultTab = ref<SchemaDiffResultTab>("tables");
+const preferredResultTab = ref<SchemaDiffResultTab | null>(null);
+const selectedTableObjectId = ref<string | null>(null);
+const selectedRoutineObjectId = ref<string | null>(null);
+const selectedObjectId = computed({
+  get: () => (resultTab.value === "routines" ? selectedRoutineObjectId.value : selectedTableObjectId.value),
+  set: (value: string | null) => {
+    if (resultTab.value === "routines") selectedRoutineObjectId.value = value;
+    else selectedTableObjectId.value = value;
+  },
+});
 const focusedDeploySql = ref("");
 const focusedForwardDeploySql = ref("");
 const focusedRollbackSql = ref("");
@@ -134,6 +157,23 @@ const lastDiffResult = ref<SchemaDiffPreparation | null>(null);
 const targetDbVersion = ref<string | null>(null);
 const showResultDialog = ref(false);
 const deployResult = ref<{ success: boolean; status?: string; message: string; affectedRows?: number; error?: string } | null>(null);
+
+const partitionedDiffObjects = computed(() => partitionSchemaDiffObjectsByResultTab(diffObjects.value));
+const tableDiffObjects = computed(() => partitionedDiffObjects.value.tableObjects);
+const routineDiffObjects = computed(() => partitionedDiffObjects.value.routineObjects);
+const currentTabDiffObjects = computed(() => (resultTab.value === "routines" ? routineDiffObjects.value : tableDiffObjects.value));
+const activeDiffGroups = computed(() => (resultTab.value === "routines" ? routineDiffGroups.value : tableDiffGroups.value));
+const tableActionableCount = computed(() => countSchemaDiffActionableObjects(tableDiffObjects.value));
+const routineActionableCount = computed(() => countSchemaDiffActionableObjects(routineDiffObjects.value));
+const tablesCompareEnabled = computed(() => !!schemaDiffPanelOptions.value.tables);
+const routinesCompareEnabled = computed(() => !!schemaDiffPanelOptions.value.functions);
+const canEnableRoutinesCompare = computed(() => schemaDiffRoutineObjectTypesIntersection(sourceDbType.value as DatabaseType | undefined, targetDbType.value as DatabaseType | undefined).length > 0);
+const effectiveRoutinesEnabled = computed(() => routinesCompareEnabled.value && canEnableRoutinesCompare.value);
+const showTableResultTab = computed(() => tablesCompareEnabled.value);
+const showRoutineResultTab = computed(() => effectiveRoutinesEnabled.value);
+const showResultTabList = computed(() => showTableResultTab.value && showRoutineResultTab.value);
+const showNoDifferences = computed(() => showTableResultTab.value && tableDiffObjects.value.length === 0);
+const showRoutineNoDifferences = computed(() => showRoutineResultTab.value && routineDiffObjects.value.length === 0);
 
 // Phase 4 result fields
 const rollbackSql = ref("");
@@ -284,18 +324,27 @@ const selectedObject = computed(() => {
 
 const selectedTreeObject = computed(() => {
   if (!selectedObjectId.value) return null;
-  for (const group of diffGroups.value) {
+  for (const group of activeDiffGroups.value) {
     for (const typeGroup of group.typeGroups) {
       const object = flattenSchemaDiffObjects(typeGroup.objects).find((candidate) => candidate.id === selectedObjectId.value);
       if (object) return object;
     }
   }
-  return null;
+  return findSchemaDiffObject(diffObjects.value, selectedObjectId.value);
 });
 
+const canDeployRoutines = computed(() => isSchemaDiffPostgresLike(targetDbType.value));
+
 const canDeploy = computed(() => {
-  return selectedSchemaDiffObjects(diffObjects.value).length > 0;
+  // MySQL/SQL Server routine sync is deferred (copy DDL only). Postgres-family
+  // already has function DDL templates, so keep deploy on the routines tab.
+  if (resultTab.value === "routines" && !canDeployRoutines.value) return false;
+  return selectedSchemaDiffObjects(currentTabDiffObjects.value).length > 0;
 });
+
+const showRoutineDeployDeferredHint = computed(() => step.value === "result" && resultTab.value === "routines" && !canDeployRoutines.value);
+
+const deployButtonLabel = computed(() => (resultTab.value === "routines" ? t("diff.nextStepDeployRoutines") : t("diff.nextStepDeploy")));
 
 const schemaDiffProgressCount = computed(() => {
   const progress = schemaDiffProgress.value;
@@ -339,8 +388,11 @@ function resetComparisonResultState() {
   schemaDiffHasExtraObjectPhase.value = false;
   step.value = "config";
   diffObjects.value = [];
-  diffGroups.value = [];
-  selectedObjectId.value = null;
+  tableDiffGroups.value = [];
+  routineDiffGroups.value = [];
+  resultTab.value = "tables";
+  selectedTableObjectId.value = null;
+  selectedRoutineObjectId.value = null;
   focusedDeploySql.value = "";
   focusedForwardDeploySql.value = "";
   focusedRollbackSql.value = "";
@@ -367,12 +419,14 @@ function comparisonEndpointLabel(connectionId: string, database: string, schema:
 
 function restoreSchemaDiffSession(session: SchemaDiffSession): void {
   const config = session.config;
-  sourceConnectionId.value = config.sourceConnectionId;
-  sourceDatabase.value = config.sourceDatabase;
-  sourceSchema.value = config.sourceSchema;
-  targetConnectionId.value = config.targetConnectionId;
-  targetDatabase.value = config.targetDatabase;
-  targetSchema.value = config.targetSchema;
+  runWithoutTargetIdentityReset(() => {
+    sourceConnectionId.value = config.sourceConnectionId;
+    sourceDatabase.value = config.sourceDatabase;
+    sourceSchema.value = config.sourceSchema;
+    targetConnectionId.value = config.targetConnectionId;
+    targetDatabase.value = config.targetDatabase;
+    targetSchema.value = config.targetSchema;
+  });
   ignoreComments.value = config.ignoreComments;
   ensureDefaultConfig(config.targetDbType);
   updateActiveConfigConnection({
@@ -384,12 +438,12 @@ function restoreSchemaDiffSession(session: SchemaDiffSession): void {
     targetSchema: config.targetSchema,
   });
   updateActiveConfigOptions(config.options);
-  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjects(config.targetDbType, config.options);
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(config.sourceDbType, config.targetDbType, config.options);
 }
 
 function applySchemaDiffSession(session: SchemaDiffSession | undefined): void {
   if (!session) return;
-  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjects(session.config.targetDbType, session.config.options);
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(session.config.sourceDbType, session.config.targetDbType, session.config.options);
   if (session.status === "running") {
     loading.value = true;
     step.value = "compare";
@@ -420,7 +474,26 @@ function applySchemaDiffSession(session: SchemaDiffSession | undefined): void {
   permissionDiffs.value = session.result.permissionDiffs ?? [];
   dependencyGraph.value = normalizeSchemaDiffDependencyGraph(session.result.dependencyGraph);
   diffObjects.value = schemaDiffSessionObjects(session.result);
-  diffGroups.value = groupDiffObjects(diffObjects.value);
+  rebuildDiffGroups();
+  const hasTableActions = showTableResultTab.value && countSchemaDiffActionableObjects(tableDiffObjects.value) > 0;
+  const hasRoutineActions = showRoutineResultTab.value && countSchemaDiffActionableObjects(routineDiffObjects.value) > 0;
+  if (!showTableResultTab.value && showRoutineResultTab.value) {
+    resultTab.value = "routines";
+    preferredResultTab.value = null;
+  } else if (showTableResultTab.value && !showRoutineResultTab.value) {
+    resultTab.value = "tables";
+    preferredResultTab.value = null;
+  } else if (preferredResultTab.value === "routines" && showRoutineResultTab.value) {
+    resultTab.value = "routines";
+    preferredResultTab.value = null;
+  } else if (preferredResultTab.value) {
+    resultTab.value = "tables";
+    preferredResultTab.value = null;
+  } else {
+    resultTab.value = !hasTableActions && hasRoutineActions ? "routines" : "tables";
+  }
+  selectedTableObjectId.value = null;
+  selectedRoutineObjectId.value = null;
   lastDiffResult.value = session.result;
   deploySqlMode.value = "forward";
   void regenerateSelectedDeploySql();
@@ -450,6 +523,14 @@ watch(
       if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
       if (props.prefillSchema) sourceSchema.value = props.prefillSchema;
     }
+    if (props.prefillSelectedRoutines?.length) {
+      handleCompareScopeUpdate({ functions: true });
+      handleSelectedRoutinesUpdate([...props.prefillSelectedRoutines]);
+    }
+    preferredResultTab.value = props.prefillResultTab ?? null;
+    if (props.prefillResultTab) {
+      resultTab.value = props.prefillResultTab;
+    }
   },
   { immediate: true },
 );
@@ -461,6 +542,12 @@ watch(
   },
   () => applySchemaDiffSession(getSchemaDiffSession(activeSessionId.value)),
 );
+
+watch(resultTab, () => {
+  if (step.value !== "result") return;
+  void regenerateSelectedDeploySql();
+  void regenerateFocusedDeploySql();
+});
 
 // Config sync
 watch([sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, targetDatabase, targetSchema], ([srcConn, srcDb, srcSchema, tgtConn, tgtDb, tgtSchema]) => {
@@ -474,12 +561,69 @@ watch([sourceConnectionId, sourceDatabase, sourceSchema, targetConnectionId, tar
   });
 });
 
+/** Suppress target-identity resets while restoring session/history/swap. */
+let suppressTargetIdentityReset = false;
+
+function runWithoutTargetIdentityReset(action: () => void): void {
+  suppressTargetIdentityReset = true;
+  try {
+    action();
+  } finally {
+    void nextTick(() => {
+      suppressTargetIdentityReset = false;
+    });
+  }
+}
+
+function clearCompareObjectSelection(): void {
+  if (!activeConfig.value) return;
+  updateActiveConfigOptions(
+    normalizeSchemaDiffCompareOptions(
+      {
+        ...activeConfig.value.options,
+        selectedTables: undefined,
+        selectedRoutines: undefined,
+        tableMappings: [],
+        routineMappings: [],
+      },
+      getDbType(),
+    ),
+  );
+}
+
+// Switching target must drop stale schema (Oracle→MySQL) and object selection/mappings.
+watch(targetConnectionId, (connId, previousConnId) => {
+  if (suppressTargetIdentityReset) return;
+  if (connId === previousConnId) return;
+  targetDatabase.value = "";
+  targetSchema.value = "";
+  clearCompareObjectSelection();
+});
+
+watch(targetDatabase, (database, previousDatabase) => {
+  if (suppressTargetIdentityReset) return;
+  if (database === previousDatabase) return;
+  targetSchema.value = "";
+  clearCompareObjectSelection();
+});
+
+watch(targetDbType, (dbType, previousDbType) => {
+  if (suppressTargetIdentityReset) return;
+  if (!isSchemaAware(dbType as DatabaseType) && targetSchema.value) {
+    targetSchema.value = "";
+  }
+  if (previousDbType && dbType && previousDbType !== dbType) {
+    clearCompareObjectSelection();
+  }
+});
+
 // Auto-fetch target database version when connection/database changes
 watch(
-  () => [targetConnectionId.value, targetDatabase.value],
-  async ([connId, db]) => {
+  () => [targetConnectionId.value, targetDatabase.value, targetSchema.value, targetDbType.value] as const,
+  async ([connId, db, schema, dbType]) => {
     if (connId && db) {
-      await fetchDbVersion(connId, db, targetSchema.value);
+      const effectiveSchema = isSchemaAware(dbType as DatabaseType) ? schema : "";
+      await fetchDbVersion(connId, db, effectiveSchema);
     } else {
       targetDbVersion.value = null;
     }
@@ -495,6 +639,8 @@ function handleSwap() {
   const currentOptions = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
   const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);
   const swappedSelectedTables = Array.isArray(currentOptions.selectedTables) ? swappedMappings.map((mapping) => mapping.sourceTable) : undefined;
+  const swappedRoutineMappings = swapSchemaDiffRoutineMappings(currentOptions.routineMappings ?? []);
+  const swappedSelectedRoutines = Array.isArray(currentOptions.selectedRoutines) ? swappedRoutineMappings.map((mapping) => mapping.sourceRoutine) : undefined;
   if (activeConfig.value) {
     updateActiveConfigOptions(
       normalizeSchemaDiffCompareOptions(
@@ -502,21 +648,25 @@ function handleSwap() {
           ...currentOptions,
           selectedTables: swappedSelectedTables,
           tableMappings: swappedMappings,
+          selectedRoutines: swappedSelectedRoutines,
+          routineMappings: swappedRoutineMappings,
         },
         getDbType(),
       ),
     );
   }
 
-  const tempConn = sourceConnectionId.value;
-  const tempDb = sourceDatabase.value;
-  const tempSchema = sourceSchema.value;
-  sourceConnectionId.value = targetConnectionId.value;
-  sourceDatabase.value = targetDatabase.value;
-  sourceSchema.value = targetSchema.value;
-  targetConnectionId.value = tempConn;
-  targetDatabase.value = tempDb;
-  targetSchema.value = tempSchema;
+  runWithoutTargetIdentityReset(() => {
+    const tempConn = sourceConnectionId.value;
+    const tempDb = sourceDatabase.value;
+    const tempSchema = sourceSchema.value;
+    sourceConnectionId.value = targetConnectionId.value;
+    sourceDatabase.value = targetDatabase.value;
+    sourceSchema.value = targetSchema.value;
+    targetConnectionId.value = tempConn;
+    targetDatabase.value = tempDb;
+    targetSchema.value = tempSchema;
+  });
 }
 
 function handleOptionsUpdate(options: SchemaDiffCompareOptions) {
@@ -531,9 +681,29 @@ function handleSelectedTablesUpdate(value?: string[]) {
   }
 }
 
+function handleSelectedRoutinesUpdate(value?: string[]) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, selectedRoutines: value }, getDbType()));
+  }
+}
+
+function handleCompareScopeUpdate(value: { tables?: boolean; views?: boolean; functions?: boolean }) {
+  if (activeConfig.value) {
+    const next = { ...activeConfig.value.options, ...value };
+    if (value.tables === false) next.views = false;
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(next, getDbType()));
+  }
+}
+
 function handleTableMappingsUpdate(value: SchemaDiffTableMapping[]) {
   if (activeConfig.value) {
     updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, tableMappings: value }, getDbType()));
+  }
+}
+
+function handleRoutineMappingsUpdate(value: SchemaDiffRoutineMapping[]) {
+  if (activeConfig.value) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions({ ...activeConfig.value.options, routineMappings: value }, getDbType()));
   }
 }
 
@@ -554,7 +724,7 @@ function handleCompare(): void {
   appliedSessionResult = null;
   shownSessionError = "";
   resetComparisonResultState();
-  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjects(targetDbType, options);
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(sourceDbType, targetDbType, options);
   const session = startSchemaDiffSession(
     {
       sourceConnectionId: sourceConnectionId.value,
@@ -576,11 +746,12 @@ function handleCompare(): void {
 }
 
 function handleToggleGroup(operationType: DiffOperationType) {
-  diffGroups.value = diffGroups.value.map((g) => (g.operationType === operationType ? { ...g, expanded: !g.expanded } : g));
+  const groups = resultTab.value === "routines" ? routineDiffGroups : tableDiffGroups;
+  groups.value = groups.value.map((g) => (g.operationType === operationType ? { ...g, expanded: !g.expanded } : g));
 }
 
 function handleToggleGroupSelection(operationType: DiffOperationType, selected: boolean) {
-  const group = diffGroups.value.find((candidate) => candidate.operationType === operationType);
+  const group = activeDiffGroups.value.find((candidate) => candidate.operationType === operationType);
   for (const object of group?.typeGroups.flatMap((typeGroup) => typeGroup.objects) ?? []) {
     for (const target of schemaDiffSelectionTargets(object)) {
       updateObjectSelection(target.id, selected);
@@ -605,16 +776,22 @@ function updateObjectSelection(objectId: string, selected: boolean): boolean {
 }
 
 function rebuildDiffGroups() {
-  const expanded = new Map(diffGroups.value.map((group) => [group.operationType, group.expanded]));
-  const typeExpanded = new Map(diffGroups.value.flatMap((group) => group.typeGroups.map((typeGroup) => [`${group.operationType}:${typeGroup.kind}`, typeGroup.expanded] as const)));
-  diffGroups.value = groupDiffObjects(diffObjects.value).map((group) => ({
-    ...group,
-    expanded: expanded.get(group.operationType) ?? group.expanded,
-    typeGroups: group.typeGroups.map((typeGroup) => ({
-      ...typeGroup,
-      expanded: typeExpanded.get(`${group.operationType}:${typeGroup.kind}`) ?? typeGroup.expanded,
-    })),
-  }));
+  const preserveExpanded = (groups: OperationGroup[], objects: SchemaDiffObject[]) => {
+    const expanded = new Map(groups.map((group) => [group.operationType, group.expanded]));
+    const typeExpanded = new Map(groups.flatMap((group) => group.typeGroups.map((typeGroup) => [`${group.operationType}:${typeGroup.kind}`, typeGroup.expanded] as const)));
+    return groupDiffObjects(objects).map((group) => ({
+      ...group,
+      expanded: expanded.get(group.operationType) ?? group.expanded,
+      typeGroups: group.typeGroups.map((typeGroup) => ({
+        ...typeGroup,
+        expanded: typeExpanded.get(`${group.operationType}:${typeGroup.kind}`) ?? typeGroup.expanded,
+      })),
+    }));
+  };
+
+  const { tableObjects, routineObjects } = partitionSchemaDiffObjectsByResultTab(diffObjects.value);
+  tableDiffGroups.value = preserveExpanded(tableDiffGroups.value, tableObjects);
+  routineDiffGroups.value = preserveExpanded(routineDiffGroups.value, routineObjects);
 }
 
 function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
@@ -655,7 +832,7 @@ async function regenerateSelectedDeploySql() {
   }
 
   const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType());
-  const input = selectSchemaDiffInput(result, diffObjects.value);
+  const input = selectSchemaDiffInput(result, currentTabDiffObjects.value);
   let plan;
   try {
     plan = await api.generateSchemaSyncPlan(input, buildSchemaSyncPlanOptions(options));
@@ -822,49 +999,90 @@ async function handleSelectObject(reviewObject: SchemaDiffObject) {
   const obj = reviewObject.parentId ? (findSchemaDiffObject(diffObjects.value, reviewObject.parentId) ?? reviewObject) : reviewObject;
 
   // Dynamically fetch DDL for objects that don't have pre-generated DDL
-  // (views need runtime retrieval; functions should already have definition)
-  const objectTypeMap: Record<string, ObjectSourceKind> = {
-    function: "FUNCTION",
-    view: "VIEW",
-  };
-  const objectType = objectTypeMap[obj.objectKind];
-  if (!objectType) return;
-
-  try {
-    // For "create" objects: source has it, target doesn't → fetch source DDL
-    if (obj.operationType === "create" && !obj.sourceDdl) {
-      const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType, obj.arguments);
-      if (result?.source) obj.sourceDdl = result.source;
-    }
-
-    // For "delete" objects: target has it, source doesn't → fetch target DDL
-    if (obj.operationType === "delete" && !obj.targetDdl) {
-      const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType, obj.arguments);
-      if (result?.source) obj.targetDdl = result.source;
-    }
-
-    // For "modify" objects: fetch whichever side is missing
-    if (obj.operationType === "modify") {
-      if (!obj.sourceDdl) {
-        const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, objectType, obj.arguments);
+  // (views need runtime retrieval; routines may have empty definitions from list_functions_via_objects)
+  if (obj.objectKind === "view") {
+    try {
+      if (obj.operationType === "create" && !obj.sourceDdl) {
+        const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, "VIEW", obj.arguments);
         if (result?.source) obj.sourceDdl = result.source;
       }
-      if (!obj.targetDdl) {
-        const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, objectType, obj.arguments);
+      if (obj.operationType === "delete" && !obj.targetDdl) {
+        const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, "VIEW", obj.arguments);
         if (result?.source) obj.targetDdl = result.source;
       }
+      if (obj.operationType === "modify") {
+        if (!obj.sourceDdl) {
+          const result = await api.getObjectSource(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name, "VIEW", obj.arguments);
+          if (result?.source) obj.sourceDdl = result.source;
+        }
+        if (!obj.targetDdl) {
+          const result = await api.getObjectSource(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name, "VIEW", obj.arguments);
+          if (result?.source) obj.targetDdl = result.source;
+        }
+      }
+    } catch {
+      // Silently ignore errors
     }
-  } catch {
-    // Silently ignore errors
+    return;
+  }
+
+  if (obj.objectKind !== "function") return;
+
+  const preferredKind: ObjectSourceKind = obj.routineType === "PROCEDURE" ? "PROCEDURE" : "FUNCTION";
+
+  async function fetchRoutineDdl(connectionId: string, database: string, schema: string, name: string): Promise<string | undefined> {
+    try {
+      const { source } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, connectionId, database, schema, name, preferredKind, obj.arguments);
+      return source?.source?.trim() ? source.source : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (obj.operationType === "create" && !obj.sourceDdl) {
+    const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name);
+    if (ddl) obj.sourceDdl = ddl;
+  }
+  if (obj.operationType === "delete" && !obj.targetDdl) {
+    const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name);
+    if (ddl) obj.targetDdl = ddl;
+  }
+  if (obj.operationType === "modify") {
+    if (!obj.sourceDdl) {
+      const ddl = await fetchRoutineDdl(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, obj.name);
+      if (ddl) obj.sourceDdl = ddl;
+    }
+    if (!obj.targetDdl) {
+      const ddl = await fetchRoutineDdl(targetConnectionId.value, targetDatabase.value, targetSchema.value, obj.name);
+      if (ddl) obj.targetDdl = ddl;
+    }
+  }
+}
+
+async function handleViewRoutineDiff(object: SchemaDiffObject) {
+  await handleSelectObject(object);
+}
+
+async function copyRoutineDiffSide(side: TextDiffSide) {
+  const object = selectedObject.value;
+  if (!object) return;
+  const text = side === "before" ? (object.sourceDdl ?? "") : (object.targetDdl ?? "");
+  try {
+    await copyToClipboard(text);
+    toast(t("diff.routineDdlCopied"), 2000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
   }
 }
 function handleLoadHistoryConfig(config: SchemaDiffConfig) {
-  sourceConnectionId.value = config.sourceConnectionId;
-  sourceDatabase.value = config.sourceDatabase;
-  sourceSchema.value = config.sourceSchema;
-  targetConnectionId.value = config.targetConnectionId;
-  targetDatabase.value = config.targetDatabase;
-  targetSchema.value = config.targetSchema;
+  runWithoutTargetIdentityReset(() => {
+    sourceConnectionId.value = config.sourceConnectionId;
+    sourceDatabase.value = config.sourceDatabase;
+    sourceSchema.value = config.sourceSchema;
+    targetConnectionId.value = config.targetConnectionId;
+    targetDatabase.value = config.targetDatabase;
+    targetSchema.value = config.targetSchema;
+  });
   if (config.options) {
     updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(config.options, getDbType()));
   }
@@ -918,7 +1136,8 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 }
 
 function handleDeployReview() {
-  const selectedObjects = selectedSchemaDiffObjects(diffObjects.value);
+  if (resultTab.value === "routines" && !canDeployRoutines.value) return;
+  const selectedObjects = selectedSchemaDiffObjects(currentTabDiffObjects.value);
   if (selectedObjects.length === 0) {
     toast(t("diff.noObjectsSelected"), 3000);
     return;
@@ -946,7 +1165,7 @@ async function onConfirmDeploy() {
 }
 
 const deployStats = computed(() => {
-  const counts = summarizeSchemaDiffOperations(diffObjects.value);
+  const counts = summarizeSchemaDiffOperations(currentTabDiffObjects.value);
   return {
     create: counts.create,
     modify: counts.modify,
@@ -1010,6 +1229,7 @@ const targetConnectionInfo = computed(() => {
           :active-config-id="activeConfigId"
           :options="schemaDiffPanelOptions"
           :selected-tables="schemaDiffPanelOptions.selectedTables"
+          :selected-routines="schemaDiffPanelOptions.selectedRoutines"
           :table-list-loader="schemaDiffTableListLoader"
           :loading="loading"
           :recent-configs="recentConfigs"
@@ -1021,7 +1241,10 @@ const targetConnectionInfo = computed(() => {
           @delete-history-config="handleDeleteHistoryConfig"
           @update:field-mappings="handleFieldMappingsUpdate"
           @update:table-mappings="handleTableMappingsUpdate"
+          @update:routine-mappings="handleRoutineMappingsUpdate"
           @update:selected-tables="handleSelectedTablesUpdate"
+          @update:selected-routines="handleSelectedRoutinesUpdate"
+          @update:compare-scope="handleCompareScopeUpdate"
           @open-field-mapping="showFieldMappingDialog = true"
         />
 
@@ -1056,82 +1279,133 @@ const targetConnectionInfo = computed(() => {
 
         <!-- Result Step -->
         <template v-else-if="step === 'result'">
-          <!-- Rename Candidates Panel -->
-          <div v-if="renameCandidates.length > 0" class="border-b bg-amber-50 dark:bg-amber-950/20 shrink-0 overflow-hidden">
-            <button class="flex items-center gap-2 px-3 py-1.5 w-full text-left text-xs font-medium hover:bg-amber-100/50 dark:hover:bg-amber-900/30 transition-colors" @click="showRenamePanel = !showRenamePanel">
-              <ChevronDown v-if="showRenamePanel" class="w-3 h-3" />
-              <ChevronRight v-else class="w-3 h-3" />
-              {{ t("diff.renameCandidates") }}
-              <span class="ml-auto text-muted-foreground font-normal">{{ renameCandidates.length }} candidate(s)</span>
-            </button>
-            <div v-if="showRenamePanel" class="px-3 pb-2 text-xs">
-              <table class="w-full">
-                <thead>
-                  <tr class="text-muted-foreground border-b">
-                    <th class="text-left py-1 pr-4">{{ t("diff.sourceTable") }}</th>
-                    <th class="text-left py-1 pr-4">{{ t("diff.targetTable") }}</th>
-                    <th class="text-left py-1 pr-4">{{ t("diff.similarity") }}</th>
-                    <th class="text-left py-1">{{ t("common.action") }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(rc, i) in renameCandidates" :key="i" class="border-b border-amber-200/50 dark:border-amber-800/30">
-                    <td class="py-1 pr-4 font-mono">{{ rc.sourceName }}</td>
-                    <td class="py-1 pr-4 font-mono">{{ rc.targetName }}</td>
-                    <td class="py-1 pr-4">
-                      <span
-                        class="px-1.5 py-0.5 rounded text-[10px] font-medium"
-                        :class="rc.score >= 0.8 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : rc.score >= 0.5 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
-                        >{{ (rc.score * 100).toFixed(0) }}%</span
-                      >
-                    </td>
-                    <td class="py-1">
-                      <button class="text-xs px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors mr-1" @click="applyRename(rc)">
-                        {{ t("diff.confirmRename") }}
-                      </button>
-                      <button class="text-xs px-2 py-0.5 rounded bg-muted hover:bg-muted/80 transition-colors" @click="ignoreRename(i)">
-                        {{ t("diff.ignore") }}
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
+          <Tabs v-model="resultTab" class="flex min-h-0 flex-1 flex-col gap-0 data-horizontal:flex-col">
+            <TabsList v-if="showResultTabList" class="mx-3 mt-2 h-8 w-fit shrink-0">
+              <TabsTrigger value="tables" class="text-xs">
+                {{ t("diff.resultTabTables", { count: tableActionableCount }) }}
+              </TabsTrigger>
+              <TabsTrigger value="routines" class="text-xs">
+                {{ t("diff.resultTabRoutines", { count: routineActionableCount }) }}
+              </TabsTrigger>
+            </TabsList>
 
-          <Splitpanes horizontal class="flex-1 min-h-0" @resized="handleSplitpanesResized">
-            <Pane :size="splitpanesSize" min-size="20">
-              <div class="h-full overflow-auto">
-                <SchemaDiffObjectTree :groups="diffGroups" :selected-object-id="selectedObjectId" @toggle-group="handleToggleGroup" @toggle-group-selection="handleToggleGroupSelection" @toggle-object-selection="handleToggleObjectSelection" @select-object="handleSelectObject" />
+            <TabsContent v-if="showTableResultTab" value="tables" class="mt-0 flex min-h-0 flex-1 flex-col outline-none data-[state=inactive]:hidden">
+              <div v-if="showNoDifferences" class="mx-3 mt-2 shrink-0 rounded-md border border-dashed bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground">
+                {{ t("diff.noDifferences") }}
               </div>
-            </Pane>
-            <Pane :size="100 - splitpanesSize" min-size="20">
-              <SchemaDiffDdlPanel
-                :selected-object="selectedObject"
-                :focused-object="selectedTreeObject"
-                :deploy-sql="focusedDeploySql"
-                :deploy-sql-all="selectedDeploySql"
-                :rollback-forward-sql="selectedForwardDeploySql"
-                :compatibility-warnings="selectedCompatibilityWarnings"
-                :rollback-sql="rollbackSql"
-                :deploy-sql-mode="deploySqlMode"
-                :dependency-graph="dependencyGraph"
-                :permission-diffs="permissionDiffs"
-                :rollback-completeness="rollbackCompleteness"
-                :missing-rollback-objects="missingRollbackObjects"
-                :can-execute="canExecuteDeploy"
-                @update:deploy-sql-mode="switchDeploySqlMode"
-                @execute-script="handleExecuteScript"
-              />
-            </Pane>
-          </Splitpanes>
+              <div v-if="renameCandidates.length > 0" class="shrink-0 overflow-hidden border-b bg-amber-50 dark:bg-amber-950/20">
+                <button class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium transition-colors hover:bg-amber-100/50 dark:hover:bg-amber-900/30" @click="showRenamePanel = !showRenamePanel">
+                  <ChevronDown v-if="showRenamePanel" class="h-3 w-3" />
+                  <ChevronRight v-else class="h-3 w-3" />
+                  {{ t("diff.renameCandidates") }}
+                  <span class="ml-auto font-normal text-muted-foreground">{{ renameCandidates.length }} candidate(s)</span>
+                </button>
+                <div v-if="showRenamePanel" class="px-3 pb-2 text-xs">
+                  <table class="w-full">
+                    <thead>
+                      <tr class="border-b text-muted-foreground">
+                        <th class="py-1 pr-4 text-left">{{ t("diff.sourceTable") }}</th>
+                        <th class="py-1 pr-4 text-left">{{ t("diff.targetTable") }}</th>
+                        <th class="py-1 pr-4 text-left">{{ t("diff.similarity") }}</th>
+                        <th class="py-1 text-left">{{ t("common.actions") }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(rc, i) in renameCandidates" :key="i" class="border-b border-amber-200/50 dark:border-amber-800/30">
+                        <td class="py-1 pr-4 font-mono">{{ rc.sourceName }}</td>
+                        <td class="py-1 pr-4 font-mono">{{ rc.targetName }}</td>
+                        <td class="py-1 pr-4">
+                          <span
+                            class="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                            :class="rc.score >= 0.8 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' : rc.score >= 0.5 ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'"
+                            >{{ (rc.score * 100).toFixed(0) }}%</span
+                          >
+                        </td>
+                        <td class="py-1">
+                          <button class="mr-1 rounded bg-primary/10 px-2 py-0.5 text-xs text-primary transition-colors hover:bg-primary/20" @click="applyRename(rc)">
+                            {{ t("diff.confirmRename") }}
+                          </button>
+                          <button class="rounded bg-muted px-2 py-0.5 text-xs transition-colors hover:bg-muted/80" @click="ignoreRename(i)">
+                            {{ t("diff.ignore") }}
+                          </button>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <Splitpanes horizontal class="min-h-0 flex-1" @resized="handleSplitpanesResized">
+                <Pane :size="splitpanesSize" min-size="20">
+                  <div class="h-full overflow-auto">
+                    <SchemaDiffObjectTree :groups="tableDiffGroups" :selected-object-id="selectedTableObjectId" @toggle-group="handleToggleGroup" @toggle-group-selection="handleToggleGroupSelection" @toggle-object-selection="handleToggleObjectSelection" @select-object="handleSelectObject" />
+                  </div>
+                </Pane>
+                <Pane :size="100 - splitpanesSize" min-size="20">
+                  <SchemaDiffDdlPanel
+                    :selected-object="selectedObject"
+                    :focused-object="selectedTreeObject"
+                    :deploy-sql="focusedDeploySql"
+                    :deploy-sql-all="selectedDeploySql"
+                    :rollback-forward-sql="selectedForwardDeploySql"
+                    :compatibility-warnings="selectedCompatibilityWarnings"
+                    :rollback-sql="rollbackSql"
+                    :deploy-sql-mode="deploySqlMode"
+                    :dependency-graph="dependencyGraph"
+                    :permission-diffs="permissionDiffs"
+                    :rollback-completeness="rollbackCompleteness"
+                    :missing-rollback-objects="missingRollbackObjects"
+                    :can-execute="canExecuteDeploy"
+                    @update:deploy-sql-mode="switchDeploySqlMode"
+                    @execute-script="handleExecuteScript"
+                  />
+                </Pane>
+              </Splitpanes>
+            </TabsContent>
+
+            <TabsContent v-if="showRoutineResultTab" value="routines" class="mt-0 flex min-h-0 flex-1 flex-col outline-none data-[state=inactive]:hidden">
+              <div v-if="showRoutineNoDifferences" class="mx-3 mt-2 shrink-0 rounded-md border border-dashed bg-muted/20 px-3 py-2 text-center text-xs text-muted-foreground">
+                {{ t("diff.noDifferences") }}
+              </div>
+              <Splitpanes horizontal class="min-h-0 flex-1" @resized="handleSplitpanesResized">
+                <Pane :size="splitpanesSize" min-size="20">
+                  <div class="h-full overflow-auto">
+                    <SchemaDiffRoutineList :objects="routineDiffObjects" :viewing-object-id="selectedRoutineObjectId" :selectable="canDeployRoutines" :empty-text="t('diff.noDifferences')" @toggle-selection="handleToggleObjectSelection" @view-diff="handleViewRoutineDiff" />
+                  </div>
+                </Pane>
+                <Pane :size="100 - splitpanesSize" min-size="20">
+                  <div class="flex h-full min-h-0 flex-col">
+                    <div v-if="!selectedObject || selectedObject.objectKind !== 'function'" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                      {{ t("diff.selectRoutineToCompare") }}
+                    </div>
+                    <div v-else-if="!selectedObject.sourceDdl && !selectedObject.targetDdl" class="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                      {{ t("diff.noDdlAvailable") }}
+                    </div>
+                    <SideBySideTextDiff
+                      v-else
+                      class="min-h-0 flex-1"
+                      :before-text="selectedObject.sourceDdl || ''"
+                      :after-text="selectedObject.targetDdl || ''"
+                      :before-label="t('diff.sourceDdl')"
+                      :after-label="t('diff.targetDdl')"
+                      :copy-before-title="t('diff.copySourceDdl')"
+                      :copy-after-title="t('diff.copyTargetDdl')"
+                      :before-available="!!selectedObject.sourceDdl"
+                      :after-available="!!selectedObject.targetDdl"
+                      @copy="copyRoutineDiffSide"
+                    />
+                  </div>
+                </Pane>
+              </Splitpanes>
+            </TabsContent>
+          </Tabs>
         </template>
 
         <!-- Deploy Review Step -->
         <template v-else-if="step === 'deploy-review'">
           <SchemaDiffDeployStep
             v-model:deploy-sql="selectedDeploySql"
-            :selected-objects="diffObjects"
+            :selected-objects="currentTabDiffObjects"
             :target-connection-id="targetConnectionId"
             :target-database="targetDatabase"
             :target-schema="targetSchema"
@@ -1166,10 +1440,13 @@ const targetConnectionInfo = computed(() => {
         <div v-else></div>
 
         <div v-if="step === 'result'" class="flex items-center gap-2">
-          <Button size="sm" :disabled="!canDeploy || executing" @click="handleDeployReview">
+          <p v-if="showRoutineDeployDeferredHint" class="max-w-md text-right text-[11px] text-muted-foreground">
+            {{ t("diff.routineSyncDeferredHint") }}
+          </p>
+          <Button v-else size="sm" :disabled="!canDeploy || executing" @click="handleDeployReview">
             <Loader2 v-if="executing" class="w-3.5 h-3.5 mr-1 animate-spin" />
             <Play v-else class="w-3.5 h-3.5 mr-1" />
-            {{ t("diff.nextStepDeploy") }}
+            {{ deployButtonLabel }}
           </Button>
         </div>
       </DialogFooter>

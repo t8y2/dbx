@@ -33,6 +33,10 @@ export interface DocumentBrowserStateSnapshot {
   documentFilterRules: DocumentFilterRule[];
   /** Zero-based page position; only meaningful for skip-based stores. */
   page: number;
+  /** DataGrid local value filters, keyed by column index. */
+  localColumnFilters?: Record<string, string[]>;
+  /** Column names corresponding to the local filter indexes. */
+  localColumnFilterColumns?: string[];
   /**
    * Rows from the last completed load. Written only by the unmount capture; a
    * conditions-only save (the keystroke path) drops it, which is the whole

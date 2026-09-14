@@ -3,19 +3,34 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { buildSchemaDiffTableMatches, availableSchemaDiffTargetTables, areSchemaDiffTableMappingsEqual, pruneSchemaDiffTableMappings, reconcileSchemaDiffTableMappings, updateSchemaDiffTableMapping, type SchemaDiffTableMatch } from "@/lib/schema/schemaDiffTableMapping";
+import {
+  areSchemaDiffRoutineMappingsEqual,
+  buildSchemaDiffRoutineMatches,
+  identitySchemaDiffRoutineMappings,
+  isSchemaDiffUnrestrictedRoutineLoadTooLarge,
+  pruneSchemaDiffRoutineMappings,
+  reconcileSchemaDiffRoutineMappings,
+  reconcileSchemaDiffSelectedRoutines,
+  schemaDiffRoutineKey,
+  SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT,
+  type SchemaDiffRoutineMatch,
+} from "@/lib/schema/schemaDiffRoutine";
 import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
+import { schemaDiffRoutineObjectTypes, schemaDiffRoutineObjectTypesIntersection, supportsSchemaDiffRoutines } from "@/lib/database/databaseObjectCapabilities";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
-import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry, SchemaDiffTableMapping } from "@/types/schemaDiff";
+import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping } from "@/types/schemaDiff";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -32,6 +47,7 @@ const props = defineProps<{
   ignoreComments: boolean;
   options: SchemaDiffCompareOptions;
   selectedTables?: string[];
+  selectedRoutines?: string[];
   tableListLoader: SchemaDiffTableListLoader;
   loading: boolean;
   recentConfigs: SchemaDiffConfig[];
@@ -47,6 +63,7 @@ const emit = defineEmits<{
   (e: "update:ignoreComments", value: boolean): void;
   (e: "update:fieldMappings", value: FieldMappingEntry[]): void;
   (e: "update:tableMappings", value: SchemaDiffTableMapping[]): void;
+  (e: "update:routineMappings", value: SchemaDiffRoutineMapping[]): void;
   (e: "open-field-mapping"): void;
   (e: "compare"): void;
   (e: "saveConfig"): void;
@@ -56,6 +73,8 @@ const emit = defineEmits<{
   (e: "loadHistoryConfig", config: SchemaDiffConfig): void;
   (e: "deleteHistoryConfig", configId: string): void;
   (e: "update:selectedTables", value?: string[]): void;
+  (e: "update:selectedRoutines", value?: string[]): void;
+  (e: "update:compareScope", value: { tables?: boolean; views?: boolean; functions?: boolean }): void;
 }>();
 
 const sourceDatabases = ref<string[]>([]);
@@ -206,32 +225,232 @@ const tableListCoordinator = createSchemaDiffTableListCoordinator({
   onTargetTablesLoaded: reconcileTargetTablesAfterSuccessfulLoad,
 });
 
+const canConfigureTableSelection = computed(() => isTableIdentityReady("source"));
+const tablesCompareEnabled = computed(() => !!props.options.tables);
+const routinesCompareEnabled = computed(() => !!props.options.functions);
+const canEnableRoutinesCompare = computed(() => schemaDiffRoutineObjectTypesIntersection(sourceDbType.value as DatabaseType | undefined, targetDbType.value as DatabaseType | undefined).length > 0);
+/** User preference AND supported pair — drives compare/canCompare/Switch display. */
+const effectiveRoutinesEnabled = computed(() => routinesCompareEnabled.value && canEnableRoutinesCompare.value);
+
 watch(
-  () => [restrictTables.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value],
+  () => [tablesCompareEnabled.value, restrictTables.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value],
   () => {
-    const shouldLoad = shouldLoadSchemaDiffTableList("source", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("source"));
+    const shouldLoad = tablesCompareEnabled.value && shouldLoadSchemaDiffTableList("source", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("source"));
     tableListCoordinator.refresh("source", shouldLoad).catch(() => {});
   },
   { immediate: true },
 );
 
 watch(
-  () => [restrictTables.value, localSelectedTables.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value],
+  () => [tablesCompareEnabled.value, restrictTables.value, localSelectedTables.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value],
   () => {
-    const shouldLoad = shouldLoadSchemaDiffTableList("target", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("target"));
+    const shouldLoad = tablesCompareEnabled.value && shouldLoadSchemaDiffTableList("target", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("target"));
     tableListCoordinator.refresh("target", shouldLoad).catch(() => {});
   },
   { immediate: true },
 );
 
-const canConfigureTableSelection = computed(() => isTableIdentityReady("source"));
+// ---- Visual (explicit) routine selection ----
+const sourceRoutineList = ref<string[]>([]);
+const targetRoutineList = ref<string[]>([]);
+const targetRoutineListLoaded = ref(false);
+const restrictRoutines = ref(false);
+const localSelectedRoutines = ref<string[]>([]);
+const loadingRoutines = ref(false);
+
+const canConfigureRoutineSelection = computed(() => isTableIdentityReady("source") && supportsSchemaDiffRoutines(sourceDbType.value as DatabaseType));
+const activeRoutineMappings = computed(() => identitySchemaDiffRoutineMappings(props.options?.routineMappings ?? []));
+const routineMatches = computed<SchemaDiffRoutineMatch[]>(() => buildSchemaDiffRoutineMatches(localSelectedRoutines.value, targetRoutineList.value, activeRoutineMappings.value));
+const matchedRoutineCount = computed(() => routineMatches.value.filter((match) => match.targetRoutine).length);
+const missingTargetRoutines = computed(() => routineMatches.value.filter((match) => !match.targetRoutine).map((match) => match.sourceRoutine));
+
+function emitRoutineMappings(nextMappings: SchemaDiffRoutineMapping[]) {
+  const identityOnly = identitySchemaDiffRoutineMappings(nextMappings);
+  if (!areSchemaDiffRoutineMappingsEqual(identityOnly, activeRoutineMappings.value)) emit("update:routineMappings", identityOnly);
+}
+
+function reconcileRoutineMappings(selectedRoutines: string[], targetRoutines = targetRoutineList.value) {
+  const nextMappings = targetRoutineListLoaded.value ? reconcileSchemaDiffRoutineMappings(selectedRoutines, targetRoutines, activeRoutineMappings.value) : pruneSchemaDiffRoutineMappings(selectedRoutines, activeRoutineMappings.value);
+  emitRoutineMappings(nextMappings);
+}
+
+watch(
+  () => props.selectedRoutines,
+  (value) => {
+    restrictRoutines.value = Array.isArray(value);
+    localSelectedRoutines.value = value && Array.isArray(value) ? [...value] : [];
+    if (!restrictRoutines.value) emitRoutineMappings([]);
+    else if (targetRoutineListLoaded.value) reconcileRoutineMappings(localSelectedRoutines.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.options?.routineMappings,
+  () => {
+    if (restrictRoutines.value && targetRoutineListLoaded.value) reconcileRoutineMappings(localSelectedRoutines.value);
+  },
+  { deep: true },
+);
+
+function handleToggleRestrictRoutines(enabled: boolean) {
+  restrictRoutines.value = enabled;
+  emit("update:selectedRoutines", enabled ? [...localSelectedRoutines.value] : undefined);
+  if (!enabled) emitRoutineMappings([]);
+  else reconcileRoutineMappings(localSelectedRoutines.value);
+}
+
+function handleUpdateSelectedRoutines(value: string[]) {
+  localSelectedRoutines.value = value;
+  if (!restrictRoutines.value) return;
+  emit("update:selectedRoutines", [...value]);
+  reconcileRoutineMappings(value);
+}
+
+function clearUnavailableRoutineSelection() {
+  sourceRoutineList.value = [];
+  targetRoutineList.value = [];
+  targetRoutineListLoaded.value = false;
+  if (props.selectedRoutines === undefined && !restrictRoutines.value && localSelectedRoutines.value.length === 0) {
+    emitRoutineMappings([]);
+    return;
+  }
+  restrictRoutines.value = false;
+  localSelectedRoutines.value = [];
+  emit("update:selectedRoutines", undefined);
+  emitRoutineMappings([]);
+}
+
+async function loadRoutineList(side: "source" | "target") {
+  const connectionId = side === "source" ? props.sourceConnectionId : props.targetConnectionId;
+  const database = side === "source" ? props.sourceDatabase : props.targetDatabase;
+  const schema = side === "source" ? props.sourceSchema : props.targetSchema;
+  const dbType = side === "source" ? sourceDbType.value : targetDbType.value;
+  if (!connectionId || !database || !supportsSchemaDiffRoutines(dbType as DatabaseType)) {
+    if (side === "source") sourceRoutineList.value = [];
+    else {
+      targetRoutineList.value = [];
+      targetRoutineListLoaded.value = false;
+    }
+    return;
+  }
+  try {
+    loadingRoutines.value = true;
+    await store.ensureConnected(connectionId);
+    // Names/signatures only — avoid listFunctions N+1 source fetch on the config step.
+    const kinds = schemaDiffRoutineObjectTypes(dbType as DatabaseType);
+    const objects = kinds.length === 0 ? [] : await api.listObjects(connectionId, database, schema, kinds);
+    const keys = objects.map((object) => schemaDiffRoutineKey(object.name, object.signature ?? ""));
+    if (side === "source") {
+      sourceRoutineList.value = keys;
+      if (restrictRoutines.value) {
+        const next = reconcileSchemaDiffSelectedRoutines(localSelectedRoutines.value, keys);
+        if (next.length !== localSelectedRoutines.value.length || next.some((key, index) => key !== localSelectedRoutines.value[index])) {
+          localSelectedRoutines.value = next;
+          emit("update:selectedRoutines", [...next]);
+        }
+      }
+    } else {
+      targetRoutineList.value = keys;
+      targetRoutineListLoaded.value = true;
+      if (restrictRoutines.value) reconcileRoutineMappings(localSelectedRoutines.value, keys);
+    }
+  } catch {
+    if (side === "source") sourceRoutineList.value = [];
+    else {
+      targetRoutineList.value = [];
+      targetRoutineListLoaded.value = false;
+    }
+  } finally {
+    loadingRoutines.value = false;
+  }
+}
+
+watch(
+  () => [restrictRoutines.value, effectiveRoutinesEnabled.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value] as const,
+  ([restrictEnabled, routinesEnabled]) => {
+    if (!canConfigureRoutineSelection.value) {
+      clearUnavailableRoutineSelection();
+      return;
+    }
+    // Load names whenever routines are effectively on (count guard + restrict picker).
+    if (routinesEnabled || restrictEnabled) void loadRoutineList("source");
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [restrictRoutines.value, localSelectedRoutines.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value] as const,
+  ([enabled, selectedCount]) => {
+    if (!enabled || selectedCount === 0 || !isTableIdentityReady("target") || !supportsSchemaDiffRoutines(targetDbType.value as DatabaseType)) {
+      if (!enabled) {
+        targetRoutineList.value = [];
+        targetRoutineListLoaded.value = false;
+      }
+      return;
+    }
+    void loadRoutineList("target");
+  },
+  { immediate: true },
+);
+
+watch(
+  () => ({
+    source: [props.sourceConnectionId, props.sourceDatabase, props.sourceSchema] as const,
+    selectedRoutines: props.selectedRoutines,
+  }),
+  (current, previous) => {
+    if (!isTableIdentityReady("source") || !supportsSchemaDiffRoutines(sourceDbType.value as DatabaseType)) {
+      clearUnavailableRoutineSelection();
+      return;
+    }
+    if (!previous) return;
+    if (current.source.every((value, index) => value === previous.source[index])) return;
+    if (current.selectedRoutines !== previous.selectedRoutines) return;
+    if (current.selectedRoutines === undefined && !restrictRoutines.value) return;
+    clearUnavailableRoutineSelection();
+  },
+  { immediate: true },
+);
+
+function handleTablesCompareEnabled(enabled: boolean) {
+  if (enabled) emit("update:compareScope", { tables: true });
+  else emit("update:compareScope", { tables: false, views: false });
+}
+
+function handleRoutinesCompareEnabled(enabled: boolean) {
+  if (enabled && !canEnableRoutinesCompare.value) return;
+  emit("update:compareScope", { functions: enabled });
+}
+
+const unrestrictedRoutineLoadTooLarge = computed(() => {
+  if (!effectiveRoutinesEnabled.value || restrictRoutines.value) return false;
+  return isSchemaDiffUnrestrictedRoutineLoadTooLarge(sourceRoutineList.value.length, props.selectedRoutines);
+});
 
 const canCompare = computed(() => {
-  const hasSelectedTables = props.selectedTables === undefined || props.selectedTables.length > 0;
+  const tablesEnabled = tablesCompareEnabled.value;
+  const routinesEnabled = effectiveRoutinesEnabled.value;
+  if (!tablesEnabled && !routinesEnabled) return false;
+  if (unrestrictedRoutineLoadTooLarge.value) return false;
+  const hasSelectedTables = !tablesEnabled || props.selectedTables === undefined || props.selectedTables.length > 0;
+  const hasSelectedRoutines = !routinesEnabled || props.selectedRoutines === undefined || props.selectedRoutines.length > 0;
   // Unmapped source tables are not a blocker: they flow through the comparison as
   // source-only tables (CREATE TABLE in the target), matching the pre-mapping behavior.
-  const hasValidTableMappings = !restrictTables.value || localSelectedTables.value.length === 0 || isTableIdentityReady("target");
-  return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && hasSelectedTables && hasValidTableMappings && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
+  const hasValidTableMappings = !tablesEnabled || !restrictTables.value || localSelectedTables.value.length === 0 || isTableIdentityReady("target");
+  const hasValidRoutineMappings = !routinesEnabled || !restrictRoutines.value || localSelectedRoutines.value.length === 0 || isTableIdentityReady("target");
+  return (
+    props.sourceConnectionId &&
+    props.targetConnectionId &&
+    props.sourceDatabase &&
+    props.targetDatabase &&
+    hasSelectedTables &&
+    hasSelectedRoutines &&
+    hasValidTableMappings &&
+    hasValidRoutineMappings &&
+    (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) &&
+    (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema)
+  );
 });
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
@@ -599,28 +818,36 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
     <div class="space-y-3 rounded-lg border bg-muted/20 p-3">
       <div class="space-y-1.5">
         <div class="flex items-center justify-between gap-2">
-          <Label class="text-xs font-medium">{{ t("diff.tableSelection") }}</Label>
-          <Button v-if="restrictTables || canConfigureTableSelection" variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="handleToggleRestrict(!restrictTables)">
+          <div class="flex min-w-0 items-center gap-2">
+            <Switch size="sm" :model-value="tablesCompareEnabled" :aria-label="t('diff.compareTablesSwitch')" @update:model-value="handleTablesCompareEnabled(Boolean($event))" />
+            <Label class="text-xs font-medium">{{ t("diff.tableSelection") }}</Label>
+          </div>
+          <Button v-if="tablesCompareEnabled && (restrictTables || canConfigureTableSelection)" variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="handleToggleRestrict(!restrictTables)">
             {{ restrictTables ? t("diff.compareAllTables") : t("diff.chooseTables") }}
           </Button>
         </div>
-        <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
-          {{ t("diff.tableSelectionUnrestricted") }}
+        <div v-if="!tablesCompareEnabled" class="text-[11px] text-muted-foreground">
+          {{ t("diff.tableCompareDisabled") }}
         </div>
-        <TableMultiSelect
-          v-if="restrictTables && canConfigureTableSelection"
-          :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
-          :model-value="localSelectedTables"
-          @update:model-value="handleUpdateSelectedTables"
-          :tables="sourceTableList"
-          :title="t('diff.sourceTables')"
-          :empty-text="t('dataCompare.noTables')"
-        />
+        <template v-else>
+          <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
+            {{ t("diff.tableSelectionUnrestricted") }}
+          </div>
+          <TableMultiSelect
+            v-if="restrictTables && canConfigureTableSelection"
+            :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+            :model-value="localSelectedTables"
+            @update:model-value="handleUpdateSelectedTables"
+            :tables="sourceTableList"
+            :title="t('diff.sourceTables')"
+            :empty-text="t('dataCompare.noTables')"
+          />
+        </template>
       </div>
 
       <!-- Target Same-Name Match -->
       <!-- Source → target table mapping -->
-      <div v-if="restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-2 rounded-lg border p-3 text-xs">
+      <div v-if="tablesCompareEnabled && restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-2 rounded-lg border p-3 text-xs">
         <div class="flex items-center justify-between gap-2">
           <div class="font-medium">{{ t("diff.targetTableMatching") }}</div>
           <div class="text-muted-foreground">
@@ -666,6 +893,77 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
         </div>
         <div v-if="tableMappingConflictSource" class="text-destructive">
           {{ t("diff.targetTableInUse") }}
+        </div>
+      </div>
+
+      <div class="space-y-1.5 border-t border-border/60 pt-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex min-w-0 items-center gap-2">
+            <Switch size="sm" :model-value="effectiveRoutinesEnabled" :disabled="!canEnableRoutinesCompare" :aria-label="t('diff.compareRoutinesSwitch')" @update:model-value="handleRoutinesCompareEnabled(Boolean($event))" />
+            <Label class="text-xs font-medium" :class="!canEnableRoutinesCompare ? 'text-muted-foreground' : ''">{{ t("diff.routineSelection") }}</Label>
+          </div>
+          <Button v-if="effectiveRoutinesEnabled && (restrictRoutines || canConfigureRoutineSelection)" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="loadingRoutines" @click="handleToggleRestrictRoutines(!restrictRoutines)">
+            {{ restrictRoutines ? t("diff.compareAllRoutines") : t("diff.chooseRoutines") }}
+          </Button>
+        </div>
+        <div v-if="!canEnableRoutinesCompare" class="text-[11px] text-muted-foreground">
+          {{ t("diff.routineSelectionUnsupported") }}
+        </div>
+        <div v-else-if="!routinesCompareEnabled" class="text-[11px] text-muted-foreground">
+          {{ t("diff.routineCompareDisabled") }}
+        </div>
+        <template v-else>
+          <div v-if="!restrictRoutines" class="text-[11px] text-muted-foreground">
+            {{ !isTableIdentityReady("source") ? t("diff.routineSelectionNeedSource") : t("diff.routineSelectionUnrestricted") }}
+          </div>
+          <div v-if="unrestrictedRoutineLoadTooLarge" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+            {{ t("diff.routineSelectionTooLarge", { count: sourceRoutineList.length, limit: SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT }) }}
+          </div>
+          <TableMultiSelect
+            v-if="restrictRoutines && canConfigureRoutineSelection"
+            :key="`routines-${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+            :model-value="localSelectedRoutines"
+            @update:model-value="handleUpdateSelectedRoutines"
+            :tables="sourceRoutineList"
+            :title="t('diff.sourceRoutines')"
+            :empty-text="t('diff.noRoutines')"
+          />
+        </template>
+      </div>
+
+      <div v-if="effectiveRoutinesEnabled && restrictRoutines && localSelectedRoutines.length && canConfigureRoutineSelection && isTableIdentityReady('target')" class="space-y-2 rounded-lg border p-3 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-medium">{{ t("diff.targetRoutineMatching") }}</div>
+          <div class="text-muted-foreground">
+            {{ t("diff.matchedRoutines", { matched: matchedRoutineCount, total: localSelectedRoutines.length }) }}
+          </div>
+        </div>
+        <p class="text-[11px] text-muted-foreground">{{ t("diff.routineSameNameMatchingOnly") }}</p>
+        <div class="overflow-x-auto rounded border">
+          <table class="w-full min-w-[520px]">
+            <thead class="border-b bg-muted/30 text-muted-foreground">
+              <tr>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.sourceRoutines") }}</th>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.targetRoutine") }}</th>
+                <th class="w-28 px-2 py-1.5 text-left font-medium">{{ t("diff.status") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="match in routineMatches" :key="match.sourceRoutine" class="border-b last:border-b-0">
+                <td class="max-w-[220px] truncate px-2 py-1.5 font-mono" :title="match.sourceRoutine">{{ match.sourceRoutine }}</td>
+                <td class="max-w-[220px] truncate px-2 py-1.5 font-mono" :title="match.targetRoutine || undefined">
+                  <span v-if="match.targetRoutine">{{ match.targetRoutine }}</span>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+                <td class="px-2 py-1.5" :class="match.kind === 'unmatched' ? 'text-destructive' : 'text-muted-foreground'">
+                  {{ t(`diff.tableMatchStatus.${match.kind}`) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="targetRoutineListLoaded && missingTargetRoutines.length" class="text-muted-foreground">
+          {{ t("diff.unmatchedRoutineWarning", { count: missingTargetRoutines.length }) }}
         </div>
       </div>
     </div>

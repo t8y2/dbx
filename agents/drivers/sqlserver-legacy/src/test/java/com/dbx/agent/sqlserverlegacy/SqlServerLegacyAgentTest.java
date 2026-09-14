@@ -2,6 +2,7 @@ package com.dbx.agent.sqlserverlegacy;
 
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.IndexInfo;
 import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -602,5 +603,35 @@ class SqlServerLegacyAgentTest {
 
     private interface MethodHandler {
         Object handle(Method method, Object[] args) throws Throwable;
+    }
+
+    @Test
+    void listIndexesMarksPrimaryKeyByConstraintName() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("getIndexInfo".equals(method.getName())) {
+                return metadataResultSet(Arrays.asList(
+                    Arrays.asList("PK__orders__3213E83F5A9632C8", "id"),
+                    Arrays.asList("PK__orders__3213E83F5A9632C8", "tenant_id"),
+                    Arrays.asList("IX_orders_name", "name")
+                ), Map.of("INDEX_NAME", 0, "COLUMN_NAME", 1));
+            }
+            if ("getPrimaryKeys".equals(method.getName())) {
+                return metadataResultSet(Arrays.asList(
+                    Arrays.asList("PK__orders__3213E83F5A9632C8", "id"),
+                    Arrays.asList("PK__orders__3213E83F5A9632C8", "tenant_id")
+                ), Map.of("PK_NAME", 0, "COLUMN_NAME", 1));
+            }
+            return defaultValue(method.getReturnType());
+        });
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) ->
+            "getMetaData".equals(method.getName()) ? metadata : defaultValue(method.getReturnType())));
+
+        List<IndexInfo> indexes = agent.listIndexes("dbo", "orders");
+
+        List<IndexInfo> primary = indexes.stream().filter(IndexInfo::getIs_primary).toList();
+        Assertions.assertEquals(1, primary.size(), indexes.toString());
+        Assertions.assertEquals("PK__orders__3213E83F5A9632C8", primary.get(0).getName());
+        Assertions.assertEquals(List.of("id", "tenant_id"), primary.get(0).getColumns());
     }
 }

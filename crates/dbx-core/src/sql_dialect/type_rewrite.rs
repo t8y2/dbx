@@ -380,7 +380,10 @@ pub fn rewrite_column_type(source_type: &str, target: DatabaseType, source_diale
 pub fn column_is_auto_increment(col: &ColumnInfo) -> bool {
     col.extra.as_deref().is_some_and(|extra| {
         let lower = extra.to_ascii_lowercase();
-        lower.contains("auto_increment") || lower.contains("identity") || lower.contains("serial")
+        lower.contains("auto_increment")
+            || lower.contains("autoincrement")
+            || lower.contains("identity")
+            || lower.contains("serial")
     })
 }
 
@@ -405,7 +408,13 @@ pub fn apply_auto_inc_to_column_def(
     col: &ColumnInfo,
     is_integer_like: bool,
 ) -> AutoIncColumnBuild {
-    let wants_auto = col.is_primary_key && (column_is_auto_increment(col) || is_integer_like);
+    let wants_auto = col.is_primary_key
+        && (column_is_auto_increment(col)
+            || (is_integer_like
+                && !matches!(
+                    profile.auto_inc,
+                    crate::sql_dialect::ddl_profile::AutoIncSyntax::Suffix(" AUTOINCREMENT")
+                )));
 
     match profile.auto_inc {
         crate::sql_dialect::ddl_profile::AutoIncSyntax::ReplaceTypeWith(type_name)
@@ -417,7 +426,12 @@ pub fn apply_auto_inc_to_column_def(
             }
             AutoIncColumnBuild::Complete { def, skip_default: true }
         }
-        crate::sql_dialect::ddl_profile::AutoIncSyntax::Suffix(suffix) if col.is_primary_key && is_integer_like => {
+        // SQLite's AUTOINCREMENT changes semantics (sqlite_sequence, no rowid
+        // reuse), so it must only be emitted for sources that explicitly ask
+        // for auto-increment; other suffixes keep the implicit PK heuristic.
+        crate::sql_dialect::ddl_profile::AutoIncSyntax::Suffix(suffix)
+            if col.is_primary_key && is_integer_like && (wants_auto || suffix != " AUTOINCREMENT") =>
+        {
             AutoIncColumnBuild::AppendSuffix { suffix, skip_default: false, postgres_sequence: false }
         }
         crate::sql_dialect::ddl_profile::AutoIncSyntax::PostgresSequence if col.is_primary_key && is_integer_like => {

@@ -21,6 +21,9 @@ const dataGrid = vi.hoisted(() => ({
   pageOffset: undefined as number | undefined,
   rowCount: undefined as number | undefined,
   columnCount: undefined as number | undefined,
+  localColumnFilters: undefined as Record<string, string[]> | undefined,
+  localColumnFilterColumns: undefined as string[] | undefined,
+  localFiltersChange: undefined as ((filters: Record<string, string[]>) => void) | undefined,
   viewStateKey: undefined as string | undefined,
   viewGeneration: undefined as string | undefined,
 }));
@@ -83,11 +86,13 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         pageSizePreference: { type: String, required: false },
         viewStateKey: { type: String, required: false },
         viewGeneration: { type: String, required: false },
+        localColumnFilterColumns: { type: Array, required: false },
       },
       setup(props, { attrs, expose, slots }) {
         dataGrid.paginate = attrs.onPaginate as typeof dataGrid.paginate;
         dataGrid.sort = attrs.onSort as typeof dataGrid.sort;
         dataGrid.reload = attrs.onReload as typeof dataGrid.reload;
+        dataGrid.localFiltersChange = attrs.onLocalColumnFiltersChange as typeof dataGrid.localFiltersChange;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -114,6 +119,8 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
           dataGrid.viewGeneration = props.viewGeneration;
           dataGrid.rowCount = (props.result as { rows: unknown[] }).rows.length;
           dataGrid.columnCount = (props.result as { columns: unknown[] }).columns.length;
+          dataGrid.localColumnFilters = (props.result as { local_column_filters?: Record<string, string[]> }).local_column_filters;
+          dataGrid.localColumnFilterColumns = props.localColumnFilterColumns as string[] | undefined;
           return h("div", [
             // Rendering the real search-bar slot exposes the filter/sort inputs
             // the same way the actual grid toolbar does.
@@ -231,6 +238,9 @@ beforeEach(async () => {
   dataGrid.pageOffset = undefined;
   dataGrid.rowCount = undefined;
   dataGrid.columnCount = undefined;
+  dataGrid.localColumnFilters = undefined;
+  dataGrid.localColumnFilterColumns = undefined;
+  dataGrid.localFiltersChange = undefined;
   dataGrid.viewStateKey = undefined;
   dataGrid.viewGeneration = undefined;
   settings.editorSettings.infiniteScroll = false;
@@ -352,6 +362,62 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
 
     expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
     expect(dataGrid.rowCount).toBe(2);
+  });
+
+  it("restores mongodb local column filters after a tab switch", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+    expect(dataGrid.localColumnFilterColumns).toEqual(["_id", "name"]);
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-local-filters" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+    expect(dataGrid.localColumnFilterColumns).toEqual(["_id", "name"]);
+  });
+
+  it("clears mongodb local column filters when the query conditions change", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters-query-change" });
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+
+    const [filterTextarea] = queryTextareas();
+    typeInTextarea(filterTextarea, '{"name":"row_1"}');
+    await flushUi();
+    pressEnter(filterTextarea);
+    await flushUi();
+
+    expect(dataGrid.localColumnFilters).toEqual({});
+    expect(dataGrid.localColumnFilterColumns).toBeUndefined();
+  });
+
+  it("clears mongodb local column filters when the page size changes mid-session", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters-page-size" });
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+
+    // Page stays at 0 for a page-size change, so only the pageSize input invalidates the snapshot.
+    await dataGrid.paginate!(0, 10);
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({});
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-local-filters-page-size" });
+
+    expect(dataGrid.localColumnFilters).toEqual({});
+    expect(dataGrid.localColumnFilterColumns).toBeUndefined();
   });
 
   it("still forces a real reload from the refresh button after a restore", async () => {

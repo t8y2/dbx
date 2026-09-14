@@ -7,13 +7,14 @@ body:
     attributes:
       value: |
         用于收集数据库兼容性细节，例如连接失败、schema 读取不完整、字段类型显示错误等。请脱敏。
-        DBX 版本、运行环境、操作系统和系统架构可在应用内通过“设置 → 关于我们 → 复制支持信息”一键复制。
+        This form collects database compatibility details such as connection failures, incomplete schema reads, and incorrect field types. Redact sensitive information.
+        DBX 版本、运行环境、操作系统和系统架构可在应用内通过“设置 → 关于我们 → 复制支持信息 / Support information”一键复制。
 
   - type: input
     id: database
     attributes:
-      label: 数据库类型和版本
-      description: 也请注明发行版，如 MariaDB、AWS RDS、TiDB 等。
+      label: 数据库类型和版本 / Database type and version
+      description: 也请注明发行版，如 MariaDB、AWS RDS、TiDB 等。 / Include the distribution, such as MariaDB, AWS RDS, or TiDB.
       placeholder: "例如：MariaDB 10.11"
     validations:
       required: true
@@ -21,16 +22,17 @@ body:
   - type: textarea
     id: description
     attributes:
-      label: 问题描述
-      description: 什么操作，出了什么错，期望怎样？
-      placeholder: "例如：展开 schema 时报错 'unknown type'，期望能正常显示字段。"
+      label: 问题描述 / Description / Problem description
+      description: 什么操作，出了什么错，期望怎样？ / What did you do, what went wrong, and what did you expect?
+      # What did you do, what went wrong, and what did you expect?
+      placeholder: "例如：展开 schema 时报错 'unknown type'，期望能正常显示字段。 / Example: expanding a schema reports 'unknown type'; fields should display normally."
     validations:
       required: true
 
   - type: textarea
     id: error
     attributes:
-      label: 错误信息
+      label: 错误信息 / Error message
       render: shell
     validations:
       required: true
@@ -38,8 +40,8 @@ body:
   - type: textarea
     id: support-info
     attributes:
-      label: 支持信息
-      description: 打开 DBX 的“设置 → 关于我们”，点击“复制支持信息”，然后粘贴到这里。如无法打开应用，请说明原因。
+      label: 支持信息 / Support information
+      description: 打开 DBX 的“设置 → 关于我们”，点击“复制支持信息”，然后粘贴到这里。如无法打开应用，请说明原因。 / Open DBX Settings → About, copy Support Information, and paste it here. Explain if the app cannot open.
       placeholder: |
         DBX 版本：v0.5.52
         运行环境：桌面端
@@ -51,5 +53,6 @@ body:
   - type: textarea
     id: extra
     attributes:
-      label: 补充信息
-      description: 表结构、SQL 样例、截图、部署方式（Docker/云/自建）等。
+      label: 补充信息 / Additional information
+      description: 表结构、SQL 样例、截图、部署方式（Docker/云/自建）等。 / Include schema, SQL samples, screenshots, and deployment details (Docker, cloud, or self-hosted).
+      # Include schema, SQL samples, screenshots, and deployment details (Docker, cloud, or self-hosted).

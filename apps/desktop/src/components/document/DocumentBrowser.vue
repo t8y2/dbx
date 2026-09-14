@@ -89,12 +89,14 @@ import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import type { SerializedDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
 import { matchesElasticsearchIndexPattern, subscribeElasticsearchIndexCleared, type ElasticsearchIndexClearedDetail } from "@/lib/sidebar/elasticsearchIndexActions";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import JsonEditNode from "./JsonEditNode.vue";
+
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -176,6 +178,8 @@ const viewMode = computed<ViewMode>({
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
+const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
+const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
@@ -319,6 +323,8 @@ function documentDataSignature(): string | undefined {
   }
 }
 
+const documentLocalColumnFilterRestoreKey = computed(() => documentDataSignature());
+
 let loadedDocumentDataSignature: string | undefined;
 
 function captureDocumentBrowserData(): DocumentBrowserDataSnapshot | undefined {
@@ -353,13 +359,37 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
     page: page.value,
+    localColumnFilters: localColumnFilters.value,
+    localColumnFilterColumns: localColumnFilterColumns.value,
     // Any condition change drops the payload; only the unmount capture stores
     // rows, so a cached page can never outlive the conditions that produced it.
     data: options.includeData ? captureDocumentBrowserData() : undefined,
   });
 }
 
-watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], () => persistDocumentBrowserState(), { deep: true });
+function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFilters) {
+  localColumnFilters.value = Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]]));
+  localColumnFilterColumns.value = Object.keys(filters).length > 0 ? [...gridResult.value.columns] : undefined;
+  // Local value filters only change the client-side view. Keep the loaded rows
+  // in the tab snapshot so returning to the tab does not trigger a reload.
+  persistDocumentBrowserState({ includeData: true });
+}
+
+// Keep these sources in lockstep with documentDataSignature(): every input that
+// invalidates held rows (including pageSize and the infinite-scroll setting, which
+// can change mid-session at page 0 without moving `page`) must also drop the
+// local-filter snapshot, or a tab switch would replay filters the user watched
+// DataGrid clear on its own restore-key change.
+watch(
+  [filterInput, sortInput, appliedDocumentFilter, page, pageSize, () => settingsStore.editorSettings.infiniteScroll],
+  () => {
+    localColumnFilters.value = {};
+    localColumnFilterColumns.value = undefined;
+    persistDocumentBrowserState();
+  },
+  { deep: true },
+);
+watch(documentFilterRules, () => persistDocumentBrowserState(), { deep: true });
 
 // Seed the grid from the cached page so a tab switch costs no round trip
 // (#8679). The signature guard rejects a snapshot whose identity or conditions
@@ -558,6 +588,7 @@ const gridResult = computed<QueryResult>(() => {
       affected_rows: 0,
       execution_time_ms: 0,
       truncated: false,
+      local_column_filters: localColumnFilters.value,
     };
   }
 
@@ -571,6 +602,7 @@ const gridResult = computed<QueryResult>(() => {
     execution_time_ms: 0,
     truncated: false,
     appended_from_row_count: appendedFromRowCount.value,
+    local_column_filters: localColumnFilters.value,
   };
 });
 
@@ -2196,6 +2228,15 @@ function focusSearch(): boolean {
   return documentJsonEditorRef.value?.openSearch() ?? false;
 }
 
+watch(
+  () => connectionStore.mongoImportCompleted,
+  (completed) => {
+    if (!completed) return;
+    if (completed.connectionId !== props.connectionId || completed.database !== props.database || completed.collection !== props.collection) return;
+    void refreshDocuments();
+  },
+);
+
 watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
   if (mode === "document" && !editing && index !== null) return;
   documentViewerSearchActive.value = false;
@@ -2518,6 +2559,8 @@ defineExpose({ focusSearch });
       :column-layout-scope-key="documentColumnLayoutScopeKey"
       :view-state-key="props.stateKey"
       :view-generation="documentViewGeneration"
+      :local-column-filter-restore-key="documentLocalColumnFilterRestoreKey"
+      :local-column-filter-columns="localColumnFilterColumns"
       context="results"
       page-size-preference="table-open"
       :database-type="props.databaseType"
@@ -2538,6 +2581,7 @@ defineExpose({ focusSearch });
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
+      @local-column-filters-change="handleLocalColumnFiltersChange"
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">

@@ -28,6 +28,20 @@ describe("data grid local column filter state", () => {
     expect(restored).toEqual({});
   });
 
+  it("maps a saved filter to its current column after a dynamic column reorder", () => {
+    const restored = restoreDataGridLocalColumnFilters(
+      {
+        "1": ["str:open"],
+        "2": ["str:stale"],
+      },
+      3,
+      ["id", "name", "status"],
+      ["id", "status", "removed"],
+    );
+
+    expect(restored).toEqual({ 2: new Set(["str:open"]) });
+  });
+
   it("builds stable keys and filters rows across multiple columns", () => {
     expect(dataGridLocalFilterKey(null)).toBe("__dbx_null__");
     expect(dataGridLocalFilterKey(true)).toBe("bool:true");

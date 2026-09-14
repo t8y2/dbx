@@ -11,7 +11,7 @@
   "exasol": "0.1.52",
   "firebird": "0.1.53",
   "gbase8a": "0.1.52",
-  "gbase8s": "0.1.46",
+  "gbase8s": "0.1.47",
   "goldendb": "0.1.57",
   "h2": "0.1.58",
   "h2-legacy": "0.1.27",
@@ -50,5 +50,5 @@
   "kafka": "0.1.14",
   "rocketmq": "0.1.13",
   "rabbitmq": "0.1.11",
-  "sqlserver-legacy": "0.1.28"
+  "sqlserver-legacy": "0.1.29"
 }

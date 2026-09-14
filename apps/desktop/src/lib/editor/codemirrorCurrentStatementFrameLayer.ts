@@ -151,6 +151,10 @@ interface CurrentStatementFrameModule {
  * returning null hides the frame.
  */
 export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModule, resolve: StatementFrameResolver): Extension {
+  let lastRequest: StatementFrameRequest | null | undefined;
+
+  const sameRequest = (left: StatementFrameRequest | null | undefined, right: StatementFrameRequest | null): boolean => left === right || (!!left && !!right && left.from === right.from && left.to === right.to);
+
   return viewModule.layer({
     // Keep the outline above line decorations so opaque active-line colors
     // from editor themes cannot cover the frame border.
@@ -158,13 +162,25 @@ export function currentStatementFrameLayer(viewModule: CurrentStatementFrameModu
     class: "cm-db-currentStatementFrameLayer",
     markers(view) {
       const request = resolve(view);
+      lastRequest = request;
       if (!request || request.to < request.from) return [];
       const rect = currentStatementFrameRect(view, request.from, request.to);
       if (!rect) return [];
       return [new viewModule.RectangleMarker("cm-db-currentStatementFrame", rect.left, rect.top, rect.width, rect.height)];
     },
     update(update) {
-      return update.docChanged || update.selectionSet || update.viewportChanged || update.geometryChanged || update.transactions.some((transaction) => transaction.reconfigured);
+      if (update.docChanged || update.viewportChanged || update.geometryChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
+        lastRequest = undefined;
+        return true;
+      }
+      if (!update.selectionSet) return false;
+
+      // Moving inside one statement does not change its frame. Avoid repeating
+      // the per-line DOM geometry probes for every auto-repeated key event.
+      const request = resolve(update.view);
+      if (sameRequest(lastRequest, request)) return false;
+      lastRequest = undefined;
+      return true;
     },
   });
 }

@@ -7,6 +7,7 @@ import type { ContentAreaSurfaceEmits } from "@/components/layout/querySurfaces"
  * four forwarding layers cannot drift apart when the contract changes.
  */
 export const contentSurfaceEventNames = [
+  "closeTab",
   "update:activeOutputView",
   "fixWithAi",
   "sendSelectionToAi",
@@ -21,6 +22,7 @@ export const contentSurfaceEventNames = [
   "editorCursorChange",
   "editorViewportChange",
   "editorSelectionStateChange",
+  "editorStateFlushed",
   "formatError",
   "reload",
   "paginate",

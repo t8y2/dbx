@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, PlugZap, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -38,6 +38,7 @@ const props = defineProps<{
   sqlLibrarySaveFeedbackId: number;
   showSqlFilePanel: boolean;
   showDriverStore: boolean;
+  showPluginCenter: boolean;
   showSettingsPage: boolean;
   checkingUpdates: boolean;
   updateVersion?: string;
@@ -64,6 +65,7 @@ const emit = defineEmits<{
   "open-github": [];
   "open-settings": [];
   "open-driver-store": [];
+  "open-plugin-center": [];
   "check-updates": [];
   "open-transfer": [];
   "open-sql-file": [];
@@ -438,6 +440,9 @@ const moreItems = computed(() => {
       disabled: false,
     });
   }
+  if (!toolbarItems.value.pluginCenter) {
+    items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
+  }
 
   // "More" menu items (individually toggleable)
   if (toolbarItems.value.sqlFile) {
@@ -503,6 +508,9 @@ const collapsedItems = computed(() => {
       action: () => emit("open-driver-store"),
       disabled: false,
     });
+  }
+  if (toolbarItems.value.pluginCenter) {
+    items.push({ value: "plugin-center", label: t("toolbar.pluginCenter"), icon: PlugZap, action: () => emit("open-plugin-center"), disabled: false });
   }
   // Always include moreItems (may contain hidden left-side items + overflowed right items)
   if (moreItems.value.length > 0) {
@@ -570,6 +578,10 @@ const toolbarStyle = computed(() => {
         <span :class="toolbarTextLabelClass">{{ t("toolbar.driverManager") }}</span>
         <!-- 小圆点仅提示"有可更新驱动"，具体数量交给对话框内标签页红点展示，避免工具栏长期挂红数字。 -->
         <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-block h-2 w-2 rounded-full bg-red-500" :aria-label="t('toolbar.updatableDriverCount')" :title="t('toolbar.updatableDriverCount')" />
+      </Button>
+      <Button v-if="toolbarItems.pluginCenter" variant="ghost" size="sm" :class="[toolbarTextButtonClass, { 'bg-accent': showPluginCenter }]" @click="emit('open-plugin-center')">
+        <PlugZap class="h-3.5 w-3.5" />
+        <span :class="toolbarTextLabelClass">{{ t("toolbar.pluginCenter") }}</span>
       </Button>
 
       <LightDropdown

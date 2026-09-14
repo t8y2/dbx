@@ -6,11 +6,14 @@ import { describe, expect, it } from "vitest";
 const browserSource = readFileSync(new URL("../../../components/redis/RedisKeyBrowser.vue", import.meta.url), "utf8");
 const viewerSource = readFileSync(new URL("../../../components/redis/RedisValueViewer.vue", import.meta.url), "utf8");
 const localeSources = {
+  az: readFileSync(new URL("../../../i18n/locales/az.ts", import.meta.url), "utf8"),
   en: readFileSync(new URL("../../../i18n/locales/en.ts", import.meta.url), "utf8"),
   es: readFileSync(new URL("../../../i18n/locales/es.ts", import.meta.url), "utf8"),
   it: readFileSync(new URL("../../../i18n/locales/it.ts", import.meta.url), "utf8"),
   ja: readFileSync(new URL("../../../i18n/locales/ja.ts", import.meta.url), "utf8"),
+  ko: readFileSync(new URL("../../../i18n/locales/ko.ts", import.meta.url), "utf8"),
   "pt-BR": readFileSync(new URL("../../../i18n/locales/pt-BR.ts", import.meta.url), "utf8"),
+  tr: readFileSync(new URL("../../../i18n/locales/tr.ts", import.meta.url), "utf8"),
   "zh-CN": readFileSync(new URL("../../../i18n/locales/zh-CN.ts", import.meta.url), "utf8"),
   "zh-TW": readFileSync(new URL("../../../i18n/locales/zh-TW.ts", import.meta.url), "utf8"),
 };
@@ -181,5 +184,56 @@ describe("Redis expiry mode wiring", () => {
     expect(load).toContain('emit("deleted", props.keyRaw)');
     expect(deleted).toContain("removeKnownKey(keyRaw)");
     expect(loaded).toContain('if (value.redis_type === "none")');
+  });
+
+  it("reuses the shared expiry validator and the batch transport for one bulk policy", () => {
+    const open = findFunction(browserSource, "openBatchExpiryDialog").getText();
+    const save = findFunction(browserSource, "saveBatchExpiry").getText();
+    const calls = callsIn(findFunction(browserSource, "saveBatchExpiry"));
+
+    expect(open).toContain("if (checkedKeys.value.size === 0 || selectionBusy.value) return;");
+    expect(open).toContain("batchExpiryKeyRaws.value = [...checkedKeys.value];");
+    expect(save).toContain("validateRedisExpiry");
+    expect(save).toContain("expiryValidationMessage(validation.reason)");
+    expect(calls.map(callName)).toContain("applyRedisBatchExpiryPolicy");
+    expect(calls.map(callName)).toContain("applyBatchExpiryMetadata");
+    // The single-key API must never be looped over a multi-selection.
+    expect(calls.map(callName)).not.toContain("api.redisSetTtl");
+    expect(calls.map(callName)).not.toContain("api.redisSetExpireAt");
+    expect(calls.map(callName)).not.toContain("applyRedisExpiryPolicy");
+    expect(save).toContain("if (savingBatchExpiry.value || batchExpiryKeyRaws.value.length === 0) return;");
+    expect(browserSource).toContain("setKeysTtl: api.redisSetKeysTtl");
+    expect(browserSource).toContain("setKeysExpireAt: api.redisSetKeysExpireAt");
+    // A batch mutation owns the selection like a batch delete does.
+    expect(browserSource).toContain("const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value);");
+    expect(findFunction(browserSource, "retainCheckedKeys").getText()).toContain("loadedKeyRaws.has(keyRaw)");
+  });
+
+  it("updates the loaded TTL badge instead of rescanning every applied key", () => {
+    const applyMetadata = findFunction(browserSource, "applyBatchExpiryMetadata").getText();
+    const applyTtl = findFunction(browserSource, "applyKeyTtlMetadata").getText();
+
+    expect(applyTtl).toContain("updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, nextKeyInfo)");
+    expect(applyTtl).toContain("recordKeyTtlObservedAt(nextKeyInfo)");
+    expect(applyTtl).toContain("updateRedisKeyTreeLeafMetadata(treeIndex, nextKeyInfo)");
+    expect(applyMetadata).toContain('policy.mode === "ttl" ? policy.ttl : -1');
+    // EXPIREAT with a past timestamp deletes the key, so the row must not keep a stale TTL.
+    expect(applyMetadata).toContain("onKeyDeleted(keyRaw)");
+    // One reactive refresh per batch, not one per selected key.
+    expect(applyMetadata.match(/noExpiryProjectionEpoch\.value\+\+/g) ?? []).toHaveLength(1);
+    expect(applyMetadata.match(/keyMetadataEpoch\.value\+\+/g) ?? []).toHaveLength(1);
+    expect(applyMetadata.match(/syncListTtlTimer\(\)/g) ?? []).toHaveLength(1);
+  });
+
+  it("ships the batch expiration copy in every supported locale", () => {
+    for (const [locale, source] of Object.entries(localeSources)) {
+      for (const key of ["batchExpiry:", "batchExpiryTitle:", "batchExpirySelected:", "batchExpiryApply:", "batchExpirySuccess:", "batchExpiryPartial:"]) {
+        expect(source, `${locale} is missing redis.${key}`).toContain(`    ${key}`);
+      }
+    }
+    // The dialog must resolve its copy through i18n instead of hard-coded text.
+    expect(browserSource).toContain('t("redis.batchExpiryTitle")');
+    expect(browserSource).toContain('t("redis.batchExpirySelected", { count: batchExpiryKeyRaws.length })');
+    expect(browserSource).toContain('t("redis.batchExpiryPartial", { success: summary.applied, failed: failed.size })');
   });
 });

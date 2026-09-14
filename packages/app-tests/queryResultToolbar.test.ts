@@ -52,7 +52,7 @@ test("query result toolbar reuses the production icon contract", () => {
   assert.match(contentArea, /<Wrench class="h-4 w-4"/);
   assert.match(contentArea, /<ChevronDown class="h-3\.5 w-3\.5"/);
   assert.match(viewSwitcher, /import \{ BarChart3, ListChecks, MessageSquareText \} from "@lucide\/vue"/);
-  assert.match(toolbarActions, /import \{ GitBranch, Gauge, Loader2, Upload \} from "@lucide\/vue"/);
+  assert.match(toolbarActions, /import \{ GitBranch, Gauge, Loader2, PlugZap, Upload \} from "@lucide\/vue"/);
   assert.match(editorToolbar, /@click="emit\('importResultArchive'\)"[\s\S]{0,100}<Download/);
   assert.match(toolbarActions, /@click="emit\('exportArchive'\)"[\s\S]{0,200}<Upload v-else/);
   assert.match(dataGrid, /return \{ label: t\("grid\.export"\), icon: Upload, children: items \};/);
@@ -112,12 +112,12 @@ test("appending a result run preserves the tab-strip scroll position", () => {
 
 test("the close-tab shortcut clears query results before closing the tab", () => {
   const app = source(appPath);
-  const closeShortcutStart = app.indexOf("if (isCloseTabShortcut(e, shortcuts))");
-  const closeShortcutEnd = app.indexOf("if (isSaveShortcut", closeShortcutStart);
-  const closeShortcut = app.slice(closeShortcutStart, closeShortcutEnd);
+  const closeSurfaceStart = app.indexOf("async function closeActiveSurface()");
+  const closeSurfaceEnd = app.indexOf("function activateMainContentSurface", closeSurfaceStart);
+  const closeSurface = app.slice(closeSurfaceStart, closeSurfaceEnd);
 
-  assert.ok(closeShortcutStart >= 0);
-  assert.ok(closeShortcut.indexOf("await queryStore.clearQueryResults(queryStore.activeTabId)") < closeShortcut.indexOf("queryStore.closeTab(queryStore.activeTabId)"));
+  assert.ok(closeSurfaceStart >= 0);
+  assert.ok(closeSurface.indexOf("await queryStore.clearQueryResults(queryStore.activeTabId)") < closeSurface.indexOf("queryStore.closeTab(queryStore.activeTabId)"));
 });
 
 test("the configurable results pane shortcut only toggles existing output", () => {

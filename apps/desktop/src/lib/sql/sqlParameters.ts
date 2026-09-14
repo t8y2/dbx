@@ -1278,6 +1278,13 @@ function collectNativeSqlServerParameters(sql: string, databaseType?: DatabaseTy
       i = collectSelectAssignmentVariables(sql, i + "select".length, declared, databaseType);
       continue;
     }
+    if (matchesWord(sql, i, "get")) {
+      const diagnosticsEnd = readGetDiagnosticsEnd(sql, i);
+      if (diagnosticsEnd !== null) {
+        i = collectSetStatementVariables(sql, diagnosticsEnd, declared, databaseType);
+        continue;
+      }
+    }
     if ((matchesWord(sql, i, "create") || matchesWord(sql, i, "alter")) && isRoutineDefinitionStart(sql, i)) {
       i = collectRoutineDefinitionVariables(sql, i, declared, databaseType);
       continue;
@@ -1524,6 +1531,16 @@ function collectExecNamedArgumentStarts(sql: string, start: number, ignoredStart
     i += 1;
   }
   return i;
+}
+
+// MySQL's GET DIAGNOSTICS writes its results into the user variables on the left
+// of each assignment (`GET DIAGNOSTICS CONDITION 1 @err = MESSAGE_TEXT`), exactly
+// as SET and SELECT ... INTO do. Returns the offset just past the statement's
+// leading keywords, or null when `start` is an ordinary `get` identifier.
+function readGetDiagnosticsEnd(sql: string, start: number): number | null {
+  let keyword = readNextKeyword(sql, start + "get".length);
+  if (keyword?.word === "current" || keyword?.word === "stacked") keyword = readNextKeyword(sql, keyword.end);
+  return keyword?.word === "diagnostics" ? keyword.end : null;
 }
 
 function isRoutineDefinitionStart(sql: string, start: number): boolean {

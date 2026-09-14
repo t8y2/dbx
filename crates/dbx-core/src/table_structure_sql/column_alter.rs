@@ -984,10 +984,23 @@ pub(super) fn build_sqlite_existing_column_sql(
         return Vec::new();
     };
     let mut statements = Vec::new();
+    // Tri-state: an unset auto_increment flag inherits the original value; only an
+    // explicit toggle (SQLite cannot add or drop AUTOINCREMENT without a rebuild)
+    // counts as an unsupported change.
+    let original_auto_increment = original.extra.as_deref().is_some_and(|extra| {
+        let lower = extra.to_ascii_lowercase();
+        lower.contains("auto_increment")
+            || lower.contains("autoincrement")
+            || lower.contains("identity")
+            || lower.contains("serial")
+    });
+    let auto_increment_changed =
+        column.extra.as_ref().and_then(|e| e.auto_increment).is_some_and(|value| value != original_auto_increment);
     let unsupported_change = column.data_type.trim() != original.data_type.trim()
         || column.is_nullable != original.is_nullable
         || normalize_default(Some(&column.default_value)) != original_default(column)
-        || clean(&column.comment) != original_comment(column);
+        || clean(&column.comment) != original_comment(column)
+        || auto_increment_changed;
     if column.name != original.name {
         statements.push(format!(
             "ALTER TABLE {table} RENAME COLUMN {} TO {};",

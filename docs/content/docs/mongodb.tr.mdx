@@ -99,14 +99,30 @@ GridFS çalışma alanı bucket'ları ve dosyaları yönetir:
 
 Bir bucket'ı silmek dosyalarını ve parçalarını kaldırır. Üretimde bunu yapmadan önce bucket adını ve yedeği doğrulayın.
 
-## Kopyalama ve Dışa Aktarma
+## İçe ve Dışa Aktarma
 
-- Geçerli belgeyi, seçili belgeleri ya da alan değerlerini kopyalayın
-- Düz JSON ya da tür bilgisini koruyan Genişletilmiş JSON olarak kopyalayın
-- Izgara sonucundan çoklu biçim kopyalama ve dışa aktarma kullanın
-- Bir MongoDB `find` sonucunu dışa aktarma; yalnızca görüntülenen sayfayla sınırlı kalmaz, sorgu ve dışa aktarma sınırlarına tabi olarak sonucun tamamını kapsar
+Koleksiyon belgelerinin CSV/JSON içe aktarma ve CSV/NDJSON dışa aktarma iş akışı, ilişkisel Tablo İçe Aktarma’dan ayrıdır. Her CSV satırı bir belge olur, iç içe değerler korunur ve `$oid`, `$date` gibi Extended JSON türleri saklanabilir.
 
-Büyük bir koleksiyonu dışa aktarmadan önce filtreleri daraltın; sunucu imleç kullanımını, ağ aktarımını ve yerel dosya boyutunu izleyin.
+### Veri içe aktarma
+
+1. Bir koleksiyona sağ tıklayıp **Veri içe aktar**’ı seçin.
+2. Bir `.csv`, `.json` veya `.ndjson` dosyası seçin. Masaüstü yerel yolu okur; Web geçici bir sunucu dosyasına yükler.
+3. Kodlama, ayırıcı, başlık, boş değer ve tür ayarlarını önizlemeyle doğrulayın.
+4. Yalnızca ekleme yazımını onaylayın. Yinelenen `_id` içe aktarmayı durdurur. Gönderilmiş toplu işler geri alınmaz.
+
+CSV, MongoDB Compass ile aynıdır: başlık satırı, noktalı iç içe alanlar (`address.city`), dizi dizinleri (`tags[0]`, `matrix[0][1]`), 24 karakterlik onaltılık ObjectId, ISO-8601 tarih ve boş hücreler null. İçe aktarma sütun türlerini çıkarmak için ilk 1000 satırı örnekler; `_id` onaltılığı ObjectId olarak geri yüklenir ve `recognizeObjectIdHex` bunu diğer sütunlara genişletir. JSON/NDJSON Extended JSON (`$oid`, `$date`) kullanır. Tüm metin kipi her hücreyi metin tutar.
+
+Tür doğruluğu: `Double` dışa aktarılıp içe aktarıldığında `Decimal128` olur (ondalık metin için kayıpsız). `_id` olmayan ObjectId alanları `recognizeObjectIdHex` açık olmadıkça String olarak gider gelir. Küçük `Int64` değerleri `Int32`'ye daralabilir; ISO tarih biçimli dizeler `DateTime` olur. Extended JSON türleri (`$binary`, `$regularExpression`, `$timestamp`, `$minKey`, `$maxKey`, `$code`) JSON metin hücreleri aracılığıyla gider gelir. Boş dizi `[]` ve boş nesne `{}` doğru şekilde gider gelir.
+
+İlk sürüm sınırları: yalnızca ekleme (truncate veya upsert yok), alan başına tür geçersiz kılma yok, CSV dışa aktarma ilk 10000 belgeden alanları keşfeder (sonraki alanlar sessizce atılır; değişken şemalar için NDJSON kullanın), JSON dizi dışa aktarma biçimi yok, Excel/GridFS/BSON ikili içe aktarma yok ve başarısız toplu işler otomatik yeniden denenmez.
+
+### Veri dışa aktarma
+
+- Bir koleksiyona sağ tıklayıp **Veri dışa aktar**, ardından CSV veya NDJSON seçin. Tablo dışa aktarmada olduğu gibi kaydetme iletişim kutusu hemen açılır.
+- CSV iç içe nesneleri noktalı sütunlar (`address.city`) ve dizileri dizinli sütunlar (`tags[0]`, `tags[1]`) olarak yazar. NDJSON her satıra bir kanonik Extended JSON belgesi yazar.
+- 256’dan fazla ayırt edici alanı olan koleksiyonlar NDJSON kullanmalıdır.
+
+Yalnızca görünen seçim gerekiyorsa, ızgaradan geçerli belgeyi, seçili belgeleri veya alan değerlerini düz JSON ya da Extended JSON olarak kopyalayabilirsiniz.
 
 ## Güvenlik ve Uyumluluk Sınırları
 

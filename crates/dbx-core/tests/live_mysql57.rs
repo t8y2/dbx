@@ -14,7 +14,9 @@ use dbx_core::query_result_export::{export_query_result_core, ExportStatus, Quer
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
 use dbx_core::sql_file_import::execute_sql_file_path;
 use dbx_core::storage::Storage;
-use dbx_core::table_import::parse_xlsx_file;
+use dbx_core::table_import::{
+    build_import_insert_batch_from_rows, parse_csv_bytes, parse_xlsx_file, TableImportColumnMapping,
+};
 use mysql_async::prelude::Queryable;
 use tokio_util::sync::CancellationToken;
 
@@ -509,6 +511,118 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         .collect::<BTreeSet<_>>();
     let expected_ids = (1..=250).collect::<BTreeSet<_>>();
     assert_eq!(exported_ids, expected_ids);
+}
+
+#[tokio::test]
+#[ignore = "requires a writable MySQL endpoint for issue #8803 regression coverage"]
+async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_values() {
+    let host = std::env::var("DBX_LIVE_MYSQL_EXPORT_HOST").expect("DBX_LIVE_MYSQL_EXPORT_HOST");
+    let port = std::env::var("DBX_LIVE_MYSQL_EXPORT_PORT").expect("DBX_LIVE_MYSQL_EXPORT_PORT").parse::<u16>().unwrap();
+    let user = std::env::var("DBX_LIVE_MYSQL_EXPORT_USER").expect("DBX_LIVE_MYSQL_EXPORT_USER");
+    let password = std::env::var("DBX_LIVE_MYSQL_EXPORT_PASSWORD").expect("DBX_LIVE_MYSQL_EXPORT_PASSWORD");
+    let database = std::env::var("DBX_LIVE_MYSQL_EXPORT_DATABASE").expect("DBX_LIVE_MYSQL_EXPORT_DATABASE");
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let table = format!("dbx_issue_8803_{}", &suffix[..8]);
+    let target_table = format!("dbx_issue_8803_target_{}", &suffix[..8]);
+    let connection_id = format!("live-mysql-issue-8803-{suffix}");
+    let config = live_mysql_query_export_config(&connection_id, &host, port, &user, &password, &database);
+    let dir = std::env::temp_dir().join(format!("dbx-live-issue-8803-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(config.id.clone(), config);
+
+    let cleanup_sql = format!("DROP TABLE IF EXISTS `{table}`, `{target_table}`");
+    let create_sql = format!("CREATE TABLE `{table}` (insert_time DATETIME NOT NULL, id INT NOT NULL)");
+    let create_target_sql = format!("CREATE TABLE `{target_table}` (insert_time DATETIME NOT NULL, id INT NOT NULL)");
+    let insert_sql = format!("INSERT INTO `{table}` (insert_time, id) VALUES ('2026-06-24 02:00:07', 695350)");
+    let _ = execute_sql_statement(&state, &connection_id, &database, &cleanup_sql, None, None).await;
+    execute_sql_statement(&state, &connection_id, &database, &create_sql, None, None).await.expect("create fixture");
+    execute_sql_statement(&state, &connection_id, &database, &insert_sql, None, None).await.expect("insert fixture");
+    execute_sql_statement(&state, &connection_id, &database, &create_target_sql, None, None)
+        .await
+        .expect("create import target");
+
+    let file_path = dir.join("issue-8803.csv");
+    let sql = format!("SELECT insert_time, id FROM `{table}`");
+    let request = QueryResultExportRequest {
+        export_id: format!("live-mysql-issue-8803-{suffix}"),
+        connection_id: connection_id.clone(),
+        database: database.clone(),
+        schema: None,
+        catalog: None,
+        sql: sql.clone(),
+        query_base_sql: sql,
+        setup_sql: Vec::new(),
+        database_type: DatabaseType::Mysql,
+        use_agent_cursor: false,
+        file_path: file_path.to_string_lossy().to_string(),
+        format: "csv".to_string(),
+        insert_mode: Default::default(),
+        include_sql_sheet: false,
+        page_size: 100,
+        row_limit: None,
+        total_rows: Some(1),
+        timeout_secs: Some(30),
+        keyset_optimization_enabled: false,
+        client_session_id: None,
+        execution_id: Some(format!("live-mysql-issue-8803-{suffix}")),
+        date_time_format: None,
+        csv_quote_mode: Default::default(),
+        export_table_name: None,
+        export_column_types: None,
+        column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
+        numeric_column_right_align: false,
+    };
+    export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
+
+    let csv = std::fs::read(&file_path).unwrap();
+    let parsed = parse_csv_bytes(&csv, 10).expect("DBX should parse its own CSV");
+    let mappings = parsed
+        .columns
+        .iter()
+        .map(|column| TableImportColumnMapping {
+            source_column: column.clone(),
+            target_column: column.clone(),
+            target_data_type: None,
+        })
+        .collect::<Vec<_>>();
+    let batch = build_import_insert_batch_from_rows(
+        &parsed.rows,
+        &parsed.columns,
+        &mappings,
+        &[("insert_time".to_string(), "DATETIME".to_string()), ("id".to_string(), "INT".to_string())],
+        &target_table,
+        &database,
+        &DatabaseType::Mysql,
+    )
+    .expect("build import batch")
+    .expect("import batch should exist");
+
+    eprintln!("issue #8803 raw CSV: {}", String::from_utf8_lossy(&csv));
+    eprintln!("issue #8803 import SQL: {}", batch.sql);
+    assert!(String::from_utf8_lossy(&csv).contains("=\"\"2026-06-24 02:00:07\"\""));
+    assert!(batch.sql.contains("'2026-06-24 02:00:07'"));
+    execute_sql_statement(&state, &connection_id, &database, &batch.sql, None, None)
+        .await
+        .expect("import exported temporal CSV");
+    let imported = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("SELECT DATE_FORMAT(insert_time, '%Y-%m-%d %H:%i:%s'), id FROM `{target_table}`"),
+        None,
+        None,
+    )
+    .await
+    .expect("query imported temporal row");
+    assert_eq!(imported.rows, vec![vec![serde_json::json!("2026-06-24 02:00:07"), serde_json::json!("695350")]]);
+
+    let cleanup_result = execute_sql_statement(&state, &connection_id, &database, &cleanup_sql, None, None).await;
+    cleanup_result.expect("cleanup fixture");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

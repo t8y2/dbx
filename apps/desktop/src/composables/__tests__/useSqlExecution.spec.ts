@@ -10,6 +10,7 @@ import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { createQueryEditorExecutionViewportOwnership } from "@/lib/editor/queryEditorExecutionViewport";
 import * as objectMetadataCache from "@/lib/metadata/objectMetadataCache";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
+import type { SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 
 vi.mock("vue-i18n", () => ({
   createI18n: () => ({ global: { locale: { value: "en" }, setLocaleMessage: vi.fn() } }),
@@ -246,6 +247,49 @@ describe("useSqlExecution", () => {
     await execution.tryExecute({ fullSql, selectedSql, cursorPos: selectionFrom, selectionFrom, selectionTo: fullSql.length - 1 });
 
     expect(executeCurrentSql).toHaveBeenCalledWith(selectedSql, { tabId: "tab-1", sourceOffset: selectionFrom });
+  });
+
+  it("keeps a toolbar snapshot bound to its owning tab when focus changes", async () => {
+    const fullSql = "SELECT active_value;\nSELECT selected_value;";
+    const selectedSql = "SELECT selected_value;";
+    const selectionFrom = fullSql.indexOf(selectedSql);
+    const activeTabValue = { ...queryTab("app"), id: "tab-a", sql: "SELECT active_value;" };
+    const executionTabValue = { ...queryTab("app"), id: "tab-b", sql: fullSql };
+    const activeTab = ref<QueryTab | undefined>(activeTabValue);
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("mysql"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [connection("mysql")];
+    queryStore.tabs = [activeTabValue, executionTabValue];
+    queryStore.activeTabId = activeTabValue.id;
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => undefined);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const resolveExecutableSql = vi.fn(async (snapshot: SqlExecutionSnapshot | undefined, tab?: QueryTab) => {
+      expect(tab?.id).toBe("tab-b");
+      return snapshot?.selectedSql ?? "";
+    });
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => activeTab.value?.sql ?? ""),
+      resolveExecutableSql,
+      activeOutputView,
+    });
+
+    await execution.tryExecute(
+      {
+        fullSql,
+        selectedSql,
+        cursorPos: selectionFrom,
+        selectionFrom,
+        selectionTo: fullSql.length,
+      },
+      { tabId: executionTabValue.id },
+    );
+
+    expect(resolveExecutableSql).toHaveBeenCalledWith(expect.objectContaining({ selectedSql }), executionTabValue);
+    expect(executeCurrentSql).toHaveBeenCalledWith(selectedSql, { tabId: executionTabValue.id, sourceOffset: selectionFrom });
   });
 
   it("expands preceding @set values in a selected shell-style statement", async () => {

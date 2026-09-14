@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
 #[cfg(feature = "postgres-legacy-tls")]
@@ -110,6 +110,7 @@ pub enum PostgresColumnDefaultState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostgresTablePartitionLocalObjects {
     pub has_primary_key: bool,
+    pub unique_constraints: BTreeSet<String>,
     pub foreign_keys: BTreeSet<String>,
     pub indexes: BTreeSet<String>,
     /// CHECK constraints with a local definition on this partition, as
@@ -122,9 +123,6 @@ pub struct PostgresTablePartitionLocalObjects {
 }
 
 fn pg_temporal_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
-    if let Ok(v) = row.try_get::<_, DateTime<Local>>(idx) {
-        return Some(serde_json::Value::String(format_pg_timestamptz(v)));
-    }
     if let Ok(v) = row.try_get::<_, NaiveDateTime>(idx) {
         return Some(serde_json::Value::String(v.to_string()));
     }
@@ -826,7 +824,7 @@ fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
     if let Ok(values) = row.try_get::<_, Vec<Option<uuid::Uuid>>>(idx) {
         return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
     }
-    if let Ok(values) = row.try_get::<_, Vec<Option<DateTime<Local>>>>(idx) {
+    if let Ok(values) = row.try_get::<_, Vec<Option<DateTime<Utc>>>>(idx) {
         return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(format_pg_timestamptz(v))));
     }
     if let Ok(values) = row.try_get::<_, Vec<Option<NaiveDateTime>>>(idx) {
@@ -870,7 +868,7 @@ fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
     None
 }
 
-fn format_pg_timestamptz(value: DateTime<Local>) -> String {
+fn format_pg_timestamptz(value: DateTime<Utc>) -> String {
     value.to_rfc3339()
 }
 
@@ -957,6 +955,17 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
         return true;
     }
 
+    // PostgreSQL's binary timestamptz decoder converts UTC into chrono::Local,
+    // which makes the DBX host timezone win over the server session timezone.
+    // Text output is formatted by PostgreSQL in the session timezone and keeps
+    // timestamp-without-time-zone values as wall-clock text as well.
+    if matches!(
+        col_type,
+        PgColType::Temporal { fallback: PgTemporalFallback::Probe | PgTemporalFallback::GenericArray }
+    ) {
+        return true;
+    }
+
     match pg_type.kind() {
         Kind::Enum(_) => false,
         Kind::Array(element_type) => Type::from_oid(element_type.oid()).is_none(),
@@ -967,6 +976,7 @@ fn pg_type_requires_text_protocol(pg_type: &Type, col_type: PgColType) -> bool {
 
 pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     let upper = type_name.to_uppercase();
+    let temporal_type_name = upper.strip_prefix('_').unwrap_or(&upper);
 
     if upper == "BYTEA" {
         return PgColType::Bytea;
@@ -986,11 +996,9 @@ pub(crate) fn classify_pg_type(type_name: &str) -> PgColType {
     if upper == "DATERANGE" {
         return PgColType::DateRange;
     }
-    if upper.contains("TIMESTAMP")
-        || upper == "DATE"
-        || upper == "TIME"
-        || upper == "TIMETZ"
-        || upper.contains("INTERVAL")
+    if temporal_type_name.contains("TIMESTAMP")
+        || matches!(temporal_type_name, "DATE" | "TIME" | "TIMETZ")
+        || temporal_type_name.contains("INTERVAL")
     {
         let fallback = if upper.starts_with('_') {
             PgTemporalFallback::GenericArray
@@ -1155,12 +1163,150 @@ fn pg_text_fallback_value_with_spatial(
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
             .or_else(|| split_pg_ewkt(value, false).map(|(value, srid)| (value, srid, true)))
             .unwrap_or_else(|| (serde_json::Value::String(value.to_string()), None, true)),
+        Some(PgColType::Temporal { fallback: PgTemporalFallback::GenericArray }) => {
+            pg_temporal_array_text_to_json(value)
+                .map(|value| (value, None, false))
+                .unwrap_or_else(|| (serde_json::Value::String(normalize_pg_temporal_text(value)), None, false))
+        }
+        Some(PgColType::Temporal { .. }) => (serde_json::Value::String(normalize_pg_temporal_text(value)), None, false),
         Some(_) => (serde_json::Value::String(value.to_string()), None, false),
         None => decode_pg_text_wkb(value)
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
             .or_else(|| split_pg_ewkt(value, true).map(|(value, srid)| (value, srid, true)))
             .unwrap_or_else(|| (serde_json::Value::String(value.to_string()), None, false)),
     }
+}
+
+/// Keep PostgreSQL's session-local wall clock while returning the same ISO
+/// shape that the grid formatter and editor already understand. PostgreSQL
+/// emits a numeric hour-only offset (for example `+08`) in text mode.
+fn normalize_pg_temporal_text(value: &str) -> String {
+    let Some(offset_start) = value.rfind(['+', '-']) else {
+        return value.to_string();
+    };
+    let (date_time, offset) = value.split_at(offset_start);
+    if date_time.as_bytes().get(10) != Some(&b' ') || !matches!(offset.len(), 3 | 6) {
+        return value.to_string();
+    }
+    let offset_bytes = offset.as_bytes();
+    let valid_offset = offset_bytes.first().is_some_and(|sign| matches!(sign, b'+' | b'-'))
+        && offset_bytes[1..].iter().enumerate().all(|(index, byte)| {
+            if offset.len() == 6 && index == 2 {
+                *byte == b':'
+            } else {
+                byte.is_ascii_digit()
+            }
+        });
+    if !valid_offset {
+        return value.to_string();
+    }
+
+    let mut normalized = String::with_capacity(value.len() + (offset.len() == 3) as usize * 3);
+    normalized.push_str(&date_time[..10]);
+    normalized.push('T');
+    normalized.push_str(&date_time[11..]);
+    normalized.push_str(offset);
+    if offset.len() == 3 {
+        normalized.push_str(":00");
+    }
+    normalized
+}
+
+fn pg_temporal_array_text_to_json(value: &str) -> Option<serde_json::Value> {
+    fn skip_whitespace(input: &[u8], cursor: &mut usize) {
+        while input.get(*cursor).is_some_and(u8::is_ascii_whitespace) {
+            *cursor += 1;
+        }
+    }
+
+    fn parse_quoted(input: &[u8], cursor: &mut usize) -> Option<String> {
+        if input.get(*cursor) != Some(&b'"') {
+            return None;
+        }
+        *cursor += 1;
+        let mut bytes = Vec::new();
+        while let Some(&byte) = input.get(*cursor) {
+            *cursor += 1;
+            match byte {
+                b'"' => return String::from_utf8(bytes).ok(),
+                b'\\' => {
+                    let escaped = *input.get(*cursor)?;
+                    *cursor += 1;
+                    bytes.push(escaped);
+                }
+                _ => bytes.push(byte),
+            }
+        }
+        None
+    }
+
+    fn parse_array(input: &[u8], cursor: &mut usize) -> Option<serde_json::Value> {
+        if input.get(*cursor) != Some(&b'{') {
+            return None;
+        }
+        *cursor += 1;
+        let mut values = Vec::new();
+        loop {
+            skip_whitespace(input, cursor);
+            match input.get(*cursor)? {
+                b'}' => {
+                    *cursor += 1;
+                    return Some(serde_json::Value::Array(values));
+                }
+                b'{' => values.push(parse_array(input, cursor)?),
+                b'"' => values.push(serde_json::Value::String(parse_quoted(input, cursor)?)),
+                _ => {
+                    let start = *cursor;
+                    while input.get(*cursor).is_some_and(|byte| !matches!(byte, b',' | b'}')) {
+                        *cursor += 1;
+                    }
+                    let token = std::str::from_utf8(input.get(start..*cursor)?).ok()?.trim();
+                    if token.eq_ignore_ascii_case("NULL") {
+                        values.push(serde_json::Value::Null);
+                    } else {
+                        values.push(serde_json::Value::String(token.to_string()));
+                    }
+                }
+            }
+            skip_whitespace(input, cursor);
+            if input.get(*cursor) == Some(&b',') {
+                *cursor += 1;
+            } else if input.get(*cursor) != Some(&b'}') {
+                return None;
+            }
+        }
+    }
+
+    fn normalize_array_value(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(normalize_array_value).collect())
+            }
+            serde_json::Value::String(value) => serde_json::Value::String(normalize_pg_temporal_text(&value)),
+            value => value,
+        }
+    }
+
+    let input = value.trim().as_bytes();
+    let mut cursor = 0;
+    // PostgreSQL prefixes arrays with dimension bounds when a lower bound is
+    // not one, for example `[0:1]={...}`. JSON has no lower-bound metadata,
+    // so skip the prefix and retain the array values themselves.
+    let mut has_dimension_bounds = false;
+    while input.get(cursor) == Some(&b'[') {
+        has_dimension_bounds = true;
+        let end = input.get(cursor..)?.iter().position(|byte| *byte == b']')? + cursor;
+        cursor = end + 1;
+    }
+    if has_dimension_bounds {
+        if input.get(cursor) != Some(&b'=') {
+            return None;
+        }
+        cursor += 1;
+    }
+    let parsed = parse_array(input, &mut cursor)?;
+    skip_whitespace(input, &mut cursor);
+    (cursor == input.len()).then(|| normalize_array_value(parsed))
 }
 
 fn decode_pg_text_wkb(value: &str) -> Option<super::wkb::DecodedGeometry> {
@@ -2283,16 +2429,10 @@ pub async fn connect_with_max_connections(
     fallback_timeout: Duration,
     max_connections: usize,
 ) -> Result<Pool, String> {
-    #[cfg(all(windows, target_vendor = "win7"))]
-    {
-        connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, None, max_connections).await
-    }
-
-    #[cfg(not(all(windows, target_vendor = "win7")))]
-    {
-        let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
-        connect_with_local_timezone_with_max_connections(url, fallback_timeout, &timezone, max_connections).await
-    }
+    // Leave the PostgreSQL session timezone untouched. PostgreSQL owns the
+    // timezone used for timestamptz text output; deriving one from DBX's host
+    // would make the client's OS timezone override the server configuration.
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, None, max_connections).await
 }
 
 /// Test-only thin wrappers (the library now connects through
@@ -2302,6 +2442,7 @@ async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, time
     connect_with_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
 }
 
+#[cfg(test)]
 async fn connect_with_local_timezone_with_max_connections(
     url: &str,
     fallback_timeout: Duration,
@@ -3672,6 +3813,9 @@ fn apply_partition_local_object_row(
 ) {
     match object_kind {
         "constraint" if object_type == "p" => entry.has_primary_key = true,
+        "constraint" if object_type == "u" && !object_name.is_empty() => {
+            entry.unique_constraints.insert(object_name);
+        }
         "constraint" if object_type == "f" && !object_name.is_empty() => {
             entry.foreign_keys.insert(object_name);
         }
@@ -4088,7 +4232,7 @@ async fn list_indexes_for_relations_with_sql(
             key_is_expression,
             column_opclasses: key_opclasses,
             key_options,
-            constraint_backed: false,
+            constraint_backed: pg_row_try_bool(row, 13).unwrap_or(false),
         });
     }
     Ok(result)
@@ -4115,7 +4259,8 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
-             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
+             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -4171,7 +4316,8 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                 AND a.attnum > 0 \
                ORDER BY pos.n \
              ) AS key_is_expression, \
-             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
+             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -4409,7 +4555,7 @@ fn postgres_table_partition_local_objects_for_relations_query_tiers() -> [&'stat
 fn postgres_table_partition_local_objects_for_relations_sql() -> &'static str {
     "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
      FROM pg_catalog.pg_constraint con \
-     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','f') \
+     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','u','f') \
        AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
      UNION ALL \
      SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
@@ -4448,7 +4594,7 @@ fn postgres_table_partition_local_objects_for_relations_sql() -> &'static str {
 fn postgres_table_partition_local_objects_for_relations_compat_sql() -> &'static str {
     "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
      FROM pg_catalog.pg_constraint con \
-     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','f') \
+     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','u','f') \
      UNION ALL \
      SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
      FROM pg_catalog.pg_constraint con \
@@ -4836,7 +4982,7 @@ fn postgres_table_partition_local_objects_sql() -> &'static str {
      FROM pg_catalog.pg_constraint con \
      JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     WHERE n.nspname = $1 AND c.relname = $2 AND con.contype IN ('p','f') \
+     WHERE n.nspname = $1 AND c.relname = $2 AND con.contype IN ('p','u','f') \
        AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
      UNION ALL \
      SELECT 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
@@ -7648,9 +7794,8 @@ async fn execute_query_with_max_rows_inner(
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
-    // Discard stale notices from infrastructure statements (e.g. the timezone
-    // SET issued at connect time) so only messages raised by this statement
-    // are attached to its result.
+    // Discard stale notices from infrastructure statements so only messages
+    // raised by this statement are attached to its result.
     let _ = drain_postgres_notices(client).await;
 
     let result = if postgres_statement_returns_rows(sql) {
@@ -7707,7 +7852,8 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
-             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
+             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7762,7 +7908,8 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                 AND a.attnum > 0 \
                ORDER BY pos.n \
              ) AS key_is_expression, \
-             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
+             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7896,7 +8043,7 @@ async fn list_indexes_with_sql(
                 key_is_expression,
                 column_opclasses: key_opclasses,
                 key_options,
-                constraint_backed: false,
+                constraint_backed: pg_row_try_bool(row, 12).unwrap_or(false),
             }
         })
         .collect())
@@ -9656,10 +9803,36 @@ mod tests {
     }
 
     #[test]
+    fn postgres_builtin_temporal_types_use_server_text_protocol() {
+        for (pg_type, type_name) in [
+            (&Type::TIMESTAMP, "timestamp"),
+            (&Type::TIMESTAMPTZ, "timestamptz"),
+            (&Type::DATE, "date"),
+            (&Type::TIME, "time"),
+            (&Type::TIMETZ, "timetz"),
+            (&Type::TIMESTAMP_ARRAY, "_timestamp"),
+            (&Type::TIMESTAMPTZ_ARRAY, "_timestamptz"),
+            (&Type::DATE_ARRAY, "_date"),
+            (&Type::TIME_ARRAY, "_time"),
+            (&Type::TIMETZ_ARRAY, "_timetz"),
+        ] {
+            assert!(
+                pg_type_requires_text_protocol(pg_type, classify_pg_type(type_name)),
+                "{type_name} should use PostgreSQL's session-formatted text output"
+            );
+        }
+        assert!(!pg_type_requires_text_protocol(&Type::INT4, PgColType::Other));
+    }
+
+    #[test]
     fn postgres_builtin_or_supported_type_keeps_binary_protocol() {
         assert!(!pg_type_requires_text_protocol(&Type::INT4, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::VARCHAR, PgColType::Other));
         assert!(!pg_type_requires_text_protocol(&Type::INT4_ARRAY, PgColType::GenericArray));
+        assert!(!pg_type_requires_text_protocol(
+            &Type::TIMESTAMPTZ,
+            PgColType::Temporal { fallback: PgTemporalFallback::Vector }
+        ));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Vector));
         assert!(!pg_scalar_type_requires_text_protocol(98_765, PgColType::Geometry));
     }
@@ -10017,8 +10190,15 @@ mod tests {
         assert_eq!(classify_pg_type("time"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("timetz"), PgColType::Temporal { fallback: PgTemporalFallback::Probe });
         assert_eq!(classify_pg_type("interval"), PgColType::Interval);
-        // 时间数组类型名在原实现中先进时间分支、解码失败后落到通用数组分支
+        // Temporal array type names use the generic array fallback after text decoding.
         assert_eq!(classify_pg_type("_timestamp"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
+        assert_eq!(
+            classify_pg_type("_timestamptz"),
+            PgColType::Temporal { fallback: PgTemporalFallback::GenericArray }
+        );
+        assert_eq!(classify_pg_type("_date"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
+        assert_eq!(classify_pg_type("_time"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
+        assert_eq!(classify_pg_type("_timetz"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
         assert_eq!(classify_pg_type("_interval"), PgColType::Temporal { fallback: PgTemporalFallback::GenericArray });
         // 同时命中时间关键字与 VECTOR( 前缀的类型名，原实现时间解码失败后走 vector 分支
         assert_eq!(classify_pg_type("vector(timestamp)"), PgColType::Temporal { fallback: PgTemporalFallback::Vector });
@@ -10040,7 +10220,6 @@ mod tests {
         assert_eq!(classify_pg_type("_bit"), PgColType::BitStringArray);
         assert_eq!(classify_pg_type("_varbit"), PgColType::BitStringArray);
         assert_eq!(classify_pg_type("_int4"), PgColType::GenericArray);
-        assert_eq!(classify_pg_type("_time"), PgColType::GenericArray);
         assert_eq!(classify_pg_type("vector"), PgColType::Vector);
         assert_eq!(classify_pg_type("vector(3)"), PgColType::Vector);
         assert_eq!(classify_pg_type("geometry"), PgColType::Geometry);
@@ -10100,6 +10279,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn postgres_temporal_text_fallback_keeps_session_wall_time_and_normalizes_offset() {
+        let temporal = PgColType::Temporal { fallback: PgTemporalFallback::Probe };
+        assert_eq!(
+            pg_text_fallback_value("2026-09-13 13:00:00+12", Some(temporal)),
+            (serde_json::json!("2026-09-13T13:00:00+12:00"), None)
+        );
+        assert_eq!(
+            pg_text_fallback_value("2026-09-13 01:00:00", Some(temporal)),
+            (serde_json::json!("2026-09-13 01:00:00"), None)
+        );
+    }
+
+    #[test]
+    fn postgres_temporal_text_array_fallback_preserves_values_and_nulls() {
+        let temporal = PgColType::Temporal { fallback: PgTemporalFallback::GenericArray };
+        assert_eq!(
+            pg_text_fallback_value(
+                r#"{"2026-09-13 13:00:00+12","2026-09-13 01:00:00-05:30",NULL,"NULL"}"#,
+                Some(temporal),
+            ),
+            (serde_json::json!(["2026-09-13T13:00:00+12:00", "2026-09-13T01:00:00-05:30", null, "NULL"]), None,)
+        );
+        assert_eq!(
+            pg_text_fallback_value(r#"[0:1]={{"2026-09-13 13:00:00+12"},{NULL}}"#, Some(temporal)),
+            (serde_json::json!([["2026-09-13T13:00:00+12:00"], [null]]), None,)
+        );
+    }
+
     struct DockerPostgres {
         name: String,
         port: u16,
@@ -10129,6 +10337,48 @@ mod tests {
         start_docker_postgres_image("postgres:16-alpine", &[]).await
     }
 
+    #[tokio::test]
+    async fn postgres_temporal_values_follow_server_timezone_and_preserve_grid_write_text() {
+        let Some(container) =
+            start_docker_postgres_image_with_postgres_args("postgres:16-alpine", &[], &["-c", "timezone=Etc/GMT-12"])
+                .await
+        else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        let client = pool.get().await.expect("checkout postgres");
+
+        let timezone: String = client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
+        assert_eq!(timezone, "Etc/GMT-12");
+
+        let result = execute_select_query(
+            &client,
+            "SELECT TIMESTAMP '2026-09-13 01:00:00' AS without_timezone, TIMESTAMPTZ '2026-09-13 01:00:00+00' AS with_timezone",
+            Instant::now(),
+            10,
+        )
+        .await
+        .expect("query temporal values");
+        assert_eq!(result.rows[0][0], serde_json::json!("2026-09-13 01:00:00"));
+        assert_eq!(result.rows[0][1], serde_json::json!("2026-09-13T13:00:00+12:00"));
+
+        let separator = if container.url().contains('?') { '&' } else { '?' };
+        let explicit_url = format!("{}{separator}options=-c%20TimeZone%3DUTC", container.url());
+        let explicit_pool = connect(&explicit_url, Duration::from_secs(5)).await.expect("connect explicit timezone");
+        let explicit_client = explicit_pool.get().await.expect("checkout explicit timezone");
+        let explicit_timezone: String = explicit_client.query_one("SHOW timezone", &[]).await.unwrap().get(0);
+        assert_eq!(explicit_timezone, "UTC");
+        let explicit_result = execute_select_query(
+            &explicit_client,
+            "SELECT TIMESTAMPTZ '2026-09-13 01:00:00+00' AS with_timezone",
+            Instant::now(),
+            10,
+        )
+        .await
+        .expect("query explicitly zoned temporal value");
+        assert_eq!(explicit_result.rows[0][0], serde_json::json!("2026-09-13T01:00:00+00:00"));
+    }
+
     // PostgreSQL 9.3 (pre-pg_sequence/pg_sequence_last_value) only ships an
     // amd64 image, so Apple Silicon hosts need explicit emulation.
     async fn start_docker_postgres_9_3() -> Option<DockerPostgres> {
@@ -10136,6 +10386,14 @@ mod tests {
     }
 
     async fn start_docker_postgres_image(image: &str, extra_args: &[&str]) -> Option<DockerPostgres> {
+        start_docker_postgres_image_with_postgres_args(image, extra_args, &[]).await
+    }
+
+    async fn start_docker_postgres_image_with_postgres_args(
+        image: &str,
+        extra_args: &[&str],
+        postgres_args: &[&str],
+    ) -> Option<DockerPostgres> {
         if !docker_ready() {
             eprintln!("skipping docker-backed postgres test because Docker is unavailable");
             return None;
@@ -10158,6 +10416,7 @@ mod tests {
                 &format!("{port}:5432"),
                 image,
             ])
+            .args(postgres_args)
             .status()
             .expect("start docker postgres");
         assert!(status.success(), "docker run postgres container should succeed");
@@ -11124,9 +11383,9 @@ mod tests {
     }
 
     #[test]
-    fn timestamptz_display_preserves_local_offset() {
-        let text = format_pg_timestamptz(Local::now());
-        assert!(!text.ends_with("+00:00") || Local::now().offset().local_minus_utc() == 0);
+    fn timestamptz_binary_fallback_uses_utc_instead_of_host_timezone() {
+        let value = "2026-09-13T01:00:00+00:00".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(format_pg_timestamptz(value), "2026-09-13T01:00:00+00:00");
     }
 
     // --- validate_postgres_ssl_paths ---
@@ -11710,7 +11969,7 @@ mod tests {
         assert!(info_compat_sql.contains("c.relkind IN ('r','p','f')"));
         assert!(info_compat_sql.contains("LIMIT 1"));
         assert!(local_objects_sql.contains("row_to_json(con)->>'conparentid'"));
-        assert!(local_objects_sql.contains("con.contype IN ('p','f')"));
+        assert!(local_objects_sql.contains("con.contype IN ('p','u','f')"));
         assert!(local_objects_sql.contains("i.inhrelid = idx.oid"));
         assert!(local_objects_sql.contains("con.contype = 'c' AND con.conislocal"));
         assert!(!local_objects_sql.contains("con.coninhcount = 0"));
@@ -13087,6 +13346,8 @@ mod tests {
             postgres_indexes_for_relations_compat_sql(),
         ] {
             assert!(sql.contains("ix.indisunique AND ix.indisvalid"));
+            assert!(sql.contains("AS constraint_backed"));
+            assert!(sql.contains("con.conindid = i.oid"));
         }
     }
 

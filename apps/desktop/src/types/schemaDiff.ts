@@ -5,6 +5,11 @@ export interface SchemaDiffTableMapping {
   targetTable: string;
 }
 
+export interface SchemaDiffRoutineMapping {
+  sourceRoutine: string;
+  targetRoutine: string;
+}
+
 export interface SchemaDiffCompareOptions {
   tables: boolean;
   primaryKeys: boolean;
@@ -38,6 +43,13 @@ export interface SchemaDiffCompareOptions {
    */
   selectedTables: string[] | undefined;
   tableMappings?: SchemaDiffTableMapping[];
+  /**
+   * Explicitly selected routine keys (`name` or `name(args)`) to compare.
+   * `undefined` means no restriction (all functions when `functions` is on).
+   * `[]` means restriction enabled with nothing selected.
+   */
+  selectedRoutines: string[] | undefined;
+  routineMappings?: SchemaDiffRoutineMapping[];
   detectRenames: boolean;
   renameThreshold: number;
   detectTableRenames: boolean;
@@ -109,6 +121,8 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   tableFilterPriority: "exclude",
   selectedTables: undefined,
   tableMappings: [],
+  selectedRoutines: undefined,
+  routineMappings: [],
   detectRenames: false,
   renameThreshold: 0.5,
   detectTableRenames: false,
@@ -128,7 +142,7 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   checks: true,
   exclusions: false,
   views: true,
-  functions: false,
+  functions: true,
   indexes: true,
   sequences: false,
   triggers: true,
@@ -144,6 +158,8 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   tableFilterPriority: "exclude",
   selectedTables: undefined,
   tableMappings: [],
+  selectedRoutines: undefined,
+  routineMappings: [],
   detectRenames: false,
   renameThreshold: 0.5,
   detectTableRenames: false,
@@ -164,11 +180,16 @@ export function getDefaultOptionsForDbType(dbType: string): SchemaDiffCompareOpt
 
 export function normalizeSchemaDiffCompareOptions(options: Partial<SchemaDiffCompareOptions> | null | undefined, dbType = "postgres"): SchemaDiffCompareOptions {
   const defaults = getDefaultOptionsForDbType(dbType);
-  return {
+  const normalized: SchemaDiffCompareOptions = {
     ...defaults,
     ...options,
     tableMappings: Array.isArray(options?.tableMappings) ? options.tableMappings.map((mapping) => ({ ...mapping })) : defaults.tableMappings,
+    routineMappings: Array.isArray(options?.routineMappings) ? options.routineMappings.map((mapping) => ({ ...mapping })) : defaults.routineMappings,
+    selectedRoutines: options?.selectedRoutines === undefined ? defaults.selectedRoutines : options.selectedRoutines ? [...options.selectedRoutines] : options.selectedRoutines,
   };
+  // Table compare owns views; turning tables off must not leave views loading metadata alone.
+  if (!normalized.tables) normalized.views = false;
+  return normalized;
 }
 
 export function createEmptyConfig(id: string, name: string): SchemaDiffConfig {

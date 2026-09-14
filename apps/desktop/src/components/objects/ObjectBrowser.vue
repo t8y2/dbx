@@ -433,6 +433,7 @@ type ObjectBrowserScroller =
 // type loose because vue-virtual-scroller does not ship complete ref typings.
 const listScrollerRef = ref<ObjectBrowserScroller | null>(null);
 const gridScrollerRef = ref<ObjectBrowserScroller | null>(null);
+const objectListHeaderRef = ref<HTMLElement | null>(null);
 let viewportFrame = 0;
 let restoreViewportFrame = 0;
 
@@ -463,6 +464,7 @@ function emitViewportChange(scrollTop: number) {
 }
 
 function onObjectsScroll() {
+  syncObjectListHeaderScroll();
   if (viewportFrame) return;
   viewportFrame = window.requestAnimationFrame(() => {
     viewportFrame = 0;
@@ -470,6 +472,17 @@ function onObjectsScroll() {
     if (!el) return;
     emitViewportChange(el.scrollTop);
   });
+}
+
+// The list header sits outside the row scroller and is clipped (overflow:
+// hidden), so keep its programmatic scrollLeft aligned with the scroller's
+// horizontal position on every scroll, resize, and (re)attach.
+function syncObjectListHeaderScroll() {
+  if (!isListView.value) return;
+  const header = objectListHeaderRef.value;
+  const el = scrollerElement(listScrollerRef.value);
+  if (!header || !el) return;
+  if (header.scrollLeft !== el.scrollLeft) header.scrollLeft = el.scrollLeft;
 }
 
 function flushObjectBrowserViewport() {
@@ -522,6 +535,7 @@ watch(
     if (!el) return;
     el.addEventListener("scroll", onObjectsScroll, { passive: true });
     restoreObjectBrowserViewport();
+    nextTick(() => syncObjectListHeaderScroll());
     onCleanup(() => el.removeEventListener("scroll", onObjectsScroll));
   },
   { flush: "post" },
@@ -697,6 +711,14 @@ const selectedTableRows = computed(() => {
 const selectedTableCount = computed(() => selectedTableRows.value.length);
 const canBatchDropCascade = computed(() => selectedTableCount.value > 0 && supportsDropTableCascade(effectiveDatabaseType.value));
 const canBatchTruncateCascade = computed(() => selectedTableCount.value > 0 && supportsTruncateTableCascade(effectiveDatabaseType.value));
+
+// Column resizes change the scrollable content width, so the header's clamped
+// scrollLeft has to be re-aligned right after the DOM updates. Registered here
+// (after every computed it transitively reads) because watch sources are
+// evaluated eagerly at registration time.
+watch([objectGridMinWidth, objectColumnWidths], () => {
+  nextTick(() => syncObjectListHeaderScroll());
+});
 const allVisibleTablesSelected = computed(() => visibleSelectableRows.value.length > 0 && visibleSelectableRows.value.every((row) => selectedTableIds.value.has(row.id)));
 const batchDropProgressPercent = computed(() => (batchDropProgress.value.total > 0 ? Math.round((batchDropProgress.value.completed / batchDropProgress.value.total) * 100) : 0));
 
@@ -3470,102 +3492,104 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
     <div v-else class="flex min-h-0 min-w-0 flex-1" :class="{ 'event-editor-layout': isEventEditor }">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
-          <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
-            <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
-              <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
-                <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-                <Square v-else class="h-3.5 w-3.5" />
-              </button>
-              <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
-                <GripVertical class="h-3 w-3" />
+        <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div ref="objectListHeaderRef" class="h-7 shrink-0 overflow-hidden">
+            <div class="grid h-7 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
+              <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
+                <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+                  <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+                  <Square v-else class="h-3.5 w-3.5" />
+                </button>
+                <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
-                <span class="truncate">{{ t("objects.name") }}</span>
-                <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 260, $event)">
-                <GripVertical class="h-3 w-3" />
+              <div class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('name')">
+                  <span class="truncate">{{ t("objects.name") }}</span>
+                  <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('name', $event)" @dblclick="resetObjectColumnWidth('name', 260, $event)">
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
-                <span class="truncate">{{ t("objects.type") }}</span>
-                <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
-                <GripVertical class="h-3 w-3" />
+              <div class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('type')">
+                  <span class="truncate">{{ t("objects.type") }}</span>
+                  <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('type', $event)" @dblclick="resetObjectColumnWidth('type', 110, $event)">
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div v-if="showObjectRowStats" class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-                <span class="truncate">{{ objectRowsLabel }}</span>
-                <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div
-                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
-                @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
-              >
-                <GripVertical class="h-3 w-3" />
+              <div v-if="showObjectRowStats" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                  <span class="truncate">{{ objectRowsLabel }}</span>
+                  <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+                  @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-                <span class="truncate">{{ t("objects.size") }}</span>
-                <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div
-                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
-                @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
-              >
-                <GripVertical class="h-3 w-3" />
+              <div v-if="showObjectSizeStats" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                  <span class="truncate">{{ t("objects.size") }}</span>
+                  <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+                  @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
-                <span class="truncate">{{ t("objects.createdAt") }}</span>
-                <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div
-                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                @mousedown="onObjectColumnResizeStart('created_at', $event)"
-                @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
-              >
-                <GripVertical class="h-3 w-3" />
+              <div v-if="hasCreatedAt" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('created_at')">
+                  <span class="truncate">{{ t("objects.createdAt") }}</span>
+                  <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('created_at', $event)"
+                  @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
-                <span class="truncate">{{ t("objects.updatedAt") }}</span>
-                <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div
-                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                @mousedown="onObjectColumnResizeStart('updated_at', $event)"
-                @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
-              >
-                <GripVertical class="h-3 w-3" />
+              <div v-if="hasUpdatedAt" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('updated_at')">
+                  <span class="truncate">{{ t("objects.updatedAt") }}</span>
+                  <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+                  @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
-            </div>
-            <div class="relative flex min-w-0 items-center">
-              <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
-                <span class="truncate">{{ t("objects.comment") }}</span>
-                <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-              </button>
-              <div
-                class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                @mousedown="onObjectColumnResizeStart('comment', $event)"
-                @dblclick="resetObjectColumnWidth('comment', 260, $event)"
-              >
-                <GripVertical class="h-3 w-3" />
+              <div class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" @click="toggleSort('comment')">
+                  <span class="truncate">{{ t("objects.comment") }}</span>
+                  <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('comment', $event)"
+                  @dblclick="resetObjectColumnWidth('comment', 260, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
               </div>
             </div>
           </div>
-          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ '--dbx-object-grid-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
               <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                 <div
@@ -4136,6 +4160,47 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 .object-browser-scroller {
   will-change: scroll-position;
   contain: content;
+  overflow-x: auto;
+}
+
+/* Keep the horizontal track discoverable when the platform uses overlay
+   scrollbars, while leaving the native vertical scrollbar in place. */
+.object-browser-scroller::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.object-browser-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.object-browser-scroller::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: rgba(82, 82, 82, 0.28);
+  background: color-mix(in oklch, var(--foreground) 28%, transparent);
+  background-clip: padding-box;
+}
+
+.object-browser-scroller:hover::-webkit-scrollbar-thumb {
+  border: 0;
+  background: rgba(82, 82, 82, 0.45);
+  background: color-mix(in oklch, var(--foreground) 45%, transparent);
+}
+
+html.dbx-legacy-webview.dark .object-browser-scroller::-webkit-scrollbar-thumb {
+  background: rgba(212, 212, 216, 0.28);
+}
+
+html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-thumb {
+  background: rgba(212, 212, 216, 0.45);
+}
+
+/* The scroller itself stays viewport-width so its vertical scrollbar remains
+   visible at the right edge; the row content inside scrolls horizontally past
+   that width instead (issue #8885). */
+.object-browser-scroller :deep(.vue-recycle-scroller__item-wrapper) {
+  min-width: var(--dbx-object-grid-min-width, 0px);
 }
 
 .object-browser-scroller :deep(.vue-recycle-scroller__item-view) {

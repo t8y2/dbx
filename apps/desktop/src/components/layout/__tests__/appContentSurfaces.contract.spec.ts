@@ -10,7 +10,7 @@ const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "ut
 // assertions pin the sibling order so a future merge cannot re-introduce it.
 describe("App main content surface structure", () => {
   it("hides only the editor workspace via the surface guard, never the special pages", () => {
-    const guard = 'v-show="!driverStoreActive && !settingsStore.settingsPageActive"';
+    const guard = 'v-show="!driverStoreActive && !pluginCenterActive && !settingsStore.settingsPageActive"';
     // The empty-state slot shares the query surface's visibility guard.
     expect(appSource.split(guard).length - 1).toBe(1);
 

@@ -33,7 +33,7 @@ describe("ConnectionDialog service deep-link hydration", () => {
   });
 
   it("keeps failed one-time connections available for error inspection and retry", () => {
-    const saveStart = source.indexOf("async function save()");
+    const saveStart = source.indexOf("async function save(");
     const saveEnd = source.indexOf('const dialogTitle = ref("")', saveStart);
     const saveBody = source.slice(saveStart, saveEnd);
 

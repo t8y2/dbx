@@ -148,6 +148,7 @@ fn parse_epoch_temporal(value: &str) -> Option<NaiveDateTime> {
 }
 
 fn parse_temporal(value: &str, preferred_pattern: Option<&str>) -> Option<ParsedTemporal> {
+    let value = strip_csv_force_text_wrapper(value);
     preferred_pattern
         .filter(|pattern| !pattern.trim().is_empty())
         .and_then(|pattern| parse_with_pattern(value, pattern))
@@ -222,6 +223,10 @@ pub fn format_temporal_export_value(value: &Value, data_type: Option<&str>, patt
 
 fn active_temporal_pattern(pattern: Option<&str>) -> Option<&str> {
     pattern.filter(|pattern| !pattern.trim().is_empty())
+}
+
+pub(crate) fn strip_csv_force_text_wrapper(value: &str) -> &str {
+    value.strip_prefix("=\"").and_then(|value| value.strip_suffix('"')).unwrap_or(value)
 }
 
 pub fn format_temporal_export_row_cow<'a>(
@@ -631,6 +636,15 @@ mod tests {
             format_temporal_export_row_with_string_types_for_csv_cow(&row, &column_types, None, true).into_owned(),
             vec![json!("=\"2024-02-25\""), json!(42)]
         );
+    }
+
+    #[test]
+    fn import_normalization_unwraps_csv_force_text_temporal_values() {
+        assert_eq!(
+            normalize_temporal_import_value(&json!("=\"2026-06-24 02:00:07\""), Some("DATETIME"), None),
+            json!("2026-06-24 02:00:07")
+        );
+        assert_eq!(normalize_temporal_import_value(&json!("=\"2026-06-24\""), Some("DATE"), None), json!("2026-06-24"));
     }
 
     #[test]

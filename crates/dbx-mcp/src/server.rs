@@ -605,7 +605,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_query",
-        description = "Execute a SQL query on a database connection (max 100 rows returned)"
+        description = "Execute a SQL query on a database connection (max 100 rows returned). For backwards compatibility, multi-statement scripts and stored-procedure scripts are routed through the dialect-aware batch executor."
     )]
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
@@ -623,6 +623,18 @@ impl DbxMcpServer {
                 "REDIS_COMMAND_REQUIRED",
                 "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
             );
+        }
+        if sql_requires_batch_execution(&request.sql, connection.db_type) {
+            return self
+                .execute_batch_request(ExecuteBatchQueryRequest {
+                    selector: ConnectionSelector { connection_id: Some(connection.id.clone()), connection_name: None },
+                    database: request.database.clone(),
+                    sql: request.sql.clone(),
+                    session_id: request.session_id.clone(),
+                    continue_on_error: None,
+                    use_transaction: None,
+                })
+                .await;
         }
         // Database discovery does not require a default database. In a
         // narrowed MCP scope it must never reveal names outside the allowlist,
@@ -751,6 +763,10 @@ impl DbxMcpServer {
         if let Err(error) = self.ensure_tool_allowed("dbx_execute_batch").await {
             return error;
         }
+        self.execute_batch_request(request).await
+    }
+
+    async fn execute_batch_request(&self, request: ExecuteBatchQueryRequest) -> CallToolResult {
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -1836,6 +1852,17 @@ fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolR
         }
     }
     tool_error(default_code, error)
+}
+
+/// Keep older MCP clients compatible with the original single-query tool when
+/// they send a complete SQL script. The batch executor removes client-side
+/// commands such as MySQL `DELIMITER` and preserves semicolons inside routine
+/// bodies before dispatching statements to the database.
+fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool {
+    if sql.lines().any(|line| line.trim_start().to_ascii_lowercase().starts_with("delimiter ")) {
+        return true;
+    }
+    dbx_core::sql::sql_execution_plan_for_database(sql, database_type).statements.len() > 1
 }
 
 /// Maximum rows returned per statement in a `dbx_execute_batch` call, matching
@@ -4051,6 +4078,17 @@ mod tests {
         assert!(confirmed_batch_sql_block_reason("INSERT INTO t VALUES (1)", postgres_db_type, None).is_none());
         // Unparseable SQL fails closed (treated as a write).
         assert!(confirmed_batch_sql_block_reason("NOT VALID SQL ;;;", postgres_db_type, confirmed).is_some());
+    }
+
+    #[test]
+    fn execute_query_routes_scripts_to_the_dialect_aware_batch_path() {
+        assert!(sql_requires_batch_execution("SELECT 1; SELECT 2", DatabaseType::Postgres));
+        assert!(sql_requires_batch_execution(
+            "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;",
+            DatabaseType::Mysql
+        ));
+        assert!(!sql_requires_batch_execution("SELECT 1;", DatabaseType::Mysql));
+        assert!(!sql_requires_batch_execution("SELECT 1", DatabaseType::Mysql));
     }
 
     #[test]

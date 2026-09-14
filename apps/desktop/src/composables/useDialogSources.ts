@@ -14,6 +14,7 @@ const showSqlFileDialog = ref(false);
 const showDiagramDialog = ref(false);
 const showDocsDialog = ref(false);
 const showTableImportDialog = ref(false);
+const showMongoImportDialog = ref(false);
 const showTableDataGenerateDialog = ref(false);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
@@ -45,6 +46,8 @@ const transferPrefillTargetSchema = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
 const schemaDiffPrefillSchema = ref("");
+const schemaDiffPrefillSelectedRoutines = ref<string[] | undefined>(undefined);
+const schemaDiffPrefillResultTab = ref<"tables" | "routines" | "">("");
 const schemaDiffSessionId = ref<string | null>(null);
 const dataComparePrefillConnectionId = ref("");
 const dataComparePrefillDatabase = ref("");
@@ -66,6 +69,9 @@ const tableImportPrefillConnectionId = ref("");
 const tableImportPrefillDatabase = ref("");
 const tableImportPrefillSchema = ref("");
 const tableImportPrefillTable = ref("");
+const mongoImportPrefillConnectionId = ref("");
+const mongoImportPrefillDatabase = ref("");
+const mongoImportPrefillCollection = ref("");
 const tableDataGeneratePrefillConnectionId = ref("");
 const tableDataGeneratePrefillDatabase = ref("");
 const tableDataGeneratePrefillSchema = ref("");
@@ -146,6 +152,8 @@ export function useDialogSources() {
           schemaDiffPrefillConnectionId.value = v.connectionId;
           schemaDiffPrefillDatabase.value = v.database;
           schemaDiffPrefillSchema.value = v.schema ?? "";
+          schemaDiffPrefillSelectedRoutines.value = v.selectedRoutines;
+          schemaDiffPrefillResultTab.value = v.preferredResultTab ?? "";
           schemaDiffSessionId.value = null;
           showSchemaDiffDialog.value = true;
           connectionStore.schemaDiffSource = null;
@@ -238,6 +246,19 @@ export function useDialogSources() {
           tableImportPrefillTable.value = v.tableName ?? "";
           showTableImportDialog.value = true;
           connectionStore.tableImportSource = null;
+        }
+      },
+    );
+
+    watch(
+      () => connectionStore.mongoImportSource,
+      (v) => {
+        if (v) {
+          mongoImportPrefillConnectionId.value = v.connectionId;
+          mongoImportPrefillDatabase.value = v.database;
+          mongoImportPrefillCollection.value = v.collection;
+          showMongoImportDialog.value = true;
+          connectionStore.mongoImportSource = null;
         }
       },
     );
@@ -497,6 +518,7 @@ export function useDialogSources() {
     showDiagramDialog,
     showDocsDialog,
     showTableImportDialog,
+    showMongoImportDialog,
     showTableDataGenerateDialog,
     showFieldLineageDialog,
     showDatabaseSearchDialog,
@@ -524,6 +546,8 @@ export function useDialogSources() {
     schemaDiffPrefillConnectionId,
     schemaDiffPrefillDatabase,
     schemaDiffPrefillSchema,
+    schemaDiffPrefillSelectedRoutines,
+    schemaDiffPrefillResultTab,
     schemaDiffSessionId,
     dataComparePrefillConnectionId,
     dataComparePrefillDatabase,
@@ -545,6 +569,9 @@ export function useDialogSources() {
     tableImportPrefillDatabase,
     tableImportPrefillSchema,
     tableImportPrefillTable,
+    mongoImportPrefillConnectionId,
+    mongoImportPrefillDatabase,
+    mongoImportPrefillCollection,
     tableDataGeneratePrefillConnectionId,
     tableDataGeneratePrefillDatabase,
     tableDataGeneratePrefillSchema,

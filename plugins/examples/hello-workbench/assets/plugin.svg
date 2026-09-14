@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="DBX Hello Workbench">
+  <defs>
+    <linearGradient id="background" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7c3aed" />
+      <stop offset="1" stop-color="#2563eb" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#background)" />
+  <path d="M18 21h28v18H31l-8 7v-7h-5V21Z" fill="white" opacity=".96" />
+  <circle cx="26" cy="30" r="2.5" fill="#7c3aed" />
+  <circle cx="32" cy="30" r="2.5" fill="#6366f1" />
+  <circle cx="38" cy="30" r="2.5" fill="#2563eb" />
+</svg>

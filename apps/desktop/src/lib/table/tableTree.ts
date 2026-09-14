@@ -7,7 +7,7 @@ export function normalizeDatabaseObjectName(name: string): string {
   return name.trim();
 }
 
-export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string }): TreeNode[] {
+export function buildTableTreeNodes({ nodeId, connectionId, database, schema, tables, catalog, includeSchemaInId = false }: { nodeId: string; connectionId: string; database: string; schema?: string; tables: TableInfo[]; catalog?: string; includeSchemaInId?: boolean }): TreeNode[] {
   const entries = tables.flatMap((table) => {
     const name = normalizeDatabaseObjectName(table.name);
     if (!name) return [];
@@ -19,7 +19,7 @@ export function buildTableTreeNodes({ nodeId, connectionId, database, schema, ta
         connectionId,
         database,
         schema: childSchema,
-        includeSchemaInId: false,
+        includeSchemaInId,
         name,
         objectType,
         tableType: table.table_type,

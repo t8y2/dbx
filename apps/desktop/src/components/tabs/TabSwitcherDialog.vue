@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
-import { useConnectionStore } from "@/stores/connectionStore";
-import { connectionIconType } from "@/lib/connection/connectionPresentation";
+import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import { hexToRgba } from "@/lib/common/color";
 import { connectionColor, connectionDisplayName, tabDisplayTitle, tabModeLabel } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
@@ -22,7 +20,6 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const connectionStore = useConnectionStore();
 const listRef = ref<HTMLElement>();
 
 function tabColor(tab: QueryTab): string {
@@ -65,7 +62,7 @@ watch(
             @mouseenter="emit('update:selectedIndex', index)"
             @click="emit('select', tab.id)"
           >
-            <DatabaseIcon :db-type="connectionIconType(connectionStore.getConfig(tab.connectionId))" class="h-4 w-4 shrink-0" />
+            <TabModeIcon :tab="tab" class="h-4 w-4 shrink-0" />
             <div class="min-w-0 flex-1">
               <div class="truncate text-sm font-medium">{{ tabDisplayTitle(tab, t) }}</div>
               <div class="truncate text-xs text-muted-foreground">

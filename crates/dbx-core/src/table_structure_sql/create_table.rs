@@ -16,6 +16,13 @@ use super::util::{
 use super::validation::{validate_columns, validate_concurrent_index_scope, validate_dameng_identity};
 use crate::models::connection::DatabaseType;
 
+fn is_sqlite_integer_family_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    ["int", "integer", "tinyint", "smallint", "mediumint", "bigint"]
+        .iter()
+        .any(|candidate| normalized == *candidate || normalized.starts_with(&format!("{candidate}(")))
+}
+
 pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
     let capabilities;
     let dialect;
@@ -60,11 +67,40 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             return TableStructureSqlResult { statements: Vec::new(), warnings };
         }
     }
+    if dialect == StructureDialect::Sqlite {
+        let primary_key_count = active_columns.iter().filter(|column| column.is_primary_key).count();
+        for column in &active_columns {
+            if !column.is_primary_key || !column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false)) {
+                continue;
+            }
+            if primary_key_count != 1 {
+                warnings.push(
+                    "SQLite AUTOINCREMENT requires a single INTEGER PRIMARY KEY column; disable auto-increment on composite primary keys.".to_string(),
+                );
+            } else if !is_sqlite_integer_family_type(&column.data_type) {
+                warnings.push(format!(
+                    "SQLite auto-increment column \"{}\" must use an integer type (normalized to INTEGER).",
+                    column.name
+                ));
+            }
+        }
+        if !warnings.is_empty() {
+            return TableStructureSqlResult { statements: Vec::new(), warnings };
+        }
+    }
     let mut statements = Vec::new();
     let mut column_definitions = Vec::new();
 
     for column in &active_columns {
-        let data_type = column_data_type(dialect, column);
+        let mut data_type = column_data_type(dialect, column);
+        // SQLite accepts AUTOINCREMENT only on an exact INTEGER PRIMARY KEY,
+        // so integer-family aliases are normalized when auto-increment is on.
+        if dialect == StructureDialect::Sqlite
+            && column.is_primary_key
+            && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false))
+        {
+            data_type = "INTEGER".to_string();
+        }
         let mut parts = vec![quote_new_ident(options.database_type, dialect, &column.name), data_type];
         if options.database_type == Some(DatabaseType::Mysql) && is_mysql_character_data_type(&column.data_type) {
             if !column.character_set.trim().is_empty() {
@@ -74,7 +110,12 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
                 parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
             }
         }
-        if !column.is_nullable
+        if dialect == StructureDialect::Sqlite
+            && column.is_primary_key
+            && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false))
+        {
+            parts.push("PRIMARY KEY".to_string());
+        } else if !column.is_nullable
             && !column.is_primary_key
             && !matches!(dialect, StructureDialect::ClickHouse | StructureDialect::ManticoreSearch)
         {
@@ -106,7 +147,12 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
 
     let pk_columns: Vec<_> = active_columns
         .iter()
-        .filter(|column| column.is_primary_key && dialect != StructureDialect::ManticoreSearch)
+        .filter(|column| {
+            column.is_primary_key
+                && dialect != StructureDialect::ManticoreSearch
+                && !(dialect == StructureDialect::Sqlite
+                    && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false)))
+        })
         .collect();
     if !pk_columns.is_empty() {
         let pk_list = pk_columns

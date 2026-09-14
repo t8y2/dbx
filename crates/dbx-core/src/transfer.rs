@@ -1738,6 +1738,22 @@ pub(crate) fn wrap_dameng_identity_insert_sql_for_table(insert_sql: &str, full_t
     format!("SET IDENTITY_INSERT {full_table} ON;\n{trimmed};\nSET IDENTITY_INSERT {full_table} OFF;")
 }
 
+async fn execute_sqlserver_identity_batch(
+    client: &mut db::sqlserver::SqlServerClient,
+    sql: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
+    let future = db::sqlserver::execute_simple_batch_with_max_rows(client, sql, None);
+    let result: Vec<db::QueryResult> = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| format!("Query timed out after {} seconds", timeout.as_secs().max(1)))??,
+        None => future.await?,
+    };
+    drop(result);
+    Ok(())
+}
+
 async fn execute_transfer_write_statement(
     state: &AppState,
     target_pool_key: &str,
@@ -1754,6 +1770,52 @@ async fn execute_transfer_write_statement(
 
     let enable_sql = identity_insert_statement(table, schema, target_db_type, true);
     let disable_sql = identity_insert_statement(table, schema, target_db_type, false);
+
+    if *target_db_type == DatabaseType::SqlServer {
+        // SQL Server scopes IDENTITY_INSERT to the current session. The generic
+        // pool helper may check out a different physical connection for each
+        // statement, so keep all three statements on the same locked client.
+        crate::query::check_read_only_for_connection(state, target_pool_key, sql).await?;
+        let (_, _, _, query_timeout_secs) = transfer_pool_context(state, target_pool_key).await;
+        let query_timeout = query_timeout_duration(query_timeout_secs);
+        let pool_handle = state.pool_handle(target_pool_key).await;
+        let client = match pool_handle.as_ref() {
+            Some(PoolKind::SqlServer(client)) => client.clone(),
+            _ => return Err("SQL Server connection not found".to_string()),
+        };
+        let mut client = client.lock().await;
+
+        let enable_result = execute_sqlserver_identity_batch(&mut client, &enable_sql, query_timeout).await;
+        if let Err(error) = enable_result {
+            drop(client);
+            if is_transfer_query_timeout(&error) {
+                state.remove_pool_by_key(target_pool_key).await;
+            }
+            return Err(format!("Failed to enable IDENTITY_INSERT for {table}: {error}"));
+        }
+
+        let write_result = execute_sqlserver_identity_batch(&mut client, sql, query_timeout).await;
+        let disable_result = execute_sqlserver_identity_batch(&mut client, &disable_sql, query_timeout).await;
+        drop(client);
+
+        if write_result.as_ref().is_err_and(|error| is_transfer_query_timeout(error))
+            || disable_result.as_ref().is_err_and(|error| is_transfer_query_timeout(error))
+        {
+            state.remove_pool_by_key(target_pool_key).await;
+        }
+
+        return match (write_result, disable_result) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(write_error), Ok(_)) => Err(write_error),
+            (Ok(_), Err(disable_error)) => {
+                Err(format!("Failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
+            }
+            (Err(write_error), Err(disable_error)) => {
+                Err(format!("{write_error}; also failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
+            }
+        };
+    }
+
     execute_on_pool(state, target_pool_key, &enable_sql)
         .await
         .map_err(|e| format!("Failed to enable IDENTITY_INSERT for {table}: {e}"))?;
@@ -5969,7 +6031,7 @@ const POSTGRES_OWNED_SEQUENCES_SQL: &str = "SELECT c.relname, \
              JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
                AND d.objid = c.oid \
                AND d.refclassid = 'pg_class'::regclass \
-               AND d.deptype IN ('a', 'i') \
+               AND d.deptype = 'a' \
              JOIN pg_class t ON t.oid = d.refobjid \
              JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
@@ -6295,7 +6357,19 @@ pub fn should_transfer_schema_objects(
         return false;
     }
     if !objects.is_empty() {
-        return true;
+        // A table-only selection is already handled by the table transfer pass.
+        // Do not enter the PostgreSQL-family schema-object path just because the
+        // request also carries the selected table kind. This matters for
+        // Kingbase, whose catalog is not a drop-in PostgreSQL catalog.
+        return objects
+            .iter()
+            .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty());
+    }
+    if matches!(source_db_type, DatabaseType::Kingbase) || matches!(target_db_type, DatabaseType::Kingbase) {
+        // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
+        // by the optional object scanner. Empty selection means the legacy
+        // table-transfer request here, so avoid probing unsupported catalogs.
+        return false;
     }
     transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
         && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
@@ -9989,6 +10063,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: if driver_class.is_empty() { None } else { Some(driver_class.to_string()) },
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -10572,11 +10650,23 @@ mod tests {
                 &TransferContent::StructureOnly,
                 &[]
             ));
-            assert!(should_transfer_schema_objects(
+            assert!(!should_transfer_schema_objects(
                 &DatabaseType::Kingbase,
                 &DatabaseType::Postgres,
                 &TransferContent::StructureAndData,
                 &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                &TransferContent::StructureAndData,
+                &[TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["orders".into()] }]
+            ));
+            assert!(should_transfer_schema_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                &TransferContent::StructureOnly,
+                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] }]
             ));
             assert!(should_transfer_schema_objects(
                 &DatabaseType::Postgres,
@@ -11428,11 +11518,11 @@ mod tests {
         fn postgres_owned_sequence_queries_support_pre_ten_catalogs() {
             assert!(!POSTGRES_OWNED_SEQUENCES_SQL.contains("pg_sequence"));
             assert!(!POSTGRES_SEQUENCE_SNAPSHOTS_SQL.contains("pg_sequence"));
-            for sql in [POSTGRES_OWNED_SEQUENCES_SQL, POSTGRES_SEQUENCE_SNAPSHOTS_SQL] {
-                assert!(sql.contains("c.relkind = 'S'"));
-                assert!(sql.contains("pg_depend"));
-                assert!(sql.contains("d.deptype IN ('a', 'i')"));
-            }
+            assert!(POSTGRES_OWNED_SEQUENCES_SQL.contains("c.relkind = 'S'"));
+            assert!(POSTGRES_OWNED_SEQUENCES_SQL.contains("pg_depend"));
+            assert!(POSTGRES_OWNED_SEQUENCES_SQL.contains("d.deptype = 'a'"));
+            assert!(!POSTGRES_OWNED_SEQUENCES_SQL.contains("d.deptype IN ('a', 'i')"));
+            assert!(POSTGRES_SEQUENCE_SNAPSHOTS_SQL.contains("d.deptype IN ('a', 'i')"));
         }
 
         #[test]
@@ -15098,6 +15188,10 @@ SELECT 1 FROM dual"#
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,

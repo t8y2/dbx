@@ -2,6 +2,9 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
+import { filterLocallySearchedTables } from "../../apps/desktop/src/lib/sidebar/sidebarSearchTree.ts";
+import { buildGroupedObjectTreeNodes, buildTableTreeNodes } from "../../apps/desktop/src/lib/table/tableTree.ts";
+import { applyPinnedTreeNodeState } from "../../apps/desktop/src/lib/app/pinnedItems.ts";
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 
 function installMemoryStorage(initial: Record<string, string> = {}) {
@@ -169,6 +172,63 @@ test("removeConnections clears persisted sidebar table filters for every removed
     });
   } finally {
     globalThis.fetch = originalFetch;
+    storage.restore();
+  }
+});
+
+test.each([
+  { label: "PostgreSQL grouped", schema: "public", grouped: true },
+  { label: "PostgreSQL simple", schema: "public", grouped: false },
+  { label: "MySQL grouped", schema: undefined, grouped: true },
+])("$label keeps a search pin after clearing search and allows unpinning", ({ schema, grouped }) => {
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    const context = { nodeId: "conn:app", connectionId: "conn", database: "app", schema };
+    const tables = ["aaa", "orders"].map((name) => ({ name, table_type: "TABLE" }));
+    const buildGroup = () => grouped
+      ? buildGroupedObjectTreeNodes({ ...context, objects: tables.map((table) => ({ name: table.name, object_type: table.table_type, schema })) })[0]
+      : { id: context.nodeId, label: "app", type: "schema" as const, ...context, children: buildTableTreeNodes({ ...context, tables }) };
+    const group = buildGroup();
+    store.treeNodes = [group];
+    const liveGroup = store.treeNodes[0];
+    const target = liveGroup.children!.find((node) => node.label === "orders")!;
+    const project = (enabled = true) => filterLocallySearchedTables(store.treeNodes, {
+      enabled, queries: store.sidebarTableSearchQueries, indexedResults: { [group.id]: tables },
+    })[0].children!;
+
+    store.setSidebarTableSearchQuery(group.id, "orders");
+    assert.deepEqual(project().map((node) => node.label), ["orders"]);
+    assert.deepEqual(project(false).map((node) => node.label), ["aaa", "orders"]);
+    store.toggleTreeNodePin(project()[0]);
+    store.setSidebarTableSearchQuery(group.id, "");
+    const cleared = project();
+    assert.deepEqual(cleared.map((node) => node.label), ["orders", "aaa"]);
+    assert.equal(cleared[0].pinned, true);
+    assert.equal(target.pinned, true);
+    assert.equal(store.isTreeNodePinned(cleared[0]), true);
+
+    store.setSidebarTableSearchQuery(group.id, "orders");
+    assert.equal(project()[0].pinned, true);
+    store.toggleTreeNodePin(project()[0]);
+    store.setSidebarTableSearchQuery(group.id, "");
+    assert.deepEqual(project().map((node) => node.label), ["aaa", "orders"]);
+    assert.equal(target.pinned, false);
+    assert.deepEqual(JSON.parse(storage.values.get("dbx-pinned-tree-nodes")!), []);
+
+    // Separate from clearing search: an index-only hit survives metadata reload.
+    liveGroup.children = liveGroup.children!.filter((node) => node.label !== "orders");
+    store.setSidebarTableSearchQuery(group.id, "orders");
+    store.toggleTreeNodePin(project()[0]);
+    const saved = new Set<string>(JSON.parse(storage.values.get("dbx-pinned-tree-nodes")!));
+    const restored = applyPinnedTreeNodeState(buildGroup().children!, saved);
+    assert.equal(restored[0].label, "orders");
+    assert.equal(restored[0].pinned, true);
+    assert.equal(store.isTreeNodePinned(restored[0]), true);
+    store.toggleTreeNodePin(restored[0]);
+    assert.deepEqual(JSON.parse(storage.values.get("dbx-pinned-tree-nodes")!), []);
+  } finally {
     storage.restore();
   }
 });

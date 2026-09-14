@@ -287,4 +287,54 @@ describe("currentStatementFrameLayer", () => {
 
     expect(layer).toHaveBeenCalledWith(expect.objectContaining({ above: true, class: "cm-db-currentStatementFrameLayer" }));
   });
+
+  it("does not rebuild the frame while the cursor stays in the same statement", () => {
+    const layer = vi.fn((config) => config);
+    const RectangleMarker = vi.fn();
+    const view = buildView(["SELECT 1;", "SELECT 2;"]);
+    const resolver = vi.fn(() => ({ from: 0, to: 8 }));
+    const config = currentStatementFrameLayer({ layer, RectangleMarker } as never, resolver) as unknown as {
+      markers: (currentView: typeof view) => unknown;
+      update: (update: { docChanged: boolean; selectionSet: boolean; viewportChanged: boolean; geometryChanged: boolean; transactions: never[]; view: typeof view }) => boolean;
+    };
+
+    config.markers(view);
+
+    expect(
+      config.update({
+        docChanged: false,
+        selectionSet: true,
+        viewportChanged: false,
+        geometryChanged: false,
+        transactions: [],
+        view,
+      }),
+    ).toBe(false);
+    expect(resolver).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds the frame when the cursor enters another statement", () => {
+    const layer = vi.fn((config) => config);
+    const RectangleMarker = vi.fn();
+    const view = buildView(["SELECT 1;", "SELECT 2;"]);
+    let range = { from: 0, to: 8 };
+    const config = currentStatementFrameLayer({ layer, RectangleMarker } as never, () => range) as unknown as {
+      markers: (currentView: typeof view) => unknown;
+      update: (update: { docChanged: boolean; selectionSet: boolean; viewportChanged: boolean; geometryChanged: boolean; transactions: never[]; view: typeof view }) => boolean;
+    };
+
+    config.markers(view);
+    range = { from: 9, to: 17 };
+
+    expect(
+      config.update({
+        docChanged: false,
+        selectionSet: true,
+        viewportChanged: false,
+        geometryChanged: false,
+        transactions: [],
+        view,
+      }),
+    ).toBe(true);
+  });
 });

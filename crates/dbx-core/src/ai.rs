@@ -88,6 +88,7 @@ pub enum AiProvider {
     Deepseek,
     Kimi,
     Qwen,
+    Zhipu,
     MiniMax,
     Ollama,
     #[serde(rename = "openai-compatible")]
@@ -121,6 +122,7 @@ impl AiProvider {
             AiProvider::Deepseek => "deepseek",
             AiProvider::Kimi => "kimi",
             AiProvider::Qwen => "qwen",
+            AiProvider::Zhipu => "zhipu",
             AiProvider::MiniMax => "minimax",
             AiProvider::Ollama => "ollama",
             AiProvider::OpenaiCompatible => "openai-compatible",
@@ -887,6 +889,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
         | AiProvider::Deepseek
         | AiProvider::Kimi
         | AiProvider::Qwen
+        | AiProvider::Zhipu
         | AiProvider::MiniMax
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
@@ -1689,6 +1692,7 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
             | AiProvider::Deepseek
             | AiProvider::Kimi
             | AiProvider::Qwen
+            | AiProvider::Zhipu
             | AiProvider::MiniMax
     )
 }
@@ -2179,6 +2183,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 | AiProvider::Deepseek
                 | AiProvider::Kimi
                 | AiProvider::Qwen
+                | AiProvider::Zhipu
                 | AiProvider::MiniMax
                 | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await?,
                 AiProvider::Custom => {
@@ -3614,6 +3619,7 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                 | AiProvider::Deepseek
                 | AiProvider::Kimi
                 | AiProvider::Qwen
+                | AiProvider::Zhipu
                 | AiProvider::MiniMax
                 | AiProvider::Ollama
                 | AiProvider::OpenaiCompatible => {
@@ -3676,6 +3682,7 @@ pub async fn stream(
         | AiProvider::Deepseek
         | AiProvider::Kimi
         | AiProvider::Qwen
+        | AiProvider::Zhipu
         | AiProvider::MiniMax
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible => {

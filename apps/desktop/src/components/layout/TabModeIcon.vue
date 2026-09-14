@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Activity, AlertTriangle, Braces, CalendarClock, Clock, Code2, Database, Eye, FileCode, Gauge, KeyRound, Link2, ListTree, Network, Package, PencilRuler, ScrollText, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { isEventObjectBrowserTab, tabDatabaseIconType } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
 
@@ -38,5 +39,7 @@ defineProps<{ tab: QueryTab }>();
   <CalendarClock v-else-if="tab.mode === 'dameng-jobs'" />
   <Activity v-else-if="tab.mode === 'processlist' || tab.mode === 'sqlserver-trace'" />
   <Gauge v-else-if="tab.mode === 'dolt-version-control'" />
+  <PluginIcon v-else-if="tab.mode === 'plugin-workbench' && tab.pluginWorkbench" :plugin-id="tab.pluginWorkbench.pluginId" :contribution-id="tab.pluginWorkbench.contributionId" />
+  <PluginIcon v-else-if="tab.mode === 'plugin-filesystem' && tab.pluginFilesystem" :plugin-id="tab.pluginFilesystem.pluginId" :contribution-id="tab.pluginFilesystem.providerId" />
   <Code2 v-else />
 </template>

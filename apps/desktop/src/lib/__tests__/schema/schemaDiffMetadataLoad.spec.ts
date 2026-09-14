@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createConcurrencyLimiter, loadSchemaDetails, mapWithConcurrency, schemaDiffMetadataConcurrency, schemaDiffMetadataLoadPlan, shouldFetchSchemaDiffDdl, type SchemaDiffMetadataApi, type SchemaDiffMetadataProgress } from "../../schema/schemaDiffMetadataLoad";
-import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjects } from "../../schema/schemaDiffProgress";
+import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjectPhase, shouldLoadSchemaDiffExtraObjects, shouldLoadSchemaDiffRoutines } from "../../schema/schemaDiffProgress";
 import { DEFAULT_MYSQL_OPTIONS, DEFAULT_POSTGRES_OPTIONS } from "../../../types/schemaDiff";
 import type { TableInfo } from "../../../types/database";
 
@@ -185,6 +185,16 @@ describe("schemaDiffMetadataLoad", () => {
         owners: false,
       }),
     ).toBe(false);
+  });
+
+  it("treats supported same-dialect routine compare as an extra-object progress phase", () => {
+    expect(shouldLoadSchemaDiffRoutines("mysql", "mysql", { functions: true })).toBe(true);
+    expect(shouldLoadSchemaDiffRoutines("mysql", "oracle", { functions: true })).toBe(false);
+    expect(shouldLoadSchemaDiffRoutines("mysql", "sqlite", { functions: true })).toBe(false);
+    expect(shouldLoadSchemaDiffRoutines("mysql", "mysql", { functions: false })).toBe(false);
+    expect(shouldLoadSchemaDiffExtraObjectPhase("mysql", "mysql", DEFAULT_MYSQL_OPTIONS)).toBe(true);
+    expect(shouldLoadSchemaDiffExtraObjectPhase("mysql", "mysql", { ...DEFAULT_MYSQL_OPTIONS, functions: false })).toBe(false);
+    expect(shouldLoadSchemaDiffExtraObjectPhase("postgres", "postgres", DEFAULT_POSTGRES_OPTIONS)).toBe(true);
   });
 
   it("maps phases to the next step on the actual comparison path", () => {

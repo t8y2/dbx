@@ -464,6 +464,46 @@ function parseRowSourceList(state: ParseState, target: number, introducer: strin
   return parsed ? { sources: [parsed.source], nextIndex: parsed.nextIndex } : null;
 }
 
+function parseDorisLateralView(state: ParseState, index: number, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
+  if (state.dialect.id !== "doris" || state.tokens[index]?.normalized !== "lateral" || state.tokens[index + 1]?.normalized !== "view") return null;
+  // Doris's `LATERAL VIEW [OUTER] fn(...) alias AS col` -- skip the optional OUTER marker so the
+  // OUTER form models the same function columns as the plain form.
+  let functionIndex = index + 2;
+  if (state.tokens[functionIndex]?.normalized === "outer") functionIndex += 1;
+  const functionName = readQualifiedName(state.tokens, functionIndex, state.dialect);
+  if (!functionName || state.tokens[functionName.nextIndex]?.text !== "(") return null;
+  const close = findMatchingParenToken(state.tokens, functionName.nextIndex);
+  if (close < 0) return null;
+  let aliasIndex = close + 1;
+  if (state.tokens[aliasIndex]?.normalized === "as") aliasIndex += 1;
+  const alias = state.tokens[aliasIndex];
+  if (!alias || alias.kind !== "word") return null;
+  let columnIndex = aliasIndex + 1;
+  if (state.tokens[columnIndex]?.normalized === "as") columnIndex += 1;
+  const columns: string[] = [];
+  while (state.tokens[columnIndex]?.kind === "word") {
+    columns.push(state.tokens[columnIndex].text);
+    columnIndex += 1;
+    if (state.tokens[columnIndex]?.text !== ",") break;
+    columnIndex += 1;
+  }
+  const endToken = state.tokens[Math.max(aliasIndex, columnIndex - 1)] ?? alias;
+  const name = alias.text;
+  return {
+    source: {
+      id: `table-function:${sourceIndex}:${name}`,
+      kind: "table_function",
+      name,
+      alias: name,
+      qualifierParts: [name],
+      qualifiedName: functionName.name,
+      sourceSpan: { start: state.tokens[index].span.start, end: endToken.span.end },
+      columns: columns.length ? columns : undefined,
+    },
+    nextIndex: columnIndex,
+  };
+}
+
 function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIndexOffset = 0): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [];
   let inSelectFromClause = false;
@@ -497,9 +537,20 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
       sources.push(...parsed.sources);
       index = parsed.nextIndex - 1;
 
-      const separator = state.tokens[parsed.nextIndex];
+      // Track the position past any LATERAL VIEW clauses so the FROM-list separator check sees
+      // the real comma after them (parsed.nextIndex points at the first "lateral" token itself).
+      let afterSources = parsed.nextIndex;
+      let lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
+      while (lateral) {
+        sources.push(lateral.source);
+        index = lateral.nextIndex - 1;
+        afterSources = lateral.nextIndex;
+        lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
+      }
+
+      const separator = state.tokens[afterSources];
       if (normalized !== "from" || separator?.text !== "," || separator.depth !== sourceDepth) break;
-      target = parsed.nextIndex + 1;
+      target = afterSources + 1;
     }
   }
   return dedupeSources(sources);

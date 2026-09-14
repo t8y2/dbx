@@ -72,13 +72,15 @@ export function buildDataGridLocalFilterOptions<TRow>({
   });
 }
 
-export function restoreDataGridLocalColumnFilters(serialized: SerializedDataGridLocalColumnFilters | undefined, columnCount: number): Record<number, Set<string>> {
+export function restoreDataGridLocalColumnFilters(serialized: SerializedDataGridLocalColumnFilters | undefined, columnCount: number, currentColumns?: readonly string[], serializedColumns?: readonly string[]): Record<number, Set<string>> {
   if (!serialized || typeof serialized !== "object") return {};
 
   const restored: Record<number, Set<string>> = {};
-  for (const [columnIndexText, values] of Object.entries(serialized)) {
-    const columnIndex = Number(columnIndexText);
-    if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= columnCount || !Array.isArray(values)) continue;
+  for (const [serializedColumnIndexText, values] of Object.entries(serialized)) {
+    const serializedColumnIndex = Number(serializedColumnIndexText);
+    if (!Number.isInteger(serializedColumnIndex) || serializedColumnIndex < 0 || !Array.isArray(values)) continue;
+    const columnIndex = currentColumns && serializedColumns ? currentColumns.indexOf(serializedColumns[serializedColumnIndex] ?? "") : serializedColumnIndex;
+    if (columnIndex < 0 || columnIndex >= columnCount) continue;
     const filteredValues = values.filter((value): value is string => typeof value === "string");
     if (filteredValues.length > 0) restored[columnIndex] = new Set(filteredValues);
   }

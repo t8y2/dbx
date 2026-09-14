@@ -156,6 +156,7 @@ import {
   webdavSyncSecretsStatus,
   webdavSyncTest,
   webdavSyncUpload,
+  listInstalledAgentsLocal,
   type AppSupportInfo,
   type McpHttpServerSettings,
   type McpHttpServerStatus,
@@ -549,6 +550,7 @@ const editInfiniteScroll = ref(settingsStore.editorSettings.infiniteScroll);
 const editRegexMaxMatchCount = ref(settingsStore.editorSettings.regexMaxMatchCount);
 const editAutoCalculateTotalRows = ref(settingsStore.editorSettings.autoCalculateTotalRows);
 const editFlatteningMultiLineText = ref(settingsStore.editorSettings.flatteningMultiLineText);
+const editDataGridShowWhitespace = ref(settingsStore.editorSettings.dataGridShowWhitespace);
 const editTableColumnTemplateRows = ref<TableColumnTemplateGridRow[]>(tableColumnTemplateRowsFromSettings(settingsStore.editorSettings.tableColumnTemplateFields));
 const editTableColumnTemplateDatabaseType = ref<DatabaseType>(TABLE_COLUMN_TEMPLATE_DATABASE_TYPES[0] ?? "mysql");
 const editSqlVariableSubstitutionEnabled = ref(settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
@@ -767,6 +769,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
     dataGridCrosshairHighlight: editDataGridCrosshairHighlight.value,
     flatteningMultiLineText: editFlatteningMultiLineText.value,
+    dataGridShowWhitespace: editDataGridShowWhitespace.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
     queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled.value,
@@ -1265,6 +1268,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
   editDataGridCrosshairHighlight.value = settingsStore.editorSettings.dataGridCrosshairHighlight;
   editFlatteningMultiLineText.value = settingsStore.editorSettings.flatteningMultiLineText;
+  editDataGridShowWhitespace.value = settingsStore.editorSettings.dataGridShowWhitespace;
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
   editQueryResultMaxRowsEnabled.value = settingsStore.editorSettings.queryResultMaxRowsEnabled;
@@ -1390,6 +1394,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   regexMaxMatchCount: editRegexMaxMatchCount,
   autoCalculateTotalRows: editAutoCalculateTotalRows,
   flatteningMultiLineText: editFlatteningMultiLineText,
+  dataGridShowWhitespace: editDataGridShowWhitespace,
   shortcuts: editShortcuts,
   sqlFormatter: editSqlFormatter,
   sidebarActivation: editSidebarActivation,
@@ -1752,6 +1757,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
     editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
     editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
+    editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
     editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
@@ -1840,6 +1846,7 @@ function resetAllDefaults() {
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
   editDataGridCrosshairHighlight.value = DEFAULT_EDITOR_SETTINGS.dataGridCrosshairHighlight;
   editFlatteningMultiLineText.value = DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText;
+  editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
   editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
@@ -2223,9 +2230,30 @@ const appSupportInfoLabels = computed<AppSupportInfoLabels>(() => ({
   runtimeWeb: t("settings.supportInfoRuntimeWeb"),
   operatingSystem: t("settings.supportInfoOperatingSystem"),
   architecture: t("settings.supportInfoArchitecture"),
+  userAgent: t("settings.supportInfoUserAgent"),
+  databaseTypes: t("settings.supportInfoDatabaseTypes"),
+  localDriverVersions: t("settings.supportInfoLocalDriverVersions"),
+  aiProviders: t("settings.supportInfoAiProviders"),
   unknown: t("settings.supportInfoUnknown"),
 }));
-const appSupportInfoRows = computed(() => (appSupportInfo.value ? buildAppSupportInfoRows(appSupportInfo.value, appSupportInfoLabels.value) : []));
+const appSupportInfoRows = computed(() => {
+  if (!appSupportInfo.value) return [];
+  const info = appSupportInfo.value;
+  return buildAppSupportInfoRows(info, appSupportInfoLabels.value).map((row) => {
+    const details: string[] = [];
+    if (row.key === "appVersion") {
+      if (info.databaseTypes?.length) details.push(`${appSupportInfoLabels.value.databaseTypes}: ${info.databaseTypes.join(", ")}`);
+      if (info.localDriverVersions?.length) {
+        details.push(`${appSupportInfoLabels.value.localDriverVersions}: ${info.localDriverVersions.map((driver) => `${driver.dbType} ${driver.version}`).join(", ")}`);
+      }
+    }
+    if (row.key === "operatingSystem") {
+      if (info.userAgent?.trim()) details.push(`${appSupportInfoLabels.value.userAgent}: ${info.userAgent.trim()}`);
+      if (info.aiProviders?.length) details.push(`${appSupportInfoLabels.value.aiProviders}: ${info.aiProviders.join(", ")}`);
+    }
+    return { ...row, tooltip: details.join("\n") };
+  });
+});
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
   { value: "appearance", label: t("settings.appearanceTab") },
   { value: "editor", label: t("settings.editorTab") },
@@ -2451,7 +2479,33 @@ async function refreshAppSupportInfo() {
   appSupportInfoLoading.value = true;
   appSupportInfoError.value = "";
   try {
-    appSupportInfo.value = await getAppSupportInfo();
+    const [info, localDrivers] = await Promise.all([getAppSupportInfo(), listInstalledAgentsLocal().catch(() => [])]);
+    const databaseTypes = [
+      ...new Set(
+        connectionStore.connections
+          .map((connection) => {
+            const dbType = connection.db_type.trim();
+            const profile = connection.driver_profile?.trim();
+            return profile && profile !== dbType ? `${dbType}/${profile}` : dbType;
+          })
+          .filter(Boolean),
+      ),
+    ].sort();
+    const localDriverVersions = localDrivers
+      .filter((driver) => driver.installed && driver.installed_version?.trim())
+      .map((driver) => ({ dbType: driver.db_type, version: driver.installed_version!.trim() }))
+      .sort((a, b) => a.dbType.localeCompare(b.dbType));
+    const aiProviders = [
+      ...new Set(
+        settingsStore.aiConfigs
+          .filter((config) => {
+            const preset = getAiProviderPreset(config.provider, config.endpoint);
+            return config.endpoint.trim() && config.model.trim() && (!preset.requiresApiKey || config.apiKey.trim());
+          })
+          .map((config) => getAiProviderPreset(config.provider, config.endpoint).label),
+      ),
+    ].sort();
+    appSupportInfo.value = { ...info, databaseTypes, localDriverVersions, aiProviders };
   } catch (e: any) {
     appSupportInfo.value = appSupportInfo.value || fallbackAppSupportInfo();
     appSupportInfoError.value = e?.message || String(e);
@@ -6158,29 +6212,6 @@ onUnmounted(() => {
                 <Switch id="update-notifications-enabled" v-model="editUpdateNotificationsEnabled" />
               </div>
 
-              <div v-if="!isWeb" class="settings-item flex flex-col gap-3 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="flex items-center justify-between gap-4">
-                  <div class="space-y-1">
-                    <Label for="debug-logging-enabled">{{ t("settings.debugLoggingEnabled") }}</Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.debugLoggingEnabledDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="debug-logging-enabled" v-model="editDebugLoggingEnabled" />
-                </div>
-                <div class="flex justify-end gap-2">
-                  <Button type="button" variant="outline" size="sm" @click="clearDebugLogs">
-                    {{ t("settings.debugLogsClear") }}
-                  </Button>
-                  <Button type="button" variant="outline" size="sm" @click="copyDebugLogs">
-                    {{ debugLogCopied ? t("settings.debugLogsCopied") : t("settings.debugLogsCopy") }}
-                  </Button>
-                  <Button type="button" variant="outline" size="sm" @click="exportDebugLogs">
-                    {{ debugLogDownloaded ? t("settings.debugLogsDownloaded") : t("settings.debugLogsDownload") }}
-                  </Button>
-                </div>
-              </div>
-
               <div class="settings-appearance-group" data-icon-theme-settings>
                 <Label>{{ t("settings.iconTheme") }}</Label>
                 <div class="settings-appearance-choice-grid settings-icon-theme-grid">
@@ -7075,6 +7106,13 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="data-grid-crosshair-highlight" v-model="editDataGridCrosshairHighlight" />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="data-grid-show-whitespace">{{ t("settings.dataGridShowWhitespace") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.dataGridShowWhitespaceDescription") }}</p>
+                  </div>
+                  <Switch id="data-grid-show-whitespace" v-model="editDataGridShowWhitespace" />
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
@@ -9283,16 +9321,25 @@ LIMIT 100;</pre
                     </Button>
                   </div>
                 </div>
-                <div v-if="appSupportInfoRows.length" class="mt-4 grid gap-3 sm:grid-cols-2">
-                  <div v-for="row in appSupportInfoRows" :key="row.key" class="min-w-0 rounded-md bg-muted/30 px-3 py-2">
-                    <div class="text-xs font-medium text-muted-foreground">
-                      {{ row.label }}
-                    </div>
-                    <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">
-                      {{ row.value }}
-                    </div>
+                <TooltipProvider v-if="appSupportInfoRows.length">
+                  <div class="mt-4 grid gap-3 sm:grid-cols-4">
+                    <Tooltip v-for="row in appSupportInfoRows" :key="row.key">
+                      <TooltipTrigger as-child>
+                        <div class="min-w-0 rounded-md bg-muted/30 px-3 py-2" :class="row.tooltip ? 'cursor-help' : ''">
+                          <div class="text-xs font-medium text-muted-foreground">
+                            {{ row.label }}
+                          </div>
+                          <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">
+                            {{ row.value }}
+                          </div>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent v-if="row.tooltip" class="max-w-[520px] whitespace-pre-line break-words text-xs leading-relaxed" side="top" align="start" :side-offset="8">
+                        {{ row.tooltip }}
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
-                </div>
+                </TooltipProvider>
                 <p v-else class="mt-4 text-sm text-muted-foreground">
                   {{ t("settings.supportInfoLoading") }}
                 </p>
@@ -9313,7 +9360,28 @@ LIMIT 100;</pre
                 :get-draft-conflict-categories="getDraftConflictCategories"
               />
 
-              <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
+              <div v-if="!isWeb" class="settings-item flex flex-col gap-3 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center justify-between gap-4">
+                  <div class="space-y-1">
+                    <Label for="debug-logging-enabled">{{ t("settings.debugLoggingEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.debugLoggingEnabledDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="debug-logging-enabled" v-model="editDebugLoggingEnabled" />
+                </div>
+                <div class="flex justify-end gap-2">
+                  <Button type="button" variant="outline" size="sm" @click="clearDebugLogs">
+                    {{ t("settings.debugLogsClear") }}
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" @click="copyDebugLogs">
+                    {{ debugLogCopied ? t("settings.debugLogsCopied") : t("settings.debugLogsCopy") }}
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" @click="exportDebugLogs">
+                    {{ debugLogDownloaded ? t("settings.debugLogsDownloaded") : t("settings.debugLogsDownload") }}
+                  </Button>
+                </div>
+              </div>
 
               <div class="settings-item rounded-lg border p-4">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -9334,6 +9402,8 @@ LIMIT 100;</pre
                   </Select>
                 </div>
               </div>
+
+              <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
 
               <div class="grid gap-3 sm:grid-cols-2">
                 <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')">

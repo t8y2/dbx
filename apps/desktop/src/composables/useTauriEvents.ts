@@ -9,6 +9,7 @@ export function useTauriEvents(deps: {
   openDbFilePath: (path: string) => Promise<void>;
   openConnectionDeepLink: (url: string) => Promise<void>;
   openAiConfigDeepLink: (url: string) => Promise<void>;
+  closeActiveSurface: () => void;
 }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
@@ -115,6 +116,10 @@ export function useTauriEvents(deps: {
           } catch (e) {
             console.error("[DBX] dbx-open-ai-config-links error:", e);
           }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen("dbx-close-active-tab", () => {
+          deps.closeActiveSurface();
         }).then((unlisten) => unlistenHandles.push(unlisten));
       })
       .catch(() => {});

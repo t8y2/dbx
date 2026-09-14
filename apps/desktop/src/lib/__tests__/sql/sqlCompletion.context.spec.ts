@@ -1344,3 +1344,92 @@ describe("originForSqlCompletionProvider", () => {
     expect(originForSqlCompletionProvider("explicit", false)).toBe("explicit");
   });
 });
+
+describe("select alias visibility", () => {
+  it("prioritizes SELECT aliases inside HAVING for MySQL", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(true);
+    expect(context.selectAliases).toContain("cnt");
+  });
+
+  it("prioritizes SELECT aliases inside ORDER BY even with later clauses", () => {
+    const sql = "SELECT SUM(price) AS total FROM orders ORDER BY total LIMIT 10";
+    const cursor = sql.indexOf("total", sql.indexOf("ORDER BY")) + "total".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(true);
+    expect(context.selectAliases).toContain("total");
+  });
+
+  it("does not prioritize SELECT aliases inside WHERE", () => {
+    const sql = "SELECT id AS uid FROM orders WHERE uid > ";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(false);
+    expect(context.selectAliases).toEqual([]);
+  });
+
+  it("offers HAVING alias completion items", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cn";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      dialect: "mysql",
+      tables: [{ name: "orders", type: "table" }],
+      columnsByTable: new Map([["orders", [{ name: "g" } as never]]]),
+    });
+
+    expect(items.some((item) => item.label === "cnt")).toBe(true);
+  });
+
+  it("does not prioritize HAVING aliases for dialects that reject them", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    for (const databaseType of ["postgres", "sqlserver", "db2", "oracle"] as const) {
+      const context = getSqlCompletionContext(sql, sql.length, { databaseType });
+
+      expect(context.prioritizeSelectAliases, databaseType).toBe(false);
+      expect(context.selectAliases, databaseType).toEqual([]);
+    }
+  });
+
+  it("keeps HAVING alias priority for SQLite-family and DuckDB dialects", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    for (const databaseType of ["duckdb", "sqlite", "doris", "bigquery"] as const) {
+      const context = getSqlCompletionContext(sql, sql.length, { databaseType });
+
+      expect(context.prioritizeSelectAliases, databaseType).toBe(true);
+      expect(context.selectAliases, databaseType).toContain("cnt");
+    }
+  });
+
+  it("does not anchor alias visibility on identifiers containing HAVING", () => {
+    const sql = "SELECT id AS uid FROM orders WHERE having_count > 1";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(false);
+    expect(context.selectAliases).toEqual([]);
+  });
+
+  it("keeps alias visibility in ORDER BY after an identifier containing HAVING", () => {
+    const sql = "SELECT id AS uid FROM orders WHERE having_count > 1 ORDER BY uid";
+    const cursor = sql.length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(true);
+    expect(context.selectAliases).toContain("uid");
+  });
+
+  it("keeps HAVING alias priority for unlisted dialects (deny-list polarity)", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    for (const databaseType of ["spark", "databricks", "snowflake", "hive"] as const) {
+      const context = getSqlCompletionContext(sql, sql.length, { databaseType });
+
+      expect(context.prioritizeSelectAliases, databaseType).toBe(true);
+      expect(context.selectAliases, databaseType).toContain("cnt");
+    }
+    // No database type at all keeps the permissive legacy behavior.
+    const untyped = getSqlCompletionContext(sql, sql.length, {});
+    expect(untyped.prioritizeSelectAliases).toBe(true);
+    expect(untyped.selectAliases).toContain("cnt");
+  });
+});

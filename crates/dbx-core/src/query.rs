@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement, TableFactor, VisitMut, VisitorMut,
 };
-use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -857,6 +857,9 @@ fn sql_for_execution_context_with_identifier_quote(
     };
     match db_type {
         Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
+        Some(DatabaseType::SqlServer) => {
+            qualify_sqlserver_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string())
+        }
         Some(DatabaseType::Kingbase) => {
             qualify_kingbase_unqualified_relations(sql, schema, identifier_quote).unwrap_or_else(|| sql.to_string())
         }
@@ -877,12 +880,42 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
             continue;
         }
         let cte_names = statement_cte_names(statement);
+        let table_aliases = statement_table_aliases(statement);
         let _ = visit_relations_mut(statement, |name| {
-            if qualify_unqualified_relation_name(name, schema, &cte_names) {
+            if qualify_unqualified_relation_name(name, schema, &cte_names, &table_aliases) {
                 changed = true;
             }
             ControlFlow::<()>::Continue(())
         });
+    }
+
+    changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+}
+
+fn qualify_sqlserver_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
+    let dialect = MsSqlDialect {};
+    let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    for statement in &mut statements {
+        if !statement_uses_schema_context(statement) {
+            continue;
+        }
+        let cte_names = statement_cte_names(statement);
+        let table_aliases = statement_table_aliases(statement);
+        let mut qualifier = SchemaRelationQualifier {
+            schema,
+            identifier_quote: '[',
+            cte_names: &cte_names,
+            table_aliases: &table_aliases,
+            parameterized_table_depth: 0,
+            changed: false,
+        };
+        let _ = statement.visit(&mut qualifier);
+        changed |= qualifier.changed;
     }
 
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
@@ -901,10 +934,12 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
             continue;
         }
         let cte_names = statement_cte_names(statement);
-        let mut qualifier = KingbaseRelationQualifier {
+        let table_aliases = statement_table_aliases(statement);
+        let mut qualifier = SchemaRelationQualifier {
             schema,
             identifier_quote: identifier_quote_char(identifier_quote),
             cte_names: &cte_names,
+            table_aliases: &table_aliases,
             parameterized_table_depth: 0,
             changed: false,
         };
@@ -915,15 +950,16 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-struct KingbaseRelationQualifier<'a> {
+struct SchemaRelationQualifier<'a> {
     schema: &'a str,
     identifier_quote: char,
     cte_names: &'a HashSet<String>,
+    table_aliases: &'a HashSet<String>,
     parameterized_table_depth: usize,
     changed: bool,
 }
 
-impl VisitorMut for KingbaseRelationQualifier<'_> {
+impl VisitorMut for SchemaRelationQualifier<'_> {
     type Break = ();
 
     fn pre_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
@@ -946,6 +982,7 @@ impl VisitorMut for KingbaseRelationQualifier<'_> {
                 relation,
                 self.schema,
                 self.cte_names,
+                self.table_aliases,
                 self.identifier_quote,
             )
         {
@@ -966,20 +1003,30 @@ fn statement_uses_schema_context(statement: &Statement) -> bool {
     )
 }
 
-fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
-    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, '"')
+fn qualify_unqualified_relation_name(
+    name: &mut ObjectName,
+    schema: &str,
+    cte_names: &HashSet<String>,
+    table_aliases: &HashSet<String>,
+) -> bool {
+    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, table_aliases, '"')
 }
 
 fn qualify_unqualified_relation_name_with_quote(
     name: &mut ObjectName,
     schema: &str,
     cte_names: &HashSet<String>,
+    table_aliases: &HashSet<String>,
     identifier_quote: char,
 ) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
-    if cte_names.contains(&table.value.to_ascii_uppercase()) {
+    let upper_name = table.value.to_ascii_uppercase();
+    if cte_names.contains(&upper_name) || table_aliases.contains(&upper_name) {
+        return false;
+    }
+    if table.value.starts_with('@') || table.value.starts_with('#') {
         return false;
     }
 
@@ -1026,8 +1073,32 @@ fn collect_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<St
     }
 }
 
+struct TableAliasCollector<'a> {
+    names: &'a mut HashSet<String>,
+}
+
+impl VisitorMut for TableAliasCollector<'_> {
+    type Break = ();
+
+    fn post_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if let TableFactor::Table { alias: Some(alias), .. } = table_factor {
+            self.names.insert(alias.name.value.to_ascii_uppercase());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// FROM-clause aliases resolve to their table, so a single-part relation that
+/// matches one must never be schema-qualified (e.g. `UPDATE p ... FROM products p`).
+fn statement_table_aliases(statement: &mut Statement) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut collector = TableAliasCollector { names: &mut names };
+    let _ = statement.visit(&mut collector);
+    names
+}
+
 fn qualifies_unqualified_agent_relations(db_type: Option<DatabaseType>) -> bool {
-    matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase))
+    matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase | DatabaseType::SqlServer))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -1905,40 +1976,39 @@ async fn do_execute_typed(
             let prefer_text_protocol = postgres_prefers_text_protocol(pool_db_type);
             let execution_mode = options.execution_mode;
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
-            if execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
-                db::postgres::execute_query_in_read_only_transaction_with_rollback(
-                    &p,
-                    schema.as_deref(),
-                    sql,
-                    max_rows,
-                    cancel_token,
-                    operation_budget.clone(),
-                    cancel_context,
-                )
-                .await
-            } else if let Some(schema) = schema {
-                db::postgres::execute_query_with_schema_and_max_rows_and_cancel(
-                    &p,
-                    &schema,
-                    sql,
-                    max_rows,
-                    cancel_token,
-                    operation_budget.clone(),
-                    cancel_context,
-                    prefer_text_protocol,
-                )
-                .await
-            } else {
-                db::postgres::execute_query_with_max_rows_and_cancel(
-                    &p,
-                    sql,
-                    max_rows,
-                    cancel_token,
-                    operation_budget.clone(),
-                    cancel_context,
-                    prefer_text_protocol,
-                )
-                .await
+            let result = execute_postgres_pool_statement(
+                &p,
+                schema.as_deref(),
+                sql,
+                max_rows,
+                prefer_text_protocol,
+                execution_mode,
+                cancel_token.clone(),
+                operation_budget.clone(),
+                cancel_context.clone(),
+            )
+            .await;
+            let retry_sql =
+                result.as_ref().err().and_then(|error| postgres_preview_fallback_retry_sql(&options, error, sql));
+            match retry_sql {
+                Some(fallback_sql) => {
+                    log::warn!(
+                        "[query][postgres] preview failed with invalid UTF-8; retrying without generated left() wrappers"
+                    );
+                    execute_postgres_pool_statement(
+                        &p,
+                        schema.as_deref(),
+                        &fallback_sql,
+                        max_rows,
+                        prefer_text_protocol,
+                        execution_mode,
+                        cancel_token,
+                        operation_budget,
+                        cancel_context,
+                    )
+                    .await
+                }
+                None => result,
             }
         }
         PoolKind::Sqlite(p) => {
@@ -2006,6 +2076,7 @@ async fn do_execute_typed(
             let client = client.clone();
             let max_rows = options.max_rows;
             let execution_mode = options.execution_mode;
+            let sql = sql_for_execution_context_with_identifier_quote(pool_db_type, sql, schema, Some("["));
             let (mut client, lock_wait_ms) =
                 match lock_shared_client_with_wait(&client, cancel_token.clone(), None).await {
                     Ok(value) => value,
@@ -2014,10 +2085,10 @@ async fn do_execute_typed(
             let execution = async {
                 if execution_mode == QueryExecutionMode::Simple {
                     let mut results =
-                        db::sqlserver::execute_simple_batch_with_max_rows(&mut client, sql, max_rows).await?;
+                        db::sqlserver::execute_simple_batch_with_max_rows(&mut client, &sql, max_rows).await?;
                     Ok(results.remove(0))
                 } else {
-                    db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await
+                    db::sqlserver::execute_query_with_max_rows(&mut client, &sql, max_rows).await
                 }
             };
             let result = wait_for_query_opt(cancel_token, query_timeout, execution)
@@ -2246,6 +2317,7 @@ async fn do_execute_typed(
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
+        PoolKind::PluginConnection(_) => Err("SQL execution is not supported for plugin connections".to_string()),
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
@@ -2371,6 +2443,71 @@ async fn invoke_external_driver_query_with_preview_retry(
 fn is_external_driver_invalid_utf8_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     normalized.contains("invalid byte sequence for encoding") && normalized.contains("utf8")
+}
+
+/// Returns the SQL to retry when a native PostgreSQL table-data preview dies
+/// with the server's invalid-UTF-8 error. On SQL_ASCII databases the generated
+/// `left()` preview slices by byte and can split a multi-byte UTF-8 sequence
+/// (#8919); like the JDBC path, re-run once without the generated wrappers and
+/// let marker extraction truncate the value client-side. Only generated
+/// preview SELECTs are rewritten — user SQL is never touched, and a genuinely
+/// invalid value simply surfaces the original error again.
+fn postgres_preview_fallback_retry_sql(options: &QueryExecutionOptions, error: &str, sql: &str) -> Option<String> {
+    if !options.table_data_preview || !is_external_driver_invalid_utf8_error(error) {
+        return None;
+    }
+    external_driver_preview_fallback_sql(sql)
+}
+
+/// Dispatches one statement on a native PostgreSQL pool according to the
+/// connection's execution mode and schema context.
+#[allow(clippy::too_many_arguments)]
+async fn execute_postgres_pool_statement(
+    pool: &deadpool_postgres::Pool,
+    schema: Option<&str>,
+    sql: &str,
+    max_rows: Option<usize>,
+    prefer_text_protocol: bool,
+    execution_mode: QueryExecutionMode,
+    cancel_token: Option<CancellationToken>,
+    budget: DbOperationBudget,
+    cancel_context: Option<db::postgres::PostgresCancelContext>,
+) -> Result<db::QueryResult, String> {
+    if execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
+        db::postgres::execute_query_in_read_only_transaction_with_rollback(
+            pool,
+            schema,
+            sql,
+            max_rows,
+            cancel_token,
+            budget,
+            cancel_context,
+        )
+        .await
+    } else if let Some(schema) = schema {
+        db::postgres::execute_query_with_schema_and_max_rows_and_cancel(
+            pool,
+            schema,
+            sql,
+            max_rows,
+            cancel_token,
+            budget,
+            cancel_context,
+            prefer_text_protocol,
+        )
+        .await
+    } else {
+        db::postgres::execute_query_with_max_rows_and_cancel(
+            pool,
+            sql,
+            max_rows,
+            cancel_token,
+            budget,
+            cancel_context,
+            prefer_text_protocol,
+        )
+        .await
+    }
 }
 
 fn is_sql_word_byte(byte: u8) -> bool {
@@ -3012,7 +3149,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     }
 
     if is_sqlserver {
-        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await.map_err(Into::into);
+        return execute_multi_sqlserver(state, &pool_key, sql, schema, cancel_token, options).await.map_err(Into::into);
     }
 
     let is_http_sqlite = {
@@ -3651,6 +3788,7 @@ async fn execute_multi_sqlserver(
     state: &AppState,
     pool_key: &str,
     sql: &str,
+    schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
@@ -3704,11 +3842,14 @@ async fn execute_multi_sqlserver(
             break;
         }
 
+        let execution_sql =
+            sql_for_execution_context_with_identifier_quote(Some(DatabaseType::SqlServer), batch, schema, Some("["));
         let execution = async {
             if execution_mode == QueryExecutionMode::Simple {
-                db::sqlserver::execute_simple_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_simple_batch_with_max_rows_metadata(&mut client_guard, &execution_sql, max_rows)
+                    .await
             } else {
-                db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, &execution_sql, max_rows).await
             }
         };
         let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
@@ -4022,7 +4163,8 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
         | PoolKind::VictoriaMetrics(_)
-        | PoolKind::ExternalDriver { .. } => false,
+        | PoolKind::ExternalDriver { .. }
+        | PoolKind::PluginConnection(_) => false,
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(_) => false,
     }
@@ -4392,7 +4534,8 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
         | PoolKind::VictoriaMetrics(_)
-        | PoolKind::ExternalDriver { .. } => BatchTransactionPath::Unsupported,
+        | PoolKind::ExternalDriver { .. }
+        | PoolKind::PluginConnection(_) => BatchTransactionPath::Unsupported,
     }
 }
 
@@ -6477,7 +6620,8 @@ mod tests {
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
     #[cfg(unix)]
     use crate::plugins::{
-        InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
+        InstalledPlugin, PluginCompatibility, PluginDriverManifest, PluginDriverSession, PluginManifest,
+        PluginRuntimeEnv,
     };
     use crate::storage::Storage;
 
@@ -6804,6 +6948,10 @@ for line in sys.stdin:
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -8559,6 +8707,28 @@ for line in sys.stdin:
         assert!(!is_external_driver_invalid_utf8_error("Incorrect syntax near SELECT"));
     }
 
+    #[test]
+    fn postgres_preview_fallback_retries_only_generated_projections() {
+        let options = QueryExecutionOptions { table_data_preview: true, ..Default::default() };
+        let sql = concat!(
+            "SELECT \"id\", left(\"content\", 227) AS \"content\", ",
+            "'T:226' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"t_large\" LIMIT 100"
+        );
+        let error = "ERROR: invalid byte sequence for encoding \"UTF8\": 0xe5 0xa4";
+        assert_eq!(
+            postgres_preview_fallback_retry_sql(&options, error, sql).as_deref(),
+            Some(
+                "SELECT \"id\", \"content\" AS \"content\", 'T:226' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"t_large\" LIMIT 100"
+            )
+        );
+
+        // User SQL without the generated marker is never rewritten, unrelated
+        // errors never trigger a retry, and the data-grid flag is required.
+        assert!(postgres_preview_fallback_retry_sql(&options, error, "SELECT left(value, 10) FROM t").is_none());
+        assert!(postgres_preview_fallback_retry_sql(&options, "ERROR: syntax error at or near \"left\"", sql).is_none());
+        assert!(postgres_preview_fallback_retry_sql(&QueryExecutionOptions::default(), error, sql).is_none());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn external_driver_preview_retry_preserves_marker_truncation() {
@@ -8595,8 +8765,14 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -8695,8 +8871,14 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
@@ -8805,8 +8987,14 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -8863,8 +9051,14 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9324,6 +9518,10 @@ for line in sys.stdin:
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -9466,6 +9664,69 @@ for line in sys.stdin:
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Postgres), "SELECT * FROM events", Some("APP")),
             "SELECT * FROM events"
+        );
+    }
+
+    #[test]
+    fn sqlserver_execution_context_qualifies_unqualified_dml_tables() {
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::SqlServer), "SELECT TOP 1 * FROM products", Some("core")),
+            "SELECT TOP 1 * FROM [core].products"
+        );
+
+        let qualified_join = sql_for_execution_context(
+            Some(DatabaseType::SqlServer),
+            "SELECT p.id FROM products p JOIN customers c ON c.id = p.customer_id",
+            Some("sales"),
+        );
+        assert!(qualified_join.contains("FROM [sales].products p"), "{qualified_join}");
+        assert!(qualified_join.contains("JOIN [sales].customers c"), "{qualified_join}");
+
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::SqlServer),
+                "UPDATE products SET status = 'done' WHERE id IN (SELECT product_id FROM audit_products)",
+                Some("core")
+            ),
+            "UPDATE [core].products SET status = 'done' WHERE id IN (SELECT product_id FROM [core].audit_products)"
+        );
+    }
+
+    #[test]
+    fn sqlserver_execution_context_skips_update_target_aliases() {
+        let qualified = sql_for_execution_context(
+            Some(DatabaseType::SqlServer),
+            "UPDATE p SET p.status = 'done' FROM products p JOIN customers c ON c.id = p.customer_id",
+            Some("core"),
+        );
+        assert!(qualified.starts_with("UPDATE p SET"), "{qualified}");
+        assert!(qualified.contains("FROM [core].products p"), "{qualified}");
+        assert!(qualified.contains("JOIN [core].customers c ON c.id = p.customer_id"), "{qualified}");
+        assert!(!qualified.contains("UPDATE [core].p"), "{qualified}");
+        assert!(!qualified.contains("[core].c ON"), "{qualified}");
+    }
+
+    #[test]
+    fn sqlserver_execution_context_preserves_ctes_qualified_tables_and_temp_tables() {
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::SqlServer),
+                "WITH recent AS (SELECT * FROM products) SELECT * FROM recent",
+                Some("core")
+            ),
+            "WITH recent AS (SELECT * FROM [core].products) SELECT * FROM recent"
+        );
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::SqlServer),
+                "SELECT * FROM [archive].products UNION ALL SELECT * FROM #staged_products",
+                Some("core")
+            ),
+            "SELECT * FROM [archive].products UNION ALL SELECT * FROM #staged_products"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::SqlServer), "CREATE TABLE products (id INT)", Some("core")),
+            "CREATE TABLE products (id INT)"
         );
     }
 

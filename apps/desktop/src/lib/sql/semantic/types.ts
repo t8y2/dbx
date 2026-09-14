@@ -129,7 +129,7 @@ export interface SqlSemanticModel {
 
 export interface SqlSemanticBuildOptions {
   databaseType?: DatabaseType;
-  dialect?: "mysql" | "postgres" | "sqlserver";
+  dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris";
   /**
    * Live CodeMirror state for the document being edited, when the caller has one (i.e. this is a
    * real editor completion request, not a pure-string test/utility call). When present and its

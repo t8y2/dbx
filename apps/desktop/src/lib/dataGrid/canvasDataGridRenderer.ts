@@ -1,4 +1,4 @@
-import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { gridCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { BOOLEAN_CHECKBOX_SIZE, isBooleanCellValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { resolveDataGridCellTextRole } from "@/lib/dataGrid/dataGridCellTextVisual";
 import type { DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
@@ -80,6 +80,7 @@ export interface DrawCanvasDataGridOptions {
   searchMatchKeys: ReadonlySet<number>;
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number, row: CanvasDataGridRow) => string;
+  isNullValue?: (value: CellValue) => boolean;
   columnIsBoolean?: (columnIndex: number) => boolean;
   newRowCellPlaceholder?: (row: CanvasDataGridRow, columnIndex: number) => string | null;
   isRowActive: (rowIndex: number) => boolean;
@@ -100,6 +101,7 @@ export interface DrawCanvasDataGridOptions {
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
+  showWhitespace?: boolean;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -344,6 +346,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     searchMatchKeys,
     currentSearchMatch,
     formatCell,
+    isNullValue,
     newRowCellPlaceholder,
     isRowActive,
     rowCellsUseSelectionVisual,
@@ -361,6 +364,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
     flatteningMultiLineEnabled,
+    showWhitespace = false,
   } = options;
   // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
   const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
@@ -556,6 +560,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.clip();
       const value = item.data[actualColIdx];
+      const isNullCell = isNullValue?.(value) ?? value === null;
       const isBooleanCell = columnIsBoolean?.(actualColIdx) === true && isBooleanCellValue(value);
       const isRightAlign = columnAligns?.[visibleColIdx] === "right";
       const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
@@ -565,7 +570,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const textRole = resolveDataGridCellTextRole({
         colorizeTypes: colorizeDataTypes,
         typeKind,
-        isNull: value === null,
+        isNull: isNullCell,
         isDraft: item.isDraft && value === null,
         isEditing: isEditingThisCell,
         isControl: shouldRenderBooleanCheckbox,
@@ -578,8 +583,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const cellTextColor = textRole === "muted" ? theme.mutedForeground : textRole === "type" ? dataGridTypeForeground(theme, typeKind) : theme.foreground;
       ctx.textAlign = isBooleanNullCell ? "center" : isRightAlign ? "right" : "left";
       ctx.fillStyle = cellTextColor;
-      ctx.font = value === null ? italicFont : tabularFont;
-      setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
+      ctx.font = isNullCell ? italicFont : tabularFont;
+      setCanvasNumericVariant(ctx, isNullCell ? "normal" : "tabular-nums");
       const reservedWidth = rightAlignedActionCell?.rowIndex === item.displayIndex && rightAlignedActionCell.visibleColIdx === visibleColIdx ? rightAlignedActionCell.reservedWidth : 0;
       const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr: scaleX, isRightAlign, reservedWidth });
       if (shouldRenderBooleanCheckbox) {
@@ -596,7 +601,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         }
       } else {
         const rawDisplayText = (value === null ? newRowCellPlaceholder?.(item, actualColIdx) : null) ?? formatCell(value, actualColIdx, item);
-        const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled);
+        const displayText = isEditingThisCell ? "" : gridCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled, showWhitespace && value !== null);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
         const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;
         ctx.fillText(text, anchorX, textY);

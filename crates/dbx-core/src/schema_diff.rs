@@ -3954,6 +3954,12 @@ fn drop_index_sql(table_name: &str, index_name: &str, db_type: DatabaseType, sch
         return sqlserver_single_statement_batch(&batch);
     }
     let index = qualified_name(index_name, db_type, schema);
+    if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        // Oracle versions before 23c do not support `DROP INDEX IF EXISTS`.
+        // Schema comparison already identified this index as present, so the
+        // direct form is both valid and sufficient for the generated script.
+        return format!("DROP INDEX {index};");
+    }
     if profile.drop_index_uses_on_table {
         format!("DROP INDEX {} ON {table};", quote_id(index_name, db_type))
     } else {
@@ -5098,7 +5104,14 @@ fn generate_create_table_sql(
                 continue;
             }
             AutoIncColumnBuild::AppendSuffix { suffix, skip_default, postgres_sequence } => {
-                let mut def = format!("{} {}", col_name, mapped_type);
+                // SQLite accepts AUTOINCREMENT only on an exact INTEGER
+                // PRIMARY KEY, so integer aliases must be normalized here too.
+                let effective_type = if db_type == DatabaseType::Sqlite && suffix.contains("AUTOINCREMENT") {
+                    "INTEGER"
+                } else {
+                    mapped_type.as_str()
+                };
+                let mut def = format!("{} {}", col_name, effective_type);
                 if !col.is_nullable {
                     def.push_str(" NOT NULL");
                 }
@@ -5121,6 +5134,12 @@ fn generate_create_table_sql(
                     }
                 }
                 if !suffix.is_empty() {
+                    // SQLite requires AUTOINCREMENT to be part of an inline
+                    // INTEGER PRIMARY KEY declaration; it cannot be combined
+                    // with the table-level PRIMARY KEY clause below.
+                    if db_type == DatabaseType::Sqlite && col.is_primary_key && suffix.contains("AUTOINCREMENT") {
+                        def.push_str(" PRIMARY KEY");
+                    }
                     def.push_str(suffix);
                 }
                 if postgres_sequence {
@@ -5128,7 +5147,7 @@ fn generate_create_table_sql(
                     auto_col_name = Some(col.name.clone());
                 }
                 col_defs.push(def);
-                if col.is_primary_key {
+                if col.is_primary_key && !(db_type == DatabaseType::Sqlite && suffix.contains("AUTOINCREMENT")) {
                     pk_cols.push(quote_id(&col.name, db_type));
                 }
             }
@@ -6215,6 +6234,18 @@ mod tests {
     }
 
     #[test]
+    fn oracle_schema_sync_drops_indexes_without_if_exists() {
+        assert_eq!(
+            drop_index_sql("orders", "idx_orders_status", DatabaseType::Oracle, Some("APP")),
+            "DROP INDEX APP.IDX_ORDERS_STATUS;"
+        );
+        assert_eq!(
+            drop_index_sql("orders", "idx_orders_status", DatabaseType::OceanbaseOracle, Some("APP")),
+            "DROP INDEX APP.IDX_ORDERS_STATUS;"
+        );
+    }
+
+    #[test]
     fn manual_table_mapping_compares_source_with_target_metadata_and_uses_target_ddl_name() {
         let result = prepare_schema_diff(SchemaDiffPreparationOptions {
             source_tables: vec![table_info("charge_records", "TABLE")],
@@ -6543,6 +6574,124 @@ mod tests {
         assert!(sql.contains("LONGTEXT"), "text→LONGTEXT: {sql}");
         assert!(sql.contains("TINYINT(1)"), "boolean→TINYINT(1): {sql}");
         assert!(sql.contains("INT"), "integer→INT: {sql}");
+    }
+
+    #[test]
+    fn sync_to_sqlite_keeps_plain_integer_pk_without_autoincrement() {
+        let columns = vec![ColumnDiff {
+            diff_type: "added".into(),
+            name: "id".into(),
+            source: Some(ColumnInfo {
+                name: "id".into(),
+                data_type: "int".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                ..Default::default()
+            }),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        }];
+        let (sql, missing) = generate_create_table_sql(
+            "t",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Sqlite,
+            None,
+            Some(DialectKind::Mysql),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(!sql.contains("AUTOINCREMENT"), "plain integer PK must not gain AUTOINCREMENT: {sql}");
+        assert!(sql.contains("PRIMARY KEY"), "table-level PK must be preserved: {sql}");
+    }
+
+    #[test]
+    fn sync_to_sqlite_composite_integer_pk_stays_valid() {
+        let columns = vec![
+            ColumnDiff {
+                diff_type: "added".into(),
+                name: "a".into(),
+                source: Some(ColumnInfo {
+                    name: "a".into(),
+                    data_type: "int".into(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    ..Default::default()
+                }),
+                target: None,
+                changes: vec![],
+                add_position: None,
+            },
+            ColumnDiff {
+                diff_type: "added".into(),
+                name: "b".into(),
+                source: Some(ColumnInfo {
+                    name: "b".into(),
+                    data_type: "int".into(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    ..Default::default()
+                }),
+                target: None,
+                changes: vec![],
+                add_position: None,
+            },
+        ];
+        let (sql, missing) = generate_create_table_sql(
+            "t",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Sqlite,
+            None,
+            Some(DialectKind::Mysql),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(!sql.contains("AUTOINCREMENT"), "composite PK must not gain AUTOINCREMENT: {sql}");
+        assert!(sql.matches("PRIMARY KEY").count() == 1, "single table-level PK expected: {sql}");
+    }
+
+    #[test]
+    fn sync_to_sqlite_explicit_autoincrement_preserved_and_normalized() {
+        let columns = vec![ColumnDiff {
+            diff_type: "added".into(),
+            name: "id".into(),
+            source: Some(ColumnInfo {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                extra: Some("auto_increment".to_string()),
+                ..Default::default()
+            }),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        }];
+        let (sql, missing) = generate_create_table_sql(
+            "t",
+            &columns,
+            &[],
+            &[],
+            None,
+            DatabaseType::Sqlite,
+            None,
+            Some(DialectKind::Mysql),
+            &[],
+            &[],
+        );
+        assert!(missing.is_empty(), "{missing:?}");
+        assert!(sql.contains("PRIMARY KEY AUTOINCREMENT"), "explicit auto-increment preserved: {sql}");
+        assert!(sql.contains("INTEGER"), "bigint must normalize to exact INTEGER: {sql}");
+        assert!(!sql.contains("BIGINT"), "bigint must normalize to exact INTEGER: {sql}");
+        assert!(!sql.contains("PRIMARY KEY (\"id\")"), "no duplicate table-level PK: {sql}");
     }
 
     // -- 5. MySQL → SQLite type conversion --

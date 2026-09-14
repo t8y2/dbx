@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { customTypeCapabilities, databaseObjectCapabilities, normalizeSidebarObjectKind, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import {
+  customTypeCapabilities,
+  databaseObjectCapabilities,
+  normalizeSidebarObjectKind,
+  schemaDiffRoutineObjectTypes,
+  schemaDiffRoutineObjectTypesIntersection,
+  sidebarObjectKindsForDatabase,
+  supportsPackageMemberExpansion,
+  supportsSchemaDiffRoutines,
+  supportsTypeObjectSource,
+} from "@/lib/database/databaseObjectCapabilities";
 import { buildObjectGroupPlaceholderNodes } from "@/lib/table/tableTree";
 
 describe("databaseObjectCapabilities", () => {
@@ -127,5 +137,25 @@ describe("databaseObjectCapabilities", () => {
     for (const dbType of ["xugu", "highgo", "uxdb", "redshift", "mysql", undefined] as const) {
       expect(customTypeCapabilities(dbType), String(dbType)).toEqual({ details: false, members: false, ddl: false });
     }
+  });
+
+  it("opens schema diff routines only for same-dialect allowlisted databases", () => {
+    for (const dbType of ["postgres", "opengauss", "mysql", "sqlserver", "gaussdb", "kingbase"] as const) {
+      expect(supportsSchemaDiffRoutines(dbType), dbType).toBe(true);
+    }
+    for (const dbType of ["oracle", "dameng", "hive", "sqlite", "doris", "databend", "manticoresearch"] as const) {
+      expect(supportsSchemaDiffRoutines(dbType), dbType).toBe(false);
+    }
+    // Fallback ROUTINE_OBJECTS must not open schema-diff routine compare.
+    expect(supportsSchemaDiffRoutines("jdbc")).toBe(false);
+    expect(supportsSchemaDiffRoutines(undefined)).toBe(false);
+    expect(schemaDiffRoutineObjectTypes("mysql")).toEqual(["PROCEDURE", "FUNCTION"]);
+    expect(schemaDiffRoutineObjectTypes("sqlserver")).toEqual(["PROCEDURE", "FUNCTION"]);
+    expect(schemaDiffRoutineObjectTypes("oracle")).toEqual([]);
+    expect(schemaDiffRoutineObjectTypesIntersection("mysql", "mysql")).toEqual(["PROCEDURE", "FUNCTION"]);
+    expect(schemaDiffRoutineObjectTypesIntersection("mysql", "oracle")).toEqual([]);
+    expect(schemaDiffRoutineObjectTypesIntersection("mysql", "sqlserver")).toEqual([]);
+    expect(schemaDiffRoutineObjectTypesIntersection("postgres", "opengauss")).toEqual(["PROCEDURE", "FUNCTION"]);
+    expect(sidebarObjectKindsForDatabase("sqlserver")).toEqual(["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]);
   });
 });

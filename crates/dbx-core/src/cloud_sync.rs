@@ -15,7 +15,7 @@ use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY,
     MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
-    NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
+    NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
@@ -973,6 +973,7 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     scrub_mq_external_config_secrets(config);
     scrub_nacos_auth_secrets(config);
     scrub_cassandra_tls_secrets(config);
+    config.connection_secrets.clear();
 }
 
 fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
@@ -1007,6 +1008,14 @@ async fn build_sensitive_payload(
         // A transient password must not become durable through a sync snapshot.
         if config.save_password {
             push_secret(&mut connection_secrets, &config.id, "password", &config.password);
+        }
+        for (key, secret) in &config.connection_secrets {
+            push_secret(
+                &mut connection_secrets,
+                &config.id,
+                &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}"),
+                secret,
+            );
         }
         push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
         for (index, layer) in config.transport_layers.iter().enumerate() {
@@ -1225,6 +1234,7 @@ async fn apply_sensitive_payload(
         if !SECRET_KEYS.contains(&secret.key.as_str())
             && !secret.key.starts_with(SSH_TUNNEL_SECRET_PREFIX)
             && !secret.key.starts_with(TRANSPORT_LAYER_SECRET_PREFIX)
+            && !secret.key.starts_with(PLUGIN_CONNECTION_SECRET_PREFIX)
         {
             continue;
         }
@@ -1264,6 +1274,7 @@ async fn clear_connection_secrets(storage: &Storage, connections: &[ConnectionCo
         for key in SECRET_KEYS {
             storage.delete_secret(&config.id, key).await?;
         }
+        storage.delete_secret_prefix(&config.id, PLUGIN_CONNECTION_SECRET_PREFIX).await?;
         for (index, layer) in config.transport_layers.iter().enumerate() {
             match layer {
                 TransportLayerConfig::Ssh(_) => {
@@ -1654,7 +1665,7 @@ mod tests {
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::{
         CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, NACOS_AUTH_PASSWORD_KEY,
-        NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
+        NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
     };
     use crate::models::connection::{
         default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
@@ -1847,6 +1858,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -1934,6 +1949,10 @@ mod tests {
                     "password": password
                 }
             })),
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -2187,6 +2206,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -2646,6 +2669,28 @@ mod tests {
         let decrypted = decrypt_sensitive_payload(encrypted, "sync-pass").unwrap();
         assert!(decrypted.connection_secrets.iter().any(|secret| {
             secret.connection_id == "pg" && secret.key == "password" && secret.secret == "db-secret"
+        }));
+    }
+
+    #[tokio::test]
+    async fn plugin_connection_secrets_are_scrubbed_from_public_sync_metadata() {
+        let storage = Storage::open(&temp_db_path("plugin-public-sync")).await.unwrap();
+        let mut config = postgres_connection("plugin", "");
+        config.db_type = DatabaseType::Plugin;
+        config.plugin_id = Some("example.plugin".to_string());
+        config.plugin_connection_provider = Some("example.connection".to_string());
+        config.connection_secrets.insert("api_token".to_string(), "plugin-secret".to_string());
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("sync-pass")).await.unwrap();
+        let public_json = serde_json::to_string(&snapshot.connections).unwrap();
+        assert!(!public_json.contains("plugin-secret"));
+        let encrypted = snapshot.encrypted_secrets.as_ref().expect("encrypted secrets");
+        let decrypted = decrypt_sensitive_payload(encrypted, "sync-pass").unwrap();
+        assert!(decrypted.connection_secrets.iter().any(|secret| {
+            secret.connection_id == "plugin"
+                && secret.key == format!("{PLUGIN_CONNECTION_SECRET_PREFIX}api_token")
+                && secret.secret == "plugin-secret"
         }));
     }
 

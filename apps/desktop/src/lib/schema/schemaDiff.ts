@@ -384,6 +384,8 @@ export interface SchemaDiffObject {
   parentName?: string;
   /** Function arguments signature (for PostgreSQL overloaded functions) */
   arguments?: string;
+  /** PROCEDURE vs FUNCTION when objectKind is function (for getObjectSource). */
+  routineType?: "PROCEDURE" | "FUNCTION";
   renameMetadata?: {
     confirmed: boolean;
     sourceName?: string;
@@ -718,12 +720,15 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
 
   for (const diff of functionDiffs) {
     const args = diff.source?.arguments || diff.target?.arguments || "";
+    const functionType = (diff.source?.function_type || diff.target?.function_type || "").toUpperCase();
+    const routineType: "PROCEDURE" | "FUNCTION" = functionType.includes("PROC") ? "PROCEDURE" : "FUNCTION";
     objects.push({
       id: `func-${diff.name}-${args}`,
       operationType: getOperationType(diff.type),
       objectKind: "function",
       name: diff.name,
       arguments: args,
+      routineType,
       sourceName: diff.type === "added" ? undefined : diff.name,
       targetName: diff.type === "removed" ? undefined : diff.name,
       selected: true,

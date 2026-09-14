@@ -472,14 +472,7 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
   try {
     await store.ensureConnected(connectionId);
     const config = store.getConfig(connectionId);
-    let dbNames: string[];
-    if (config?.db_type === "dameng") {
-      // 达梦的"数据库"概念对应 schema，使用 fetchNamespaceOptionsForConnection
-      dbNames = await fetchNamespaceOptionsForConnection(connectionId, config);
-    } else {
-      const dbs = await api.listDatabases(connectionId);
-      dbNames = Array.isArray(dbs) ? dbs.map((db: any) => (typeof db === "string" ? db : db.name || db.database)) : [];
-    }
+    const dbNames = config ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((db) => db.name);
     if (side === "source") {
       sourceDatabases.value = dbNames;
       if (props.sourceDatabase) {

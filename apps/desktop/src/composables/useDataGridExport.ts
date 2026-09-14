@@ -116,7 +116,7 @@ export interface UseDataGridExportOptions {
   queryResultExportRequest?: (options: {
     exportId: string;
     filePath: string;
-    format: "csv" | "xlsx" | "txt" | "sql";
+    format: "csv" | "xlsx" | "json" | "txt" | "sql";
     includeSqlSheet?: boolean;
     exportTableName?: string;
     exportColumnTypes?: Array<string | null | undefined>;
@@ -878,6 +878,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await runExclusiveExport(async () => {
       try {
         if (await exportFullTableDataViaBackend("json", rowIds)) return;
+        if (await exportQueryResultViaBackend("json", rowIds)) return;
 
         let outputPath = exportFileName("export", "json");
         if (isTauriRuntime()) {
@@ -1267,7 +1268,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode?: SqlInsertMode): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "json" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode?: SqlInsertMode): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }

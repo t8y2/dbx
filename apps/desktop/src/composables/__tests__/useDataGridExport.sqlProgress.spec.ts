@@ -139,4 +139,12 @@ describe("query result SQL export progress", () => {
     expect(cancelHandler.value).toBeNull();
     expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", exportTableName: "users", exportColumnTypes: ["int4", "text"] }), expect.any(Function));
   });
+
+  it("routes incomplete query-result JSON exports through the streaming backend", async () => {
+    const state = useDataGridExport(createOptions());
+
+    await state.exportJson();
+
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "json", sql: "SELECT id, name FROM users" }), expect.any(Function));
+  });
 });

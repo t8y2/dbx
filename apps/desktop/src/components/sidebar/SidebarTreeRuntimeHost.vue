@@ -156,8 +156,7 @@ import {
   type TableChildObjectType,
 } from "@/lib/database/dbAdminSql";
 import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
-import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
-import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
+import { buildRoutineRenameObjectSourceStatements, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
@@ -2525,63 +2524,22 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
   const database = node.database;
   const sourceTarget = objectSourceTargetForTreeNode(sourceNode);
   if (!sourceTarget) return;
-  const openMode = settingsStore.editorSettings.routineSourceOpenMode;
-  if (openMode === "query-tab") {
-    void connectionStore
-      .ensureConnected(connectionId)
-      .then(async () => {
-        connectionStore.activeConnectionId = connectionId;
-        const schema = sourceTarget.schema || database;
-        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
-        if (!databaseType) throw new Error("Connection type is unavailable.");
-        const objectName = sourceTarget.name;
-        const {
-          raw,
-          editableSource,
-          objectType: resolvedType,
-        } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
-          connectionId,
-          database,
-          schema,
-          name: objectName,
-          objectType: sourceTarget.objectType as any,
-          databaseType,
-          signature: sourceNode.signature,
-        });
-        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"].includes(resolvedType);
-        if (sourceIsEditable) {
-          queryStore.openObjectSourceTab({
-            connectionId,
-            database,
-            title: `Source - ${node.label}`,
-            schema,
-            catalog: node.catalog,
-            sql: editableSource,
-            objectSource: {
-              schema,
-              name: objectName,
-              objectType: resolvedType,
-              signature: node.signature,
-            },
-          });
-        } else {
-          queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true, sourceView: true });
-        }
-      })
-      .catch((e: any) => {
-        toast(e?.message || String(e), 5000);
-      });
+  const schema = sourceTarget.schema || database;
+  // issue #9035：两个分支都不再 await 连接与取源。先把容器挂出来（源码 tab /
+  // 源码弹窗），ensureConnected 与 getObjectSource 都发生在已挂载的 UI 之内，
+  // 加载中有状态、失败就地重试，而不是点击后一段时间毫无反应。
+  if (settingsStore.editorSettings.routineSourceOpenMode === "query-tab") {
+    queryStore.openObjectSourceTabPending({
+      connectionId,
+      database,
+      title: `Source - ${node.label}`,
+      schema,
+      catalog: node.catalog,
+      request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceNode.signature },
+    });
     return;
   }
-  void connectionStore
-    .ensureConnected(connectionId)
-    .then(() => {
-      connectionStore.activeConnectionId = connectionId;
-      emit("open-object-source", sourceNode, initialEditing);
-    })
-    .catch((e: any) => {
-      toast(e?.message || String(e), 5000);
-    });
+  emit("open-object-source", sourceNode, initialEditing);
 }
 
 function openProcedureExecution() {

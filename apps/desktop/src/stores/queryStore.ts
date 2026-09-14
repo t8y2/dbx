@@ -5,7 +5,7 @@ import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
-import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
+import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, ObjectSource, ObjectSourceKind, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
@@ -91,6 +91,8 @@ import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
+import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
+import { buildEditableObjectSource } from "@/lib/table/objectSourceEditor";
 import { disposeAllSqlServerActivityTraces, disposeSqlServerActivityTrace } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import type { SavedSqlFile } from "@/types/database";
 import i18n, { currentLocale } from "@/i18n";
@@ -174,6 +176,32 @@ interface OpenObjectSourceTabOptions {
   sql: string;
   objectSource: NonNullable<QueryTab["objectSource"]>;
 }
+
+/**
+ * 请求身份：`objectSource.objectType` 要等 routine fallback 跑完才知道，所以
+ * pending 去重只能按请求时的身份判定。请求身份必须含 objectType —— PACKAGE 与
+ * PACKAGE_BODY 同名同 schema，仅靠 name+schema 会错误合并。
+ */
+interface ObjectSourceRequestIdentity {
+  name: string;
+  objectType: ObjectSourceKind;
+  signature?: string;
+}
+
+interface OpenPendingObjectSourceTabOptions {
+  connectionId: string;
+  database: string;
+  title: string;
+  schema?: string;
+  catalog?: string;
+  request: ObjectSourceRequestIdentity;
+}
+
+/**
+ * 拿到源码也没有可编辑形态的对象类型：只填内容，不挂 objectSource。
+ * （`App.vue` 的 Ctrl+click 路径有一份少了 `JOB` 的旧副本，是既有不一致。）
+ */
+const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind[] = ["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"];
 
 interface UpdateExecutionTargetOptions {
   persistSavedSqlTarget?: boolean;
@@ -2559,9 +2587,17 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openObjectSourceTab(options: OpenObjectSourceTabOptions) {
-    const existing = tabs.value.find(
+  /**
+   * 对象源码 tab 的判重键。裁决点是**解析后**的 objectSource.objectType：
+   * routine fallback 会把 PROCEDURE↔FUNCTION、PACKAGE↔PACKAGE_BODY 归一，
+   * 因此「PROCEDURE foo」与「FUNCTION foo」应当共用一个 tab。pending 阶段
+   * 拿不到解析结果，只能做请求身份去重（见 openObjectSourceTabPending），
+   * 解析完成后再回到这里落定，避免改变既有语义。
+   */
+  function findMatchingObjectSourceTab(options: OpenObjectSourceTabOptions, excludeTabId?: string): QueryTab | undefined {
+    return tabs.value.find(
       (tab) =>
+        tab.id !== excludeTabId &&
         tab.mode === "query" &&
         tab.connectionId === options.connectionId &&
         tab.database === options.database &&
@@ -2572,6 +2608,10 @@ export const useQueryStore = defineStore("query", () => {
         (tab.objectSource.schema || "") === (options.objectSource.schema || "") &&
         (tab.objectSource.signature || "") === (options.objectSource.signature || ""),
     );
+  }
+
+  function openObjectSourceTab(options: OpenObjectSourceTabOptions) {
+    const existing = findMatchingObjectSourceTab(options);
     if (existing) {
       existing.sourceView = true;
       switchTab(existing.id);
@@ -2585,6 +2625,212 @@ export const useQueryStore = defineStore("query", () => {
     const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true });
     setObjectSource(id, options.objectSource);
     return id;
+  }
+
+  /**
+   * 正在后台重新校验源码的 tab。非响应式：仅用于避免同一个 tab 上叠起多次
+   * 取源请求（Oracle 的 GET_DDL 正是慢的那一步）。
+   */
+  const sourceRevalidateInFlight = new Set<string>();
+
+  function findPendingObjectSourceTab(options: OpenPendingObjectSourceTabOptions): QueryTab | undefined {
+    return tabs.value.find(
+      (tab) =>
+        !!tab.sourceLoad &&
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.schema || "") === (options.schema || "") &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.sourceLoad.request.name === options.request.name &&
+        tab.sourceLoad.request.objectType === options.request.objectType &&
+        (tab.sourceLoad.request.signature || "") === (options.request.signature || ""),
+    );
+  }
+
+  /**
+   * 立即建出源码 tab 并挂上加载态，再异步取源码（issue #9035）。
+   * 此前是「等连接 + 等源码都完成才建 tab」，等待期间没有任何可见 UI，
+   * 用户看到的是点击后毫无反应。
+   */
+  function openObjectSourceTabPending(options: OpenPendingObjectSourceTabOptions): string {
+    // 这个对象已经打开过：立刻切过去，再在后台重新校验源码。
+    // 两条弯路都要避开 —— 再建一个 pending tab 会让界面上多出一个转圈 tab，
+    // 随后又被交接逻辑关掉；而只切过去不校验，会让重开看到的是旧 DDL
+    // （改动前每次打开都会重新取源，源码 tab 没有其它刷新入口）。
+    const loaded = findMatchingObjectSourceTab({
+      connectionId: options.connectionId,
+      database: options.database,
+      title: options.title,
+      schema: options.schema,
+      catalog: options.catalog,
+      sql: "",
+      objectSource: { schema: options.schema, name: options.request.name, objectType: options.request.objectType, signature: options.request.signature },
+    });
+    if (loaded) {
+      loaded.sourceView = true;
+      switchTab(loaded.id);
+      // 这条路径不经过 ensureConnected，但树上的动作会把该连接设为当前连接
+      useConnectionStore().activeConnectionId = options.connectionId;
+      void revalidateObjectSourceTab(loaded.id);
+      return loaded.id;
+    }
+
+    const existing = findPendingObjectSourceTab(options);
+    if (existing) {
+      switchTab(existing.id);
+      // 再次点击同一对象 = 再试一次，不新开 tab、不重复占用一个 tab 位
+      if (existing.sourceLoad?.error) retryObjectSourceTab(existing.id);
+      return existing.id;
+    }
+
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, "", options.catalog, { forceNew: true, sourceView: true });
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (tab) tab.sourceLoad = { startedAt: Date.now(), request: { ...options.request } };
+    void loadObjectSourceIntoTab(id);
+    return id;
+  }
+
+  /**
+   * 后台重新校验一个已加载源码 tab 的 DDL：不占用加载态、不打断编辑，
+   * 失败就保持原内容（用户并没有在等这次请求）。
+   */
+  async function revalidateObjectSourceTab(id: string) {
+    if (sourceRevalidateInFlight.has(id)) return;
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    const objectSource = tab?.objectSource;
+    if (!tab || !objectSource) return;
+    const { connectionId } = tab;
+    const { database } = tab;
+    const schema = objectSource.schema || tab.schema || database;
+    sourceRevalidateInFlight.add(id);
+    try {
+      const connectionStore = useConnectionStore();
+      await connectionStore.ensureConnected(connectionId);
+      const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
+      if (!databaseType) return;
+      const {
+        raw,
+        editableSource,
+        objectType: resolvedType,
+      } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
+        connectionId,
+        database,
+        schema,
+        name: objectSource.name,
+        objectType: objectSource.objectType,
+        databaseType,
+        signature: objectSource.signature,
+      });
+      // 期间 tab 可能被关闭、被复用或已被编辑：身份没变且用户没改过内容时才回填
+      const current = tabs.value.find((candidate) => candidate.id === id);
+      if (current?.objectSource !== objectSource || resolvedType !== objectSource.objectType) return;
+      if (raw.editable === false || OBJECT_SOURCE_READ_ONLY_TYPES.includes(resolvedType)) return;
+      if (isTabDirty(current)) return;
+      updateSql(id, editableSource);
+      markTabClean(current);
+    } catch {
+      // 已有的源码依然可用，静默保留
+    } finally {
+      sourceRevalidateInFlight.delete(id);
+    }
+  }
+
+  function retryObjectSourceTab(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.sourceLoad) return;
+    tab.sourceLoad.error = undefined;
+    tab.sourceLoad.startedAt = Date.now();
+    void loadObjectSourceIntoTab(id);
+  }
+
+  function clearObjectSourceLoad(tab: QueryTab) {
+    tab.sourceLoad = undefined;
+  }
+
+  async function loadObjectSourceIntoTab(id: string) {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.sourceLoad || !tab.connectionId) return;
+    const { connectionId } = tab;
+    const { database } = tab;
+    const schema = tab.schema || database;
+    const { request } = tab.sourceLoad;
+    try {
+      const connectionStore = useConnectionStore();
+      await connectionStore.ensureConnected(connectionId);
+      connectionStore.activeConnectionId = connectionId;
+      const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
+      if (!databaseType) throw new Error("Connection type is unavailable.");
+      const {
+        raw,
+        editableSource,
+        objectType: resolvedType,
+      } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
+        connectionId,
+        database,
+        schema,
+        name: request.name,
+        objectType: request.objectType,
+        databaseType,
+        signature: request.signature,
+      });
+      applyLoadedObjectSource(id, { connectionId, database, schema, catalog: tab.catalog, title: tab.title, request, editableSource, raw, resolvedType });
+    } catch (e: any) {
+      // 就地显示错误 + Retry：用户此刻正看着这个 tab，比 toast 更可发现
+      const failed = tabs.value.find((candidate) => candidate.id === id);
+      if (failed?.sourceLoad) failed.sourceLoad.error = e?.message || String(e);
+    }
+  }
+
+  function applyLoadedObjectSource(
+    id: string,
+    loaded: {
+      connectionId: string;
+      database: string;
+      schema?: string;
+      catalog?: string;
+      title: string;
+      request: ObjectSourceRequestIdentity;
+      editableSource: string;
+      raw: ObjectSource;
+      resolvedType: ObjectSourceKind;
+    },
+  ) {
+    // 加载期间 tab 被关掉（用户放弃）或连接被断开：静默丢弃，不重建、不写库
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    if (!tab?.sourceLoad) return;
+    const sourceIsEditable = loaded.raw.editable !== false && !OBJECT_SOURCE_READ_ONLY_TYPES.includes(loaded.resolvedType);
+    if (sourceIsEditable) {
+      const options: OpenObjectSourceTabOptions = {
+        connectionId: loaded.connectionId,
+        database: loaded.database,
+        title: loaded.title,
+        schema: loaded.schema,
+        catalog: loaded.catalog,
+        sql: loaded.editableSource,
+        objectSource: { schema: loaded.schema, name: loaded.request.name, objectType: loaded.resolvedType, signature: loaded.request.signature },
+      };
+      // 解析后的身份可能命中已存在的 tab（例：先按 FUNCTION 打开过，这次请求的是 PROCEDURE）。
+      // 有则交接给它并关掉 pending 占位，避免同一个对象出现两个 tab。
+      const existing = findMatchingObjectSourceTab(options, id);
+      if (existing) {
+        clearObjectSourceLoad(tab);
+        closeTab(id);
+        existing.sourceView = true;
+        switchTab(existing.id);
+        if (!isTabDirty(existing)) {
+          updateSql(existing.id, loaded.editableSource);
+          markTabClean(existing);
+        }
+        return;
+      }
+      updateSql(id, loaded.editableSource);
+      setObjectSource(id, options.objectSource);
+    } else {
+      updateSql(id, loaded.editableSource);
+    }
+    tab.sourceView = true;
+    markTabClean(tab);
+    clearObjectSourceLoad(tab);
   }
 
   function showExecutedQueryResults(connectionId: string, database: string, sql: string, queryResults: QueryResult[]) {
@@ -8135,6 +8381,8 @@ export const useQueryStore = defineStore("query", () => {
     isConfirmingAppClose,
     createTab,
     openObjectSourceTab,
+    openObjectSourceTabPending,
+    retryObjectSourceTab,
     showExecutedQueryResults,
     focusGroup,
     activateTab,

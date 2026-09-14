@@ -667,6 +667,7 @@ const resultsPaneSize = ref(Number(safeLocalStorageGet("dbx-results-pane-size"))
 // re-normalize a single pane, and shrinking it would leave a blank dead zone.
 const editorPaneSize = computed(() => (props.editorOnly || !resultsPaneOpen.value ? 100 : 100 - resultsPaneSize.value));
 const queryRunningElapsed = ref(0);
+const sourceLoadElapsed = ref(0);
 
 function toggleResultsPane(): boolean {
   if (props.activeTab.mode !== "query" || !hasQueryOutput.value) return false;
@@ -698,25 +699,36 @@ function onResultsResized(payload: { panes: { size: number }[] }) {
 }
 let queryRunningElapsedFrame: number | undefined;
 
-function stopQueryRunningElapsedTimer() {
+function stopRunningElapsedTimer() {
   if (queryRunningElapsedFrame !== undefined) {
     window.cancelAnimationFrame(queryRunningElapsedFrame);
     queryRunningElapsedFrame = undefined;
   }
 }
 
-function updateQueryRunningElapsed() {
-  const startedAt = props.activeTab.queryExecutionStartedAt;
-  queryRunningElapsed.value = props.activeTab.isExecuting && startedAt ? Math.max(0, Date.now() - startedAt) : 0;
+/** 源码仍在加载（未失败）时的开始时间；用于耗时显示与 rAF 循环的续期判断。 */
+function pendingSourceLoadStartedAt(): number | undefined {
+  const load = props.activeTab.sourceLoad;
+  return load && !load.error ? load.startedAt : undefined;
 }
 
-function startQueryRunningElapsedTimer() {
-  stopQueryRunningElapsedTimer();
-  updateQueryRunningElapsed();
-  if (!props.activeTab.isExecuting || !props.activeTab.queryExecutionStartedAt) return;
+// 一个 rAF 循环同时驱动「查询执行中」与「对象源码加载中」两个耗时显示：
+// issue #9035 的核心体感就是「不知道要等多久」，所以源码加载也要显示已耗时。
+function updateRunningElapsed() {
+  const startedAt = props.activeTab.queryExecutionStartedAt;
+  queryRunningElapsed.value = props.activeTab.isExecuting && startedAt ? Math.max(0, Date.now() - startedAt) : 0;
+  const sourceStartedAt = pendingSourceLoadStartedAt();
+  sourceLoadElapsed.value = sourceStartedAt ? Math.max(0, Date.now() - sourceStartedAt) : 0;
+}
+
+function startRunningElapsedTimer() {
+  stopRunningElapsedTimer();
+  updateRunningElapsed();
+  const isTicking = () => (props.activeTab.isExecuting && !!props.activeTab.queryExecutionStartedAt) || pendingSourceLoadStartedAt() !== undefined;
+  if (!isTicking()) return;
   const updateOnNextFrame = () => {
-    updateQueryRunningElapsed();
-    if (props.activeTab.isExecuting && props.activeTab.queryExecutionStartedAt) {
+    updateRunningElapsed();
+    if (isTicking()) {
       queryRunningElapsedFrame = window.requestAnimationFrame(updateOnNextFrame);
     }
   };
@@ -724,11 +736,12 @@ function startQueryRunningElapsedTimer() {
 }
 
 const queryRunningElapsedSeconds = computed(() => formatElapsedSeconds(queryRunningElapsed.value));
+const sourceLoadElapsedSeconds = computed(() => formatElapsedSeconds(sourceLoadElapsed.value));
 
-watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt] as const, startQueryRunningElapsedTimer, { immediate: true });
+watch(() => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.queryExecutionStartedAt, props.activeTab.sourceLoad?.startedAt, props.activeTab.sourceLoad?.error] as const, startRunningElapsedTimer, { immediate: true });
 
 onUnmounted(() => {
-  stopQueryRunningElapsedTimer();
+  stopRunningElapsedTimer();
   standaloneResultToolbarResizeObserver?.disconnect();
   window.removeEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
   window.removeEventListener("resize", updateStandaloneResultToolbarDimensions);
@@ -1315,7 +1328,18 @@ defineExpose({
             <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
               <span v-for="index in 4" :key="index" class="production-watermark__label whitespace-nowrap font-mono text-6xl font-extrabold text-red-700/[0.12] dark:text-red-200/[0.1]">{{ productionWatermarkText }}</span>
             </div>
+            <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
+                 （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。 -->
+            <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
+            <div v-else-if="activeTab.sourceLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
+              <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
+              <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
+                <RotateCcw class="h-4 w-4" />
+                {{ t("common.retry") }}
+              </Button>
+            </div>
             <QueryEditor
+              v-else
               ref="queryEditorRef"
               class="relative z-0 flex-1"
               :auto-focus="autoFocus !== false"

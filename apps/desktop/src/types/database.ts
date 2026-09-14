@@ -1663,6 +1663,29 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  /**
+   * 「先出 UI 再加载」的中间态：源码 tab 已经可见，但源码还在路上
+   * （ensureConnected + getObjectSource）。让 tab 栏与编辑区在等待期间就有反馈，
+   * 失败时就地显示错误 + Retry，而不是等到加载完才建 tab、失败只弹 toast。
+   *
+   * 纯运行期字段，刻意不进 openTabsPersistence 的落盘白名单：重启后恢复出的
+   * tab 只是普通空 tab，不会永久停在「加载中」。
+   */
+  sourceLoad?: {
+    startedAt: number;
+    /** 加载失败时写入；保留 request 以便就地重试 */
+    error?: string;
+    /**
+     * 重试所需的请求身份。与 `objectSource` 分开保存：objectType 在这里是
+     * **请求时**的类型，而 `objectSource.objectType` 是 routine fallback
+     * 解析后的类型（PROCEDURE↔FUNCTION、PACKAGE↔PACKAGE_BODY 会被改写）。
+     */
+    request: {
+      name: string;
+      objectType: ObjectSourceKind;
+      signature?: string;
+    };
+  };
   tableComment?: string | null;
   tableMeta?: {
     schema?: string;

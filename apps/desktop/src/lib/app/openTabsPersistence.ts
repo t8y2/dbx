@@ -259,6 +259,9 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         redisMonitorActive: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
+        // sourceLoad 是纯运行期态（serializeOpenTabs 不落盘）。这里显式清空，
+        // 让「恢复后的 tab 不会停在加载中」成为不变量，而不是依赖白名单的副作用。
+        sourceLoad: undefined,
         executingResultRunId: undefined,
         editorViewport: restoredEditorViewport(tab),
         editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),

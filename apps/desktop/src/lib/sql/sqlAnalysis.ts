@@ -862,6 +862,9 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
 }
 
 function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): EditableQueryColumn[] | undefined {
+  // Preserve projection order before searching by label: folded duplicate names are not unique.
+  if (analysis.columns.length === resultColumns.length && analysis.columns.every((column, index) => column.resultName.toLowerCase() === resultColumns[index]!.toLowerCase())) return analysis.columns;
+
   const matches: EditableQueryColumn[] = [];
   let searchFrom = 0;
   for (const resultColumn of resultColumns) {

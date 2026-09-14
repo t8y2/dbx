@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeEditableQueryEditability, resolveSourceColumnsByOrdinal } from "@/lib/sql/sqlAnalysis";
+import { analyzeEditableQueryEditability, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sql/sqlAnalysis";
 
 /**
  * An unqualified `*` is unambiguous when the query has exactly one source,
@@ -55,5 +55,21 @@ describe("single-source star projection column mapping", () => {
       { sourceKey: "orders:0", sourceColumn: "id" },
       { sourceKey: "orders:0", sourceColumn: "amount" },
     ]);
+  });
+
+  it("keeps a case-folded explicit column before an Oracle star aligned by ordinal", () => {
+    const analysis: EditableQueryInfo = {
+      schema: "APP",
+      tableName: "TABLE1",
+      tableAlias: "t1",
+      selectStar: false,
+      columns: [
+        { sourceName: "ID", sourceNameQuoted: false, sourceQualifier: "t1", sourceKey: "t1:0", resultName: "id", expression: "t1.id" },
+        { sourceName: "ID", sourceNameQuoted: false, sourceQualifier: "t1", sourceKey: "t1:0", resultName: "ID", expression: "t1.ID" },
+        { sourceName: "NAME", sourceNameQuoted: false, sourceQualifier: "t1", sourceKey: "t1:0", resultName: "NAME", expression: "t1.NAME" },
+      ],
+    };
+
+    expect(sourceColumnsForResult(analysis, ["ID", "ID", "NAME"], "t1:0", "oracle", ["ID"])).toEqual(["ID", "ID", "NAME"]);
   });
 });

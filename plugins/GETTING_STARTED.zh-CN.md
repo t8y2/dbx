@@ -11,7 +11,7 @@
 
 插件可以在 `manifest.json` 中声明可选的 `source`（源码仓库）和 `homepage`（项目主页）。这两个字段会随插件包签名并在“已安装”页面本地显示，因此不依赖联网；市场目录可以重复这些字段用于展示未安装插件。
 
-正式文档和仓库提交流程参考 [`docs/content/docs/plugin-development.cn.mdx`](../docs/content/docs/plugin-development.cn.mdx)。完整协议和贡献点参考 [`README.md`](./README.md)，底层发布流程参考 [`RELEASING.md`](./RELEASING.md)。
+完整的[中文插件开发文档](https://dbxio.com/cn/docs/plugin-development)覆盖 Manifest、权限、Host API、Sidecar、Svelte、调试和商店发布流程；对应的仓库源文件是 [`docs/content/docs/plugin-development.cn.mdx`](../docs/content/docs/plugin-development.cn.mdx)。完整协议和贡献点参考 [`README.md`](./README.md)，底层发布流程参考 [`RELEASING.md`](./RELEASING.md)。
 
 ## 先说结论：SDK 不需要“启动”
 
@@ -360,7 +360,7 @@ cargo run --release \
 - 每个候选包对应的 `.artifact.json`。
 - 合并后的 `release-candidates.json`。
 
-这些 `.dbxp` 不能直接作为官方商店安装地址。审核通过后，DBX Store 的受保护工作流生成最终签名包并发布到仓库控制的 Release/CDN。源码放在插件自己的 Git 仓库；`dbx-store` Git 仓库只保存商店元数据、最终下载地址、哈希、大小、仓库公钥和审核信息。
+这些 `.dbxp` 不能直接作为官方商店安装地址。若插件仓库已登记 `autoUpdate: true`，发布 Release 后 DBX Store 会自动创建或更新候选 PR；未登记时，开发者手动向 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) 提交一个候选 PR 即可，不需要先创建 Issue。审核通过后，DBX Store 的受保护工作流在同一个 PR 流程中生成最终签名包并更新目录。源码放在插件自己的 Git 仓库；`dbx-store` Git 仓库只保存商店元数据、最终下载地址、哈希、大小、仓库公钥和审核信息。
 
 ## 10. 常用命令
 

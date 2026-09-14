@@ -12,13 +12,12 @@ type InstallTabsProps = {
   version: string;
 };
 
-const downloadLabel = { en: "Download DBX", cn: "下载 DBX", tr: "DBX'i indir" };
-const selectDownloadLabel = { en: "Choose a version", cn: "选择下载版本", tr: "Bir sürüm seçin" };
-const selectMacLabel = { en: "Choose a macOS version", cn: "选择 macOS 版本", tr: "macOS sürümü seçin" };
+const downloadLabel = { en: "Download DBX", cn: "下载 DBX" };
+const selectDownloadLabel = { en: "Choose a version", cn: "选择下载版本" };
+const selectMacLabel = { en: "Choose a macOS version", cn: "选择 macOS 版本" };
 const offlineHint = {
   en: "Installing offline or using legacy Windows? View the matching installer",
   cn: "需要离线安装或使用旧版 Windows？查看对应安装包",
-  tr: "Çevrimdışı mı kuruyorsunuz ya da eski bir Windows mu kullanıyorsunuz? Uygun yükleyiciye bakın",
 };
 
 const browserStaticText = {
@@ -40,25 +39,6 @@ const browserStaticText = {
     close: "Close installation guide",
     copy: "Copy command",
     copied: "Copied",
-  },
-  tr: {
-    eyebrow: "Linux tarayıcı paketi",
-    intro: "Kylin, UnionTech UOS ve diğer Linux dağıtımları içindir. DBX yerelde çalışır ve tarayıcınızda açılır.",
-    extract: "Arşivi açın ve paket dizinine girin",
-    start: "DBX'i başlatın",
-    open: "Yerel tarayıcınızda açın",
-    port: "Farklı bir port mu gerekiyor?",
-    portHint: "8080 yerine kullanılabilir başka bir yerel port yazın.",
-    browserStyle: "Sayfa düzeni bozuk mu görünüyor?",
-    browserStyleHint: [
-      "İç ağ veya kurumsal Linux ortamlarındaki bazı tarayıcılar, DBX'in kullandığı modern web standartlarını tam desteklemeyen eski tarayıcı motorları kullanır; bu da eksik veya hatalı biçimlendirmeye yol açar.",
-      "Örneğin Chromium 90 tabanlı eski QiAnXin tarayıcı sürümlerinde bu davranış görülebilir.",
-      "Tarayıcıyı en son sürümüne güncelleyin ya da güncel bir Chrome, Edge veya Firefox sürümü kullanın.",
-    ],
-    download: "İndir",
-    close: "Kurulum kılavuzunu kapat",
-    copy: "Komutu kopyala",
-    copied: "Kopyalandı",
   },
   cn: {
     eyebrow: "Linux 浏览器版",
@@ -89,12 +69,6 @@ const INSTALL_ARIA: Record<DocsLang, { moreOptions: string; options: string; gui
     options: "下载选项",
     guide: (label) => `查看 ${label} 安装说明`,
     download: (label) => `下载 ${label}`,
-  },
-  tr: {
-    moreOptions: "Diğer indirme seçeneklerini göster",
-    options: "İndirme seçenekleri",
-    guide: (label) => `${label} kurulum kılavuzunu görüntüle`,
-    download: (label) => `${label} indir`,
   },
 };
 

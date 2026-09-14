@@ -1,4 +1,5 @@
 # Dependencies
+openGauss-server/
 node_modules
 .claude/
 .codex/
@@ -70,6 +71,9 @@ Thumbs.db
 
 # Temp
 tmp/
+
+# Local issue screenshots (never commit)
+issue-assets/
 
 # AI background-run dev artifacts (never commit)
 .dlp-quarantine/

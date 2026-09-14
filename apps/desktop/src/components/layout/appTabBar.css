@@ -670,6 +670,12 @@
   border-left-color: transparent;
 }
 
+/* The app toolbar already supplies the shared top edge. Pills must not draw
+ * a second line against it in the classic top placement. */
+.app-tab-bar.classic-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="top"] .app-tab-pill {
+  border-top-width: 0;
+}
+
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
   background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);

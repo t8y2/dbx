@@ -15,10 +15,11 @@ use crate::ai::{
     AiRunStatus,
 };
 use crate::connection_secrets::{
-    CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
-    MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
-    NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
+    plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX,
+    CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY,
+    MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
+    NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
+    PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -1360,6 +1361,12 @@ fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
         if auth.get("kind").and_then(serde_json::Value::as_str) == Some("usernamePassword") {
             scrub_json_secret(auth, "password");
         }
+    }
+}
+
+fn scrub_plugin_connection_secrets(config: &mut ConnectionConfig) {
+    for secret in config.connection_secrets.values_mut() {
+        secret.clear();
     }
 }
 
@@ -3776,16 +3783,32 @@ impl Storage {
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
             let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
             let needs_cassandra_tls_rewrite = self.hydrate_cassandra_tls_secrets(&id, &mut config).await?;
+            let mut needs_plugin_secret_rewrite = false;
+            let plugin_secret_keys = config.connection_secrets.keys().cloned().collect::<Vec<_>>();
+            for key in plugin_secret_keys {
+                let storage_key = plugin_connection_secret_key(&key)?;
+                let current = config.connection_secrets.get(&key).cloned().unwrap_or_default();
+                if current.is_empty() {
+                    if let Some(secret) = self.get_secret(&id, &storage_key).await? {
+                        config.connection_secrets.insert(key, secret);
+                    }
+                } else {
+                    self.set_secret(&id, &storage_key, &current).await?;
+                    needs_plugin_secret_rewrite = true;
+                }
+            }
             let needs_external_secret_rewrite = needs_mq_auth_rewrite
                 || needs_mq_token_signing_rewrite
                 || needs_nacos_auth_rewrite
-                || needs_cassandra_tls_rewrite;
+                || needs_cassandra_tls_rewrite
+                || needs_plugin_secret_rewrite;
             if needs_external_secret_rewrite {
                 let mut sanitized = config.clone().canonicalized();
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
                 scrub_cassandra_tls_secrets(&mut sanitized);
+                scrub_plugin_connection_secrets(&mut sanitized);
                 let sanitized_json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
                 let update_id = id.clone();
                 self.with_conn(move |conn| {
@@ -5353,8 +5376,9 @@ mod tests {
     };
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
-        CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
-        MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
+        plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
+        MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+        PLUGIN_CONNECTION_SECRET_PREFIX,
     };
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{
@@ -6084,7 +6108,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_connections_moves_plugin_secrets_to_secret_table_and_restores_them() {
+    async fn save_connections_moves_plugin_secrets_to_secret_table_and_clears_removed_values() {
         let path = temp_db_path("plugin-secrets");
         let storage = Storage::open(&path).await.unwrap();
         let mut config = plain_connection("plugin", "");
@@ -6671,6 +6695,39 @@ mod tests {
         assert_eq!(storage.get_secret("future", "password").await.unwrap().as_deref(), Some("future-secret"));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connections_moves_plugin_secrets_to_secret_table_and_restores_them() {
+        let path = temp_db_path("plugin-connection-secret");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = mq_connection("plugin-connection", "");
+        config.name = "Hello plugin".to_string();
+        config.db_type = DatabaseType::Plugin;
+        config.driver_profile = Some("plugin".to_string());
+        config.external_config = Some(serde_json::json!({ "greeting": "Hello" }));
+        config.plugin_id = Some("dbx.example.hello".to_string());
+        config.plugin_connection_provider = Some("hello.connection".to_string());
+        config.plugin_connection_type = Some("hello".to_string());
+        config.connection_secrets.insert("access_token".to_string(), "plugin-secret".to_string());
+
+        storage.save_connections(&[config]).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "plugin-connection").await;
+        assert!(!raw_json.contains("plugin-secret"));
+        let persisted: ConnectionConfig = serde_json::from_str(&raw_json).unwrap();
+        assert_eq!(persisted.connection_secrets.get("access_token"), None);
+        assert_eq!(
+            storage
+                .get_secret("plugin-connection", &plugin_connection_secret_key("access_token").unwrap())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("plugin-secret")
+        );
+
+        let loaded = storage.load_connections().await.unwrap();
+        assert_eq!(loaded[0].connection_secrets.get("access_token").map(String::as_str), Some("plugin-secret"));
     }
 
     #[tokio::test]

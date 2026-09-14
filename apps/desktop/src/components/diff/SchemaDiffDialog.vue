@@ -11,6 +11,7 @@ import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutio
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { useSchemaDiffConfig } from "@/composables/useSchemaDiffConfig";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
+import SchemaDiffConfigSelector from "@/components/diff/SchemaDiffConfigSelector.vue";
 import FieldMappingDialog from "@/components/diff/FieldMappingDialog.vue";
 import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue";
 import SchemaDiffRoutineList from "@/components/diff/SchemaDiffRoutineList.vue";
@@ -103,6 +104,7 @@ const ignoreComments = ref(false);
 // Options panel
 const showOptionsPanel = ref(false);
 const showFieldMappingDialog = ref(false);
+const showConfigSelector = ref(false);
 const sourceDbType = computed(() => store.getConfig(sourceConnectionId.value)?.db_type ?? "");
 const targetDbType = computed(() => store.getConfig(targetConnectionId.value)?.db_type ?? "");
 
@@ -254,6 +256,11 @@ function toggleMaximize() {
 }
 
 function handleDialogEscape(event: KeyboardEvent) {
+  if (showConfigSelector.value) {
+    event.preventDefault();
+    showConfigSelector.value = false;
+    return;
+  }
   if (!showOptionsPanel.value) return;
 
   event.preventDefault();
@@ -313,7 +320,7 @@ onBeforeUnmount(() => {
 });
 
 // Config management
-const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfig, updateActiveConfigConnection, updateActiveConfigOptions, saveToHistory, deleteFromHistory } = useSchemaDiffConfig();
+const { configs, activeConfigId, activeConfig, recentConfigs, ensureDefaultConfig, createConfig, updateConfig, renameConfig, deleteConfig, duplicateConfig, importConfigs, updateActiveConfigConnection, updateActiveConfigOptions, saveToHistory, deleteFromHistory } = useSchemaDiffConfig();
 const schemaDiffPanelOptions = computed(() => normalizeSchemaDiffCompareOptions(activeConfig.value?.options, getDbType()));
 
 const selectedObject = computed(() => {
@@ -1075,6 +1082,13 @@ async function copyRoutineDiffSide(side: TextDiffSide) {
   }
 }
 function handleLoadHistoryConfig(config: SchemaDiffConfig) {
+  applyConfigToForm(config);
+  if (config.options) {
+    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(config.options, getDbType()));
+  }
+}
+
+function applyConfigToForm(config: SchemaDiffConfig) {
   runWithoutTargetIdentityReset(() => {
     sourceConnectionId.value = config.sourceConnectionId;
     sourceDatabase.value = config.sourceDatabase;
@@ -1083,18 +1097,85 @@ function handleLoadHistoryConfig(config: SchemaDiffConfig) {
     targetDatabase.value = config.targetDatabase;
     targetSchema.value = config.targetSchema;
   });
-  if (config.options) {
-    updateActiveConfigOptions(normalizeSchemaDiffCompareOptions(config.options, getDbType()));
-  }
+}
+
+function snapshotCurrentConfig(name: string): SchemaDiffConfig {
+  ensureDefaultConfig(getDbType());
+  const base = activeConfig.value;
+  return {
+    id: base?.id ?? "",
+    name,
+    createdAt: base?.createdAt ?? Date.now(),
+    updatedAt: Date.now(),
+    sourceConnectionId: sourceConnectionId.value,
+    sourceDatabase: sourceDatabase.value,
+    sourceSchema: sourceSchema.value,
+    targetConnectionId: targetConnectionId.value,
+    targetDatabase: targetDatabase.value,
+    targetSchema: targetSchema.value,
+    options: { ...schemaDiffPanelOptions.value },
+  };
+}
+
+function handleLoadConfig() {
+  ensureDefaultConfig(getDbType());
+  showConfigSelector.value = true;
+}
+
+function handleSelectActiveConfig(id: string) {
+  if (!id || id === activeConfigId.value) return;
+  activeConfigId.value = id;
+  const config = configs.value.find((entry) => entry.id === id);
+  if (config) applyConfigToForm(config);
 }
 
 function handleSaveConfig() {
-  if (activeConfig.value) {
-    const name = window.prompt(t("diff.saveConfigPrompt"), activeConfig.value.name || t("diff.defaultConfigName"));
-    if (name === null) return; // User cancelled
-    const configToSave = { ...activeConfig.value, name: name.trim() || t("diff.defaultConfigName") };
-    saveToHistory(configToSave);
+  ensureDefaultConfig(getDbType());
+  if (!activeConfig.value) return;
+  const name = window.prompt(t("diff.saveConfigPrompt"), activeConfig.value.name || t("diff.defaultConfigName"));
+  if (name === null) return;
+  const trimmed = name.trim() || t("diff.defaultConfigName");
+  const snapshot = snapshotCurrentConfig(trimmed);
+  updateConfig(activeConfig.value.id, {
+    name: trimmed,
+    sourceConnectionId: snapshot.sourceConnectionId,
+    sourceDatabase: snapshot.sourceDatabase,
+    sourceSchema: snapshot.sourceSchema,
+    targetConnectionId: snapshot.targetConnectionId,
+    targetDatabase: snapshot.targetDatabase,
+    targetSchema: snapshot.targetSchema,
+    options: snapshot.options,
+  });
+  saveToHistory({ ...snapshot, id: activeConfig.value.id });
+  toast(t("diff.configSaved"), 2000);
+}
+
+function handleCreateNamedConfig(name: string) {
+  const snapshot = snapshotCurrentConfig(name);
+  createConfig(name, snapshot, getDbType());
+}
+
+function handleRenameNamedConfig(id: string, name: string) {
+  renameConfig(id, name);
+}
+
+function handleDeleteNamedConfig(id: string) {
+  deleteConfig(id);
+  if (activeConfig.value) applyConfigToForm(activeConfig.value);
+}
+
+function handleDuplicateNamedConfig(id: string) {
+  duplicateConfig(id);
+  if (activeConfig.value) applyConfigToForm(activeConfig.value);
+}
+
+function handleImportNamedConfigs(jsonText: string) {
+  try {
+    importConfigs(jsonText, "merge");
+    if (activeConfig.value) applyConfigToForm(activeConfig.value);
     toast(t("diff.configSaved"), 2000);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), 5000);
   }
 }
 
@@ -1237,6 +1318,7 @@ const targetConnectionInfo = computed(() => {
           @swap="handleSwap"
           @show-options="showOptionsPanel = true"
           @save-config="handleSaveConfig"
+          @load-config="handleLoadConfig"
           @load-history-config="handleLoadHistoryConfig"
           @delete-history-config="handleDeleteHistoryConfig"
           @update:field-mappings="handleFieldMappingsUpdate"
@@ -1563,6 +1645,26 @@ const targetConnectionInfo = computed(() => {
             <Button variant="ghost" size="sm" @click="showOptionsPanel = false" :aria-label="t('common.close')">✕</Button>
           </div>
           <SchemaDiffOptionsPanel :options="schemaDiffPanelOptions" :option-tree="optionTree" @update:options="handleOptionsUpdate" @close="showOptionsPanel = false" />
+        </div>
+      </div>
+
+      <!-- Config selector overlay (save/load named configs) -->
+      <div v-if="showConfigSelector" class="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm" @click.self="showConfigSelector = false">
+        <div class="max-h-[80vh] w-[720px] max-w-[calc(100vw-2rem)] overflow-auto rounded-lg border bg-card p-4 shadow-lg">
+          <div class="mb-4 flex items-center justify-between gap-2">
+            <h3 class="text-sm font-medium">{{ t("diff.loadConfig") }}</h3>
+            <Button variant="ghost" size="sm" :aria-label="t('common.close')" @click="showConfigSelector = false">✕</Button>
+          </div>
+          <SchemaDiffConfigSelector
+            :configs="configs"
+            :active-config-id="activeConfigId"
+            @update:active-config-id="handleSelectActiveConfig"
+            @create="handleCreateNamedConfig"
+            @rename="handleRenameNamedConfig"
+            @delete="handleDeleteNamedConfig"
+            @duplicate="handleDuplicateNamedConfig"
+            @import="handleImportNamedConfigs"
+          />
         </div>
       </div>
 

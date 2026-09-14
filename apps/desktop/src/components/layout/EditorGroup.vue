@@ -30,6 +30,8 @@ const props = defineProps<
     tabBarCollapsed?: boolean;
     canDetachTabs?: boolean;
     detachedDropTarget?: boolean;
+    /** Collapse the group to its tab strip while a plugin workbench tab owns the layout. */
+    contentSuppressed?: boolean;
   }
 >();
 
@@ -98,6 +100,7 @@ const tabBarTarget = computed(() => {
   if (!tabBarPortal?.active.value) return undefined;
   return tabBarPortal.targets.get(props.groupId);
 });
+
 const groupTabs = computed(() => {
   const byId = new Map(queryStore.tabs.map((tab) => [tab.id, tab]));
   return props.tabIds.map((id) => byId.get(id)).filter((tab): tab is QueryTab => !!tab);
@@ -138,7 +141,7 @@ const groupExecutableSql = computed(() => {
 </script>
 
 <template>
-  <div class="editor-group flex h-full min-h-0 min-w-0 overflow-hidden" :class="[groupClass, groupLayoutClass]" :data-group-id="groupId" @pointerdown.capture="$emit('focus-group', groupId)" @focusin="$emit('focus-group', groupId)">
+  <div class="editor-group flex min-h-0 min-w-0 overflow-hidden" :class="[contentSuppressed ? '' : 'h-full', groupClass, groupLayoutClass]" :data-group-id="groupId" @pointerdown.capture="$emit('focus-group', groupId)" @focusin="$emit('focus-group', groupId)">
     <Teleport defer v-if="showTabNavigation !== false" :to="tabBarTarget" :disabled="!tabBarPortal?.active.value || !tabBarTarget">
       <EditorGroupTabBar
         :group-id="groupId"
@@ -157,15 +160,17 @@ const groupExecutableSql = computed(() => {
         @detach-tab="$emit('detach-tab', $event)"
         @activate-settings="toolbar.activateSettingsPage()"
         @close-settings="toolbar.closeSettingsPage()"
-        @activate-driver-store="toolbar.activateDriverStore()"
-        @close-driver-store="toolbar.closeDriverStore()"
         @activate-plugin-center="toolbar.activatePluginCenter()"
         @close-plugin-center="toolbar.closePluginCenter()"
+        @activate-driver-store="toolbar.activateDriverStore()"
+        @close-driver-store="toolbar.closeDriverStore()"
       />
     </Teleport>
     <!-- The toolbar stays at the top of the pane's content column in every
-         placement; only the tab bar moves around it. -->
-    <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+         placement; only the tab bar moves around it. While contentSuppressed
+         (plugin workbench tab active) the whole column yields to the
+         always-mounted plugin layer and the group collapses to its strip. -->
+    <div v-show="!contentSuppressed" class="flex min-h-0 min-w-0 flex-1 flex-col">
       <EditorToolbar
         v-if="activeTab && showGroupToolbar"
         :active-tab="activeTab"

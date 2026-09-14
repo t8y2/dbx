@@ -42,6 +42,7 @@ import type { NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementat
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { detachTunnelProfileLayer, tunnelProfileReferenceLayer, tunnelProfileSummary } from "@/lib/connection/tunnelProfiles";
+import { sanitizeConnectionCredentials } from "@/lib/connection/credentialSanitizer";
 import { applySshAuthMethod, inferSshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from "./connectionEditDraftSync";
@@ -92,6 +93,7 @@ import { assertCompleteDatabaseCategories, databaseSelectionForCategory } from "
 import { loadConnectionPickerView, saveConnectionPickerView, type DbPickerView } from "@/lib/connection/connectionPickerViewPreference";
 import { normalizeRocketmqNamesrvAddr } from "@/lib/connection/rocketmqNamesrv";
 import { normalizeRabbitmqAddresses, parseRabbitmqAddress } from "@/lib/connection/rabbitmqAddresses";
+import { pluginFieldIsRequired, pluginFieldIsVisible } from "@/lib/plugins/pluginFieldConditions";
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
@@ -255,6 +257,8 @@ type LegacyTransportFields = {
 type LegacyConnectionConfig = ConnectionConfig & LegacyTransportFields;
 type ConnectionForm = Omit<ConnectionConfig, "id">;
 type ConnectionTestState = ConnectionTestResult & { ok: boolean; scope?: "connection" | "ssh" };
+type PluginActionStatus = { ok: boolean; message: string };
+type SaveConnectionOptions = { connectAfterSave?: boolean; closeOnSuccess?: boolean };
 
 const { t, locale: appLocale } = useI18n();
 const { toast } = useToast();
@@ -328,11 +332,9 @@ const connectionErrorDetail = ref("");
 const testResultCopied = ref(false);
 const connectionErrorCopied = ref(false);
 const editingId = ref<string | null>(null);
-const installedPlugins = ref<InstalledPlugin[]>([]);
 const pluginFormValues = ref<Record<string, PluginFormFieldValue>>({});
 const pluginLoadError = ref("");
 const runningPluginActionId = ref<string | null>(null);
-type PluginActionStatus = { ok: boolean; message: string };
 const pluginActionStatus = ref<PluginActionStatus | null>(null);
 const draftTestConnectionId = ref(uuid());
 const showVisibleDatabasesDialog = ref(false);
@@ -365,6 +367,7 @@ const isLoadingVisibleSchemas = ref(false);
 const visibleSchemaNames = ref<string[]>([]);
 const visibleSchemaInitialSelection = ref<string[]>([]);
 const visibleSchemaError = ref("");
+const installedPlugins = ref<InstalledPlugin[]>([]);
 let testRunId = 0;
 let unlistenAgentInstallProgress: (() => void) | null = null;
 
@@ -759,6 +762,13 @@ const keepaliveEnabled = computed({
 const selectedTransportLayerId = ref<string | null>(null);
 const draggedTransportLayerId = ref<string | null>(null);
 const selectedType = ref("mysql");
+const pluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
+const pluginConnectionProviders = computed(() => pluginRegistry.value.listConnectionProviders());
+const selectedPluginProvider = computed(() => pluginProviderEntryForOption(selectedType.value));
+const selectedPluginIcon = computed(() => (selectedPluginProvider.value ? pluginConnectionProviderIcon(selectedPluginProvider.value) : undefined));
+const isPluginConnection = computed(() => form.value.db_type === "plugin");
+const pluginFooterActions = computed<PluginConnectionAction[]>(() => (selectedPluginProvider.value ? pluginConnectionActionsForDialog(selectedPluginProvider.value.contribution, !!editingId.value) : []));
+const pluginFooterBusy = computed(() => isTesting.value || isSaving.value || !!runningPluginActionId.value);
 const customDriverName = ref("");
 const mongoUseUrl = ref(false);
 const jdbcDriverPathsInput = ref("");
@@ -1190,13 +1200,6 @@ function selectedProfile() {
   return driverProfiles[profile] ?? driverProfiles.mysql;
 }
 
-const isPluginConnection = computed(() => form.value.db_type === "plugin");
-const pluginConnectionProviders = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value).listConnectionProviders());
-const selectedPluginProvider = computed(() => pluginProviderEntryForOption(selectedType.value));
-const selectedPluginIcon = computed(() => (selectedPluginProvider.value ? pluginConnectionProviderIcon(selectedPluginProvider.value) : undefined));
-const pluginFooterActions = computed<PluginConnectionAction[]>(() => (selectedPluginProvider.value ? pluginConnectionActionsForDialog(selectedPluginProvider.value.contribution, !!editingId.value) : []));
-const pluginFooterBusy = computed(() => isTesting.value || isSaving.value || !!runningPluginActionId.value);
-
 function pluginProviderEntry(pluginId: string, providerId: string) {
   return pluginConnectionProviders.value.find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === providerId) || null;
 }
@@ -1204,62 +1207,6 @@ function pluginProviderEntry(pluginId: string, providerId: string) {
 function pluginProviderEntryForOption(value: string) {
   const target = parsePluginConnectionProviderOptionValue(value);
   return target ? pluginProviderEntry(target.pluginId, target.providerId) : null;
-}
-
-function applyPluginProvider(value: string, preserveConnectionFields = false, existing?: ConnectionConfig): boolean {
-  const target = parsePluginConnectionProviderOptionValue(value);
-  if (!target) return false;
-  const entry = pluginProviderEntry(target.pluginId, target.providerId);
-  if (!entry) return false;
-
-  selectedType.value = value;
-  if (!preserveConnectionFields) {
-    form.value = {
-      ...defaultForm(),
-      name: entry.contribution.label,
-      db_type: "plugin",
-      driver_profile: "plugin",
-      driver_label: entry.contribution.label,
-      host: "",
-      port: 0,
-      username: "",
-      password: "",
-      query_timeout_secs: 60,
-    };
-  } else {
-    form.value.db_type = "plugin";
-    form.value.driver_profile = "plugin";
-    form.value.driver_label = entry.contribution.label;
-  }
-  pluginFormValues.value = pluginConnectionFormValues(entry.contribution, existing);
-  if (!preserveConnectionFields) {
-    const nameField = entry.contribution.fields.find((field) => field.binding === "name");
-    const defaultName = nameField ? pluginFormValues.value[nameField.key] : undefined;
-    if (typeof defaultName === "string" && defaultName.trim()) form.value.name = defaultName.trim();
-  }
-  connectionUrlInput.value = "";
-  appliedConnectionUrlInput.value = "";
-  return true;
-}
-
-async function loadInstalledPlugins() {
-  pluginLoadError.value = "";
-  try {
-    installedPlugins.value = await api.listPlugins();
-  } catch (cause) {
-    installedPlugins.value = [];
-    pluginLoadError.value = cause instanceof Error ? cause.message : String(cause);
-  }
-}
-
-function applyRequestedPluginProvider(target: PluginCenterFocus | null | undefined) {
-  if (!target?.pluginId || !target.providerId) return false;
-  const value = pluginConnectionProviderOptionValue(target.pluginId, target.providerId);
-  if (!applyPluginProvider(value)) return false;
-  selectedDbCategory.value = "plugins";
-  dialogStep.value = "config";
-  configTab.value = "connection";
-  return true;
 }
 
 function mqExtraRecord(config?: Partial<MqAdminConfig>): Record<string, unknown> {
@@ -2589,6 +2536,62 @@ function applyProfile(val: string, preserveConnectionFields = false) {
   }
 }
 
+function applyPluginProvider(value: string, preserveConnectionFields = false, existing?: ConnectionConfig): boolean {
+  const target = parsePluginConnectionProviderOptionValue(value);
+  if (!target) return false;
+  const entry = pluginProviderEntry(target.pluginId, target.providerId);
+  if (!entry) return false;
+
+  selectedType.value = value;
+  if (!preserveConnectionFields) {
+    form.value = {
+      ...defaultForm(),
+      name: entry.contribution.label,
+      db_type: "plugin",
+      driver_profile: "plugin",
+      driver_label: entry.contribution.label,
+      host: "",
+      port: 0,
+      username: "",
+      password: "",
+      query_timeout_secs: 60,
+    };
+  } else {
+    form.value.db_type = "plugin";
+    form.value.driver_profile = "plugin";
+    form.value.driver_label = entry.contribution.label;
+  }
+  pluginFormValues.value = pluginConnectionFormValues(entry.contribution, existing);
+  if (!preserveConnectionFields) {
+    const nameField = entry.contribution.fields.find((field) => field.binding === "name");
+    const defaultName = nameField ? pluginFormValues.value[nameField.key] : undefined;
+    if (typeof defaultName === "string" && defaultName.trim()) form.value.name = defaultName.trim();
+  }
+  connectionUrlInput.value = "";
+  appliedConnectionUrlInput.value = "";
+  return true;
+}
+
+async function loadInstalledPlugins() {
+  pluginLoadError.value = "";
+  try {
+    installedPlugins.value = await api.listPlugins();
+  } catch (cause) {
+    installedPlugins.value = [];
+    pluginLoadError.value = cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+function applyRequestedPluginProvider(target: PluginCenterFocus | null | undefined) {
+  if (!target?.pluginId || !target.providerId) return false;
+  const value = pluginConnectionProviderOptionValue(target.pluginId, target.providerId);
+  if (!applyPluginProvider(value)) return false;
+  selectedDbCategory.value = "plugins";
+  dialogStep.value = "config";
+  configTab.value = "connection";
+  return true;
+}
+
 function switchOceanbaseMode(mode: "mysql" | "oracle") {
   oceanbaseSubMode.value = mode;
   if (mode === "mysql") {
@@ -2626,7 +2629,7 @@ watch(
         name: config.name,
         note: config.note || "",
         db_type: oceanbasePatch?.db_type || profileConfig?.type || config.db_type,
-        driver_profile: oceanbasePatch?.driver_profile || config.driver_profile || profile,
+        driver_profile: config.db_type === "plugin" ? "plugin" : oceanbasePatch?.driver_profile || config.driver_profile || profile,
         driver_label: config.driver_label || oceanbasePatch?.driver_label || driverProfiles[profile]?.label || config.db_type,
         url_params: config.url_params || "",
         agent_java_options: config.agent_java_options || [],
@@ -2770,6 +2773,7 @@ watch(
       productionProtectionEnabled.value = false;
       selectedTransportLayerId.value = null;
       selectedType.value = "mysql";
+      pluginFormValues.value = {};
       customDriverName.value = "";
       resetMqFields();
       resetCassandraTlsFields(undefined);
@@ -3013,10 +3017,10 @@ const dbCategoryMetadata: Array<{ key: DbCategoryKey; titleKey: string }> = [
   { key: "registry_config", titleKey: "connection.databaseCategoryRegistryConfig" },
 ];
 
-function jdbcProductCategory(profileId: string): DbCategoryKey {
-  const category = dbCategoryMetadata.find(({ key }) => jdbcProductProfileIdsForCategory(key).includes(profileId))?.key;
-  if (!category) throw new Error(`JDBC product profile ${profileId} has no connection picker category`);
-  return category;
+function jdbcProductCategory(profileId: string): ConnectionProfileCategory {
+  const category: DbCategoryKey | undefined = dbCategoryMetadata.find(({ key }) => jdbcProductProfileIdsForCategory(key).includes(profileId))?.key;
+  if (category !== "plugins" && category) return category;
+  throw new Error(`JDBC product profile ${profileId} has no connection picker category`);
 }
 
 // `influxdb3` is presented as a version option inside the InfluxDB card
@@ -3092,7 +3096,7 @@ const selectedDbOptionIsVisible = computed(() => visibleDbCategories.value.some(
 function selectDbCategory(category: DbCategoryKey) {
   selectedDbCategory.value = category;
   dbSearchQuery.value = "";
-  const categoryOptions = dbCategoryDefinitions.find((definition) => definition.key === category)?.optionValues ?? [];
+  const categoryOptions = dbCategories.value.find((definition) => definition.key === category)?.options.map((option) => option.value) ?? [];
   const nextSelection = databaseSelectionForCategory(selectedType.value, categoryOptions);
   if (nextSelection && nextSelection !== selectedType.value) onDbTypeChange(nextSelection);
 }
@@ -3573,6 +3577,32 @@ const pluginActionStatusMessage = computed(() => {
   if (!pluginActionStatus.value) return "";
   return pluginActionStatus.value.ok ? pluginActionStatus.value.message : translateBackendError(t, pluginActionStatus.value.message);
 });
+const agentInstallPercent = computed(() => driverInstallProgressPercent(agentInstallProgress.value));
+const agentInstallProgressLabel = computed(() => {
+  const progress = agentInstallProgress.value;
+  if (agentInstallError.value) return t("connection.driverInstall.statusFailed");
+  if (!agentInstallRunning.value) return t("connection.driverInstall.statusWaiting");
+  if (!progress) return t("connection.driverInstall.statusPreparing");
+  if (progress.step === "jre-extract") return t("connection.driverInstall.statusExtractingJre");
+  const label = progress.step === "jre" ? t("connection.driverInstall.stepJre") : progress.step === "driver" ? t("connection.driverInstall.stepDriver") : progress.step || t("connection.driverInstall.stepDefault");
+  if (!progress.total) return `${label}...`;
+  return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
+});
+const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
+const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
+const shouldUseWideConnectionDialog = computed(
+  () => dialogStep.value === "config" && (canChooseVisibleDatabases.value || canChooseVisibleNacosNamespaces.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value) || (selectedPluginProvider.value?.contribution.fields.length ?? 0) >= 6),
+);
+const connectionDialogContentClass = computed(() => {
+  if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
+  const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
+  const scrollableAdvancedNacos = form.value.db_type === "nacos" && configTab.value === "advanced";
+  return `${widthClass} connection-dialog-content--config${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
+});
+const connectionLabelClass = "justify-self-start text-left";
+const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
+const connectionLabelTopClass = `${connectionLabelClass} mt-2`;
+const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
 
 function pluginFieldValue(field: PluginFormField): PluginFormFieldValue {
   if (field.binding === "name") return form.value.name;
@@ -3582,6 +3612,19 @@ function pluginFieldValue(field: PluginFormField): PluginFormFieldValue {
 function pluginFieldHasValue(field: PluginFormField): boolean {
   const value = pluginFieldValue(field);
   return typeof value === "string" ? value.trim().length > 0 : value !== undefined;
+}
+
+function pluginFieldValueByKey(key: string): PluginFormFieldValue {
+  const field = selectedPluginProvider.value?.contribution.fields.find((candidate) => candidate.key === key);
+  return field ? pluginFieldValue(field) : undefined;
+}
+
+function pluginFieldVisible(field: PluginFormField): boolean {
+  return pluginFieldIsVisible(field, pluginFieldValueByKey, (key) => selectedPluginProvider.value?.contribution.fields.find((candidate) => candidate.key === key));
+}
+
+function pluginFieldRequired(field: PluginFormField): boolean {
+  return pluginFieldIsRequired(field, pluginFieldValueByKey);
 }
 
 function pluginActionLabel(action: PluginConnectionAction): string {
@@ -3633,34 +3676,11 @@ function applyPluginActionFieldValues(values: Record<string, PluginFormFieldValu
   }
   pluginFormValues.value = nextValues;
 }
-const agentInstallPercent = computed(() => driverInstallProgressPercent(agentInstallProgress.value));
-const agentInstallProgressLabel = computed(() => {
-  const progress = agentInstallProgress.value;
-  if (agentInstallError.value) return t("connection.driverInstall.statusFailed");
-  if (!agentInstallRunning.value) return t("connection.driverInstall.statusWaiting");
-  if (!progress) return t("connection.driverInstall.statusPreparing");
-  if (progress.step === "jre-extract") return t("connection.driverInstall.statusExtractingJre");
-  const label = progress.step === "jre" ? t("connection.driverInstall.stepJre") : progress.step === "driver" ? t("connection.driverInstall.stepDriver") : progress.step || t("connection.driverInstall.stepDefault");
-  if (!progress.total) return `${label}...`;
-  return `${label} ${formatInstallSize(progress.downloaded ?? 0)} / ${formatInstallSize(progress.total)} (${agentInstallPercent.value ?? 0}%)`;
-});
-const canCloseAgentInstallDialog = computed(() => !agentInstallRunning.value || !!agentInstallError.value);
-const sqlServerDriverMode = computed<"auto" | "legacy">(() => (sqlServerUsesLegacyCompatibility(form.value) ? "legacy" : "auto"));
-const shouldUseWideConnectionDialog = computed(() => dialogStep.value === "config" && (canChooseVisibleDatabases.value || canChooseVisibleNacosNamespaces.value || (canChooseVisibleSchemas.value && !visibleFilterUsesSchemas.value)));
-const connectionDialogContentClass = computed(() => {
-  if (dialogStep.value === "select") return "connection-dialog-content--picker sm:h-[720px] sm:max-w-[880px]";
-  const widthClass = shouldUseWideConnectionDialog.value ? "connection-dialog-content--wide sm:max-w-[660px]" : "connection-dialog-content--standard sm:max-w-[560px]";
-  const scrollableAdvancedNacos = form.value.db_type === "nacos" && configTab.value === "advanced";
-  return `${widthClass} connection-dialog-content--config${scrollableAdvancedNacos ? " connection-dialog-content--scrollable" : ""}`;
-});
-const connectionLabelClass = "justify-self-start text-left";
-const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
-const connectionLabelTopClass = `${connectionLabelClass} mt-2`;
-const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
+
 const hasRequiredConnectionTarget = computed(() => {
   if (isPluginConnection.value) {
-    const provider = selectedPluginProvider.value?.contribution;
-    return !!provider && provider.fields.every((field) => !field.required || pluginFieldHasValue(field));
+    const entry = selectedPluginProvider.value;
+    return !!entry && entry.contribution.fields.every((field) => !pluginFieldVisible(field) || !pluginFieldRequired(field) || pluginFieldHasValue(field));
   }
   if (form.value.db_type === "mq") {
     if (mqSystemKind.value === "kafka") return mqKafkaConnectionSource.value === "zookeeper" ? !!mqKafkaZooKeeperServers.value.trim() : !!mqKafkaBootstrapServers.value.trim();
@@ -4061,11 +4081,12 @@ function connectionConfigForSshTunnelTest(id: string): ConnectionConfig {
 }
 
 function connectionConfigForSubmit(id: string, generatedName = "", validatePluginRequired = true): ConnectionConfig {
+  let config: LegacyConnectionConfig;
   if (isPluginConnection.value) {
     const entry = selectedPluginProvider.value;
     if (!entry) throw new Error(pluginLoadError.value || t("connection.pluginProviderUnavailable"));
     if (validatePluginRequired) {
-      const missingField = entry.contribution.fields.find((field) => field.required && !pluginFieldHasValue(field));
+      const missingField = entry.contribution.fields.find((field) => pluginFieldVisible(field) && pluginFieldRequired(field) && !pluginFieldHasValue(field));
       if (missingField) throw new Error(t("connection.pluginRequiredField", { field: missingField.label }));
     }
     const values = { ...pluginFormValues.value };
@@ -4073,10 +4094,23 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       if (field.binding === "name") values[field.key] = form.value.name;
     }
     const existing = props.editConfig?.db_type === "plugin" && props.editConfig.plugin_id === entry.plugin.manifest.id && props.editConfig.plugin_connection_provider === entry.contribution.id ? props.editConfig : undefined;
-    const config = buildPluginConnectionConfig(entry.plugin.manifest.id, entry.contribution, values, existing);
-    return { ...formValueForSubmit(), ...config, id, name: form.value.name.trim() || generatedName.trim() || config.name, note: form.value.note?.trim() || undefined };
+    config = buildPluginConnectionConfig(entry.plugin.manifest.id, entry.contribution, values, existing) as LegacyConnectionConfig;
+    config.id = id;
+    config.name = form.value.name.trim() || config.name;
+    config.note = form.value.note;
+    config.color = form.value.color;
+    config.transport_layers = form.value.transport_layers || [];
+    config.connect_timeout_secs = form.value.connect_timeout_secs;
+    config.query_timeout_secs = form.value.query_timeout_secs;
+    config.idle_timeout_secs = form.value.idle_timeout_secs;
+    config.keepalive_interval_secs = form.value.keepalive_interval_secs;
+    config.read_only = form.value.read_only;
+    config.save_password = form.value.save_password;
+    config.is_production = form.value.is_production;
+    config.production_databases = form.value.production_databases;
+  } else {
+    config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   }
-  const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
   config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
   config.note = config.note?.trim() || undefined;
@@ -4286,6 +4320,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     setGaussdbTargetServerType(config, targetServerType);
     setGaussdbCountQueryDop(config, countQueryDop);
   } else if (config.db_type !== "plugin" && !isDoltDriverProfile(config.driver_profile)) {
+    // Plugin connections keep `external_config`: the manifest-driven form
+    // fields land there via buildPluginConnectionConfig. Only the built-in
+    // drivers without an external-config payload get wiped here.
     config.external_config = undefined;
   }
   if (config.db_type === "mongodb" && !mongoUseUrl.value) {
@@ -4382,12 +4419,6 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.port = firstEndpoint.port;
     }
     config.database = undefined;
-    config.ca_cert_path = config.ca_cert_path?.trim() || "";
-    config.client_cert_path = config.client_cert_path?.trim() || "";
-    config.client_key_path = config.client_key_path?.trim() || "";
-    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
-      throw new Error(t("connection.etcdClientCertPairRequired"));
-    }
   }
   if (config.db_type === "etcd") {
     config.etcd_endpoints = normalizeEndpointLines(config.etcd_endpoints || "");
@@ -4402,12 +4433,37 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
-  } else if (form.value.db_type !== "consul" && config.db_type !== "zookeeper") {
+  } else if (config.db_type === "zookeeper") {
+    config.etcd_endpoints = undefined;
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.etcdClientCertPairRequired"));
+    }
+  } else if (form.value.db_type !== "consul" && config.db_type !== "elasticsearch" && config.db_type !== "easysearch") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "consul" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics" && config.db_type !== "zookeeper") {
+  if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.etcdClientCertPairRequired"));
+    }
+  }
+  if (
+    config.db_type !== "mysql" &&
+    config.db_type !== "clickhouse" &&
+    config.db_type !== "etcd" &&
+    config.db_type !== "consul" &&
+    config.db_type !== "starrocks" &&
+    config.db_type !== "mongodb" &&
+    config.db_type !== "victoriametrics" &&
+    config.db_type !== "zookeeper" &&
+    config.db_type !== "elasticsearch" &&
+    config.db_type !== "easysearch"
+  ) {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -4518,6 +4574,8 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
+  // Pasted credentials may carry invisible characters that trim() keeps (#9043).
+  sanitizeConnectionCredentials(config);
   return config as ConnectionConfig;
 }
 
@@ -4733,6 +4791,7 @@ function resetTestState() {
   isTesting.value = false;
   isTestingSshTunnel.value = false;
   testResult.value = null;
+  pluginActionStatus.value = null;
   clearTestedConnectionInfo();
   showConnectionErrorDialog.value = false;
   connectionErrorRawDetail.value = "";
@@ -5272,6 +5331,7 @@ function resetForm(options: { preservePickerState?: boolean } = {}) {
   selectedTransportLayerId.value = null;
   draggedTransportLayerId.value = null;
   selectedType.value = "mysql";
+  pluginFormValues.value = {};
   customDriverName.value = "";
   mongoUseUrl.value = false;
   resetMqFields();
@@ -5407,6 +5467,19 @@ watch(
       resetForm();
       if (props.prefillConfig) applyConnectionPrefill(props.prefillConfig);
     }
+    void loadInstalledPlugins().then(() => {
+      if (!open.value) return;
+      if (props.editConfig?.db_type === "plugin" && props.editConfig.plugin_id && props.editConfig.plugin_connection_provider) {
+        const entry = pluginProviderEntry(props.editConfig.plugin_id, props.editConfig.plugin_connection_provider);
+        if (entry) {
+          selectedType.value = pluginConnectionProviderOptionValue(props.editConfig.plugin_id, props.editConfig.plugin_connection_provider);
+          selectedDbCategory.value = "plugins";
+          pluginFormValues.value = pluginConnectionFormValues(entry.contribution, props.editConfig);
+        }
+      } else if (!props.prefillConfig) {
+        applyRequestedPluginProvider(props.pluginProvider);
+      }
+    });
     if (!props.prefillConfig?.oneTime) {
       void loadJdbcDrivers();
       void loadAgentDrivers();
@@ -5695,83 +5768,74 @@ async function persistConnectionNoteVisibilityDraft() {
   await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: value }));
 }
 
-async function save(options: { connectAfterSave?: boolean; closeOnSuccess?: boolean } = {}) {
-  if (!ensureConnectionHostResolvedFromUrl()) return;
-  if (isSaving.value) return;
+function startSavedConnection(config: ConnectionConfig) {
+  emit("connectStarted", config.name);
+  void store
+    .connect(config)
+    .then(() => {
+      emit("connectSucceeded", config.name);
+    })
+    .catch((e: any) => {
+      const message = String(e?.message || e);
+      if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
+      // Keep failed one-time connections available for retry and error inspection.
+      // They are still removed by connectionStore.disconnect after a successful session.
+      emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
+    });
+}
+
+async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
+  if (!ensureConnectionHostResolvedFromUrl()) return false;
+  if (isSaving.value) return false;
   if (!hasNacosNamespaceScopeForSave()) {
     testResult.value = null;
     await openVisibleNacosNamespacesPicker();
-    return;
+    return false;
   }
-  const connectAfterSave = options.connectAfterSave ?? (!editingId.value && form.value.db_type !== "jdbc");
+  const wasEditing = !!editingId.value;
+  const connectAfterSave = options.connectAfterSave ?? (!wasEditing && !isJdbcConnection.value);
   const closeOnSuccess = options.closeOnSuccess ?? true;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
   let connectionSaved = false;
   try {
+    let savedConfig: ConnectionConfig;
     if (editingId.value) {
       const updated = withSavedDatabaseInfo(connectionConfigForSubmit(editingId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(updated);
       await ensureRequiredGaussdbMJdbcRuntime(updated);
       await persistGlobalTimeoutDrafts();
       await store.updateConnection(updated);
+      savedConfig = updated;
       connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
-      store.stopEditing();
-      if (connectAfterSave) {
-        if (closeOnSuccess) {
-          open.value = false;
-          await nextTick();
-        }
-        emit("connectStarted", updated.name);
-        void store
-          .connect(updated)
-          .then(() => {
-            emit("connectSucceeded", updated.name);
-          })
-          .catch((e: any) => {
-            const message = String(e?.message || e);
-            if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-            emit("connectFailed", appendConnectionErrorHints(updated, mongodbAuthFailureHint(message), t));
-          });
-        return;
-      }
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
       await ensureRequiredAgentDriverInstalled(config);
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
       await store.addConnection(config, selectedConnectionGroupId.value);
+      savedConfig = config;
       connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
-      if (!connectAfterSave) {
-        if (closeOnSuccess) open.value = false;
-        return;
-      }
-      if (closeOnSuccess) open.value = false;
-      await nextTick();
-      emit("connectStarted", config.name);
-      void store
-        .connect(config)
-        .then(() => {
-          emit("connectSucceeded", config.name);
-        })
-        .catch((e: any) => {
-          const message = String(e?.message || e);
-          if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-          // Keep failed one-time connections available for retry and error inspection.
-          // They are still removed by connectionStore.disconnect after a successful session.
-          emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
-        });
-      return;
     }
-    if (closeOnSuccess) open.value = false;
+    if (closeOnSuccess) {
+      if (wasEditing) store.stopEditing();
+      open.value = false;
+      await nextTick();
+    } else if (!wasEditing) {
+      editingId.value = savedConfig.id;
+      store.startEditing(savedConfig.id);
+    }
+    if (connectAfterSave && savedConfig.db_type !== "jdbc") startSavedConnection(savedConfig);
+    return true;
   } catch (e: any) {
     const cause = mongodbAuthFailureHint(String(e?.message || e));
     const message = connectionSaved ? t("connection.savedSettingsFailed", { message: cause }) : cause;
     testResult.value = { ok: false, message };
     showConnectionError(message);
+    return false;
   } finally {
     isSaving.value = false;
   }
@@ -6424,7 +6488,15 @@ function openExternalUrl(url: string) {
                 </div>
 
                 <template v-if="isPluginConnection">
-                  <PluginConnectionFields v-if="selectedPluginProvider" :model-value="pluginFormValues" :contribution="selectedPluginProvider.contribution" :hidden-bindings="['name']" layout="connection-dialog" @update:model-value="updatePluginFormValues" />
+                  <PluginConnectionFields
+                    v-if="selectedPluginProvider"
+                    :model-value="pluginFormValues"
+                    :contribution="selectedPluginProvider.contribution"
+                    :hidden-bindings="['name']"
+                    layout="connection-dialog"
+                    :plugin-id="selectedPluginProvider.plugin.manifest.id"
+                    @update:model-value="updatePluginFormValues"
+                  />
                   <div v-else class="col-span-full rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
                     {{ pluginLoadError || t("connection.pluginProviderUnavailable") }}
                   </div>
@@ -8344,7 +8416,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper' || form.db_type === 'elasticsearch' || form.db_type === 'easysearch'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">
@@ -8398,7 +8470,7 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                       <p class="text-[11px] leading-4 text-muted-foreground">
-                        {{ t("connection.clientCertHint") }}
+                        {{ t("connection.etcdClientCertHint") }}
                       </p>
                     </div>
                   </div>
@@ -9295,7 +9367,7 @@ function openExternalUrl(url: string) {
             <Button variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving" @click="testConnection">
               {{ isTesting ? t("connection.testing") : t("connection.test") }}
             </Button>
-            <Button class="shrink-0" @click="save" :disabled="isSaving || isTestingSshTunnel || !hasRequiredConnectionTarget">
+            <Button class="shrink-0" @click="save()" :disabled="isSaving || isTestingSshTunnel || !hasRequiredConnectionTarget">
               {{ isSaving ? t("common.loading") : editingId || isJdbcConnection ? t("connection.save") : t("connection.saveAndConnect") }}
             </Button>
           </template>

@@ -138,7 +138,15 @@ const suppressNextTabClick = ref(false);
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
 // Special pages append to the focused group's strip only: one instance at a
 // time, in the pane the user is working in (v0.6.2 kept them in the single strip).
-const showSpecialPageTabs = computed(() => !!props.specialPageTabs && (props.specialPageTabs.settingsOpen || props.specialPageTabs.driverStoreOpen || props.specialPageTabs.pluginCenterOpen) && queryStore.focusedGroupId === props.groupId);
+const showSpecialPageTabs = computed(() => {
+  if (!props.specialPageTabs || !(props.specialPageTabs.settingsOpen || props.specialPageTabs.driverStoreOpen || props.specialPageTabs.pluginCenterOpen)) return false;
+  // With no regular query tabs there is no focus event to establish the
+  // focused group. Render the special-page tab in the sole (main) group so
+  // opening Plugin Center or Driver Manager by itself still creates a tab.
+  const isFocusedGroup = queryStore.focusedGroupId === props.groupId;
+  const isEmptyWorkspaceMainGroup = queryStore.tabs.length === 0 && props.groupId === queryStore.groups[0]?.id;
+  return isFocusedGroup || isEmptyWorkspaceMainGroup;
+});
 const specialPageActive = computed(() => !!(props.specialPageTabs?.settingsActive || props.specialPageTabs?.driverStoreActive || props.specialPageTabs?.pluginCenterActive));
 
 function isTabActive(tab: QueryTab): boolean {

@@ -616,6 +616,27 @@ END pkg_utils_without_replace;`;
     expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpecWithoutReplace}\nSELECT 1;`, "xugu"))).toEqual([packageSpecWithoutReplace, "SELECT 1"]);
   });
 
+  it("keeps openGauss packages together while compatibility metadata is unknown", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+  PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;`;
+    const script = `${packageSpec}\n/\nSELECT 1;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "opengauss"))).toEqual([packageSpec, "SELECT 1"]);
+  });
+
+  it("splits openGauss A-mode packages without changing PG mode", () => {
+    const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
+  FUNCTION get_version RETURN VARCHAR2;
+  PROCEDURE log_message(msg VARCHAR2);
+END pkg_utils;`;
+    const script = `${packageSpec}\n/\nSELECT 1;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "opengauss", { compatibilityMode: "A" }))).toEqual([packageSpec, "SELECT 1"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "opengauss", { compatibilityMode: "PG" }))).not.toEqual([packageSpec, "SELECT 1"]);
+  });
+
   it("splits a declaration-only Oracle package body before following DML", () => {
     const packageBody = `CREATE OR REPLACE PACKAGE BODY packageName IS
 null;

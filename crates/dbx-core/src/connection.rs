@@ -29,7 +29,10 @@ use crate::models::connection::{
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
-use crate::plugins::{PluginConnectionHandle, PluginDriverSession, PluginHost, PluginRegistry, PluginRuntimeEnv};
+use crate::plugins::{
+    PluginConnectionActionResult, PluginConnectionHandle, PluginDriverSession, PluginHost, PluginRegistry,
+    PluginRuntimeEnv,
+};
 use crate::query_cancel::RunningQueries;
 use crate::session_credentials::SessionCredentialStore;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
@@ -1346,8 +1349,10 @@ impl AppState {
         agent_dir: PathBuf,
         app_version: impl Into<String>,
     ) -> Self {
-        let data_dir = storage.data_dir().to_path_buf();
         let app_version = app_version.into();
+        let data_dir = storage.data_dir().to_path_buf();
+        let plugins = PluginRegistry::new_with_app_version(plugin_dir, app_version.clone());
+        let plugin_host = PluginHost::new(plugins.clone());
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -1360,8 +1365,8 @@ impl AppState {
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),
             storage,
-            plugins: PluginRegistry::new_with_app_version(plugin_dir.clone(), app_version.clone()),
-            plugin_host: PluginHost::new(PluginRegistry::new_with_app_version(plugin_dir, app_version.clone())),
+            plugins,
+            plugin_host,
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,
@@ -2033,6 +2038,7 @@ impl AppState {
                 self.proxy_tunnels.stop_all_tunnels(),
                 self.http_tunnels.stop_all_tunnels(),
                 self.agent_manager.stop_daemons(),
+                self.plugin_host.stop_all(),
             );
         };
         if tokio::time::timeout(deadline, shutdown).await.is_err() {
@@ -2204,7 +2210,9 @@ impl AppState {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;
             return Err(err);
         }
-        probe_connection_endpoint(&db_config, &host, port).await?;
+        if db_config.db_type != DatabaseType::Plugin {
+            probe_connection_endpoint(&db_config, &host, port).await?;
+        }
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;
             return Err(err);
@@ -2468,7 +2476,10 @@ impl AppState {
                     db_config.url_params.as_deref(),
                     db_config.external_config.as_ref(),
                     connect_timeout,
-                );
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Elasticsearch(client)
             }
@@ -2481,7 +2492,10 @@ impl AppState {
                     db_config.url_params.as_deref(),
                     db_config.external_config.as_ref(),
                     connect_timeout,
-                );
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
+                )?;
                 db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Easysearch(client)
             }
@@ -2781,7 +2795,9 @@ impl AppState {
                 }
                 self.external_driver_pool("jdbc", &jdbc_config).await?
             }
-            DatabaseType::Plugin => return Err("Plugin-owned connections use the plugin host".to_string()),
+            DatabaseType::Plugin => {
+                PoolKind::PluginConnection(self.plugin_host.connect_connection(&db_config, &host, port).await?)
+            }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 // MQ admin connections don't hold a data query pool. We just test
@@ -3048,6 +3064,28 @@ impl AppState {
         .await?;
 
         Ok(("127.0.0.1".to_string(), local_port))
+    }
+
+    pub async fn invoke_plugin_connection_action(
+        &self,
+        config: ConnectionConfig,
+        action_id: &str,
+    ) -> Result<PluginConnectionActionResult, String> {
+        if config.db_type != DatabaseType::Plugin {
+            return Err("Connection is not owned by a plugin".to_string());
+        }
+        let config = config.canonicalized();
+        let transport_id = format!("{}:plugin-action:{action_id}", config.id);
+        let has_transport_layers = config.has_effective_transport_layers();
+        let connection_id = if has_transport_layers { transport_id.as_str() } else { config.id.as_str() };
+        let result = match self.connection_host_port(connection_id, &config).await {
+            Ok((host, port)) => self.plugin_host.invoke_connection_action(&config, action_id, &host, port).await,
+            Err(error) => Err(error),
+        };
+        if has_transport_layers {
+            self.reset_connection_transport_for_config(&transport_id, &config).await;
+        }
+        result
     }
 
     pub async fn connect_redis_sentinel(
@@ -3832,13 +3870,13 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::PluginConnection(handle) => !handle.is_running(),
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => false,
-                PoolKind::PluginConnection(handle) => !handle.is_running(),
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => false,
             }
@@ -4996,15 +5034,6 @@ impl AppState {
         self.pool_routing_control().close_removed(removed).await;
     }
 
-    pub async fn invoke_plugin_connection_action(
-        &self,
-        config: ConnectionConfig,
-        action_id: &str,
-    ) -> Result<crate::plugins::PluginConnectionActionResult, String> {
-        let (host, port) = self.connection_host_port(&config.id, &config).await?;
-        self.plugin_host.invoke_connection_action(&config, action_id, &host, port).await
-    }
-
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
         let pool_prefix = format!("{connection_id}:");
         let keys_to_remove: Vec<String> = self
@@ -5765,7 +5794,14 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             session.shutdown().await;
         }
         PoolKind::PluginConnection(handle) => {
-            handle.disconnect().await?;
+            if let Err(error) = handle.disconnect().await {
+                log::warn!(
+                    "Failed to disconnect plugin connection '{}' ({}/{}): {error}",
+                    handle.connection_id,
+                    handle.plugin_id,
+                    handle.provider_id
+                );
+            }
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
@@ -9828,6 +9864,308 @@ for line in sys.stdin:
             url_params.as_deref(),
         ))
         .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable openGauss A-compatibility instance via environment variables"]
+    async fn live_opengauss_package_feature() {
+        let host = std::env::var("DBX_TEST_OPENGAUSS_HOST").expect("DBX_TEST_OPENGAUSS_HOST not set");
+        let port = std::env::var("DBX_TEST_OPENGAUSS_PORT")
+            .expect("DBX_TEST_OPENGAUSS_PORT not set")
+            .parse::<u16>()
+            .expect("DBX_TEST_OPENGAUSS_PORT should be a u16");
+        let username = std::env::var("DBX_TEST_OPENGAUSS_USER").expect("DBX_TEST_OPENGAUSS_USER not set");
+        let password = std::env::var("DBX_TEST_OPENGAUSS_PASSWORD").expect("DBX_TEST_OPENGAUSS_PASSWORD not set");
+        let database = std::env::var("DBX_TEST_OPENGAUSS_DATABASE").unwrap_or_else(|_| "postgres".to_string());
+
+        let mut config = live_postgres_like_config(DatabaseType::OpenGauss, &host, port, &username, &password, None);
+        config.id = "opengauss-live".to_string();
+        config.database = Some(database.clone());
+
+        let (state, dir) = test_app_state().await;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool_key = state.get_or_create_pool("opengauss-live", Some(&database)).await.unwrap();
+        let pool = match state.pool_handle(&pool_key).await.expect("openGauss pool should be created") {
+            PoolKind::Postgres(pool) => pool,
+            _ => panic!("openGauss should use the PostgreSQL pool path"),
+        };
+
+        let mode = db::postgres::opengauss_compatibility_mode(&pool).await.unwrap();
+        println!("[live] current database = {database}, compatibility mode = {mode:?}");
+        let is_a_mode = mode.as_deref().map(str::trim).map(|value| value.eq_ignore_ascii_case("A")) == Some(true);
+
+        let databases = schema::list_databases_core(&state, "opengauss-live").await.unwrap();
+        for item in &databases {
+            println!("[live] database {} -> {:?}", item.name, item.compatibility_mode);
+        }
+        assert!(databases.iter().any(|item| item.name == database), "expected {database} in the database list");
+        if is_a_mode {
+            assert_eq!(
+                databases.iter().find(|item| item.name == database).and_then(|item| item.compatibility_mode.as_deref()),
+                mode.as_deref(),
+                "listed compatibility mode should match the probed mode"
+            );
+        }
+
+        // Statement splitting must keep an A-mode package intact.
+        let script = "CREATE OR REPLACE PACKAGE p AS\n  FUNCTION f RETURN INT;\nEND p;\n/\nSELECT 1;";
+        let a_split = crate::sql::split_sql_statements_for_database_with_compatibility(
+            script,
+            DatabaseType::OpenGauss,
+            Some("A"),
+        );
+        let pg_split = crate::sql::split_sql_statements_for_database_with_compatibility(
+            script,
+            DatabaseType::OpenGauss,
+            Some("PG"),
+        );
+        println!("[live] A-mode split = {a_split:?}");
+        println!("[live] PG-mode split = {pg_split:?}");
+        assert_eq!(a_split.len(), 2, "A-mode package must stay one statement");
+        assert!(pg_split.len() > 2, "PG-mode must split the same script at inner semicolons");
+
+        // A non-A database on the same instance must keep the package gate closed.
+        if let Some(other) = databases.iter().find(|item| {
+            item.name != database
+                && item.compatibility_mode.as_deref().map(str::trim).is_some_and(|mode| !mode.eq_ignore_ascii_case("A"))
+        }) {
+            let other_pool_key = state.get_or_create_pool("opengauss-live", Some(&other.name)).await.unwrap();
+            if let Some(PoolKind::Postgres(other_pool)) = state.pool_handle(&other_pool_key).await {
+                let other_mode = db::postgres::opengauss_compatibility_mode(&other_pool).await.unwrap();
+                let other_packages =
+                    db::postgres::list_opengauss_packages(&other_pool, "public", true, true).await.unwrap();
+                println!(
+                    "[live] non-A database {} mode = {:?}, listed packages = {}",
+                    other.name,
+                    other_mode,
+                    other_packages.len()
+                );
+                assert!(!db::postgres::opengauss_is_oracle_compatible(&other_pool).await.unwrap());
+                assert!(other_packages.is_empty(), "non-A database must not list packages");
+                other_pool.close();
+            }
+        }
+
+        if !is_a_mode {
+            println!("[live] database is not A-compatible; skipping package catalog assertions");
+            pool.close();
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+
+        let schema_name = "public";
+        let pkg = "dbx_live_pkg";
+        let _ = db::postgres::execute_query(&pool, &format!("DROP PACKAGE BODY IF EXISTS {schema_name}.{pkg}")).await;
+        let _ = db::postgres::execute_query(&pool, &format!("DROP PACKAGE IF EXISTS {schema_name}.{pkg}")).await;
+
+        let spec = format!(
+            "CREATE OR REPLACE PACKAGE {schema_name}.{pkg} AS\n  g_version VARCHAR2(20) := '1.0';\n  PROCEDURE log_message(p_message IN VARCHAR2);\n  FUNCTION add_numbers(p_left IN INTEGER, p_right IN INTEGER) RETURN INTEGER;\nEND {pkg};"
+        );
+        db::postgres::execute_query(&pool, &spec)
+            .await
+            .unwrap_or_else(|error| panic!("create package spec failed: {error}"));
+        let body = format!(
+            "CREATE OR REPLACE PACKAGE BODY {schema_name}.{pkg} AS\n  PROCEDURE log_message(p_message IN VARCHAR2) IS\n  BEGIN\n    NULL;\n  END;\n  FUNCTION add_numbers(p_left IN INTEGER, p_right IN INTEGER) RETURN INTEGER IS\n  BEGIN\n    RETURN p_left + p_right;\n  END;\nBEGIN\n  g_version := '1.1';\nEND {pkg};"
+        );
+        db::postgres::execute_query(&pool, &body)
+            .await
+            .unwrap_or_else(|error| panic!("create package body failed: {error}"));
+
+        let package_types = vec!["PACKAGE".to_string(), "PACKAGE_BODY".to_string()];
+        let package_objects = schema::list_objects_core(
+            &state,
+            "opengauss-live",
+            &database,
+            schema_name,
+            None,
+            None,
+            None,
+            Some(package_types.as_slice()),
+            None,
+        )
+        .await
+        .unwrap();
+        println!(
+            "[live] package objects = {:?}",
+            package_objects
+                .iter()
+                .filter(|object| object.name == pkg)
+                .map(|object| object.object_type.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(package_objects.iter().any(|object| object.name == pkg && object.object_type == "PACKAGE"));
+        assert!(package_objects.iter().any(|object| object.name == pkg && object.object_type == "PACKAGE_BODY"));
+
+        let routine_types = vec!["PROCEDURE".to_string(), "FUNCTION".to_string()];
+        let routine_objects = schema::list_objects_core(
+            &state,
+            "opengauss-live",
+            &database,
+            schema_name,
+            None,
+            None,
+            None,
+            Some(routine_types.as_slice()),
+            None,
+        )
+        .await
+        .unwrap();
+        println!(
+            "[live] routine objects (top-level) = {:?}",
+            routine_objects.iter().map(|object| object.name.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            !routine_objects.iter().any(|object| object.name == "log_message" || object.name == "add_numbers"),
+            "package members must not surface as top-level routines"
+        );
+
+        let package_search = schema::completion_assistant_search_core(
+            &state,
+            db::CompletionAssistantRequest {
+                connection_id: "opengauss-live".to_string(),
+                database: database.clone(),
+                schema: Some(schema_name.to_string()),
+                object_kinds: vec![db::CompletionAssistantObjectKind::Routine],
+                mask: pkg.to_string(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(50),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: None,
+                parent_name: None,
+                match_mode: Some(db::CompletionAssistantMatchMode::Prefix),
+            },
+        )
+        .await
+        .unwrap();
+        println!(
+            "[live] unqualified package candidates = {:?}",
+            package_search
+                .candidates
+                .iter()
+                .map(|candidate| (&candidate.name, &candidate.kind, &candidate.data_type))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            package_search.candidates.iter().any(|candidate| {
+                candidate.name == pkg
+                    && candidate.kind == db::CompletionAssistantCandidateKind::Object
+                    && candidate.data_type.as_deref() == Some("PACKAGE")
+            }),
+            "package name should be offered as an unqualified completion candidate"
+        );
+
+        let member_search = schema::completion_assistant_search_core(
+            &state,
+            db::CompletionAssistantRequest {
+                connection_id: "opengauss-live".to_string(),
+                database: database.clone(),
+                schema: Some(schema_name.to_string()),
+                object_kinds: vec![db::CompletionAssistantObjectKind::Routine],
+                mask: String::new(),
+                case_sensitive: false,
+                global_search: false,
+                max_results: Some(50),
+                search_in_comments: false,
+                search_in_definitions: false,
+                parent_schema: Some(schema_name.to_string()),
+                parent_name: Some(pkg.to_string()),
+                match_mode: Some(db::CompletionAssistantMatchMode::Prefix),
+            },
+        )
+        .await
+        .unwrap();
+        println!(
+            "[live] package member candidates = {:?}",
+            member_search
+                .candidates
+                .iter()
+                .map(|candidate| (&candidate.name, &candidate.kind, &candidate.signature))
+                .collect::<Vec<_>>()
+        );
+        assert!(!member_search.fallback_used, "package members should not fall back to top-level routines");
+        assert!(member_search.candidates.iter().any(|candidate| {
+            candidate.name == "log_message" && candidate.kind == db::CompletionAssistantCandidateKind::Procedure
+        }));
+        assert!(member_search.candidates.iter().any(|candidate| {
+            candidate.name == "add_numbers" && candidate.kind == db::CompletionAssistantCandidateKind::Function
+        }));
+
+        let spec_source = schema::get_object_source_core(
+            &state,
+            "opengauss-live",
+            &database,
+            schema_name,
+            pkg,
+            db::ObjectSourceKind::Package,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let body_source = schema::get_object_source_core(
+            &state,
+            "opengauss-live",
+            &database,
+            schema_name,
+            pkg,
+            db::ObjectSourceKind::PackageBody,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        println!("[live] spec source length = {}", spec_source.source.len());
+        println!("[live] body source length = {}", body_source.source.len());
+        println!("[live] spec source =\n{}", spec_source.source);
+        println!("[live] body source =\n{}", body_source.source);
+        assert!(spec_source.source.to_uppercase().contains("PACKAGE"));
+        assert!(body_source.source.to_uppercase().contains("PACKAGE BODY"));
+        assert_eq!(spec_source.editable, Some(false));
+        assert_eq!(body_source.editable, Some(false));
+
+        // Catalog and gs_source lookups are case-insensitive for unquoted names.
+        let upper = schema::get_object_source_core(
+            &state,
+            "opengauss-live",
+            &database,
+            schema_name,
+            &pkg.to_uppercase(),
+            db::ObjectSourceKind::Package,
+            None,
+            None,
+        )
+        .await;
+        println!("[live] uppercase lookup ok = {}", upper.is_ok());
+        assert!(upper.is_ok(), "case-insensitive package source lookup failed: {upper:?}");
+
+        // Force the catalog-rebuild fallback by removing the gs_source rows, then
+        // prove the rebuilt spec/body are valid DDL by re-executing them.
+        let _ =
+            db::postgres::execute_query(&pool, &format!("DELETE FROM dbe_pldeveloper.gs_source WHERE name = '{pkg}'"))
+                .await;
+        let fallback_spec = db::postgres::opengauss_package_source(&pool, schema_name, pkg, false).await.unwrap();
+        let fallback_body = db::postgres::opengauss_package_source(&pool, schema_name, pkg, true).await.unwrap();
+        println!("[live] fallback spec =\n{fallback_spec}");
+        println!("[live] fallback body =\n{fallback_body}");
+        assert!(fallback_spec.contains("AUTHID"), "rebuilt spec must preserve the authid clause");
+        assert!(fallback_body.contains("g_version := '1.1'"), "rebuilt body must keep the initialization section");
+        db::postgres::execute_query(&pool, &fallback_spec)
+            .await
+            .unwrap_or_else(|error| panic!("rebuilt spec is not valid DDL: {error}\n{fallback_spec}"));
+        db::postgres::execute_query(&pool, &fallback_body)
+            .await
+            .unwrap_or_else(|error| panic!("rebuilt body is not valid DDL: {error}\n{fallback_body}"));
+        println!("[live] rebuilt fallback DDL re-executed successfully");
+
+        let _ = db::postgres::execute_query(&pool, &format!("DROP PACKAGE BODY IF EXISTS {schema_name}.{pkg}")).await;
+        let _ = db::postgres::execute_query(&pool, &format!("DROP PACKAGE IF EXISTS {schema_name}.{pkg}")).await;
+        let remaining = db::postgres::list_opengauss_packages(&pool, schema_name, true, true).await.unwrap();
+        assert!(!remaining.iter().any(|object| object.name == pkg), "cleanup left the test package behind");
+        println!("[live] cleanup verified: test package removed");
+        pool.close();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

@@ -316,9 +316,13 @@ func runQueryBenchmark(process *agentProcess, duration time.Duration, concurrenc
 		total += value
 	}
 	count := operations.Load()
+	sampleCount := len(merged)
+	if sampleCount < 1 {
+		sampleCount = 1
+	}
 	return benchmarkResult{
 		Concurrency: concurrency, Operations: count, Errors: failures.Load(), DurationMS: float64(elapsed.Microseconds()) / 1000,
-		QPS: float64(count) / elapsed.Seconds(), MeanMS: total / float64(max(1, len(merged))),
+		QPS: float64(count) / elapsed.Seconds(), MeanMS: total / float64(sampleCount),
 		P50MS: percentile(merged, 0.50), P95MS: percentile(merged, 0.95), P99MS: percentile(merged, 0.99),
 		PeakRSSKB: peakRSS.Load(),
 	}

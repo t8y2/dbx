@@ -9,10 +9,6 @@ const pageMeta = {
     title: "Offline Driver Downloads",
     description: "Download DBX offline driver bundles, database drivers, and JRE packages for air-gapped environments across macOS, Linux, and Windows.",
   },
-  tr: {
-    title: "Çevrimdışı Sürücü İndirmeleri",
-    description: "İnternet erişimi olmayan ortamlar için DBX çevrimdışı sürücü paketlerini, veritabanı sürücülerini ve JRE paketlerini macOS, Linux ve Windows için indirin.",
-  },
   cn: {
     title: "离线驱动下载",
     description: "下载 DBX 离线驱动整包、数据库驱动和 JRE 离线包，覆盖 macOS、Linux、Windows 平台。",

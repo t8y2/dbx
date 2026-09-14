@@ -224,7 +224,9 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function selectColumns(startCol: number, endCol: number, options?: { merge?: boolean }) {
     const normalizedColumns = normalizeSelectedColumnIndexes(Array.from({ length: Math.abs(endCol - startCol) + 1 }, (_, index) => Math.min(startCol, endCol) + index));
-    if (normalizedColumns.length === 0 || displayItems.value.length <= 0) return;
+    // Column selection is column-based and deliberately independent of the row count, so an
+    // empty result (0 rows, N columns) keeps header multi-select working.
+    if (normalizedColumns.length === 0) return;
     clearRowSelection();
     selectedCellKeys.value = new Set();
     selectionAnchor.value = null;

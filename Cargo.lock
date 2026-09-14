@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.12"
+version = "0.6.13"
 dependencies = [
  "anyhow",
  "axum",
@@ -2050,6 +2050,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "tiberius",
  "tokio",
  "tokio-postgres",
@@ -2195,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.12"
+version = "0.6.13"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

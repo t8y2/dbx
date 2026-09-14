@@ -117,6 +117,9 @@ export function shouldIncludeSyntheticRowId(databaseType: DatabaseType | undefin
 
 export function isHiddenGridColumn(databaseType: DatabaseType | undefined, column: string, primaryKeys: string[], tableType?: string): boolean {
   if (databaseType === "neo4j" && column === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
+  // Xugu may inject ROWID before table metadata finishes loading. Keep this
+  // internal projection hidden even after the real primary keys arrive.
+  if (databaseType === "xugu" && !isViewTableType(tableType) && column.toUpperCase() === DBX_ROWID_COLUMN) return true;
   return shouldIncludeSyntheticRowId(databaseType, primaryKeys, tableType) && column.toUpperCase() === DBX_ROWID_COLUMN;
 }
 

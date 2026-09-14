@@ -9,19 +9,23 @@ function createSelection(options?: {
   onUserCellSelection?: () => void;
   shouldUpdateDraggedRowsImmediately?: () => boolean;
   onDraggedRowSelectionChange?: () => void;
+  displayItemCount?: number;
 }) {
   const columns = computed(() => ["id", "name", "email"]);
   const displayItems = computed(() =>
-    [1, 2, 3, 4].map((id, index) => ({
-      id,
-      sourceIndex: index,
-      data: [id, `name-${id}`, `user-${id}@example.com`],
-      isNew: false,
-      isDraft: false,
-      isDeleted: false,
-      isDirtyCol: [false, false, false],
-      status: "clean",
-    })),
+    Array.from({ length: options?.displayItemCount ?? 4 }, (_, index) => {
+      const id = index + 1;
+      return {
+        id,
+        sourceIndex: index,
+        data: [id, `name-${id}`, `user-${id}@example.com`],
+        isNew: false,
+        isDraft: false,
+        isDeleted: false,
+        isDirtyCol: [false, false, false],
+        status: "clean",
+      };
+    }),
   );
 
   return useDataGridSelection({
@@ -684,5 +688,41 @@ describe("useDataGridSelection", () => {
       selection.finishCellSelection();
       Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
     }
+  });
+
+  it("selects a header column on a zero-row result", () => {
+    const selection = createSelection({ displayItemCount: 0 });
+
+    selection.selectColumn(1);
+
+    expect(selection.hasColumnSelection.value).toBe(true);
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([1]));
+  });
+
+  it("selects a header column range on a zero-row result", () => {
+    const selection = createSelection({ displayItemCount: 0 });
+
+    selection.selectColumns(0, 2);
+
+    expect(selection.hasColumnSelection.value).toBe(true);
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([0, 1, 2]));
+  });
+
+  it("merges a shift-click header selection on a zero-row result", () => {
+    const selection = createSelection({ displayItemCount: 0 });
+
+    selection.selectColumn(1);
+    selection.selectColumn(3, rowEvent({ shift: true }));
+
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([1, 2, 3]));
+  });
+
+  it("keeps discrete cell selection empty when selecting header columns on a zero-row result", () => {
+    const selection = createSelection({ displayItemCount: 0 });
+
+    selection.selectColumn(1);
+
+    expect(selection.selectedCellKeys.value).toEqual(new Set());
+    expect(selection.hasCellSelection.value).toBe(false);
   });
 });

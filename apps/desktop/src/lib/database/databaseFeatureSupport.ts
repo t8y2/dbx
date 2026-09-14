@@ -124,8 +124,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * SQL editor against a broker (issue #8415).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "mq" && dbType !== "mqtt";
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt";
 }
 
 /**

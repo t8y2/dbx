@@ -14,6 +14,7 @@ import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { createTunnelProfile, createTunnelProfileTestGuard, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
 import { applySshAuthMethod } from "@/lib/connection/sshAuthMethod";
+import { stripInvisibleCharactersFromLayer } from "@/lib/connection/credentialSanitizer";
 import * as api from "@/lib/backend/api";
 import type { SshConfigHostEntry, TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -151,7 +152,10 @@ async function save() {
   invalidateProfileTest();
   isSaving.value = true;
   try {
-    await store.saveProfiles(cloneProfiles(draft.value));
+    // Pasted credentials may carry invisible characters that trim() keeps (#9043).
+    const sanitized = cloneProfiles(draft.value);
+    sanitized.forEach(stripInvisibleCharactersFromLayer);
+    await store.saveProfiles(sanitized);
     toast(t("settings.tunnelsSaved"));
   } catch (error) {
     toast(t("settings.tunnelsSaveFailed", { message: translateBackendError(t, error) }), 5000);

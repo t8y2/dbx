@@ -1758,7 +1758,35 @@ export function formatGeneratedValue(value: unknown, databaseType?: DatabaseType
     const temporalValue = formatOracleTemporalValue(stringValue, dataType);
     if (temporalValue) return temporalValue;
   }
+  if (isJsonType(dataType)) {
+    // MySQL (and MariaDB) reject any non-JSON text in a JSON column, so free
+    // text from a string generator must land as a JSON string scalar; values
+    // that are already valid JSON pass through untouched.
+    const jsonText = isWellFormedJson(stringValue) ? stringValue : JSON.stringify(stringValue);
+    // MySQL's lexer consumes backslash escapes inside '...' literals, so the
+    // JSON escape sequences must double their backslashes to survive the trip.
+    if (databaseType === "mysql") return quoteGeneratedString(jsonText.replace(/\\/g, "\\\\"));
+    return quoteGeneratedString(jsonText);
+  }
   return quoteGeneratedString(stringValue);
+}
+
+function isJsonType(dataType: string | undefined): boolean {
+  return !!dataType && dataType.toLowerCase().includes("json");
+}
+
+function isWellFormedJson(value: string): boolean {
+  // Cheap pre-filter: plain prose (the common case from string generators)
+  // can't be JSON, so skip the parse for it.
+  if (!/^".*"$/.test(value) && !/^\{.*\}$/.test(value) && !/^\[.*\]$/.test(value) && !/^(true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?)$/.test(value)) {
+    return false;
+  }
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function displayGeneratedValue(value: unknown): string {

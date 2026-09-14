@@ -93,11 +93,37 @@ const themes = () => ({
     ? {
         "--color-background": "#18181b",
         "--color-foreground": "#f4f4f5",
+        "--color-card": "#1b1b1f",
+        "--color-card-foreground": "#f4f4f5",
         "--color-muted": "#27272a",
+        "--color-muted-foreground": "#a1a1aa",
         "--color-border": "#3f3f46",
+        "--color-input": "#3f3f46",
+        "--color-ring": "#71717a",
         "--color-primary": "#60a5fa",
+        "--color-primary-foreground": "#18181b",
+        "--color-destructive": "#f3625f",
+        "--color-destructive-foreground": "#18181b",
+        "--radius-md": "6px",
+        "--radius-lg": "8px",
       }
-    : { "--color-background": "#ffffff", "--color-foreground": "#27272a", "--color-muted": "#f4f4f5", "--color-border": "#e4e4e7", "--color-primary": "#2563eb" },
+    : {
+        "--color-background": "#ffffff",
+        "--color-foreground": "#27272a",
+        "--color-card": "#ffffff",
+        "--color-card-foreground": "#27272a",
+        "--color-muted": "#f4f4f5",
+        "--color-muted-foreground": "#71717a",
+        "--color-border": "#e4e4e7",
+        "--color-input": "#e4e4e7",
+        "--color-ring": "#93c5fd",
+        "--color-primary": "#2563eb",
+        "--color-primary-foreground": "#ffffff",
+        "--color-destructive": "#e7000b",
+        "--color-destructive-foreground": "#ffffff",
+        "--radius-md": "6px",
+        "--radius-lg": "8px",
+      },
 });
 function post(frame, message) {
   const snapshot = hostMessage(frame.channel, message);

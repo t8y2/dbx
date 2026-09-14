@@ -141,6 +141,15 @@
         "contributions": { "type": "object", "propertyNames": { "$ref": "#/$defs/identifier" }, "additionalProperties": { "$ref": "#/$defs/contributionLocalization" } }
       }
     },
+    "fieldCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "one_of"],
+      "properties": {
+        "field": { "$ref": "#/$defs/identifier" },
+        "one_of": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      }
+    },
     "formField": {
       "type": "object",
       "additionalProperties": false,
@@ -154,7 +163,9 @@
         "required": { "type": "boolean" },
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
-        "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] }
+        "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
+        "visible_when": { "$ref": "#/$defs/fieldCondition" },
+        "required_when": { "$ref": "#/$defs/fieldCondition" }
       },
       "allOf": [
         {

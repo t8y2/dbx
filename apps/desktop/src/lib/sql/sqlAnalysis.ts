@@ -232,7 +232,7 @@ export function analyzeEditableQueryEditability(sql: string): QueryEditability {
   if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) {
     return { editable: false, reason: "set-operation" };
   }
-  if (normalized.includes(";")) return { editable: false, reason: "complex-source" };
+  if (hasTopLevelSemicolon(normalized)) return { editable: false, reason: "complex-source" };
 
   const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
   if (fromIndex < 0) return { editable: false, reason: "no-table" };
@@ -313,7 +313,7 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
   if (/^\s*WITH\b/i.test(normalized)) return null;
   if (!/^SELECT\b/i.test(normalized)) return null;
   if (hasTopLevelKeyword(normalized, ["UNION", "INTERSECT", "EXCEPT", "MINUS"])) return null;
-  if (normalized.includes(";")) return null;
+  if (hasTopLevelSemicolon(normalized)) return null;
 
   const fromIndex = findTopLevelKeyword(normalized, "FROM", 0);
   if (fromIndex < 0) return null;
@@ -761,6 +761,36 @@ function hasTopLevelKeyword(sql: string, keywords: string[]): boolean {
   return keywords.some((keyword) => findTopLevelKeyword(sql, keyword, 0) >= 0);
 }
 
+function hasTopLevelSemicolon(sql: string): boolean {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (quote) {
+      if (ch === quote || (quote === "]" && ch === "]")) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "[") {
+      quote = "]";
+      continue;
+    }
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && ch === ";") return true;
+  }
+  return false;
+}
+
 function firstTopLevelKeywordIndex(sql: string, keywords: string[], start: number): number {
   const indexes = keywords.map((keyword) => findTopLevelKeyword(sql, keyword, start)).filter((index) => index >= 0);
   return indexes.length ? Math.min(...indexes) : -1;
@@ -832,6 +862,9 @@ export function allPrimaryKeysPresent(primaryKeys: string[], resultColumns: stri
 }
 
 function matchColumnsForResult(analysis: EditableQueryInfo, resultColumns: string[]): EditableQueryColumn[] | undefined {
+  // Preserve projection order before searching by label: folded duplicate names are not unique.
+  if (analysis.columns.length === resultColumns.length && analysis.columns.every((column, index) => column.resultName.toLowerCase() === resultColumns[index]!.toLowerCase())) return analysis.columns;
+
   const matches: EditableQueryColumn[] = [];
   let searchFrom = 0;
   for (const resultColumn of resultColumns) {

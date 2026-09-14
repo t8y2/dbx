@@ -22,6 +22,20 @@ function functionBody(source: string, name: string): string {
   throw new Error(`Could not parse body for ${name}`);
 }
 
+/**
+ * Region of one top-level function in a store/component module. Unlike
+ * `functionBody`, this survives inline object type literals in the parameter
+ * list (the first `{` there is not the body).
+ */
+function functionRegion(source: string, name: string): string {
+  const candidates = [`  async function ${name}(`, `  function ${name}(`].map((marker) => source.indexOf(marker)).filter((index) => index >= 0);
+  assert.notEqual(candidates.length, 0, `Could not find function ${name}`);
+  const start = Math.min(...candidates);
+  const rest = source.slice(start + 1);
+  const next = /\n  (?:async )?function /.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
+
 test("tree-level context menu opens with the current row items atomically", () => {
   const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
   const contextMenu = readFileSync("apps/desktop/src/components/ui/CustomContextMenu.vue", "utf8");
@@ -60,18 +74,46 @@ test("tree host owns sidebar data-open generations", () => {
   assert.match(connectionTree, /createSidebarActionTarget\(node\)/);
 });
 
-test("query-tab object source uses canonical identity and honors backend editability", () => {
+test("query-tab object source opens the tab before connecting or loading", () => {
   const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
   const openObjectSourceBody = functionBody(runtimeHost, "openObjectSourceDialog");
 
-  assert.match(openObjectSourceBody, /queryStore\.openObjectSourceTab\(\{/);
-  assert.match(openObjectSourceBody, /raw\.editable !== false/);
-  assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"\]\.includes\(resolvedType\)/);
-  assert.match(openObjectSourceBody, /objectType: resolvedType/);
-  assert.match(openObjectSourceBody, /signature: node\.signature/);
-  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true, sourceView: true \}\)/);
-  assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
-  assert.doesNotMatch(openObjectSourceBody, /queryStore\.markTabClean/);
+  // #9035：点击后立刻建出带加载态的 tab/弹窗，ensureConnected 与 getObjectSource
+  // 都必须发生在已挂载的 UI 之内，而不是先 await 完再挂载（那样界面没有任何反馈）。
+  assert.match(openObjectSourceBody, /queryStore\.openObjectSourceTabPending\(\{/);
+  assert.match(openObjectSourceBody, /objectType: sourceTarget\.objectType/);
+  assert.match(openObjectSourceBody, /signature: sourceNode\.signature/);
+  assert.match(openObjectSourceBody, /emit\("open-object-source", sourceNode, initialEditing\)/);
+  // 断言「调用形态」而不是词本身：这段代码里注释会提到这两个名字
+  assert.doesNotMatch(openObjectSourceBody, /ensureConnected\(/);
+  assert.doesNotMatch(openObjectSourceBody, /api\.getObjectSource\(/);
+  assert.doesNotMatch(openObjectSourceBody, /toast\(/);
+});
+
+test("object source identity and editability are enforced in queryStore", () => {
+  const queryStore = readFileSync("apps/desktop/src/stores/queryStore.ts", "utf8");
+  const findBody = functionRegion(queryStore, "findMatchingObjectSourceTab");
+  const pendingBody = functionRegion(queryStore, "openObjectSourceTabPending");
+  const applyBody = functionRegion(queryStore, "applyLoadedObjectSource");
+
+  // canonical identity：连接 + 库 + schema + catalog + 解析后的对象身份共同决定复用哪个 tab
+  assert.match(findBody, /tab\.objectSource\?\.name === options\.objectSource\.name/);
+  assert.match(findBody, /tab\.objectSource\.objectType === options\.objectSource\.objectType/);
+  assert.match(findBody, /\(tab\.objectSource\.schema \|\| ""\) === \(options\.objectSource\.schema \|\| ""\)/);
+  assert.match(findBody, /\(tab\.objectSource\.signature \|\| ""\) === \(options\.objectSource\.signature \|\| ""\)/);
+
+  // honor backend editability：只读源码不挂 objectSource，但仍是一个 sourceView tab
+  assert.match(applyBody, /raw\.editable !== false/);
+  assert.match(applyBody, /OBJECT_SOURCE_READ_ONLY_TYPES\.includes\(loaded\.resolvedType\)/);
+  assert.match(applyBody, /tab\.sourceView = true/);
+  assert.match(queryStore, /const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind\[\] = \["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"\]/);
+
+  // pending 占位：同步返回（不 await），tab 已可见并带着可重试的请求身份
+  assert.doesNotMatch(pendingBody, /await /);
+  assert.match(pendingBody, /tab\.sourceLoad = \{ startedAt: Date\.now\(\), request: \{ \.\.\.options\.request \} \}/);
+  assert.match(pendingBody, /void loadObjectSourceIntoTab\(id\)/);
+  // 落地时清掉加载态，否则 tab 会永远停在转圈
+  assert.match(applyBody, /clearObjectSourceLoad\(tab\)/);
 });
 
 test("table copy menu uses the shared single and multi-selection clipboard path", () => {

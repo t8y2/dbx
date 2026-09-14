@@ -20,7 +20,7 @@ const SHIKI_THEMES = {
   },
 } as const;
 
-type ShikiHighlighter = Awaited<ReturnType<typeof import("shiki/core").createHighlighterCore>>;
+export type ShikiHighlighter = Awaited<ReturnType<typeof import("shiki/core").createHighlighterCore>>;
 type ShikiCodeHighlighter = Pick<ShikiHighlighter, "codeToHtml">;
 
 let highlighterPromise: Promise<ShikiHighlighter> | undefined;
@@ -68,7 +68,12 @@ export function escapeHtml(content: string): string {
   });
 }
 
-function getShikiSqlHighlighter(): Promise<ShikiHighlighter> {
+/**
+ * Lazily-initialized shared highlighter. Exported so other SQL renderers
+ * (e.g. rich-text copy) reuse one Shiki instance instead of loading the SQL
+ * grammar and themes a second time.
+ */
+export function getShikiSqlHighlighter(): Promise<ShikiHighlighter> {
   highlighterPromise ??= loadShikiSqlHighlighter();
   return highlighterPromise;
 }

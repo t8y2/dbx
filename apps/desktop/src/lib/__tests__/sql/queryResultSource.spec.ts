@@ -5,10 +5,12 @@ describe("queryResultNameFromPreamble", () => {
   it("uses the nearest non-empty Name line comment", () => {
     expect(queryResultNameFromPreamble("-- Name: Old name\n-- unrelated\r\n  -- NAME :  Latest name  \r\n")).toBe("Latest name");
     expect(queryResultNameFromPreamble("-- Name: kept\n-- Name:   \n")).toBe("kept");
+    expect(queryResultNameFromPreamble("-- Name: explicit\n-- nearest ordinary comment\n")).toBe("explicit");
   });
 
-  it("ignores unrelated, malformed, and block comments", () => {
-    expect(queryResultNameFromPreamble("-- Name without colon\n/*\n-- Name: block\n*/\n-- ordinary comment\n")).toBeUndefined();
+  it("falls back to the nearest non-empty line comment", () => {
+    expect(queryResultNameFromPreamble("-- older comment\n/*\n-- Name: block\n*/\n-- 当前时间\n")).toBe("当前时间");
+    expect(queryResultNameFromPreamble("/* -- block only */\n--   \n")).toBeUndefined();
   });
 });
 

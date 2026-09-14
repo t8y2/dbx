@@ -880,11 +880,27 @@ func (s *server) closeAllQuerySessions() {
 	}
 }
 
+// minInt/maxInt replace the Go 1.21 builtins so the module stays go 1.20
+// compatible for the Windows 7 toolchain build.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult, error) {
 	if pageSize <= 0 {
 		pageSize = 100
 	}
-	capacity := min(pageSize, session.remaining)
+	capacity := minInt(pageSize, session.remaining)
 	result := queryPageResult{Columns: session.columns, ColumnTypes: session.columnTypes, Rows: make([][]any, 0, capacity)}
 	for len(result.Rows) < pageSize && session.remaining > 0 {
 		if session.pending != nil {
@@ -925,7 +941,7 @@ func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
 	}
 	columns = nonNilStrings(columns)
 	columnTypes := columnTypeNames(rows)
-	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: make([][]any, 0, min(maxRows, 1024))}
+	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: make([][]any, 0, minInt(maxRows, 1024))}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
@@ -1814,7 +1830,7 @@ func hasTopLevelSQLKeyword(sqlText string, index int, target string) bool {
 		case '(':
 			depth++
 		case ')':
-			depth = max(depth-1, 0)
+			depth = maxInt(depth-1, 0)
 		default:
 			if depth == 0 && isSQLWordStartByte(sqlText[index]) {
 				keyword, next := sqlKeywordAt(sqlText, index)

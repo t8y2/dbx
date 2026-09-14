@@ -1,4 +1,5 @@
-import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
+import { splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
@@ -46,7 +47,7 @@ export function queryTimeoutSecsForConcurrentIndex(configuredTimeoutSecs: number
   return Math.max(configuredTimeoutSecs, CONCURRENT_INDEX_QUERY_TIMEOUT_SECS);
 }
 
-export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number): number {
+export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: DatabaseType | undefined, queryTimeoutSecs: number, parameterOptions?: SqlParameterOptions): number {
   if (queryTimeoutSecs === 0) return 0;
 
   // PostgreSQL applies the configured timeout while the backend receives rows
@@ -56,7 +57,7 @@ export function frontendQueryTimeoutSecsForSql(sql: string, databaseType: Databa
   if (databaseType === "postgres" && postgresQueryMayReturnRows(sql, databaseType)) return 0;
 
   const baseTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
-  const statementCount = Math.max(splitSqlStatementRanges(sql, databaseType).length, 1);
+  const statementCount = Math.max(splitSqlStatementRanges(sql, databaseType, parameterOptions ?? sqlStatementParameterOptionsForCompatibility(databaseType)).length, 1);
   return baseTimeoutSecs * statementCount;
 }
 
@@ -67,7 +68,7 @@ export function frontendQueryTimeoutDelayMs(timeoutSecs: number): number | undef
 }
 
 function postgresQueryMayReturnRows(sql: string, databaseType: DatabaseType): boolean {
-  return splitSqlStatementRanges(sql, databaseType).some(({ sql: statement }) => {
+  return splitSqlStatementRanges(sql, databaseType, sqlStatementParameterOptionsForCompatibility(databaseType)).some(({ sql: statement }) => {
     const tokens = tokenizeSqlSemantic(statement, "postgres");
     const firstKeyword = tokens.find((token) => token.kind === "word" && token.depth === 0)?.normalized;
     if (!firstKeyword) return false;

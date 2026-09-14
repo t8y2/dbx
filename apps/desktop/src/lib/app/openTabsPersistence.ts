@@ -104,6 +104,13 @@ function shouldPersistTabSql(tab: QueryTab) {
   return tab.originalSql !== undefined && tab.sql !== tab.originalSql;
 }
 
+// Pending object-source tabs are transient work surfaces. Persisting one while
+// its request is in flight would restore an empty source tab after restart,
+// because the request itself is intentionally not durable.
+function shouldPersistOpenTab(tab: QueryTab): boolean {
+  return !tab.sourceLoad;
+}
+
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
   if (mode !== "query") return undefined;
   if (tab.externalSqlPath) return tab.originalSql ?? sql;
@@ -149,7 +156,7 @@ function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
 }
 
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
-  return tabs.map((tab) => ({
+  return tabs.filter(shouldPersistOpenTab).map((tab) => ({
     id: tab.id,
     ...(typeof tab.createdAt === "number" ? { createdAt: tab.createdAt } : {}),
     title: tab.title,
@@ -216,6 +223,8 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
       : {}),
     ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
     ...(tab.mode === "query" && typeof tab.resultAutoSave === "boolean" ? { resultAutoSave: tab.resultAutoSave } : {}),
+    ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
+    ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
     ...(tab.uiState ? { uiState: sanitizeTabUiState(tab.uiState) } : {}),
     ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
   }));
@@ -259,6 +268,9 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         redisMonitorActive: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
+        // sourceLoad 是纯运行期态（serializeOpenTabs 不落盘）。这里显式清空，
+        // 让「恢复后的 tab 不会停在加载中」成为不变量，而不是依赖白名单的副作用。
+        sourceLoad: undefined,
         executingResultRunId: undefined,
         editorViewport: restoredEditorViewport(tab),
         editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),

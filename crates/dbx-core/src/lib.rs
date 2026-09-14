@@ -68,6 +68,7 @@ pub mod mysql_event_sql;
 pub mod nacos;
 #[cfg(all(target_os = "windows", target_env = "gnu"))]
 mod nanosleep_stub;
+pub mod object_cache;
 pub mod object_source_sql;
 pub mod path_utils;
 pub mod plugins;

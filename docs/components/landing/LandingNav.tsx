@@ -5,11 +5,8 @@ import { Github, Menu, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DocsLang } from "@/lib/i18n";
 
-// Order of the nav language button, which cycles rather than toggling: with
-// three locales a two-way "other language" switch would strand Turkish
-// readers on the Chinese site.
-const LANG_CYCLE = ["en", "cn", "tr"] as const satisfies readonly DocsLang[];
-const LANG_BUTTON_LABEL: Record<DocsLang, string> = { en: "EN", cn: "中", tr: "TR" };
+const LANG_CYCLE = ["en", "cn"] as const satisfies readonly DocsLang[];
+const LANG_BUTTON_LABEL: Record<DocsLang, string> = { en: "EN", cn: "中" };
 
 const i18n = {
   en: {
@@ -24,19 +21,6 @@ const i18n = {
     menu: "Open navigation",
     closeMenu: "Close navigation",
     navLabel: "Primary navigation",
-  },
-  tr: {
-    home: "Ana Sayfa",
-    docs: "Dokümanlar",
-    changelog: "Değişiklik Günlüğü",
-    community: "Topluluk",
-    sponsors: "Sponsorlar",
-    contributors: "Katkıda Bulunanlar",
-    drivers: "Çevrimdışı Sürücüler",
-    langLabel: "Dili değiştir",
-    menu: "Gezinmeyi aç",
-    closeMenu: "Gezinmeyi kapat",
-    navLabel: "Ana gezinme",
   },
   cn: {
     home: "首页",

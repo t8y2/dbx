@@ -72,7 +72,7 @@ import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, Inde
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
-import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
@@ -2531,7 +2531,7 @@ async function confirmPasteTable() {
 function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boolean }): TableAdminSqlOptions {
   const result: TableAdminSqlOptions = {
     databaseType: effectiveDatabaseType.value,
-    schema: row.schema || selectedSchema.value,
+    schema: connectionTableSqlSchema(props.connection, row.schema || selectedSchema.value),
     tableName: row.name,
     // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),

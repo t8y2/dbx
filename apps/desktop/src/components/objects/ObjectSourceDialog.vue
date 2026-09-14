@@ -87,6 +87,10 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   loading.value = true;
   try {
     if (!props.databaseType) throw new Error("Connection type is unavailable.");
+    // issue #9035：连接建立也纳入弹窗的加载态。调用方不再先 await ensureConnected
+    // 才打开弹窗，否则弹窗挂载前会有一段没有任何反馈的等待。
+    await connectionStore.ensureConnected(props.connectionId);
+    connectionStore.activeConnectionId = props.connectionId;
     const schema = props.schema || props.database;
     const { source: result, objectType: resolvedType } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, props.connectionId, props.database, schema, props.name, props.objectType, props.signature, props.relationName);
     const editableAllowed = result.editable !== false;

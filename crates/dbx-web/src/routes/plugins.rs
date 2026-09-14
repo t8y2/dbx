@@ -29,6 +29,10 @@ const MAX_PLUGIN_UPLOAD_BYTES: usize = 512 * 1024 * 1024;
 pub struct PluginInstallQuery {
     #[serde(default)]
     allow_unsigned: bool,
+    /// Marks bytes fetched from a direct package URL by the caller, which also
+    /// trusts the built-in official marketplace keys like desktop URL installs.
+    #[serde(default)]
+    from_url: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,7 +289,13 @@ pub async fn install_plugin(
     let root_dir = state.app.plugins.root_dir().to_path_buf();
     let app_version = state.app.plugins.app_version().to_string();
     let result = tokio::task::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.install_bytes(&package, policy)
+        let installer = if query.from_url {
+            let trust_store = dbx_core::plugins::url_install_trust_store(&root_dir)?;
+            PluginPackageInstaller::with_trust_store(root_dir.clone(), app_version, trust_store)
+        } else {
+            PluginPackageInstaller::new(root_dir.clone(), app_version)?
+        };
+        installer.install_bytes(&package, policy)
     })
     .await
     .map_err(|error| AppError::internal(error.to_string()))?

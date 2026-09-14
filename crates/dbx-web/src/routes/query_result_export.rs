@@ -44,6 +44,8 @@ pub async fn start_query_result_export(
     let ext = match req.format.as_str() {
         "csv" => "csv",
         "xlsx" => "xlsx",
+        "json" => "json",
+        "txt" => "txt",
         _ => return Err(AppError::from(format!("Unsupported query result export format: {}", req.format))),
     };
     let tmp_dir = state.data_dir.join("tmp");
@@ -162,6 +164,8 @@ pub async fn query_result_export_download(
     let content_type = match export_file.format.as_str() {
         "csv" => "text/csv; charset=utf-8",
         "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "json" => "application/json; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
         format => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
 

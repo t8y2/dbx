@@ -52,14 +52,6 @@ const i18n = {
     wechat: { name: "WeChat Group", desc: "Join via Tencent Docs invite link." },
     github: { name: "GitHub Discussions", desc: "Bug reports, feature requests, and long-form discussions." },
   },
-  tr: {
-    title: "Topluluk",
-    desc: "DBX topluluğuna katılın — soru sorun, geri bildirim paylaşın ve diğer kullanıcılarla tanışın.",
-    discord: { name: "Discord", desc: "Anlık sohbet, soru-cevap ve özellik tartışmaları." },
-    qq: { name: "QQ Grubu", desc: "Grup numarası: 1087880322" },
-    wechat: { name: "WeChat Grubu", desc: "Tencent Docs davet bağlantısıyla katılın." },
-    github: { name: "GitHub Discussions", desc: "Hata bildirimleri, özellik istekleri ve uzun tartışmalar." },
-  },
   cn: {
     title: "交流群",
     desc: "加入 DBX 社区 — 提问、反馈、与其他用户交流。",

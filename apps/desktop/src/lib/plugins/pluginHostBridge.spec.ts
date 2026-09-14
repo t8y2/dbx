@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
-import { PluginHostBridge, pluginSandboxDocument } from "./pluginHostBridge";
+import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
 function plugin(permissions: string[] = []): InstalledPlugin {
@@ -291,10 +291,23 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("window.dbxPlugin");
     expect(document).toContain("get locale() { return locale; }");
     expect(document).toContain("openFilesystem");
+    expect(document).toContain("document.dispatchEvent(new CustomEvent('dbx-plugin-env'");
     expect(document).toContain("shortcut: 'closeTab'");
     expect(document).toContain("connect-src 'none'");
     expect(document).toContain(".dbx-btn");
     expect(document).toContain("var(--color-background");
+  });
+
+  it("bootstraps the initial theme before the plugin document paints", () => {
+    const document = pluginSandboxDocument("<html><head></head><body></body></html>", [], {
+      appearance: "dark",
+      tokens: { "--color-background": "rgb(19 20 22)", "--color-destructive": "rgb(243 98 95)" },
+    });
+
+    expect(document).toContain('root.dataset.dbxTheme = theme.appearance === "dark" ? "dark" : "light"');
+    expect(document).toContain('root.style.colorScheme = theme.appearance === "dark" ? "dark" : "light"');
+    expect(document).toContain('"--color-background":"rgb(19 20 22)"');
+    expect(document).toContain('"--color-destructive":"rgb(243 98 95)"');
   });
 
   it("forwards the plugin close-tab shortcut to the host", () => {
@@ -325,6 +338,31 @@ describe("PluginHostBridge", () => {
 
     const closed = pluginSandboxDocument("<html><head></head><body></body></html>", ["host.events"]);
     expect(closed).toContain("connect-src 'none';");
+    expect(closed).toContain("host.stream.chunk");
+  });
+
+  it("pre-seeds the current theme as the sandbox first paint", () => {
+    const themed = pluginSandboxDocument("<html><head></head><body></body></html>", ["host.events"], { appearance: "dark", tokens: { "--color-background": "#131416", "--color-foreground": "rgb(215 215 219)" } });
+    expect(themed).toContain("color-scheme: dark");
+    expect(themed).toContain("--color-background: #131416");
+    expect(themed).toContain("--color-foreground: rgb(215 215 219)");
+    expect(themed.indexOf("<style>:root{")).toBeGreaterThan(themed.indexOf(".dbx-btn"));
+
+    const unthemed = pluginSandboxDocument("<html><head></head><body></body></html>");
+    expect(unthemed).not.toContain("color-scheme: dark");
+    expect(unthemed).not.toContain("--color-background: #131416");
+  });
+
+  it("drops boot theme declarations that could break out of the style element", () => {
+    const hostile = pluginSandboxDocument("<html><head></head><body></body></html>", [], {
+      appearance: "dark",
+      tokens: { "--color-background": "#131416", color: "red", "--evil": "red}</style><script>alert(1)</script>", "--empty": " " },
+    });
+    expect(hostile).toContain("--color-background: #131416");
+    expect(hostile).not.toContain("--bad-name");
+    expect(hostile).not.toContain("--evil");
+    expect(hostile).not.toContain("--empty");
+    expect((hostile.match(/<script\b/gi) ?? []).length).toBe(1);
   });
 
   it("sends the theme in init and pushes theme updates through env messages", () => {
@@ -338,5 +376,77 @@ describe("PluginHostBridge", () => {
 
     bridge.updateTheme({ appearance: "light", tokens: {} });
     expect(messages[1]).toMatchObject({ type: "env", locale: "en", theme: { appearance: "light" } });
+  });
+});
+
+describe("plugin SDK source", () => {
+  interface SdkWindow {
+    dbxPlugin?: { invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown> };
+  }
+
+  function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
+    const sandbox = {} as SdkWindow;
+    const document = {
+      documentElement: {
+        dataset: {} as Record<string, string>,
+        style: { colorScheme: "", setProperty: vi.fn() },
+      },
+      dispatchEvent: vi.fn(),
+    } as unknown as Document;
+    // The SDK IIFE only touches window and the bare-global addEventListener at
+    // boot; parent.postMessage is captured for later request() calls, so a
+    // stub window/parent is enough here.
+    new Function("window", "parent", "addEventListener", "document", pluginSdkSource(initialTheme))(sandbox, { postMessage: (message: unknown) => posted.push(message) }, () => {}, document);
+    return sandbox;
+  }
+
+  /** The SDK posts a `ready` message at boot; the first request follows it. */
+  function firstRequest(posted: unknown[]): { type: string; method: string; params: { method: string; params: Record<string, unknown> } } {
+    const request = posted.find((message) => (message as { type: string }).type === "request");
+    if (!request) throw new Error("SDK posted no request message");
+    return request as { type: string; method: string; params: { method: string; params: Record<string, unknown> } };
+  }
+
+  it("plainifies reactive (Proxy) params before postMessage", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+    expect(dbxPlugin).toBeDefined();
+
+    // Vue reactive arrays/objects are Proxies; structured clone rejects them
+    // with "The object can not be cloned." (WebKit wording) — the SDK must
+    // recover the plain data before crossing the postMessage boundary.
+    const reactive: string[] = ["session-a", "session-b"];
+    const proxy = new Proxy(reactive, {});
+
+    void dbxPlugin!.invoke("ssh/terminal/batchInput", { sessionIds: proxy, command: "ls -la" });
+
+    const message = firstRequest(posted);
+    expect(message.method).toBe("backend.invoke");
+    expect(message.params.params).toEqual({ sessionIds: ["session-a", "session-b"], command: "ls -la" });
+    // The posted sessionIds must not be the incoming Proxy itself.
+    expect(message.params.params.sessionIds).not.toBe(proxy);
+    expect(JSON.stringify(message.params.params.sessionIds)).toBe(JSON.stringify(["session-a", "session-b"]));
+  });
+
+  it("boots successfully when the host provides the initial theme", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted, { appearance: "dark", tokens: { "--color-background": "#131416" } });
+
+    expect(dbxPlugin).toBeDefined();
+    expect(posted[0]).toMatchObject({ source: "dbx-plugin", type: "ready" });
+  });
+
+  it("keeps cloneable values intact and plain scalars by reference", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+
+    const stamp = new Date("2026-09-06T00:00:00Z");
+    void dbxPlugin!.invoke("sample/hello", { count: 3, stamp, nested: new Map([["k", "v"]]) });
+
+    const params = firstRequest(posted).params.params as { count: number; stamp: Date; nested: Map<string, string> };
+    // structuredClone path: cloneable types keep their identity class.
+    expect(params.count).toBe(3);
+    expect(params.stamp).toBeInstanceOf(Date);
+    expect(params.nested).toBeInstanceOf(Map);
   });
 });

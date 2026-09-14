@@ -62,6 +62,20 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.objectSource).toBeUndefined();
   });
 
+  it("does not persist a pending object-source tab without its in-flight request", () => {
+    const pending = queryTab({
+      id: "pending-source",
+      title: "Source - v_orders",
+      sourceView: true,
+      sourceLoad: {
+        startedAt: Date.now(),
+        request: { name: "v_orders", objectType: "VIEW" },
+      },
+    });
+
+    expect(serializeOpenTabs([pending])).toEqual([]);
+  });
+
   it("keeps legacy query tabs without source intent compatible", () => {
     const [restored] = roundTrip([queryTab({ sql: "SELECT 1" })]);
     expect(restored.sourceView).toBeUndefined();

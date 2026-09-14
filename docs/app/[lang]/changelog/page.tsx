@@ -11,10 +11,6 @@ const i18n = {
     title: "Changelog",
     desc: "Track every release — features, improvements, and fixes.",
   },
-  tr: {
-    title: "Değişiklik Günlüğü",
-    desc: "Her sürümü takip edin — yeni özellikler, iyileştirmeler ve düzeltmeler.",
-  },
   cn: {
     title: "更新日志",
     desc: "追踪每次发布 — 新功能、改进和修复。",

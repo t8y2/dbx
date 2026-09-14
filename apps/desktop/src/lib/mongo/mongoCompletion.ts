@@ -4,10 +4,11 @@ import {
   COMMON_OPERATORS,
   EXPRESSION_OPERATORS,
   EXTENDED_JSON_VALUES,
+  FIELD_QUERY_OPERATORS,
   PIPELINE_STAGES,
   PUSH_MODIFIERS,
-  QUERY_OPERATORS,
   STAGE_OPTION_KEYS,
+  TOP_LEVEL_QUERY_OPERATORS,
   UPDATE_OPERATORS,
   UPDATE_OPERATOR_LABELS,
   VALUE_SNIPPETS,
@@ -34,6 +35,7 @@ export type MongoCompletionMode =
   | "method"
   | "cursorMethod"
   | "field"
+  | "filterField"
   | "fieldPath"
   | "fieldRef"
   | "value"
@@ -310,6 +312,10 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "field":
       items = fieldItems(prefix, fields);
       break;
+    case "filterField":
+      // Fields lead; `$and` / `$or` and the other whole-filter operators follow once `$` is typed.
+      items = [...fieldItems(prefix, fields), ...specItems(TOP_LEVEL_QUERY_OPERATORS, prefix, "query operator", 80)];
+      break;
     case "fieldPath":
       items = fieldPathItems(prefix, fields);
       break;
@@ -325,7 +331,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       break;
     case "queryOperator":
       // `{ _id: { $oid: ... } }` is as valid here as `{ _id: { $gt: ... } }`.
-      items = [...specItems(QUERY_OPERATORS, prefix, "query operator", 100), ...specItems(EXTENDED_JSON_VALUES, prefix, "extended JSON value", 90)];
+      items = [...specItems(FIELD_QUERY_OPERATORS, prefix, "query operator", 100), ...specItems(EXTENDED_JSON_VALUES, prefix, "extended JSON value", 90)];
       break;
     case "updateOperator":
       items = specItems(UPDATE_OPERATORS, prefix, "update operator", 100);
@@ -353,7 +359,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
 
 /** Modes whose items are built from the target collection's sampled fields. */
 export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
-  return mode === "field" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
+  return mode === "field" || mode === "filterField" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
 }
 
 /** Modes whose items are built from the database's collection names. */
@@ -544,7 +550,7 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCompletion
   if (inner.kind === "array") return VALUE_ARRAY_OPERATORS.has(inner.key ?? "") && !scan.inString ? "value" : "none";
   if (inner.kind !== "object") return "none";
   if (scan.inValue) return scan.inString ? "none" : "value";
-  if (innerDepth(scan, rootIndex) === 0) return "field";
+  if (innerDepth(scan, rootIndex) === 0) return "filterField";
 
   // Inside a nested object: whose value is it?
   switch (inner.key) {
@@ -552,10 +558,10 @@ function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCompletion
       // An object inside an array: a sub-filter under `$and` / `$or` / `$nor`,
       // or an extended JSON wrapper such as `{ $oid: ... }` under `$in`.
       const parent = scan.stack[scan.stack.length - 2];
-      return parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "field";
+      return parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "filterField";
     }
     case "$elemMatch":
-      return "field";
+      return "filterField";
     case "$expr":
       return "expression";
     case "$jsonSchema":

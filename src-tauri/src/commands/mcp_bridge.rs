@@ -232,6 +232,10 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
 
                 if first_line.starts_with("POST /open-table") {
                     handle_open_table(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /call-plugin-tool") {
+                    handle_call_plugin_tool(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /list-plugin-connections") {
+                    handle_list_plugin_connections(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/list-tables") {
                     handle_list_tables_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/describe-table") {
@@ -298,8 +302,9 @@ mod tests {
     use super::{
         effective_database_execution_policy, ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed,
         ensure_mcp_execute_and_show_supported, ensure_mcp_mongo_pipeline_target_allowed_by_id,
-        ensure_mcp_sql_database_switch_allowed, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
-        resolve_connection, resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
+        ensure_mcp_sql_database_switch_allowed, is_terminal_routed_exec, mongo_filter_is_effectively_unbounded,
+        mongo_pipeline_has_write_stage, plugin_connection_summaries, plugin_connection_summary, resolve_connection,
+        resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy, Storage};
@@ -338,6 +343,19 @@ mod tests {
         assert!(!default_data_dir.join("mcp-bridge-port").exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_ssh_exec_tools_may_open_the_workbench_terminal() {
+        // The workbench open (and its tab churn) exists solely so a
+        // terminal-routed exec lands in a real PTY; forwarded sftp/metrics
+        // calls are hidden-channel by design and must never trigger it,
+        // whatever runInTerminal says.
+        assert!(is_terminal_routed_exec("ssh_exec"));
+        assert!(is_terminal_routed_exec("ssh_exec_sudo"));
+        assert!(!is_terminal_routed_exec("sftp_list_dir"));
+        assert!(!is_terminal_routed_exec("ssh_metrics"));
+        assert!(!is_terminal_routed_exec("mcp_exec"));
     }
 
     #[test]
@@ -576,6 +594,80 @@ mod tests {
         ] {
             assert!(!mongo_filter_is_effectively_unbounded(filter), "{filter}");
         }
+    }
+
+    fn plugin_connection_config(id: &str, name: &str, external_config: serde_json::Value) -> ConnectionConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": name,
+            "db_type": "plugin",
+            "plugin_id": "io.dbx.ssh",
+            "plugin_connection_type": "ssh",
+            "host": "server.example.com",
+            "port": 2222,
+            "username": "deploy",
+            "password": "",
+            "connection_secrets": { "password": "hunter2", "totp_secret": "otpauth://secret" },
+            "external_config": external_config
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn plugin_connection_summary_is_metadata_only() {
+        let config = plugin_connection_config(
+            "conn-ssh-1",
+            "prod-bastion",
+            serde_json::json!({ "authentication": "private-key", "read_only": true, "agent_socket": "/tmp/agent" }),
+        );
+        let value = serde_json::to_value(plugin_connection_summary(&config)).unwrap();
+        let object = value.as_object().unwrap();
+        let keys: std::collections::HashSet<_> = object.keys().cloned().collect();
+        assert_eq!(
+            keys,
+            ["id", "name", "host", "port", "username", "authentication", "readOnly"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        assert_eq!(value["id"], "conn-ssh-1");
+        assert_eq!(value["host"], "server.example.com");
+        assert_eq!(value["port"], 2222);
+        assert_eq!(value["username"], "deploy");
+        assert_eq!(value["authentication"], "private-key");
+        assert_eq!(value["readOnly"], true);
+        let rendered = value.to_string();
+        for secret in ["hunter2", "otpauth", "password", "connection_secrets", "external_config", "agent_socket"] {
+            assert!(!rendered.contains(secret), "summary must not leak {secret}");
+        }
+    }
+
+    #[test]
+    fn plugin_connection_summary_falls_back_to_safe_defaults() {
+        let mut config = plugin_connection_config("conn-ssh-2", "fallback", serde_json::json!({}));
+        config.read_only = true;
+        let value = serde_json::to_value(plugin_connection_summary(&config)).unwrap();
+        assert_eq!(value["authentication"], "password");
+        assert_eq!(value["readOnly"], true);
+    }
+
+    #[test]
+    fn plugin_connection_summaries_filter_by_plugin_and_sort_by_name() {
+        let ssh_b = plugin_connection_config("b", "Beta", serde_json::json!({}));
+        let ssh_a = plugin_connection_config("a", "alpha", serde_json::json!({}));
+        let mut ldap = plugin_connection_config("l", "zeta", serde_json::json!({}));
+        ldap.plugin_id = Some("io.dbx.ldap".to_string());
+        let mysql = mysql_config(false);
+
+        let summaries = plugin_connection_summaries(&[ssh_b, ldap, mysql, ssh_a], "io.dbx.ssh");
+        let names: Vec<_> = summaries.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Beta"]);
+
+        assert!(plugin_connection_summaries(
+            &[plugin_connection_config("a", "alpha", serde_json::json!({}))],
+            "io.dbx.files"
+        )
+        .is_empty());
     }
 }
 
@@ -1201,6 +1293,201 @@ async fn handle_open_table(app: &AppHandle, state: &Arc<AppState>, body: &str, s
     };
     let _ = app.emit("mcp-open-table", &event);
     respond(stream, "200 OK", "ok").await;
+}
+
+#[derive(Deserialize)]
+struct CallPluginToolRequest {
+    connection_id: String,
+    tool: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+    plugin_id: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+/// Tools whose terminal routing (`runInTerminal` / terminal MCP mode) can
+/// require the workbench terminal to exist. Every other forwarded tool runs
+/// on the hidden channel by design and must never open the workbench.
+fn is_terminal_routed_exec(tool: &str) -> bool {
+    tool == "ssh_exec" || tool == "ssh_exec_sudo"
+}
+
+/// Asks the plugin for a connection's terminal MCP mode (the toggle in the
+/// SSH terminal toolbar). Any failure — an older plugin without the probe
+/// route, a busy sidecar — degrades to off, so the silent path can never
+/// regress into opening the workbench.
+async fn plugin_agent_mode_on(state: &Arc<AppState>, plugin_id: &str, connection_id: &str) -> bool {
+    let probe: Result<serde_json::Value, String> = state
+        .plugin_host
+        .invoke(
+            plugin_id,
+            "ssh/agent/mode/get",
+            serde_json::json!({ "connectionId": connection_id }),
+            None,
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .await;
+    probe
+        .ok()
+        .and_then(|value| value.get("agentTerminalMode").and_then(serde_json::Value::as_str).map(str::to_string))
+        .is_some_and(|mode| mode == "auto" || mode == "strict")
+}
+
+/// POST /call-plugin-tool: runs a plugin MCP tool on the desktop app's own
+/// plugin session — the same sidecar process the workbench talks to. The
+/// connection's workbench tab is opened only when the call will route into
+/// the visible terminal (ssh runInTerminal / terminal MCP mode), so
+/// agent-terminal commands execute in a real PTY while silent hidden-channel
+/// calls never open or focus the app. The lifecycle payload comes from the
+/// saved connection config, so callers never pass credentials.
+async fn handle_call_plugin_tool(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    body: &str,
+    stream: &mut tokio::net::TcpStream,
+) {
+    let req: CallPluginToolRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_error(stream, "400 Bad Request", &format!("invalid body: {e}")).await;
+            return;
+        }
+    };
+    let config = match resolve_connection(state, Some(&req.connection_id), "").await {
+        Ok(c) => c,
+        Err(e) => {
+            respond_error(stream, "404 Not Found", &e).await;
+            return;
+        }
+    };
+    let plugin_id = req.plugin_id.or_else(|| config.plugin_id.clone()).unwrap_or_default();
+    if plugin_id.is_empty() {
+        respond_error(stream, "400 Bad Request", "connection is not bound to a plugin").await;
+        return;
+    }
+    // The workbench tab only needs to exist when the forwarded call will
+    // actually route into the visible terminal: an explicit runInTerminal,
+    // or no flag plus the connection's terminal MCP mode being on (asked
+    // from the plugin, so the toggle in the terminal UI owns the decision).
+    // Everything else — sftp listings, silent execs on the hidden channel —
+    // must not open (let alone focus) the app while the agent works.
+    let route_terminal = is_terminal_routed_exec(&req.tool)
+        && match req.arguments.get("runInTerminal").and_then(serde_json::Value::as_bool) {
+            Some(explicit) => explicit,
+            None => plugin_agent_mode_on(state, &plugin_id, &config.id).await,
+        };
+    if route_terminal {
+        let _ = app.emit("mcp-open-connection-workbench", serde_json::json!({ "connection_id": config.id }));
+    }
+    let lifecycle = match state.plugin_host.connection_params_standalone(&config) {
+        Ok(l) => l,
+        Err(e) => {
+            respond_error(stream, "500 Internal Server Error", &e).await;
+            return;
+        }
+    };
+    let params = serde_json::json!({
+        "tool": req.tool,
+        "arguments": req.arguments,
+        "lifecycle": lifecycle,
+    });
+    // Long ceiling: agent-terminal calls may sit in a workbench approval
+    // prompt (default 120s) before the command even starts.
+    let timeout = std::time::Duration::from_millis(req.timeout_ms.unwrap_or(300_000).clamp(1_000, 600_000));
+    let result: Result<serde_json::Value, String> =
+        state.plugin_host.invoke(&plugin_id, "mcp/call", params, None, Some(timeout)).await;
+    match result {
+        Ok(value) => respond_json(stream, &value).await,
+        Err(e) => respond_error(stream, "502 Bad Gateway", &e).await,
+    }
+}
+
+#[derive(Deserialize)]
+struct ListPluginConnectionsRequest {
+    plugin_id: String,
+}
+
+/// Metadata-only view of a saved plugin connection. This is a deliberate
+/// field whitelist: credentials (`password`, `connection_secrets`, private
+/// keys, `sudo_password`, `totp_secret`, ...) can never reach the response
+/// because they are not part of this struct and `external_config` is only
+/// probed for the two safe keys below.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginConnectionSummary {
+    id: String,
+    name: String,
+    host: String,
+    port: u16,
+    username: String,
+    authentication: String,
+    read_only: bool,
+}
+
+fn plugin_connection_summary(config: &crate::models::connection::ConnectionConfig) -> PluginConnectionSummary {
+    let external = config.external_config.as_ref();
+    // The dialog persists every declared config-bound field (including
+    // defaults), so `authentication` is normally present; fall back to the
+    // provider's historical default ("password") for pre-existing rows.
+    let authentication = external
+        .and_then(|v| v.get("authentication"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("password")
+        .to_string();
+    let read_only =
+        external.and_then(|v| v.get("read_only")).and_then(serde_json::Value::as_bool).unwrap_or(config.read_only);
+    PluginConnectionSummary {
+        id: config.id.clone(),
+        name: config.name.clone(),
+        host: config.host.clone(),
+        port: config.port,
+        username: config.username.clone(),
+        authentication,
+        read_only,
+    }
+}
+
+fn plugin_connection_summaries(
+    configs: &[crate::models::connection::ConnectionConfig],
+    plugin_id: &str,
+) -> Vec<PluginConnectionSummary> {
+    let mut summaries: Vec<PluginConnectionSummary> = configs
+        .iter()
+        .filter(|c| {
+            c.db_type == crate::models::connection::DatabaseType::Plugin && c.plugin_id.as_deref() == Some(plugin_id)
+        })
+        .map(plugin_connection_summary)
+        .collect();
+    summaries.sort_by_key(|summary| summary.name.to_lowercase());
+    summaries
+}
+
+/// POST /list-plugin-connections: returns saved connection metadata for one
+/// plugin so standalone stdio MCP agents can pick a connection without
+/// reading the SQLite store. Metadata only — this route never returns
+/// credentials; connecting still goes through /call-plugin-tool, whose
+/// lifecycle payload comes from the host-side saved config.
+async fn handle_list_plugin_connections(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: ListPluginConnectionsRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            respond_error(stream, "400 Bad Request", &format!("invalid body: {e}")).await;
+            return;
+        }
+    };
+    if req.plugin_id.trim().is_empty() {
+        respond_error(stream, "400 Bad Request", "plugin_id is required").await;
+        return;
+    }
+    let configs = match state.storage.load_connections().await {
+        Ok(c) => c,
+        Err(e) => {
+            respond_error(stream, "500 Internal Server Error", &e).await;
+            return;
+        }
+    };
+    let connections = plugin_connection_summaries(&configs, req.plugin_id.trim());
+    respond_json(stream, &serde_json::json!({ "connections": connections })).await;
 }
 
 async fn handle_execute_query(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {

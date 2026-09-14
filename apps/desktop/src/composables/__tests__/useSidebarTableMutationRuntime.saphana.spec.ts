@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { shallowRef } from "vue";
-import type { TreeNode } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, TreeNode } from "@/types/database";
 import { dropTableCascade, dropTablePreviewSql, emptyTablePreviewSql, sidebarDangerRunningCancel, sidebarDangerRunningExecutionId, sidebarDangerTarget, truncateTableCascade, truncateTablePreviewSql } from "@/components/sidebar/sidebarTreeDialogState";
 
 const mocks = vi.hoisted(() => ({
@@ -49,19 +49,20 @@ function tableNode(database: string | null | undefined): TreeNode {
   } as TreeNode;
 }
 
-function runtime(database: string | null | undefined) {
+function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana") {
   const node = tableNode(database);
   const activeNode = shallowRef(node);
   const connectionStore = {
     ensureConnected: mocks.ensureConnected,
+    getConfig: () => config,
     removeTreeNode: mocks.removeTreeNode,
   } as any;
   const feature = useSidebarTableMutationRuntime({
     activeNode,
     releaseActiveNodeReference: mocks.releaseActiveNodeReference,
     connectionStore,
-    currentDatabaseType: () => "saphana",
-    databaseTypeForNode: () => "saphana",
+    currentDatabaseType: () => databaseType,
+    databaseTypeForNode: () => databaseType,
     executeWithProductionGuard: mocks.executeWithProductionGuard,
     closeDroppedTableObjectTabsForNode: mocks.closeDroppedTableObjectTabsForNode,
     refreshMutatedTableDataTabsForNode: mocks.refreshMutatedTableDataTabsForNode,
@@ -119,6 +120,14 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.closeDroppedTableObjectTabsForNode).toHaveBeenCalledWith(node);
     expect(mocks.removeTreeNode).toHaveBeenCalledWith(node.id);
     expect(mocks.releaseActiveNodeReference).toHaveBeenCalledWith([node.id]);
+  });
+
+  it("omits the GBase 8s metadata owner from generated table SQL", async () => {
+    const { feature } = runtime("tenant", { db_type: "gbase", driver_profile: "gbase8s" }, "informix");
+
+    await feature.confirmDropTable();
+
+    expect(mocks.buildDropTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "informix", schema: undefined, tableName: "ORDERS" }));
   });
 
   it.each(["confirmEmptyTable", "confirmTruncateTable"] as const)("refreshes data tabs after %s", async (action) => {

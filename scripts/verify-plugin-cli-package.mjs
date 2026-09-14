@@ -81,7 +81,8 @@ try {
     process.platform === "win32" ? "dbx-plugin.cmd" : "dbx-plugin",
   );
   const version = run(command, ["--version"], { cwd: installDirectory, capture: true });
-  if (!version.stdout.includes("dbx-plugin 0.1.3")) {
+  const expectedVersion = JSON.parse(readFileSync(join(repositoryRoot, "packages/plugin-cli/package.json"), "utf8")).version;
+  if (version.stdout.trim() !== `dbx-plugin ${expectedVersion}`) {
     throw new Error(`Unexpected installed CLI version output: ${version.stdout.trim()}`);
   }
 

@@ -4,6 +4,7 @@ import { getPlatform, type Platform } from "@/lib/backend/platform";
 interface ClipboardApi {
   readText?: () => Promise<string> | string;
   writeText?: (text: string) => Promise<void> | void;
+  write?: (items: readonly unknown[]) => Promise<void> | void;
 }
 
 interface ClipboardNavigator {
@@ -38,9 +39,17 @@ interface ClipboardDocument {
   execCommand?(command: string): boolean;
 }
 
+/** Structural stand-ins for the DOM constructors used by the rich-text path. */
+type ClipboardItemConstructor = new (items: Record<string, unknown>) => unknown;
+type ClipboardBlobConstructor = new (parts: readonly string[], options?: { type?: string }) => unknown;
+
 export interface ClipboardEnvironment {
   navigator?: ClipboardNavigator;
   document?: ClipboardDocument;
+  /** Injected for tests; resolves from `globalThis` in the app. */
+  ClipboardItem?: ClipboardItemConstructor;
+  /** Injected for tests; resolves from `globalThis` in the app. */
+  Blob?: ClipboardBlobConstructor;
 }
 
 /**
@@ -201,4 +210,52 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   } finally {
     container.removeChild(textarea);
   }
+}
+
+/**
+ * Write both an HTML flavor and a plain-text flavor to the system clipboard.
+ *
+ * Rich-text targets (email clients, Word, chat apps) pick up `text/html` and
+ * keep the formatting, while plain-text targets fall back to `text` — so the
+ * same copy works everywhere.
+ *
+ * Order of attempts:
+ * 1. Tauri `clipboard-manager` `writeHtml`, whose `altText` argument is the
+ *    plain-text flavor.
+ * 2. Web `navigator.clipboard.write` with a two-flavor `ClipboardItem`.
+ * 3. Plain text via {@link copyToClipboard}. Rich writes need a secure
+ *    context, and a non-secure web deployment should still copy something
+ *    rather than fail.
+ */
+export async function copyRichTextToClipboard(html: string, text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
+  text = clipboardLineEndings(text);
+  if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
+    try {
+      const { writeHtml } = await import("@tauri-apps/plugin-clipboard-manager");
+      await writeHtml(html, text);
+      recordClipboardWrite();
+      return;
+    } catch {
+      // Fall through to the Web Clipboard rich-text path.
+    }
+  }
+
+  try {
+    const ClipboardItem = env.ClipboardItem;
+    const Blob = env.Blob;
+    if (env.navigator?.clipboard?.write && typeof ClipboardItem === "function" && typeof Blob === "function") {
+      await env.navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      recordClipboardWrite();
+      return;
+    }
+  } catch {
+    // Fall through to the plain-text path so the copy still succeeds.
+  }
+
+  await copyToClipboard(text, env);
 }

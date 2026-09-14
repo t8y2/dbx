@@ -31,6 +31,45 @@ function connectionProvider(overrides: Partial<PluginConnectionProviderContribut
 }
 
 describe("FrontendPluginRegistry", () => {
+  it("migrates a config-bound secret on edit, preserves multiline values and removes the plaintext copy", () => {
+    const provider = connectionProvider({ fields: [{ key: "key", label: "Private key", type: "textarea", binding: "secret" }] });
+    const pem = "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----\n";
+    const existing = buildPluginConnectionConfig("example.plugin", connectionProvider({ fields: [] }), {});
+    existing.external_config = { key: pem, root: "/files" };
+    const values = pluginConnectionFormValues(provider, existing);
+    expect(values.key).toBe(pem);
+
+    const saved = buildPluginConnectionConfig("example.plugin", provider, values, existing);
+    expect(saved.connection_secrets?.key).toBe(pem);
+    expect(saved.external_config).toEqual({ root: "/files" });
+    expect(existing.external_config).toEqual({ key: pem, root: "/files" });
+    expect(pluginConnectionFormValues(provider, saved).key).toBe(pem);
+
+    existing.connection_secrets = { key: "newer secret" };
+    expect(pluginConnectionFormValues(provider, existing).key).toBe("newer secret");
+    const cleared = buildPluginConnectionConfig("example.plugin", provider, { key: "" }, existing);
+    expect(cleared.connection_secrets?.key).toBeUndefined();
+    expect(cleared.external_config).toEqual({ root: "/files" });
+  });
+
+  it("round-trips automatic ports as an empty input and preserves explicit custom ports", () => {
+    const provider = connectionProvider({ fields: [{ key: "port", label: "Port", type: "number", binding: "port" }] });
+    const automatic = buildPluginConnectionConfig("example.plugin", provider, {});
+    expect(automatic.port).toBe(0);
+    expect(pluginConnectionFormValues(provider, automatic).port).toBeUndefined();
+    const explicit = buildPluginConnectionConfig("example.plugin", provider, { port: 1636 });
+    expect(pluginConnectionFormValues(provider, explicit).port).toBe(1636);
+  });
+
+  it("preserves the save-password preference for plugin connections", () => {
+    const provider = connectionProvider({ fields: [] });
+    const defaultConfig = buildPluginConnectionConfig("example.plugin", provider, {});
+    expect(defaultConfig.save_password).toBe(true);
+
+    const transient = buildPluginConnectionConfig("example.plugin", provider, {}, { ...defaultConfig, save_password: false });
+    expect(transient.save_password).toBe(false);
+  });
+
   it("round-trips plugin connection provider picker values", () => {
     const value = pluginConnectionProviderOptionValue("example/plugin", "ssh:main");
     expect(parsePluginConnectionProviderOptionValue(value)).toEqual({ pluginId: "example/plugin", providerId: "ssh:main" });
@@ -326,5 +365,24 @@ describe("FrontendPluginRegistry", () => {
       private_key: "secret-key",
       keepalive: false,
     });
+  });
+
+  it("builds from a reactive (non-structured-cloneable) existing config", () => {
+    // Connection configs reach the builder through props as Vue reactive
+    // proxies; structuredClone refuses them ("The object can not be cloned.").
+    const provider = connectionProvider({
+      id: "example.ssh",
+      database_type: "ssh",
+      fields: [{ key: "authentication", label: "Authentication", type: "select", binding: "config", default: "password", options: [] }],
+    });
+    const existing = {
+      id: "ssh-1",
+      external_config: new Proxy({ authentication: "private-key" }, {}),
+    } as unknown as Parameters<typeof buildPluginConnectionConfig>[3];
+
+    const config = buildPluginConnectionConfig("example.plugin", provider, { authentication: "private-key" }, existing);
+
+    expect(config.external_config).toEqual({ authentication: "private-key" });
+    expect(config.id).toBe("ssh-1");
   });
 });

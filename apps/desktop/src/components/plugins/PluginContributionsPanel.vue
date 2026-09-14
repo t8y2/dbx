@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, LayoutGrid, List, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
+import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Info, LayoutGrid, Link2, List, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,10 +16,11 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
 import { buildMarketplacePluginListings, filterMarketplacePluginListings, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import type { InstalledPlugin, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
+import type { InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
 import { useI18n } from "vue-i18n";
 
 const props = defineProps<{
@@ -31,15 +32,18 @@ const emit = defineEmits<{
 }>();
 
 // lucide no longer ships brand icons; mirror the inline glyph used in AppToolbar.
-const GithubIcon = {
+const GithubIcon = defineComponent({
+  props: {
+    iconClass: { type: String, default: "size-3" },
+  },
   render() {
-    return h("svg", { class: "size-3", viewBox: "0 0 24 24", fill: "currentColor" }, [
+    return h("svg", { class: this.iconClass, viewBox: "0 0 24 24", fill: "currentColor" }, [
       h("path", {
         d: "M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z",
       }),
     ]);
   },
-};
+});
 
 const PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY = "dbx-plugin-allow-unsigned";
 
@@ -57,6 +61,9 @@ const catalogResults = ref<PluginRepositoryCatalogResult[]>([]);
 const loading = ref(false);
 const marketplaceLoading = ref(false);
 const installing = ref(false);
+const installUrl = ref("");
+const urlInstalling = ref(false);
+const urlDownloadProgress = ref<{ downloaded: number; total: number | null } | null>(null);
 const marketplaceInstallingKey = ref("");
 const operating = ref(false);
 const error = ref("");
@@ -103,6 +110,7 @@ const filteredMarketplaceListings = computed(() => filterMarketplacePluginListin
 const catalogErrors = computed(() => catalogResults.value.filter((result) => result.error));
 const customRepositories = computed(() => repositories.value.filter((repository) => !repository.managed));
 const showCustomRepositoryTrustSettings = computed(() => customRepositories.value.length > 0 || trustedKeys.value.length > 0);
+const pluginDevelopmentDocsUrl = computed(() => `https://dbxio.com/${appLocale.value.startsWith("zh") ? "cn" : "en"}/docs/plugin-development`);
 
 function openExternal(url?: string) {
   const target = url?.trim();
@@ -339,21 +347,73 @@ async function handleWebPackage(event: Event) {
   if (file) await installPlugin(file);
 }
 
+async function finishInstall(result: PluginInstallResult) {
+  toast(t("pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
+  clearPluginIconCache();
+  installedPlugins.value = await api.listPlugins();
+  selectPlugin(result.plugin.manifest.id);
+  activeSection.value = "installed";
+}
+
 async function installPlugin(source: string | File) {
   installing.value = true;
   try {
     const result = await api.installPluginPackage(source, allowUnsigned.value);
-    toast(t("pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
-    clearPluginIconCache();
-    installedPlugins.value = await api.listPlugins();
-    selectPlugin(result.plugin.manifest.id);
-    activeSection.value = "installed";
+    await finishInstall(result);
   } catch (cause) {
     toast(cause instanceof Error ? cause.message : String(cause), 8000);
   } finally {
     installing.value = false;
   }
 }
+
+function isHttpPackageUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+async function installPluginFromUrl() {
+  const url = installUrl.value.trim();
+  if (!url || installing.value || urlInstalling.value) return;
+  if (!isHttpPackageUrl(url)) return toast(t("pluginPlatform.invalidPackageUrl"));
+  urlInstalling.value = true;
+  urlDownloadProgress.value = { downloaded: 0, total: null };
+  let unlisten: (() => void) | undefined;
+  try {
+    if (isTauriRuntime()) {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<{ downloaded: number; total: number | null }>("plugin-url-download-progress", ({ payload }) => {
+        urlDownloadProgress.value = payload;
+      });
+    }
+    const result = await api.installPluginPackageFromUrl(url, allowUnsigned.value);
+    installUrl.value = "";
+    await finishInstall(result);
+  } catch (cause) {
+    toast(cause instanceof Error ? cause.message : String(cause), 8000);
+  } finally {
+    unlisten?.();
+    urlInstalling.value = false;
+    urlDownloadProgress.value = null;
+  }
+}
+
+const urlProgressPercent = computed(() => {
+  const progress = urlDownloadProgress.value;
+  if (!progress?.total) return null;
+  return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
+});
+
+const urlProgressLabel = computed(() => {
+  const progress = urlDownloadProgress.value;
+  if (!progress) return "";
+  const downloaded = formatBytes(progress.downloaded);
+  return progress.total ? t("pluginPlatform.downloadProgress", { downloaded, total: formatBytes(progress.total) }) : t("pluginPlatform.downloadProgressUnknown", { downloaded });
+});
 
 function isPluginPackagePath(path: string): boolean {
   return /\.dbxp$/i.test(path);
@@ -395,7 +455,7 @@ function onWebDrop(event: DragEvent) {
   }
   event.preventDefault();
   event.stopPropagation();
-  if (installing.value) return;
+  if (installing.value || urlInstalling.value) return;
   void installPlugin(file);
 }
 
@@ -422,7 +482,7 @@ function onTauriPluginDrop(event: Event) {
   }
   draggingPackage.value = false;
   const path = payload.paths.find(isPluginPackagePath);
-  if (!inside || !path || installing.value) return;
+  if (!inside || !path || installing.value || urlInstalling.value) return;
   routedEvent.preventDefault();
   void installPlugin(path);
 }
@@ -503,6 +563,13 @@ onBeforeUnmount(() => {
 
       <TabsContent value="marketplace" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <div class="flex min-h-full w-full flex-col gap-4 pb-2">
+          <div class="flex items-start gap-2.5 rounded-xl border bg-card/70 px-4 py-3">
+            <Info class="mt-0.5 size-3.5 shrink-0 text-primary" />
+            <div class="min-w-0 flex-1 text-xs leading-5 text-muted-foreground">
+              <span class="font-medium text-foreground">{{ t("pluginPlatform.marketplaceGuideTitle") }}</span>
+              <span class="mx-1.5 text-border">·</span>{{ t("pluginPlatform.marketplaceGuideDescription") }}
+            </div>
+          </div>
           <div class="flex w-full flex-col gap-2 rounded-xl border bg-card/70 p-3 sm:flex-row sm:items-center">
             <div class="relative">
               <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
@@ -566,15 +633,17 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
                     <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
-                    <button v-if="listing.plugin.source" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.sourceRepository')" :aria-label="t('pluginPlatform.sourceRepository')" @click.stop="openExternal(listing.plugin.source)">
-                      <GithubIcon />
-                    </button>
-                    <button v-if="listing.plugin.homepage" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.pluginHomepage')" :aria-label="t('pluginPlatform.pluginHomepage')" @click.stop="openExternal(listing.plugin.homepage)">
-                      <Globe class="size-3" />
-                    </button>
                   </div>
                 </div>
-                <Badge variant="outline" class="h-5 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
+                <div class="flex shrink-0 items-center gap-1">
+                  <button v-if="listing.plugin.source" type="button" class="rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.sourceRepository')" :aria-label="t('pluginPlatform.sourceRepository')" @click.stop="openExternal(listing.plugin.source)">
+                    <GithubIcon icon-class="size-3.5" />
+                  </button>
+                  <button v-if="listing.plugin.homepage" type="button" class="rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.pluginHomepage')" :aria-label="t('pluginPlatform.pluginHomepage')" @click.stop="openExternal(listing.plugin.homepage)">
+                    <Globe class="size-3.5" />
+                  </button>
+                  <Badge variant="outline" class="h-5 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
+                </div>
               </div>
               <p class="mt-3 line-clamp-3 text-xs leading-5 text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
               <div class="mt-3 flex flex-wrap gap-1.5">
@@ -611,16 +680,16 @@ onBeforeUnmount(() => {
                 <div class="flex min-w-0 items-center gap-2">
                   <span class="truncate text-sm font-semibold">{{ listing.name }}</span>
                   <Badge v-if="listing.verified" variant="secondary" class="hidden h-5 shrink-0 gap-1 px-1.5 text-[10px] sm:inline-flex"><ShieldCheck class="size-3" />{{ t("pluginPlatform.verified") }}</Badge>
+                  <button v-if="listing.plugin.source" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.sourceRepository')" :aria-label="t('pluginPlatform.sourceRepository')" @click.stop="openExternal(listing.plugin.source)">
+                    <GithubIcon icon-class="size-3.5" />
+                  </button>
+                  <button v-if="listing.plugin.homepage" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.pluginHomepage')" :aria-label="t('pluginPlatform.pluginHomepage')" @click.stop="openExternal(listing.plugin.homepage)">
+                    <Globe class="size-3.5" />
+                  </button>
                   <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
                 </div>
                 <div class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
                   <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
-                  <button v-if="listing.plugin.source" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.sourceRepository')" :aria-label="t('pluginPlatform.sourceRepository')" @click.stop="openExternal(listing.plugin.source)">
-                    <GithubIcon />
-                  </button>
-                  <button v-if="listing.plugin.homepage" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.pluginHomepage')" :aria-label="t('pluginPlatform.pluginHomepage')" @click.stop="openExternal(listing.plugin.homepage)">
-                    <Globe class="size-3" />
-                  </button>
                 </div>
                 <p class="mt-1 truncate text-xs text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
               </div>
@@ -738,7 +807,7 @@ onBeforeUnmount(() => {
                     <Button size="sm" class="gap-1.5" @click="createConnection"><Plus class="size-3.5" />{{ t("pluginPlatform.newConnection") }}</Button>
                     <div v-for="connection in providerConnections" :key="connection.id" class="inline-flex items-center">
                       <Button size="sm" class="rounded-r-none" :variant="selectedConnectionId === connection.id ? 'secondary' : 'outline'" @click="selectConnection(connection.id)">{{ connection.name }}</Button>
-                      <Button size="icon" variant="outline" class="h-8 w-8 rounded-l-none border-l-0" :title="t('common.edit')" :aria-label="t('common.edit')" @click="editConnection(connection.id)"><Pencil class="size-3.5" /></Button>
+                      <Button size="icon-sm" class="rounded-l-none border-l-0" :variant="selectedConnectionId === connection.id ? 'secondary' : 'outline'" :title="t('common.edit')" :aria-label="t('common.edit')" @click="editConnection(connection.id)"><Pencil class="size-3.5" /></Button>
                     </div>
                   </div>
                   <div class="rounded-md border border-dashed bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">{{ t("pluginPlatform.connectionManagedInDialog") }}</div>
@@ -782,9 +851,24 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="flex flex-wrap items-center gap-3">
-              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="installing" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="installing || urlInstalling" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><ShieldCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />{{ t("pluginPlatform.signedPackagesVerifiedAutomatically") }}</div>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><FileUp class="size-3.5" />{{ t("pluginPlatform.dropInstallHint") }}</div>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="relative min-w-0 flex-1 sm:max-w-md">
+                <Link2 class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
+                <Input v-model="installUrl" class="h-8 pl-8 font-mono text-xs" type="url" :disabled="urlInstalling" :placeholder="t('pluginPlatform.installUrlPlaceholder')" @keyup.enter="installPluginFromUrl" />
+              </div>
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="installing || urlInstalling || !installUrl.trim()" @click="installPluginFromUrl"
+                ><Loader2 v-if="urlInstalling" class="size-3.5 animate-spin" /><Download v-else class="size-3.5" />{{ t("pluginPlatform.installFromUrl") }}</Button
+              >
+            </div>
+            <div v-if="urlInstalling" class="space-y-1.5">
+              <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                <div class="h-full rounded-full bg-primary transition-[width]" :class="urlProgressPercent === null ? 'w-1/3 animate-pulse' : ''" :style="{ width: urlProgressPercent === null ? undefined : `${urlProgressPercent}%` }" />
+              </div>
+              <div class="text-[10px] text-muted-foreground">{{ urlProgressLabel }}</div>
             </div>
           </section>
 
@@ -831,6 +915,14 @@ onBeforeUnmount(() => {
               <div class="flex gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-amber-800 dark:text-amber-200">
                 <CircleAlert class="mt-0.5 size-4 shrink-0" />
                 <div class="text-xs leading-5">{{ t("pluginPlatform.developerOptionsWarning") }}</div>
+              </div>
+
+              <div class="flex items-center justify-between gap-4 rounded-lg border bg-background p-3">
+                <div class="min-w-0">
+                  <div class="text-xs font-medium">{{ t("pluginPlatform.pluginDevelopmentDocsTitle") }}</div>
+                  <div class="mt-1 text-[11px] leading-5 text-muted-foreground">{{ t("pluginPlatform.pluginDevelopmentDocsDescription") }}</div>
+                </div>
+                <Button size="sm" variant="outline" class="shrink-0 gap-1.5" @click="openExternal(pluginDevelopmentDocsUrl)"><ExternalLink class="size-3.5" />{{ t("pluginPlatform.pluginDevelopmentDocsOpen") }}</Button>
               </div>
 
               <div class="flex items-start justify-between gap-4 rounded-lg border bg-background p-3">

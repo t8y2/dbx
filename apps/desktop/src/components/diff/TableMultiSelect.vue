@@ -20,6 +20,8 @@ const props = withDefaults(
     modelValue: string[];
     /** Optional header label; falls back to `tableMultiSelect.tables`. */
     title?: string;
+    /** Optional search input placeholder; falls back to `tableMultiSelect.search`. */
+    searchPlaceholder?: string;
     /** Show the search box (only rendered when there are more than 5 tables). */
     searchable?: boolean;
     /** Text shown when `tables` is empty. */
@@ -28,6 +30,7 @@ const props = withDefaults(
   }>(),
   {
     title: "",
+    searchPlaceholder: "",
     searchable: true,
     emptyText: "",
     disabled: false,
@@ -64,7 +67,7 @@ function toggleSelectAll() {
       </div>
     </div>
 
-    <Input v-if="showSearch" v-model="search" class="h-7 text-xs" :placeholder="t('tableMultiSelect.search')" :disabled="disabled" />
+    <Input v-if="showSearch" v-model="search" class="h-7 text-xs" :placeholder="searchPlaceholder || t('tableMultiSelect.search')" :disabled="disabled" />
 
     <div class="flex items-center gap-2">
       <Button v-if="tables.length" variant="outline" size="sm" class="h-7 px-2 text-xs" :disabled="disabled" @click="toggleSelectAll">

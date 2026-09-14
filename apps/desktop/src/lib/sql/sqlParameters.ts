@@ -55,6 +55,8 @@ type TriggerPseudoRecordName = "new" | "old" | "parent" | "eventinfo";
 
 export interface SqlParameterOptions {
   databaseType?: DatabaseType;
+  /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
+  compatibilityMode?: string;
   // Which placeholder syntaxes are recognized. Undefined enables all of them.
   enabledSyntaxes?: readonly SqlParameterSyntax[];
 }

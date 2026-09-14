@@ -624,6 +624,9 @@ export default {
     const url = new URL(request.url);
     const issueRedirect = issueRedirectPath(url.pathname, preferredIssueLanguage(request));
     if (issueRedirect && request.method === "GET") return Response.redirect(`${url.origin}${issueRedirect}`, 308);
+    // Turkish docs routes no longer exist; keep old /tr/* links working by sending them to English.
+    const turkishRoute = url.pathname.match(/^\/tr(\/.*)?$/);
+    if (turkishRoute && request.method === "GET") return Response.redirect(`${url.origin}/en${turkishRoute[1] ?? ""}${url.search}`, 308);
     if (url.pathname === "/api/issues/draft" && request.method === "POST") return handleIssueDraft(request, env);
     if (url.pathname === "/api/issues/submit" && request.method === "POST") return handleIssueSubmit(request, env);
     if (url.pathname === "/api/auth/github/start" && request.method === "GET") return startOAuth(request, env);

@@ -513,7 +513,7 @@ interface DataGridProps {
   queryResultExportRequest?: (options: {
     exportId: string;
     filePath: string;
-    format: "csv" | "xlsx" | "txt" | "sql";
+    format: "csv" | "xlsx" | "json" | "txt" | "sql";
     includeSqlSheet?: boolean;
     exportTableName?: string;
     exportColumnTypes?: Array<string | null | undefined>;
@@ -1933,7 +1933,8 @@ const {
   filteredColumnLayoutOptions,
   isColumnVisible,
   toggleColumnVisibility,
-  showAllColumns,
+  hideColumns: hideColumnsInLayout,
+  showAllColumns: showAllColumnsInLayout,
   invertColumnVisibility,
   showColumn,
   persistColumnOrder,
@@ -2292,6 +2293,47 @@ function freezeSelectedColumns(selectedVisibleColumnIndexes: number[]) {
 
 function unfreezeAllColumns() {
   applyColumnOrderChange(unfreezeAllColumnsInLayout);
+}
+
+// 隐藏列后列宽/滚动范围都会缩短：让滚动条贴回新的最大偏移，避免右侧出现空白槽。
+function clampGridHorizontalScroll() {
+  const scroller = gridScrollerElement();
+  if (!scroller) return;
+  const previousLeft = scroller.scrollLeft;
+  clampGridScrollerBounds(scroller); // 复用既有边界收敛，保持单一事实来源
+  if (scroller.scrollLeft === previousLeft) return; // 未越界，无需同步
+  updateGridHorizontalViewport(scroller);
+  if (headerRef.value) headerRef.value.scrollLeft = scroller.scrollLeft;
+}
+
+// 批量隐藏（表头右键菜单）：一次布局提交 + 一次持久化，并把可见索引变化交给
+// applyColumnOrderChange 处理，随后清空单元格选区、重测列宽并收敛横向滚动。
+function hideColumns(columnIndexes: number[]) {
+  if (columnIndexes.length === 0) return;
+  applyColumnOrderChange(() => hideColumnsInLayout(columnIndexes));
+  clearCellSelection();
+  void nextTick(() => {
+    scheduleColumnLayoutRefresh();
+    clampGridHorizontalScroll();
+  });
+}
+
+function hideContextColumn() {
+  const columnIndex = contextHeaderColumnIndex.value;
+  if (columnIndex === null || columnIndex < 0) return;
+  hideColumns([columnIndex]);
+}
+
+function hideSelectedColumns() {
+  const actualColumnIndexes = selectedVisibleColumnIndexes()
+    .map((visibleColIdx) => visibleColumnIndexes.value[visibleColIdx])
+    .filter((index): index is number => index !== undefined);
+  hideColumns(actualColumnIndexes);
+}
+
+function showAllColumns() {
+  applyColumnOrderChange(showAllColumnsInLayout);
+  void nextTick(scheduleColumnLayoutRefresh);
 }
 
 // --- 表头拖拽进 SQL 编辑器：目标导向模式切换的控制器 ---
@@ -11104,6 +11146,7 @@ defineExpose({
   filteredColumnLayoutOptions,
   isColumnVisible,
   toggleColumnVisibility,
+  hideColumns,
   showAllColumns,
   invertColumnVisibility,
   hasCustomColumnOrder,
@@ -11289,6 +11332,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const row = contextRowItem.value;
   const rowLabels = rowActionLabels();
   const hasEditableSelection = selectionHasEditableCells();
+  const selectedColumnCount = selectedVisibleColumnIndexes().length;
   const gridSnapshotContext = contextHeaderColumn.value && hasColumnSelection.value ? "columns" : contextCell.value?.col === -1 && affectedRowIds().length > 0 ? "rows" : contextCell.value && hasCellSelection.value && selectedCellMatrix.value ? "cells" : null;
   const previewItems: ContextMenuItem[] = [];
   if (!contextHeaderColumn.value && contextCell.value) {
@@ -11320,6 +11364,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       frozenColumnCount: frozenColumnCount.value,
       contextVisibleColIdx: contextHeaderVisibleColIdx.value ?? undefined,
       hasColumnSelection: hasColumnSelection.value,
+      selectedColumnCount,
+      visibleColumnCount: visibleColumnCount.value,
+      hiddenColumnCount: hiddenColumnCount.value,
       labels: {
         copyName:
           selectedColumnNamesForCopy.value.length > 1
@@ -11338,6 +11385,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         freezeToColumn: t("grid.freezeToColumn"),
         freezeSelectedColumns: t("grid.freezeSelectedColumns"),
         unfreezeColumns: t("grid.unfreezeColumns"),
+        hideColumn: t("grid.hideColumn"),
+        hideSelectedColumns: t("grid.hideSelectedColumns", { count: selectedColumnCount }),
+        showAllColumnsMenu: t("grid.showAllColumnsMenu"),
       },
       icons: {
         copy: Copy,
@@ -11368,6 +11418,9 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           unfreezeAllColumns();
           clearCellSelection();
         },
+        hideColumn: hideContextColumn,
+        hideSelectedColumns,
+        showAllColumnsMenu: showAllColumns,
       },
       filterSubmenu: filterSubmenu(),
     }),

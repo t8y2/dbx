@@ -57,6 +57,11 @@ if (savedThemeMode && savedThemeMode !== themeMode.value) safeLocalStorageSet(AP
 if (savedCornerStyle && savedCornerStyle !== cornerStyle.value) safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
 const systemPrefersDark = ref(readSystemPrefersDark());
 const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemPrefersDark.value) === "dark");
+// Bumped at the end of every applyTheme(): theme changes are DOM mutations
+// (classes / inline vars), so watchers keyed on reactive sources like isDark
+// miss palette switches and custom-color edits. Consumers that mirror the
+// resolved token set (plugin iframe bridge) watch this revision instead.
+const themeRevision = ref(0);
 
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
@@ -103,6 +108,7 @@ function applyTheme() {
 
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
+  themeRevision.value += 1;
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
   if (!isTauriRuntime()) return;
 
@@ -206,5 +212,5 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
+  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, themeRevision, cornerStyle, applyTheme, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
 }

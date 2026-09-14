@@ -93,6 +93,8 @@ pub struct AiAgentStreamRequest {
     pub connection_id: String,
     pub database: String,
     #[serde(default)]
+    pub selected_databases: Vec<String>,
+    #[serde(default)]
     pub schema: Option<String>,
     pub db_type: String,
     /// Agent mode: "ask" (read-only tools) or "agent" (all tools including execute_query).
@@ -452,6 +454,7 @@ pub async fn ai_agent_stream(
         state: state.app.clone(),
         connection_id: body.connection_id,
         database: body.database,
+        selected_databases: body.selected_databases,
         schema: body.schema,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,

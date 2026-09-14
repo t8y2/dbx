@@ -253,12 +253,12 @@ function confirmImport() {
       <div class="settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2">
         <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="busy" @click="onExportClick">
           <Loader2 v-if="exporting" class="mr-1 h-3.5 w-3.5 animate-spin" />
-          <Download v-else class="mr-1 h-3.5 w-3.5" />
+          <Upload v-else class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.settingsTransferExport") }}
         </Button>
         <Button type="button" variant="outline" size="sm" class="shrink-0" :disabled="busy" @click="onImportClick">
           <Loader2 v-if="importing" class="mr-1 h-3.5 w-3.5 animate-spin" />
-          <Upload v-else class="mr-1 h-3.5 w-3.5" />
+          <Download v-else class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.settingsTransferImport") }}
         </Button>
       </div>

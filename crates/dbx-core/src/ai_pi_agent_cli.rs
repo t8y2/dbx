@@ -1017,6 +1017,7 @@ mod tests {
             connection_id: "connection-1".to_string(),
             connection_name: "Test connection".to_string(),
             database: "dbx_test".to_string(),
+            selected_databases: Vec::new(),
             schema: Some("reporting".to_string()),
             agent_mode: true,
             allow_writes: true,

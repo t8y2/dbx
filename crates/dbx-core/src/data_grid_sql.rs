@@ -1510,7 +1510,7 @@ fn build_data_grid_save_statements(
         }
     }
     if !delete_predicates.is_empty() {
-        push_mysql_predicate_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
+        push_mysql_delete_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
     }
 
     for row in &options.new_rows {
@@ -1778,6 +1778,96 @@ fn supports_mysql_data_grid_batch(options: &DataGridSaveStatementOptions) -> boo
 
 fn push_mysql_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
     push_mysql_joined_batches(statements, prefix, predicates, " OR ", true);
+}
+
+/// Render a batch of delete predicates for MySQL. Rows deleted through the grid
+/// usually differ only in a single primary-key equality predicate, so equal-key
+/// runs collapse into `id IN (...)` instead of a chain of ORs (#8857). Anything
+/// that is not a plain `column = literal` equality (compound keys, NULL checks,
+/// BINARY comparisons, ...) falls back to the OR form, which stays correct for
+/// every predicate shape.
+fn push_mysql_delete_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
+    const IN_JOINER: &str = ", ";
+
+    struct InRun {
+        column: Option<String>,
+        values: Vec<String>,
+        bytes: usize,
+    }
+
+    fn flush_in(run: &mut InRun, batches: &mut Vec<String>) {
+        if let Some(column) = run.column.take() {
+            if run.values.len() == 1 {
+                batches.push(format!("{column} = {}", run.values[0]));
+            } else {
+                batches.push(format!("{column} IN ({})", run.values.join(IN_JOINER)));
+            }
+            run.values.clear();
+            run.bytes = 0;
+        }
+    }
+
+    let mut in_run = InRun { column: None, values: Vec::new(), bytes: 0 };
+    let mut in_batches: Vec<String> = Vec::new();
+    let mut pending_batches: Vec<String> = Vec::new();
+
+    for predicate in &predicates {
+        match parse_mysql_equality_predicate(predicate) {
+            Some((column, literal)) => {
+                let literal_bytes = literal.len() + IN_JOINER.len();
+                let column_switch = in_run.column.as_deref().is_some_and(|existing| existing != column);
+                let over_budget = in_run.bytes + literal_bytes > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES;
+                let over_rows = in_run.values.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS;
+                if column_switch || over_budget || over_rows {
+                    flush_in(&mut in_run, &mut in_batches);
+                }
+                if in_run.column.is_none() {
+                    in_run.column = Some(column);
+                }
+                in_run.bytes += literal_bytes;
+                in_run.values.push(literal);
+            }
+            None => {
+                flush_in(&mut in_run, &mut in_batches);
+                pending_batches.push(predicate.clone());
+            }
+        }
+    }
+    flush_in(&mut in_run, &mut in_batches);
+
+    let mut batches = pending_batches;
+    batches.extend(in_batches);
+    if batches.len() == 1 {
+        statements.push(format!("{prefix}{};", batches.remove(0)));
+    } else if !batches.is_empty() {
+        push_mysql_predicate_batches(statements, prefix, batches);
+    }
+}
+
+/// Recognize predicates shaped exactly like `` `column` = literal `` (with or
+/// without backticks) so they can merge into an IN list. Anything else —
+/// compound-key AND chains, IS NULL, BINARY comparisons — returns None.
+fn parse_mysql_equality_predicate(predicate: &str) -> Option<(String, String)> {
+    let mut trimmed = predicate;
+    while let Some(inner) = trimmed.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
+        trimmed = inner;
+    }
+    let separator = trimmed.find(" = ")?;
+    let column = trimmed.get(..separator)?.trim().to_string();
+    if !column.starts_with('`') || !column.ends_with('`') || column.len() < 3 {
+        return None;
+    }
+    let literal = trimmed.get(separator + 3..)?.trim().to_string();
+    if literal.is_empty() || literal.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    // Compound-key predicates contain further AND/OR/IS clauses after the first
+    // equality; merging those into an IN list would change the row targeting.
+    let upper = literal.to_ascii_uppercase();
+    if upper.contains(" AND ") || upper.contains(" OR ") || upper.starts_with("IS ") {
+        return None;
+    }
+    Some((column, literal))
 }
 
 fn push_mysql_values_insert_batches(
@@ -7092,12 +7182,32 @@ mod tests {
         options.deleted_rows = vec![0, 1, 2];
 
         let result = prepare_data_grid_save(options);
+        for statement in &result.statements {
+            println!("statement: {statement}");
+        }
 
         assert_eq!(result.validation_error, None);
-        assert_eq!(result.statements, vec!["DELETE FROM `app`.`people` WHERE (`id` = 1) OR (`id` = 2) OR (`id` = 3);"]);
+        assert_eq!(result.statements, vec!["DELETE FROM `app`.`people` WHERE `id` IN (1, 2, 3);"]);
         assert_eq!(
             result.rollback_statements,
             vec!["INSERT INTO `app`.`people` (`id`, `status`) VALUES (1, 'active'), (2, 'active'), (3, 'active');"]
+        );
+    }
+
+    #[test]
+    fn batches_mysql_compound_key_deletes_keep_or_form() {
+        let mut options = mysql_people_save_options(3);
+        options.table_meta.primary_keys = vec!["id".to_string(), "status".to_string()];
+        options.deleted_rows = vec![0, 1];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM `app`.`people` WHERE (`id` = 1 AND `status` = 'active') OR (`id` = 2 AND `status` = 'active');"
+            ]
         );
     }
 
@@ -7108,9 +7218,11 @@ mod tests {
 
         let result = prepare_data_grid_save(options);
 
-        assert_eq!(result.statements.len(), 2);
-        assert!(result.statements[0].contains("(`id` = 500)"));
-        assert_eq!(result.statements[1], "DELETE FROM `app`.`people` WHERE `id` = 501;");
+        // IN lists are far more compact than OR chains, so the batch fits in a
+        // single statement up to the row limit.
+        assert_eq!(result.statements.len(), 1);
+        assert!(result.statements[0].contains("`id` IN ("));
+        assert!(result.statements[0].contains("501"));
         assert_eq!(result.rollback_statements.len(), 2);
         assert!(result.rollback_statements[0].contains("(500, 'active')"));
         assert_eq!(
@@ -7128,6 +7240,8 @@ mod tests {
 
         let result = prepare_data_grid_save(options);
 
+        // The IN list stays within the SQL byte budget, splitting into a
+        // second statement once the accumulated literals would exceed it.
         assert_eq!(result.statements.len(), 2);
         assert!(result.statements.iter().all(|statement| statement.len() <= MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES));
     }

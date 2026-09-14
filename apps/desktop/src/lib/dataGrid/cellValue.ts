@@ -48,6 +48,6 @@ export function limitDataGridCellDisplay(value: string, maxLength = DATA_GRID_CE
 /** Visual-only cell text; never use whitespace markers for editing or serialization. */
 export function gridCellDisplayValue(value: string, flatteningMultiLine: boolean, showWhitespace: boolean): string {
   const text = firstLineCellDisplayValue(value, flatteningMultiLine);
-  // Hair spaces keep adjacent dots legible in both DOM and Canvas rendering.
-  return showWhitespace ? text.replace(/[ \t]/g, (character) => (character === " " ? "\u200a·\u200a" : "→")) : text;
+  // Map one space to one marker so monospace fonts preserve the original cell width.
+  return showWhitespace ? text.replace(/[ \t]/g, (character) => (character === " " ? "·" : "→")) : text;
 }

@@ -13,9 +13,9 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
-    CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY,
-    MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
-    NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
+    plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
+    MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
+    MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
@@ -970,6 +970,9 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
     config.connection_string = None;
     config.init_script = None;
     scrub_mqtt_auth_secrets(config);
+    for secret in config.connection_secrets.values_mut() {
+        secret.clear();
+    }
     scrub_mq_external_config_secrets(config);
     scrub_nacos_auth_secrets(config);
     scrub_cassandra_tls_secrets(config);
@@ -1008,14 +1011,6 @@ async fn build_sensitive_payload(
         // A transient password must not become durable through a sync snapshot.
         if config.save_password {
             push_secret(&mut connection_secrets, &config.id, "password", &config.password);
-        }
-        for (key, secret) in &config.connection_secrets {
-            push_secret(
-                &mut connection_secrets,
-                &config.id,
-                &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}"),
-                secret,
-            );
         }
         push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
         for (index, layer) in config.transport_layers.iter().enumerate() {
@@ -1060,6 +1055,9 @@ async fn build_sensitive_payload(
         push_cassandra_tls_secrets(&mut connection_secrets, config);
         if config.save_password {
             push_nacos_external_config_secrets(&mut connection_secrets, config);
+            for (key, secret) in &config.connection_secrets {
+                push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
+            }
         }
     }
 
@@ -2219,6 +2217,7 @@ mod tests {
             production_databases: vec![],
             database_info: None,
         };
+        config.connection_secrets.insert("api_token".to_string(), "plugin-secret".to_string());
         scrub_connection_secrets(&mut config);
         assert!(config.password.is_empty());
         match &config.transport_layers[0] {
@@ -2235,8 +2234,10 @@ mod tests {
         assert!(config.redis_sentinel_password.is_empty());
         assert!(config.connection_string.is_none());
         assert!(config.init_script.is_none());
+        assert_eq!(config.connection_secrets.get("api_token").map(String::as_str), None);
         let public_json = serde_json::to_string(&config).unwrap();
         assert!(!public_json.contains("token-value"));
+        assert!(!public_json.contains("plugin-secret"));
         assert!(super::SECRET_KEYS.contains(&"init_script"));
     }
 

@@ -582,6 +582,12 @@ impl LocalBackend {
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
+        Self::open_with_app_version(path, env!("CARGO_PKG_VERSION")).await
+    }
+
+    /// Same as [`open`], but lets tests and embedded callers pin the app version
+    /// used for plugin compatibility checks instead of the compile-time version.
+    pub async fn open_with_app_version(path: &Path, app_version: &str) -> Result<Self, String> {
         let storage = Storage::open(path).await?;
         let configs = storage.load_connections().await?;
         let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
@@ -592,7 +598,7 @@ impl LocalBackend {
             storage,
             plugin_dir,
             agent_dir,
-            env!("CARGO_PKG_VERSION"),
+            app_version,
         ));
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
@@ -602,6 +608,65 @@ impl LocalBackend {
 
     pub fn state(&self) -> &Arc<AppState> {
         &self.state
+    }
+
+    /// List the MCP tools exposed by every installed plugin.
+    ///
+    /// Plugin MCP surfaces are discovered through the same `mcp/tools`
+    /// protocol used by the desktop bridge. Keep the response grouped by
+    /// plugin so callers can select the correct sidecar for a tool call.
+    pub async fn list_plugin_tools(&self) -> Result<Vec<Value>, String> {
+        let plugins = self.state.plugins.list_installed()?;
+        let mut providers = Vec::new();
+        for plugin in plugins {
+            if !plugin.compatibility.compatible || plugin.manifest.backend_entrypoint().is_none() {
+                continue;
+            }
+            let tools: Value = self
+                .state
+                .plugin_host
+                .invoke(&plugin.manifest.id, "mcp/tools", json!({}), None, Some(std::time::Duration::from_secs(30)))
+                .await?;
+            let tool_list = tools
+                .get("tools")
+                .cloned()
+                .or_else(|| tools.is_array().then_some(tools.clone()))
+                .unwrap_or_else(|| json!([]));
+            providers.push(json!({
+                "pluginId": plugin.manifest.id,
+                "tools": tool_list,
+            }));
+        }
+        Ok(providers)
+    }
+
+    /// Call one plugin MCP tool through the host-managed sidecar session.
+    /// When a saved connection is supplied, only its host-generated lifecycle
+    /// payload is sent to the plugin; credentials remain host-managed.
+    pub async fn call_plugin_tool(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        connection_id: Option<&str>,
+        arguments: &Value,
+    ) -> Result<Value, String> {
+        let mut params = json!({ "tool": tool, "arguments": arguments });
+        if let Some(connection_id) = connection_id {
+            let config = self
+                .state
+                .configs
+                .read()
+                .await
+                .get(connection_id)
+                .cloned()
+                .ok_or_else(|| format!("Connection not found: {connection_id}"))?;
+            let lifecycle = self.state.plugin_host.connection_params_standalone(&config)?;
+            params["lifecycle"] = lifecycle;
+        }
+        self.state
+            .plugin_host
+            .invoke(plugin_id, "mcp/call", params, None, Some(std::time::Duration::from_secs(300)))
+            .await
     }
 
     /// Sync the latest connection list from storage into the `AppState.configs` in-memory cache:

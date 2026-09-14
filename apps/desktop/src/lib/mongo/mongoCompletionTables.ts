@@ -38,7 +38,11 @@ export function mongoOperatorItemType(apply: string): "snippet" | "keyword" {
   return apply.includes("${") ? "snippet" : "keyword";
 }
 
-export const QUERY_OPERATORS: MongoOperatorSpec[] = specs([
+/**
+ * Operators that constrain one field, valid inside `{ field: { ... } }`.
+ * `$and` / `$or` and friends are not: those go at the top level of a filter.
+ */
+export const FIELD_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$eq", "Matches values equal to a value", "$eq: ${}"],
   ["$ne", "Matches values not equal to a value", "$ne: ${}"],
   ["$gt", "Matches values greater than a value", "$gt: ${}"],
@@ -47,18 +51,11 @@ export const QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$lte", "Matches values less than or equal to a value", "$lte: ${}"],
   ["$in", "Matches any value in an array", "$in: [${}]"],
   ["$nin", "Matches no value in an array", "$nin: [${}]"],
-  ["$and", "Joins clauses with a logical AND", "$and: [${}]"],
-  ["$or", "Joins clauses with a logical OR", "$or: [${}]"],
-  ["$nor", "Joins clauses with a logical NOR", "$nor: [${}]"],
   ["$not", "Inverts the effect of a query expression", "$not: { ${} }"],
   ["$exists", "Matches documents that have the field", "$exists: true"],
   ["$type", "Matches documents by BSON type", '$type: "${string}"'],
   ["$regex", "Matches a regular expression", '$regex: "${pattern}"'],
-  ["$text", "Performs a text search", '$text: { $search: "${text}" }'],
-  ["$expr", "Uses aggregation expressions in a query", "$expr: { ${} }"],
-  ["$jsonSchema", "Matches documents against a JSON schema", "$jsonSchema: { ${} }"],
   ["$mod", "Matches values by modulo division", "$mod: [${divisor}, ${remainder}]"],
-  ["$where", "Matches with a JavaScript predicate", '$where: "${expression}"'],
   ["$all", "Matches arrays containing all the values", "$all: [${}]"],
   ["$elemMatch", "Matches arrays with an element matching all criteria", "$elemMatch: { ${} }"],
   ["$size", "Matches arrays of a given length", "$size: ${}"],
@@ -71,6 +68,23 @@ export const QUERY_OPERATORS: MongoOperatorSpec[] = specs([
   ["$near", "Matches points near a point, nearest first", "$near: { ${} }"],
   ["$nearSphere", "Matches points near a point on a sphere", "$nearSphere: { ${} }"],
 ]);
+
+/**
+ * Operators that apply to the whole filter, valid at its top level and inside
+ * the sub-filters of `$and` / `$or` / `$nor` — never under a field.
+ */
+export const TOP_LEVEL_QUERY_OPERATORS: MongoOperatorSpec[] = specs([
+  ["$and", "Joins clauses with a logical AND", "$and: [${}]"],
+  ["$or", "Joins clauses with a logical OR", "$or: [${}]"],
+  ["$nor", "Joins clauses with a logical NOR", "$nor: [${}]"],
+  ["$expr", "Uses aggregation expressions in a query", "$expr: { ${} }"],
+  ["$text", "Performs a text search", '$text: { $search: "${text}" }'],
+  ["$where", "Matches with a JavaScript predicate", '$where: "${expression}"'],
+  ["$jsonSchema", "Matches documents against a JSON schema", "$jsonSchema: { ${} }"],
+]);
+
+/** Every query operator, for callers that do not care about position. */
+export const QUERY_OPERATORS: MongoOperatorSpec[] = [...FIELD_QUERY_OPERATORS, ...TOP_LEVEL_QUERY_OPERATORS];
 
 export const UPDATE_OPERATORS: MongoOperatorSpec[] = specs([
   ["$set", "Sets field values", "$set: { ${} }"],

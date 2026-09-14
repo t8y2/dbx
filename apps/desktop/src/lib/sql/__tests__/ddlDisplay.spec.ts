@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 
 describe("omitDdlIdentifierQuotes", () => {
   it("removes safe MySQL identifier quotes without changing literals or comments", () => {
@@ -39,5 +39,20 @@ describe("omitDdlIdentifierQuotes", () => {
   it("keeps quotes required by Dameng case, naming, and reserved-word rules", () => {
     const ddl = 'CREATE TABLE "CamelCase" ("lowercase" INT, "WITH SPACE" INT, "ORDER" INT, "A$B" INT)';
     expect(omitDdlIdentifierQuotes(ddl, "dameng")).toBe(ddl);
+  });
+
+  it("folds safe Oracle identifiers when generated SQL quoting is disabled", () => {
+    const ddl = 'ALTER TABLE "SYSTEM"."TEST" RENAME COLUMN "ABCD" TO "AbCd";';
+    expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", false)).toBe("ALTER TABLE SYSTEM.TEST RENAME COLUMN ABCD TO ABCD;");
+  });
+
+  it("keeps case-sensitive Dameng identifiers quoted when generated SQL quoting is disabled", () => {
+    const ddl = 'ALTER TABLE "user_login_log" ADD "status" INT; ALTER TABLE "CamelCase" ADD "order" INT;';
+    expect(formatGeneratedDdlIdentifierQuotes(ddl, "dameng", false)).toBe(ddl);
+  });
+
+  it("preserves generated identifier quotes when the setting is enabled", () => {
+    const ddl = 'ALTER TABLE "SYSTEM"."TEST" RENAME COLUMN "ABCD" TO "AbCd";';
+    expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", true)).toBe(ddl);
   });
 });

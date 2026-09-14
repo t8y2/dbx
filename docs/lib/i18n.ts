@@ -3,24 +3,11 @@ import { defineI18nUI } from "fumadocs-ui/i18n";
 
 export const i18n = defineI18n({
   defaultLanguage: "en",
-  languages: ["en", "cn", "tr"],
+  languages: ["en", "cn"],
 });
 
 export const i18nUI = defineI18nUI(i18n, {
   en: { displayName: "English" },
-  tr: {
-    displayName: "Türkçe",
-    search: "Ara",
-    searchNoResult: "Sonuç bulunamadı",
-    toc: "İçindekiler",
-    tocNoHeadings: "Başlık yok",
-    lastUpdate: "Son güncelleme",
-    chooseLanguage: "Dil seçin",
-    nextPage: "Sonraki sayfa",
-    previousPage: "Önceki sayfa",
-    chooseTheme: "Tema seçin",
-    editOnGithub: "GitHub'da düzenle",
-  },
   cn: {
     displayName: "简体中文",
     search: "搜索",
@@ -36,12 +23,12 @@ export const i18nUI = defineI18nUI(i18n, {
   },
 });
 
-export type DocsLang = "en" | "cn" | "tr";
+export type DocsLang = "en" | "cn";
 
 /**
  * Narrow an arbitrary route segment to a supported docs language.
  *
- * Pages keep their own `{ en, cn, tr }` copy objects; this replaces the
+ * Pages keep their own `{ en, cn }` copy objects; this replaces the
  * `lang === "cn" ? "cn" : "en"` ternary each of them used to repeat, so adding
  * a language only touches `i18n.languages` above.
  */

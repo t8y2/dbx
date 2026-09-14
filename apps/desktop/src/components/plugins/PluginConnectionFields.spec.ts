@@ -1,10 +1,20 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import PluginConnectionFields from "./PluginConnectionFields.vue";
 import type { PluginConnectionProviderContribution, PluginFormFieldBinding, PluginFormFieldValue } from "@/types/database";
+
+const invokePluginMock = vi.fn();
+
+vi.mock("@/lib/backend/api", () => ({
+  listLocalSshKeys: vi.fn(async () => [
+    { path: "/home/dev/.ssh/id_ed25519", algorithm: "ssh-ed25519", fingerprint: "SHA256:abc", hasPassphrase: false },
+    { path: "/home/dev/.ssh/id_rsa", algorithm: "ssh-rsa", fingerprint: "", hasPassphrase: true },
+  ]),
+  invokePlugin: (...args: unknown[]) => invokePluginMock(...args),
+}));
 
 const mountedApps: App[] = [];
 
@@ -16,16 +26,6 @@ const contribution: PluginConnectionProviderContribution = {
   fields: [
     { key: "host", label: "Host", type: "text", required: true, placeholder: "localhost" },
     { key: "password", label: "Password", type: "password" },
-    {
-      key: "protocol",
-      label: "Protocol",
-      type: "radio",
-      default: "https",
-      options: [
-        { label: "HTTPS", value: "https" },
-        { label: "HTTP", value: "http" },
-      ],
-    },
   ],
 };
 
@@ -62,6 +62,39 @@ afterEach(() => {
 });
 
 describe("PluginConnectionFields", () => {
+  it("preserves multiline secret input and masks it again after its branch is reopened", async () => {
+    const provider: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "pem.connection",
+      label: "PEM",
+      database_type: "example",
+      fields: [
+        { key: "mode", label: "Mode", type: "text", default: "tls" },
+        { key: "key", label: "Private key", type: "textarea", binding: "secret", visible_when: { field: "mode", one_of: ["tls"] } },
+      ],
+    };
+    const state = await mountContribution(provider, {});
+    const textarea = document.querySelector<HTMLTextAreaElement>("#pem-connection-key")!;
+    const pem = "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----\n";
+    expect(textarea.classList.contains("secret-masked")).toBe(true);
+    textarea.value = pem;
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    expect(state.values.key).toBe(pem);
+    textarea.parentElement!.querySelector<HTMLButtonElement>("button")!.click();
+    await nextTick();
+    expect(textarea.classList.contains("secret-masked")).toBe(false);
+    expect(textarea.value).toBe(pem);
+    state.values = { ...state.values, mode: "plain" };
+    await nextTick();
+    expect(document.querySelector("#pem-connection-key")).toBeNull();
+    state.values = { ...state.values, mode: "tls" };
+    await nextTick();
+    const reopened = document.querySelector<HTMLTextAreaElement>("#pem-connection-key")!;
+    expect(reopened.value).toBe(pem);
+    expect(reopened.classList.contains("secret-masked")).toBe(true);
+  });
+
   it("renders declared fields and emits immutable model updates", async () => {
     const state = await mountFields({ password: "secret" });
     const hostInput = document.querySelector<HTMLInputElement>("#example-connection-host");
@@ -99,15 +132,199 @@ describe("PluginConnectionFields", () => {
     expect(document.querySelector(".rounded-lg.border")).toBeNull();
   });
 
-  it("renders radio fields and emits the selected option", async () => {
-    const state = await mountFields();
-    const radios = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='radio']"));
+  it("hides conditional fields until visible_when matches and marks required_when", async () => {
+    const conditional: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "cond.connection",
+      label: "Conditional",
+      database_type: "cond",
+      fields: [
+        { key: "mode", label: "Mode", type: "text", default: "password" },
+        { key: "private_key_path", label: "Private key", type: "text", visible_when: { field: "mode", one_of: ["key"] }, required_when: { field: "mode", one_of: ["key"] } },
+      ],
+    };
+    const state = await mountContribution(conditional, {});
 
-    expect(radios).toHaveLength(2);
-    expect(radios[0]?.checked).toBe(true);
-    radios[1]?.click();
+    expect(document.querySelector("#cond-connection-private_key_path")).toBeNull();
+
+    state.values = { mode: "key" };
     await nextTick();
 
-    expect(state.values.protocol).toBe("http");
+    const keyInput = document.querySelector<HTMLInputElement>("#cond-connection-private_key_path");
+    expect(keyInput).not.toBeNull();
+    const label = document.querySelector('label[for="cond-connection-private_key_path"]');
+    expect(label?.textContent).toContain("*");
+
+    state.values = { mode: "password" };
+    await nextTick();
+    expect(document.querySelector("#cond-connection-private_key_path")).toBeNull();
+  });
+
+  it("keeps grandchild fields hidden while an intermediate default-only value would match (kafka msk_region regression)", async () => {
+    // sasl_mechanism (PLAIN default, hidden without SASL) → oauth_token_source
+    // (msk_iam default) → msk_region: the nested default must not surface an
+    // always-required AWS region on a plain PLAINTEXT/SCRAM connection.
+    const kafka: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "kafka.connection",
+      label: "Kafka",
+      database_type: "kafka",
+      fields: [
+        { key: "bootstrap_servers", label: "Bootstrap servers", type: "textarea", required: true },
+        {
+          key: "security_protocol",
+          label: "Security protocol",
+          type: "select",
+          default: "PLAINTEXT",
+          options: [
+            { label: "PLAINTEXT", value: "PLAINTEXT" },
+            { label: "SASL_SSL", value: "SASL_SSL" },
+          ],
+        },
+        {
+          key: "sasl_mechanism",
+          label: "SASL mechanism",
+          type: "select",
+          default: "PLAIN",
+          options: [
+            { label: "PLAIN", value: "PLAIN" },
+            { label: "OAUTHBEARER", value: "OAUTHBEARER" },
+          ],
+          visible_when: { field: "security_protocol", one_of: ["SASL_PLAINTEXT", "SASL_SSL"] },
+        },
+        {
+          key: "oauth_token_source",
+          label: "OAuth token source",
+          type: "select",
+          default: "msk_iam",
+          options: [
+            { label: "MSK IAM", value: "msk_iam" },
+            { label: "Static token", value: "static_token" },
+          ],
+          visible_when: { field: "sasl_mechanism", one_of: ["OAUTHBEARER"] },
+        },
+        { key: "msk_region", label: "MSK AWS region", type: "text", visible_when: { field: "oauth_token_source", one_of: ["msk_iam"] }, required_when: { field: "oauth_token_source", one_of: ["msk_iam"] } },
+      ],
+    };
+    const state = await mountContribution(kafka, {}, "io.dbx.kafka");
+
+    expect(document.querySelector("#kafka-connection-msk_region")).toBeNull();
+
+    state.values = { security_protocol: "SASL_SSL", sasl_mechanism: "OAUTHBEARER" };
+    await nextTick();
+    expect(document.querySelector("#kafka-connection-msk_region")).not.toBeNull();
+    const label = document.querySelector('label[for="kafka-connection-msk_region"]');
+    expect(label?.textContent).toContain("*");
+
+    // Selecting the static token source hides the region field again.
+    state.values = { sasl_mechanism: "OAUTHBEARER", oauth_token_source: "static_token" };
+    await nextTick();
+    expect(document.querySelector("#kafka-connection-msk_region")).toBeNull();
+  });
+
+  it("offers local SSH keys on private_key_path fields and fills the chosen path", async () => {
+    const withKey: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "keys.connection",
+      label: "Keys",
+      database_type: "keys",
+      fields: [{ key: "private_key_path", label: "Private key", type: "text" }],
+    };
+    const state = await mountContribution(withKey, {});
+    await flushAsync();
+
+    const select = document.querySelector<HTMLSelectElement>("select");
+    expect(select).not.toBeNull();
+    expect(select?.disabled).toBe(false);
+    const encryptedOption = select?.querySelector<HTMLOptionElement>('option[value="/home/dev/.ssh/id_rsa"]');
+    expect(encryptedOption?.textContent).toContain("id_rsa");
+    expect(encryptedOption?.textContent).toContain("ssh-rsa");
+    expect(encryptedOption?.textContent).toMatch(/encrypted|已加密/);
+
+    select!.value = "/home/dev/.ssh/id_rsa";
+    select!.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+
+    expect(state.values.private_key_path).toBe("/home/dev/.ssh/id_rsa");
+  });
+
+  it("renders options_action fields as a dynamic select and keeps a stored value visible", async () => {
+    const dynamic: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "dyn.connection",
+      label: "Dyn",
+      database_type: "dyn",
+      fields: [{ key: "sudo_profile", label: "Profile", type: "text", options_action: "sudo/profiles/options" }],
+    };
+    invokePluginMock.mockResolvedValueOnce({
+      options: [
+        { value: "p1", label: "Ops" },
+        { value: "p2", label: "QA" },
+      ],
+    });
+    // "ghost" is stored but no longer offered: the dropdown must keep it visible.
+    await mountContribution(dynamic, { sudo_profile: "ghost" }, "io.dbx.ssh");
+    await flushAsync();
+
+    expect(invokePluginMock).toHaveBeenCalledWith("io.dbx.ssh", "sudo/profiles/options");
+    expect(document.querySelector("input#dyn-connection-sudo_profile")).toBeNull();
+    const trigger = document.querySelector<HTMLButtonElement>('#dyn-connection-sudo_profile, button[role="combobox"]');
+    expect(trigger).not.toBeNull();
+    expect(trigger?.textContent).toContain("ghost");
+  });
+
+  it("falls back to the text input when the options_action call fails or returns nothing", async () => {
+    const dynamic: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "degrade.connection",
+      label: "Degrade",
+      database_type: "degrade",
+      fields: [{ key: "sudo_profile", label: "Profile", type: "text", options_action: "sudo/profiles/options" }],
+    };
+    invokePluginMock.mockRejectedValueOnce(new Error("method not registered"));
+    await mountContribution(dynamic, {}, "io.dbx.ssh");
+    await flushAsync();
+
+    const input = document.querySelector<HTMLInputElement>("input#degrade-connection-sudo_profile");
+    expect(input).not.toBeNull();
+    expect(input?.value).toBe("");
+
+    // An empty option list degrades the same way.
+    invokePluginMock.mockResolvedValueOnce({ options: [] });
+    const empty = { ...dynamic, id: "empty.connection", label: "Empty" };
+    await mountContribution(empty, {}, "io.dbx.ssh");
+    await flushAsync();
+    expect(document.querySelector("input#empty-connection-sudo_profile")).not.toBeNull();
   });
 });
+
+async function flushAsync() {
+  await nextTick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function mountContribution(contribution: PluginConnectionProviderContribution, initialValues: Record<string, PluginFormFieldValue>, pluginId?: string) {
+  const state = reactive({ values: initialValues });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const app = createApp(
+    defineComponent({
+      setup() {
+        return () =>
+          h(PluginConnectionFields, {
+            contribution,
+            modelValue: state.values,
+            pluginId,
+            "onUpdate:modelValue": (value: Record<string, PluginFormFieldValue>) => {
+              state.values = value;
+            },
+          });
+      },
+    }),
+  );
+  mountedApps.push(app);
+  app.use(i18n);
+  app.mount(container);
+  await nextTick();
+  return state;
+}

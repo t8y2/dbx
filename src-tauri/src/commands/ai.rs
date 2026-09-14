@@ -333,6 +333,7 @@ pub async fn ai_agent_stream(
     confirmed_connection_id: Option<String>,
     confirmed_database: Option<String>,
     confirmed_schema: Option<String>,
+    selected_databases: Option<Vec<String>>,
 ) -> Result<String, String> {
     let mut request = resolve_cli_provider_request(request);
     merge_global_max_retries(
@@ -387,6 +388,7 @@ pub async fn ai_agent_stream(
         state: state.inner().clone(),
         connection_id,
         database,
+        selected_databases: selected_databases.unwrap_or_default(),
         schema,
         db_type: parsed_db_type,
         cli_mcp_server_command,

@@ -16,7 +16,9 @@ function selectedProfileHarness(selectedTypeValue: string, driverProfile: string
   const javascript = ts.transpileModule(declaration!.getText(), {
     compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const selectedProfile = new Function("driverProfiles", "selectedType", "form", `${javascript}\nreturn selectedProfile;`)(
+  // The merged dialog checks plugin providers before the profile table; the
+  // plugin branch is stubbed out so this harness pins the GBase profile path.
+  const selectedProfile = new Function("driverProfiles", "selectedType", "form", "parsePluginConnectionProviderOptionValue", "selectedPluginProvider", `${javascript}\nreturn selectedProfile;`)(
     {
       mysql: { label: "MySQL" },
       gbase: { label: "南大通用 GBase 8a" },
@@ -25,6 +27,8 @@ function selectedProfileHarness(selectedTypeValue: string, driverProfile: string
     },
     { value: selectedTypeValue },
     { value: { driver_profile: driverProfile } },
+    () => null,
+    { value: null },
   ) as () => { label: string };
   return selectedProfile();
 }

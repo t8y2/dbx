@@ -80,6 +80,34 @@ describe("usePanelResize", () => {
     expect(localStorage.getItem("dbx-ai-panel-width")).toBe("600");
   });
 
+  it("keeps resizable panels wide enough for their toolbar actions", () => {
+    const panel = document.createElement("div");
+    const handle = document.createElement("div");
+    panel.append(handle);
+    document.body.append(panel);
+
+    vi.spyOn(panel, "getBoundingClientRect").mockReturnValue(rect(0, 260));
+
+    const { sidebarWidth, startSidebarResize } = usePanelResize();
+    handle.addEventListener("mousedown", startSidebarResize);
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 260 }));
+    document.dispatchEvent(new MouseEvent("mousemove", { clientX: 0 }));
+    document.dispatchEvent(new MouseEvent("mouseup"));
+
+    expect(sidebarWidth.value).toBe(240);
+    expect(localStorage.getItem("dbx-sidebar-width")).toBe("240");
+  });
+
+  it("raises persisted panel widths below the toolbar-safe minimum", () => {
+    localStorage.setItem("dbx-sidebar-width", "180");
+    localStorage.setItem("dbx-ai-panel-width", "200");
+
+    const { sidebarWidth, aiPanelWidth } = usePanelResize();
+
+    expect(sidebarWidth.value).toBe(240);
+    expect(aiPanelWidth.value).toBe(240);
+  });
+
   it("persists the collapsed vertical tab bar state across composable instances", () => {
     const first = usePanelResize();
     expect(first.tabBarCollapsed.value).toBe(false);

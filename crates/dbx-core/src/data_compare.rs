@@ -1426,6 +1426,42 @@ impl Default for DegradationChain {
     }
 }
 
+fn uses_oracle_rownum_sampling(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+}
+
+fn build_limited_sampling_select_sql(
+    database_type: DatabaseType,
+    table: &str,
+    select_columns: &str,
+    order_by: Option<&str>,
+    row_limit: usize,
+) -> String {
+    match pagination_strategy(Some(database_type), PaginationContext::BoundedRead) {
+        TablePaginationStrategy::Rownum if uses_oracle_rownum_sampling(database_type) => {
+            if let Some(order_by) = order_by {
+                format!(
+                    "SELECT {select_columns} FROM (SELECT {select_columns} FROM {table} ORDER BY {order_by}) WHERE ROWNUM <= {row_limit}"
+                )
+            } else {
+                format!("SELECT {select_columns} FROM {table} WHERE ROWNUM <= {row_limit}")
+            }
+        }
+        TablePaginationStrategy::SqlServerTop => {
+            let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+            format!("SELECT TOP ({row_limit}) {select_columns} FROM {table}{order}")
+        }
+        _ => {
+            let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+            format!("SELECT {select_columns} FROM {table}{order} LIMIT {row_limit}")
+        }
+    }
+}
+
+fn build_rownum_sampling_union_sql(select_columns: &str, parts: &[String]) -> String {
+    format!("SELECT {select_columns} FROM ({})", parts.join(" UNION ALL "))
+}
+
 fn build_sampling_select_sql(
     database_type: DatabaseType,
     schema: &str,
@@ -1486,7 +1522,7 @@ fn build_sampling_select_sql(
         },
         SamplingStrategy::ExtremeValues => {
             if key_columns.is_empty() {
-                return format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}");
+                return build_limited_sampling_select_sql(database_type, &table, &select_columns, None, sample_size);
             }
             let order_keys = key_columns
                 .iter()
@@ -1501,18 +1537,31 @@ fn build_sampling_select_sql(
 
             let head_count = sample_size / 2;
             let tail_count = sample_size - head_count;
+            let head =
+                build_limited_sampling_select_sql(database_type, &table, &select_columns, Some(&asc_order), head_count);
+            let tail = build_limited_sampling_select_sql(
+                database_type,
+                &table,
+                &select_columns,
+                Some(&desc_order),
+                tail_count,
+            );
+
+            if uses_oracle_rownum_sampling(database_type) {
+                return build_rownum_sampling_union_sql(&select_columns, &[head, tail]);
+            }
 
             format!(
                 "SELECT {select_columns} FROM ( \
-                 (SELECT {select_columns} FROM {table} ORDER BY {asc_order} LIMIT {head_count}) \
+                 ({head}) \
                  UNION ALL \
-                 (SELECT {select_columns} FROM {table} ORDER BY {desc_order} LIMIT {tail_count}) \
+                 ({tail}) \
                  ) AS _extreme_sample"
             )
         }
         SamplingStrategy::Hybrid => {
             if key_columns.is_empty() {
-                return format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}");
+                return build_limited_sampling_select_sql(database_type, &table, &select_columns, None, sample_size);
             }
             let order_keys = key_columns
                 .iter()
@@ -1548,7 +1597,13 @@ fn build_sampling_select_sql(
                     format!("(SELECT {select_columns} FROM {table} ORDER BY rand() LIMIT {random_count})")
                 }
                 DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
-                    format!("(SELECT {select_columns} FROM (SELECT {select_columns} FROM {table} ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= {random_count})")
+                    build_limited_sampling_select_sql(
+                        database_type,
+                        &table,
+                        &select_columns,
+                        Some("DBMS_RANDOM.VALUE"),
+                        random_count,
+                    )
                 }
                 DatabaseType::Iris => {
                     format!("(SELECT TOP {random_count} {select_columns} FROM {table} ORDER BY RAND())")
@@ -1563,14 +1618,27 @@ fn build_sampling_select_sql(
                     format!("(SELECT {select_columns} FROM {table} LIMIT {random_count})")
                 }
             };
+            let head =
+                build_limited_sampling_select_sql(database_type, &table, &select_columns, Some(&asc_order), head_count);
+            let tail = build_limited_sampling_select_sql(
+                database_type,
+                &table,
+                &select_columns,
+                Some(&desc_order),
+                tail_count,
+            );
+
+            if uses_oracle_rownum_sampling(database_type) {
+                return build_rownum_sampling_union_sql(&select_columns, &[random_part, head, tail]);
+            }
 
             format!(
                 "SELECT {select_columns} FROM ( \
                  {random_part} \
                  UNION ALL \
-                 (SELECT {select_columns} FROM {table} ORDER BY {asc_order} LIMIT {head_count}) \
+                 ({head}) \
                  UNION ALL \
-                 (SELECT {select_columns} FROM {table} ORDER BY {desc_order} LIMIT {tail_count}) \
+                 ({tail}) \
                  ) AS _hybrid_sample"
             )
         }
@@ -2483,6 +2551,98 @@ mod tests {
             ),
             "SELECT \"ID\", \"NAME\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"NAME\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC) dbx_inner WHERE ROWNUM <= 75) WHERE \"__dbx_row_num\" > 50"
         );
+    }
+
+    #[test]
+    fn builds_oracle_rownum_pages_with_composite_key_and_long_projection() {
+        let columns = ["ID".to_string(), "TENANT_ID".to_string(), "NAME".to_string(), "CREATED_AT".to_string()];
+        let key_columns = ["ID".to_string(), "TENANT_ID".to_string()];
+
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Oracle,
+                "APP",
+                "EVENTS",
+                &columns,
+                &key_columns,
+                25,
+                0,
+            ),
+            "SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC, \"TENANT_ID\" ASC) WHERE ROWNUM <= 25"
+        );
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Oracle,
+                "APP",
+                "EVENTS",
+                &columns,
+                &key_columns,
+                25,
+                50,
+            ),
+            "SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC, \"TENANT_ID\" ASC) dbx_inner WHERE ROWNUM <= 75) WHERE \"__dbx_row_num\" > 50"
+        );
+    }
+
+    #[test]
+    fn builds_oracle_hybrid_sampling_sql_without_limit_or_as_alias() {
+        let sql = build_sampling_select_sql(
+            DatabaseType::Oracle,
+            "APP",
+            "EVENTS",
+            &["ID".to_string(), "TENANT_ID".to_string(), "NAME".to_string(), "CREATED_AT".to_string()],
+            &["ID".to_string(), "TENANT_ID".to_string()],
+            &SamplingStrategy::Hybrid,
+            10,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= 5 UNION ALL SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC, \"TENANT_ID\" ASC) WHERE ROWNUM <= 2 UNION ALL SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" DESC, \"TENANT_ID\" DESC) WHERE ROWNUM <= 3)"
+        );
+        assert!(!sql.contains(" LIMIT "));
+        assert!(!sql.contains(" AS _hybrid_sample"));
+    }
+
+    #[test]
+    fn builds_oracle_family_hybrid_sampling_sql_with_rownum() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let sql = build_sampling_select_sql(
+                database_type,
+                "APP",
+                "EVENTS",
+                &["ID".to_string(), "TENANT_ID".to_string()],
+                &["ID".to_string(), "TENANT_ID".to_string()],
+                &SamplingStrategy::Hybrid,
+                10,
+            );
+
+            assert!(!sql.contains(" LIMIT "), "{database_type:?}: {sql}");
+            assert!(!sql.contains(" AS _hybrid_sample"), "{database_type:?}: {sql}");
+            assert_eq!(sql.matches("ROWNUM <= ").count(), 3, "{database_type:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn builds_sqlserver_hybrid_sampling_sql_with_top_for_cross_database_source() {
+        let sql = build_sampling_select_sql(
+            DatabaseType::SqlServer,
+            "dbo",
+            "EVENTS",
+            &["id".to_string(), "tenant_id".to_string(), "name".to_string()],
+            &["id".to_string(), "tenant_id".to_string()],
+            &SamplingStrategy::Hybrid,
+            10,
+        );
+
+        assert!(sql.contains("TABLESAMPLE (5 ROWS)"));
+        assert!(sql.contains(
+            "SELECT TOP (2) [id], [tenant_id], [name] FROM [dbo].[EVENTS] ORDER BY [id] ASC, [tenant_id] ASC"
+        ));
+        assert!(sql.contains(
+            "SELECT TOP (3) [id], [tenant_id], [name] FROM [dbo].[EVENTS] ORDER BY [id] DESC, [tenant_id] DESC"
+        ));
+        assert!(!sql.contains(" LIMIT "));
     }
 
     #[test]

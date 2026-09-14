@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, resolveMetadataColumnName, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, isBinaryType, queryEditabilityMessageKey, resolveMetadataColumnName, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 
 test("recognizes a simple single-table SELECT as editable", () => {
   const result = analyzeEditableQueryEditability("select id, name from public.users where active = true order by id");
@@ -50,6 +50,41 @@ test("ignores MINUS in strings, comments, and nested queries", () => {
 
     assert.equal(result.editable, true, sql);
     assert.equal(result.analysis.tableName, "users", sql);
+  }
+});
+
+test("ignores semicolons inside literals, identifiers, and comments", () => {
+  for (const sql of [
+    "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111'",
+    "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';",
+    "SELECT * FROM users WHERE name = 'a;b'  ",
+    'SELECT * FROM "weird;name"',
+    "SELECT * FROM `weird;name`",
+    "SELECT * FROM [weird;name]",
+    "SELECT * FROM users -- keep; going\nWHERE active = 1",
+    "SELECT * FROM users /* keep; going */ WHERE active = 1",
+  ]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+  }
+
+  const issue = analyzeEditableQueryEditability("SELECT c.*  FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';");
+  assert.equal(issue.editable, true);
+  assert.equal(issue.analysis.tableName, "CONTAINER");
+  assert.equal(issue.analysis.tableAlias, "c");
+  assert.equal(issue.analysis.selectStar, true);
+
+  const display = analyzeSelectStructureForDisplay("SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';");
+  assert.ok(display);
+  assert.equal(display.tableName, "CONTAINER");
+  assert.equal(display.tableAlias, "c");
+});
+
+test("treats top-level semicolons as a complex source", () => {
+  for (const sql of ["SELECT * FROM users; SELECT * FROM orders", "SELECT * FROM users WHERE name = 'a;b'; SELECT 1"]) {
+    assert.deepEqual(analyzeEditableQueryEditability(sql), { editable: false, reason: "complex-source" }, sql);
+    assert.equal(analyzeSelectStructureForDisplay(sql), null, sql);
   }
 });
 

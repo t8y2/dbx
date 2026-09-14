@@ -18,10 +18,6 @@ const text = {
     empty: "No releases found.",
     loadError: "Failed to load this release. Please retry or check GitHub Releases.",
   },
-  tr: {
-    empty: "Sürüm kaydı bulunamadı.",
-    loadError: "Bu sürüm yüklenemedi. Tekrar deneyin ya da GitHub Releases sayfasına bakın.",
-  },
   cn: {
     empty: "暂无版本记录。",
     loadError: "该版本加载失败，请稍后重试或前往 GitHub Releases 查看。",

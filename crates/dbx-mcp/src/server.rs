@@ -942,15 +942,11 @@ impl DbxMcpServer {
                     results[0].statement_index = None;
                 }
                 let markdown = format_batch_results(&results);
-                // Issue #7548 requires a structured array so callers do not
-                // parse concatenated text. The Markdown block stays as a human-
-                // readable summary; structuredContent carries one object per
-                // statement (or the single merged outcome in transaction mode).
+                // Issue #7548 requires structured per-statement results so callers do not
+                // parse concatenated text. MCP requires structuredContent to be an object,
+                // so the array lives under `results`.
                 let mut tool_result = CallToolResult::success(vec![ContentBlock::text(markdown)]);
-                tool_result.structured_content = Some(
-                    serde_json::to_value(&results)
-                        .unwrap_or_else(|error| serde_json::json!({ "error": error.to_string() })),
-                );
+                tool_result.structured_content = Some(serde_json::json!({ "results": results }));
                 tool_result
             }
             Err(error) => backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error),
@@ -4047,11 +4043,12 @@ mod tests {
             .await;
         // The human-readable block stays in content…
         assert!(result_text(&result).contains("Statement 1"));
-        // …and structuredContent carries one object per statement.
+        // …and structuredContent is a protocol-valid object carrying one result per statement.
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
-        let statements = structured.as_array().expect("structured content must be an array");
-        assert_eq!(statements.len(), 1);
-        assert_eq!(statements[0]["statement_index"], 0);
+        assert!(structured.is_object(), "MCP structuredContent must be a JSON object");
+        let results = structured["results"].as_array().expect("results must be an array");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["statement_index"], 0);
     }
 
     #[tokio::test]
@@ -4170,8 +4167,8 @@ mod tests {
         assert!(result_text(&result).contains("Transaction outcome"));
         assert!(!result_text(&result).contains("Statement 1"));
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
-        assert_eq!(structured[0]["merged"], true);
-        assert!(structured[0]["statement_index"].is_null());
+        assert_eq!(structured["results"][0]["merged"], true);
+        assert!(structured["results"][0]["statement_index"].is_null());
     }
 
     #[tokio::test]
@@ -4199,7 +4196,7 @@ mod tests {
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
         // merged=false is skipped by serde, so the single statement must not
         // carry a merged marker (null/absent), unlike the transaction outcome.
-        assert!(structured[0]["merged"].is_null());
+        assert!(structured["results"][0]["merged"].is_null());
     }
 
     #[tokio::test]
@@ -4223,6 +4220,6 @@ mod tests {
         assert!(result_text(&result).contains("Transaction outcome"));
         assert!(!result_text(&result).contains("Statement 1"));
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
-        assert_eq!(structured[0]["merged"], true);
+        assert_eq!(structured["results"][0]["merged"], true);
     }
 }

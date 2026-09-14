@@ -76,6 +76,7 @@ pub struct AgentLoopContext {
     pub state: Arc<AppState>,
     pub connection_id: String,
     pub database: String,
+    pub selected_databases: Vec<String>,
     /// Selected schema that scopes Agent metadata and SQL execution.
     pub schema: Option<String>,
     pub db_type: DatabaseType,
@@ -151,6 +152,7 @@ pub async fn run_agent_loop(
             connection_id: agent_ctx.connection_id.clone(),
             connection_name,
             database: agent_ctx.database.clone(),
+            selected_databases: agent_ctx.selected_databases.clone(),
             schema: agent_ctx.schema.clone(),
             agent_mode: is_agent_mode,
             allow_writes: agent_ctx.sql_permissions.allow_writes,

@@ -29,21 +29,23 @@ pub use installer::{
     MAX_PLUGIN_PACKAGE_BYTES, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
 };
 pub use marketplace::{
-    PluginMarketplace, PluginMarketplaceArtifact, PluginMarketplaceCatalog, PluginMarketplaceInstallRequest,
-    PluginMarketplaceLocalization, PluginMarketplacePlugin, PluginMarketplaceRepositoryMetadata,
-    PluginMarketplaceVersion, PluginRepository, PluginRepositoryCatalogResult, PluginRepositoryKind,
-    PluginRepositoryStore, MAX_PLUGIN_CATALOG_BYTES, OFFICIAL_PLUGIN_REPOSITORY_ID, SUPPORTED_PLUGIN_CATALOG_VERSION,
+    url_install_trust_store, PluginMarketplace, PluginMarketplaceArtifact, PluginMarketplaceCatalog,
+    PluginMarketplaceInstallRequest, PluginMarketplaceLocalization, PluginMarketplacePlugin,
+    PluginMarketplaceRepositoryMetadata, PluginMarketplaceVersion, PluginRepository, PluginRepositoryCatalogResult,
+    PluginRepositoryKind, PluginRepositoryStore, MAX_PLUGIN_CATALOG_BYTES, OFFICIAL_PLUGIN_REPOSITORY_ID,
+    SUPPORTED_PLUGIN_CATALOG_VERSION,
 };
 
 pub use manifest::{
     current_plugin_target, resolve_safe_plugin_path, PluginBackendEntrypoint, PluginBackendTransport,
     PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant, PluginConnectionActionWhen,
     PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution, PluginDriverManifest,
-    PluginEngines, PluginEntrypoints, PluginFilesystemCapability, PluginFilesystemProviderContribution,
-    PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldType, PluginManifest,
-    PluginUiEntrypoint, PluginWorkbenchContribution, PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD,
-    PLUGIN_CONNECTION_DISCONNECT_METHOD, PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION,
-    SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
+    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFilesystemCapability,
+    PluginFilesystemProviderContribution, PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption,
+    PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
+    PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
+    PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_MANIFEST_VERSION,
+    SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
 };
 pub use runtime::{
     PluginBinaryMessage, PluginEvent, PluginHandshake, PluginHandshakeIdentity, PluginSessionState,
@@ -100,10 +102,25 @@ pub struct PluginRuntimeEnv {
     vars: Vec<(String, String)>,
 }
 
+/// Environment variable that tells a plugin sidecar where to keep its
+/// persistent, version-independent local data (preferences, audit logs,
+/// known hosts, ...). Injected by the registry so plugins never have to fall
+/// back to the OS temp dir, which macOS wipes on reboot.
+pub const PLUGIN_DATA_DIR_ENV: &str = "DBX_PLUGIN_DATA_DIR";
+
 impl PluginRuntimeEnv {
     pub fn with_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.vars.push((key.into(), value.into()));
         self
+    }
+
+    /// Sets `DBX_PLUGIN_DATA_DIR` unless the caller already provided one, so
+    /// an explicit override keeps winning over the registry default.
+    pub fn with_plugin_data_dir(self, data_dir: &Path) -> Self {
+        if self.get(PLUGIN_DATA_DIR_ENV).is_some() {
+            return self;
+        }
+        self.with_var(PLUGIN_DATA_DIR_ENV, data_dir.to_string_lossy().into_owned())
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -138,6 +155,14 @@ impl PluginRegistry {
 
     pub fn app_version(&self) -> &str {
         &self.app_version
+    }
+
+    /// Persistent data directory for one plugin: `<data dir>/plugin-data/<id>`,
+    /// a sibling of the `plugins/` registry root so it survives version
+    /// upgrades and never collides with the installer-managed
+    /// `versions/` + `activations/` tree.
+    pub fn plugin_data_dir(&self, plugin_id: &str) -> PathBuf {
+        self.root_dir.parent().unwrap_or(&self.root_dir).join("plugin-data").join(plugin_id)
     }
 
     pub fn list_installed(&self) -> Result<Vec<InstalledPlugin>, String> {
@@ -241,6 +266,7 @@ impl PluginRegistry {
         let plugin =
             self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
         ensure_plugin_compatible(&plugin)?;
+        let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
         let session = PluginSidecarSession::start(plugin, self.app_version.clone(), env).await?;
         let result = session.invoke_with_timeout(method, params, Some(driver_id), timeout_duration).await;
         session.shutdown().await;
@@ -259,6 +285,7 @@ impl PluginRegistry {
         let plugin =
             self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
         ensure_plugin_compatible(&plugin)?;
+        let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
         PluginDriverSession::start(plugin, driver_id.to_string(), self.app_version.clone(), env).await.map(Arc::new)
     }
 }
@@ -362,9 +389,98 @@ impl PluginDriverSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{InstalledPlugin, PluginContribution, PluginManifest, PluginRegistry};
+    use std::path::{Path, PathBuf};
+
+    use super::{InstalledPlugin, PluginContribution, PluginManifest, PluginRegistry, PluginRuntimeEnv};
     #[cfg(unix)]
-    use super::{PluginDriverManifest, PluginDriverSession, PluginRuntimeEnv};
+    use super::{PluginDriverManifest, PluginDriverSession};
+
+    #[test]
+    fn plugin_data_dir_lives_beside_the_plugin_registry() {
+        let registry = PluginRegistry::new(PathBuf::from("/data/plugins"));
+        assert_eq!(registry.plugin_data_dir("io.dbx.ssh"), PathBuf::from("/data/plugin-data/io.dbx.ssh"));
+    }
+
+    #[test]
+    fn plugin_data_dir_falls_back_to_registry_root_without_a_parent() {
+        let registry = PluginRegistry::new(PathBuf::from("/"));
+        assert_eq!(registry.plugin_data_dir("io.dbx.ssh"), PathBuf::from("/plugin-data/io.dbx.ssh"));
+    }
+
+    #[test]
+    fn with_plugin_data_dir_sets_the_env_var_once() {
+        let env = PluginRuntimeEnv::default().with_plugin_data_dir(Path::new("/data/plugin-data/io.dbx.ssh"));
+        assert_eq!(env.get("DBX_PLUGIN_DATA_DIR"), Some("/data/plugin-data/io.dbx.ssh"));
+
+        // An explicit caller-provided value wins over the registry default.
+        let explicit = PluginRuntimeEnv::default()
+            .with_var("DBX_PLUGIN_DATA_DIR", "/custom")
+            .with_plugin_data_dir(Path::new("/ignored"));
+        assert_eq!(explicit.get("DBX_PLUGIN_DATA_DIR"), Some("/custom"));
+    }
+
+    /// The registry-injected data dir must reach the sidecar process itself,
+    /// not just the `PluginRuntimeEnv` value object.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn activated_sidecar_receives_plugin_data_dir_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::PluginHost;
+
+        let data_dir = tempfile::tempdir().unwrap();
+        let plugin_dir = data_dir.path().join("plugins").join("sample.sidecar");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let executable = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":[],"plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+IFS= read -r request
+request_id=$(printf '%s' "$request" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":"%s"}\n' "$request_id" "$DBX_PLUGIN_DATA_DIR"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.sidecar",
+                "name": "Sample Sidecar",
+                "version": "1.0.0",
+                "publisher": "dbx",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "permissions": [],
+                "entrypoints": {
+                    "backend": {
+                        "protocol_versions": [1],
+                        "transport": "stdio-jsonl",
+                        "executable": "plugin.sh"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let registry = PluginRegistry::new_with_app_version(data_dir.path().join("plugins"), "0.5.67");
+        let host = PluginHost::new(registry);
+        let reported: String =
+            host.invoke("sample.sidecar", "sample/dataDir", serde_json::Value::Null, None, None).await.unwrap();
+        assert_eq!(
+            PathBuf::from(reported),
+            data_dir.path().join("plugin-data").join("sample.sidecar"),
+            "sidecar must see <data dir>/plugin-data/<id> in DBX_PLUGIN_DATA_DIR"
+        );
+        host.stop_all().await;
+    }
 
     #[cfg(unix)]
     #[tokio::test]

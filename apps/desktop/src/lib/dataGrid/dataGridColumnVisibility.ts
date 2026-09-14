@@ -65,6 +65,34 @@ export function nextHiddenColumnIndexes(options: { columnIndex: number; hiddenIn
   return next;
 }
 
+/**
+ * Batch counterpart of {@link nextHiddenColumnIndexes}: hides a whole set of
+ * columns in one deterministic step and keeps at least one column visible.
+ * When the batch would hide every visible column, the first currently visible
+ * column is kept instead (same rule as the single-column toggle, expressed once
+ * for a set). Duplicate or already-hidden indexes are ignored, and an empty
+ * batch is a no-op.
+ */
+export function hiddenColumnIndexesAfterHiding(options: { columnIndexes: Iterable<number>; hiddenIndexes: ReadonlySet<number>; availableIndexes: readonly number[] }): Set<number> {
+  const next = new Set(options.hiddenIndexes);
+  const available = new Set(options.availableIndexes);
+  const visibleIndexes = options.availableIndexes.filter((index) => !next.has(index));
+  const requestedIndexes = [...new Set(options.columnIndexes)].filter((index) => available.has(index) && !next.has(index));
+  if (requestedIndexes.length === 0) return next;
+
+  if (visibleIndexes.length - requestedIndexes.length >= 1) {
+    for (const index of requestedIndexes) next.add(index);
+    return next;
+  }
+
+  // 会隐藏全部可见列：保留最前面的一个可见列，其余全部隐藏。
+  const keptIndex = visibleIndexes[0];
+  for (const index of visibleIndexes) {
+    if (index !== keptIndex) next.add(index);
+  }
+  return next;
+}
+
 export function invertedHiddenColumnIndexes(availableIndexes: number[], hiddenIndexes: ReadonlySet<number>): Set<number> {
   const next = new Set(availableIndexes.filter((index) => !hiddenIndexes.has(index)));
   if (next.size === availableIndexes.length && availableIndexes.length > 0) {

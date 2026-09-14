@@ -27,6 +27,7 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-write-image",
+    "clipboard-manager:allow-write-html",
     "dialog:default",
     "dialog:allow-save",
     "dialog:allow-open",

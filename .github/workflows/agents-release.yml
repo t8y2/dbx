@@ -169,7 +169,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.20.14"
       - name: Test Oracle native agent
         working-directory: agents/drivers/oracle-go
         run: go test ./...
@@ -222,7 +222,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.20.14"
       - name: Test Xugu native agent
         working-directory: agents/drivers/xugu
         run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver go test ./...
@@ -262,7 +262,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.20.14"
       - name: Test RabbitMQ native agent
         working-directory: agents/drivers/rabbitmq
         run: go test ./...
@@ -595,7 +595,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.20.14"
       - name: Test Kingbase native agent
         working-directory: agents/drivers/kingbase-go
         run: go test ./...

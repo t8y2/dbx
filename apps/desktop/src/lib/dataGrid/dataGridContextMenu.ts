@@ -81,9 +81,30 @@ export function createDataGridColumnContextMenuItems(options: {
   frozenColumnCount?: number;
   contextVisibleColIdx?: number;
   hasColumnSelection?: boolean;
-  labels: Record<"copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns", string>;
+  /** 显式多选的可见列数量；为 undefined 时按 0 处理。 */
+  selectedColumnCount?: number;
+  /** 当前可见列总数，用于判断「选中列覆盖全部可见列」而禁用批量隐藏。 */
+  visibleColumnCount?: number;
+  /** 当前被隐藏的列数量，用于决定是否显示「显示全部列」。 */
+  hiddenColumnCount?: number;
+  labels: Record<
+    "copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
+    string
+  >;
   icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
-  actions: { copyName: () => void; copyNames: () => void; details: () => void; copyAlterSql: () => void; sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void; freezeToColumn: () => void; freezeSelectedColumns: () => void; unfreezeColumns: () => void };
+  actions: {
+    copyName: () => void;
+    copyNames: () => void;
+    details: () => void;
+    copyAlterSql: () => void;
+    sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
+    freezeToColumn: () => void;
+    freezeSelectedColumns: () => void;
+    unfreezeColumns: () => void;
+    hideColumn: () => void;
+    hideSelectedColumns: () => void;
+    showAllColumnsMenu: () => void;
+  };
   filterSubmenu: DataGridContextMenuItem;
 }): DataGridContextMenuItem[] {
   const items: DataGridContextMenuItem[] = [];
@@ -108,6 +129,18 @@ export function createDataGridColumnContextMenuItems(options: {
   }
   if (options.contextVisibleColIdx !== undefined) {
     items.push({ label: "", separator: true });
+    const selectedColumnCount = options.selectedColumnCount ?? 0;
+    const visibleColumnCount = options.visibleColumnCount ?? 0;
+    // 只剩一列时隐藏会被 helper 拒绝；用 disabled 明确表达，而不是静默无效。
+    // 这里读 options.visibleColumnCount 而非本地默认值：字段可选，未传的调用方不应被误禁用。
+    items.push({ label: options.labels.hideColumn, action: options.actions.hideColumn, disabled: options.visibleColumnCount !== undefined && options.visibleColumnCount <= 1 });
+    // 仅在多选（>1）时提供批量隐藏；选中列覆盖全部可见列时禁用，而不是悄悄少隐藏一列。
+    if (options.hasColumnSelection && selectedColumnCount > 1) {
+      items.push({ label: options.labels.hideSelectedColumns, action: options.actions.hideSelectedColumns, disabled: visibleColumnCount > 0 && selectedColumnCount >= visibleColumnCount });
+    }
+    if ((options.hiddenColumnCount ?? 0) > 0) {
+      items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
     if ((options.frozenColumnCount ?? 0) > 0) {
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
     }

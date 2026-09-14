@@ -71,6 +71,7 @@ import type {
   SavedSqlFolder,
   SavedSqlLibrary,
   SshConfigHostEntry,
+  LocalSshKey,
   TunnelProfile,
   TransactionLog,
   ExternalSqlFileVersion,
@@ -587,6 +588,7 @@ export async function aiAgentStream(
   confirmedDatabase?: string,
   confirmedSchema?: string,
   _signal?: AbortSignal,
+  selectedDatabases?: string[],
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
     const payload = event.payload;
@@ -610,6 +612,7 @@ export async function aiAgentStream(
       confirmedConnectionId,
       confirmedDatabase,
       confirmedSchema,
+      selectedDatabases,
     });
   } catch (e) {
     unlisten();
@@ -978,6 +981,10 @@ export async function listSystemFonts(): Promise<string[]> {
 
 export async function listSshConfigHosts(): Promise<SshConfigHostEntry[]> {
   return invoke("list_ssh_config_hosts");
+}
+
+export async function listLocalSshKeys(): Promise<LocalSshKey[]> {
+  return invoke("list_local_ssh_keys");
 }
 
 export async function pendingOpenSqlFiles(): Promise<string[]> {
@@ -2285,6 +2292,10 @@ export async function installMarketplacePlugin(request: PluginMarketplaceInstall
 export async function installPluginPackage(pathOrFile: string | File, allowUnsigned = false): Promise<PluginInstallResult> {
   if (typeof pathOrFile !== "string") throw new Error("Desktop plugin installation requires a local .dbxp file path");
   return invoke("install_plugin_package", { path: pathOrFile, allowUnsigned });
+}
+
+export async function installPluginPackageFromUrl(url: string, allowUnsigned = false): Promise<PluginInstallResult> {
+  return invoke("install_plugin_package_from_url", { url, allowUnsigned });
 }
 
 export async function rollbackPlugin(pluginId: string): Promise<PluginRollbackResult> {
@@ -5325,7 +5336,7 @@ export interface QueryResultExportRequest {
   databaseType: DatabaseType;
   useAgentCursor: boolean;
   filePath: string;
-  format: "csv" | "xlsx" | "txt" | "sql";
+  format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
   csvQuoteMode?: CsvQuoteMode;
   includeSqlSheet?: boolean;

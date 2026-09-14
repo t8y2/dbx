@@ -45,6 +45,10 @@ const APP_CLOSE_REQUESTED_EVENT: &str = "dbx-app-close-requested";
 const APP_MENU_QUIT_ID: &str = "app-menu-quit";
 #[cfg(target_os = "macos")]
 const APP_MENU_COPY_SUPPORT_INFO_ID: &str = "app-menu-copy-support-info";
+#[cfg(target_os = "macos")]
+const APP_MENU_CLOSE_TAB_ID: &str = "app-menu-close-tab";
+#[cfg(target_os = "macos")]
+const APP_CLOSE_ACTIVE_TAB_EVENT: &str = "dbx-close-active-tab";
 
 pub struct CloseBehaviorState {
     confirmed_exit: AtomicBool,
@@ -226,6 +230,13 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
         true,
         Some("Cmd+Q"),
     )?;
+    let close_tab_item = MenuItem::with_id(
+        app_handle,
+        APP_MENU_CLOSE_TAB_ID,
+        app_menu_close_tab_label(&current_app_locale(app_handle)),
+        true,
+        Some("Cmd+W"),
+    )?;
 
     Menu::with_items(
         app_handle,
@@ -246,7 +257,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                     &quit_item,
                 ],
             )?,
-            &Submenu::with_items(app_handle, "File", true, &[&PredefinedMenuItem::close_window(app_handle, None)?])?,
+            &Submenu::with_items(app_handle, "File", true, &[&close_tab_item])?,
             &Submenu::with_items(
                 app_handle,
                 "Edit",
@@ -266,12 +277,7 @@ fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri:
                 app_handle,
                 "Window",
                 true,
-                &[
-                    &PredefinedMenuItem::minimize(app_handle, None)?,
-                    &PredefinedMenuItem::maximize(app_handle, None)?,
-                    &PredefinedMenuItem::separator(app_handle)?,
-                    &PredefinedMenuItem::close_window(app_handle, None)?,
-                ],
+                &[&PredefinedMenuItem::minimize(app_handle, None)?, &PredefinedMenuItem::maximize(app_handle, None)?],
             )?,
             &Submenu::with_items(app_handle, "Help", true, &[])?,
         ],
@@ -775,6 +781,22 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn app_menu_close_tab_label(locale: &str) -> &'static str {
+    match locale_family(locale) {
+        LocaleFamily::SimplifiedChinese => "关闭标签页",
+        LocaleFamily::TraditionalChinese => "關閉分頁",
+        LocaleFamily::Japanese => "タブを閉じる",
+        LocaleFamily::Korean => "탭 닫기",
+        LocaleFamily::Azerbaijani => "Vərəqi bağla",
+        LocaleFamily::Spanish => "Cerrar pestaña",
+        LocaleFamily::Italian => "Chiudi scheda",
+        LocaleFamily::Turkish => "Sekmeyi kapat",
+        LocaleFamily::Portuguese => "Fechar aba",
+        LocaleFamily::English => "Close Tab",
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese | LocaleFamily::TraditionalChinese => format!("退出 {app_name}"),
@@ -967,14 +989,15 @@ pub(crate) fn apply_desktop_settings(app: &tauri::AppHandle, desktop_settings: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        app_menu_copy_support_info_label, app_menu_quit_label, linux_appimage_requires_dmabuf_workaround,
-        linux_drm_driver_is_software_only, linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state,
-        linux_pci_id_from_sysfs_value, linux_selected_drm_render_device, linux_uses_native_wayland,
-        linux_webkit_environment_override, linux_webkit_rendering_workarounds, native_window_decorations_override,
-        should_confirm_app_exit_request, should_enable_single_instance, should_fallback_to_native_quit,
-        should_hide_window_before_exit, should_hide_window_on_close, should_setup_desktop_tray,
-        should_show_main_window_after_setup, should_show_main_window_before_setup_tasks, startup_data_dir_mode,
-        tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
+        app_menu_close_tab_label, app_menu_copy_support_info_label, app_menu_quit_label,
+        linux_appimage_requires_dmabuf_workaround, linux_drm_driver_is_software_only,
+        linux_drm_render_devices_from_paths, linux_nvidia_driver_from_state, linux_pci_id_from_sysfs_value,
+        linux_selected_drm_render_device, linux_uses_native_wayland, linux_webkit_environment_override,
+        linux_webkit_rendering_workarounds, native_window_decorations_override, should_confirm_app_exit_request,
+        should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_before_exit,
+        should_hide_window_on_close, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1018,6 +1041,10 @@ mod tests {
         assert_eq!(app_menu_copy_support_info_label("tr-TR"), "Destek bilgilerini kopyala");
         assert_eq!(app_menu_copy_support_info_label("az-AZ"), "Dəstək məlumatlarını kopyala");
         assert_eq!(app_menu_copy_support_info_label("en-US"), "Copy Support Info");
+        assert_eq!(app_menu_close_tab_label("zh-CN"), "关闭标签页");
+        assert_eq!(app_menu_close_tab_label("zh-TW"), "關閉分頁");
+        assert_eq!(app_menu_close_tab_label("ja-JP"), "タブを閉じる");
+        assert_eq!(app_menu_close_tab_label("en-US"), "Close Tab");
     }
 
     #[test]
@@ -1471,6 +1498,8 @@ pub fn run() {
             if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
                 log::warn!("Failed to copy support info from app menu: {err}");
             }
+        } else if event.id() == APP_MENU_CLOSE_TAB_ID {
+            let _ = app.emit(APP_CLOSE_ACTIVE_TAB_EVENT, ());
         }
     });
 
@@ -1821,6 +1850,7 @@ pub fn run() {
             commands::plugins::fetch_plugin_marketplace_catalogs,
             commands::plugins::install_marketplace_plugin,
             commands::plugins::install_plugin_package,
+            commands::plugins::install_plugin_package_from_url,
             commands::plugins::rollback_plugin,
             commands::plugins::uninstall_plugin,
             commands::plugins::activate_plugin,
@@ -2553,6 +2583,7 @@ pub fn run() {
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,
+            commands::ssh_keys::list_local_ssh_keys,
             commands::ssh_prompt::ssh_prompt_ready,
             commands::ssh_prompt::ssh_prompt_not_ready,
             commands::ssh_prompt::resolve_ssh_prompt,

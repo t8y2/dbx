@@ -55,7 +55,8 @@ fn connection_tool_lock(connection_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 fn tool_uses_database(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "list_tables"
+        "list_databases"
+            | "list_tables"
             | "get_columns"
             | "execute_query"
             | "get_sample_data"
@@ -320,7 +321,7 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
         vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()]
+        vec![list_databases_tool(), list_tables_tool(), get_columns_tool(), get_current_time_tool()]
     }
 }
 
@@ -331,7 +332,7 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
     if is_vector_db(db_type) {
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_tables_tool(), get_columns_tool(), get_current_time_tool()];
+    let mut tools = vec![list_databases_tool(), list_tables_tool(), get_columns_tool(), get_current_time_tool()];
     if db_type == DatabaseType::MongoDb {
         tools.push(mongo_execute_query_tool(sql_permissions));
     } else if supports_sql_query(db_type) {
@@ -342,6 +343,16 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
         tools.push(explain_query_tool());
     }
     tools
+}
+
+fn list_databases_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "list_databases",
+        description: "List databases available through the current connection. If more than one database is returned, cross-database read queries can use fully qualified names such as database.table (or database.schema.table for SQL Server).",
+        parameters: json!({"type": "object", "properties": {}, "required": []}),
+        read_only: true,
+        parallel_ok: true,
+    }
 }
 
 fn mongo_execute_query_tool(_sql_permissions: AgentSqlPermissions) -> ToolDefinition {
@@ -378,6 +389,10 @@ fn list_tables_tool() -> ToolDefinition {
                 "schema": {
                     "type": "string",
                     "description": "Schema name to list tables from (optional, defaults to current database)"
+                },
+                "database": {
+                    "type": "string",
+                    "description": "Database to inspect (optional, defaults to the current database)"
                 }
             },
             "required": []
@@ -405,6 +420,10 @@ fn get_columns_tool() -> ToolDefinition {
                 "schema": {
                     "type": "string",
                     "description": "Schema name (optional, defaults to current database)"
+                },
+                "database": {
+                    "type": "string",
+                    "description": "Database containing the table (optional, defaults to the current database)"
                 }
             },
             "required": ["table"]
@@ -422,7 +441,7 @@ fn execute_query_tool(sql_permissions: AgentSqlPermissions) -> ToolDefinition {
     } else if sql_permissions.allow_writes {
         "Execute SQL after the user explicitly confirmed this operation. Read queries and non-DDL writes are allowed for this run."
     } else {
-        "Execute a read-only SQL query and return results (max 50 rows). This run cannot execute writes or DDL because no specific SQL has been confirmed yet; this does not mean the database itself is read-only. When the user requests a write, first propose the exact SQL in one ```sql code block and ask for confirmation. After confirmation, DBX starts a new run that can execute only that exact SQL. Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements may be executed in this run."
+        "Execute a read-only SQL query and return results (max 50 rows). Cross-database reads may use fully qualified names such as database.table (or database.schema.table for SQL Server) without switching the current database. This run cannot execute writes or DDL because no specific SQL has been confirmed yet; this does not mean the database itself is read-only. When the user requests a write, first propose the exact SQL in one ```sql code block and ask for confirmation. After confirmation, DBX starts a new run that can execute only that exact SQL. Only SELECT, WITH, SHOW, DESCRIBE, EXPLAIN statements may be executed in this run."
     };
     ToolDefinition {
         name: "execute_query",
@@ -477,6 +496,10 @@ fn get_sample_data_tool() -> ToolDefinition {
                 "schema": {
                     "type": "string",
                     "description": "Schema name (optional)"
+                },
+                "database": {
+                    "type": "string",
+                    "description": "Database containing the table (optional, defaults to the current database)"
                 },
                 "limit": {
                     "type": "number",
@@ -572,6 +595,7 @@ pub async fn execute_tool(
         None
     };
     let result = match tool_call.name.as_str() {
+        "list_databases" => execute_list_databases(tool_call, state, connection_id).await,
         "list_tables" => execute_list_tables(tool_call, state, connection_id, database, default_schema, db_type).await,
         "get_columns" => execute_get_columns(tool_call, state, connection_id, database, default_schema, db_type).await,
         "execute_query" => {
@@ -629,6 +653,20 @@ pub async fn execute_tool(
     }
 }
 
+async fn execute_list_databases(
+    _tool_call: &ToolCall,
+    state: &Arc<AppState>,
+    connection_id: &str,
+) -> Result<String, String> {
+    let databases = crate::schema::list_databases_core(state, connection_id)
+        .await
+        .map_err(|e| format!("Failed to list databases: {e}"))?;
+    if databases.is_empty() {
+        return Ok("No databases were returned for this connection.".to_string());
+    }
+    Ok(databases.into_iter().map(|database| format!("- {}", database.name)).collect::<Vec<_>>().join("\n"))
+}
+
 async fn execute_list_tables(
     tool_call: &ToolCall,
     state: &Arc<AppState>,
@@ -637,13 +675,14 @@ async fn execute_list_tables(
     default_schema: Option<&str>,
     _db_type: &DatabaseType,
 ) -> Result<String, String> {
+    let database = effective_database(tool_call, database);
     let schema = effective_schema(tool_call, default_schema).unwrap_or_default();
 
     // Request one extra to detect whether more tables exist beyond the limit.
     let tables = crate::schema::list_tables_core(
         state,
         connection_id,
-        database,
+        &database,
         &schema,
         None,
         Some(LIST_TABLES_LIMIT + 1),
@@ -689,6 +728,7 @@ async fn execute_get_columns(
     default_schema: Option<&str>,
     _db_type: &DatabaseType,
 ) -> Result<String, String> {
+    let database = effective_database(tool_call, database);
     let table = tool_call
         .arguments
         .get("table")
@@ -710,7 +750,7 @@ async fn execute_get_columns(
 
     let schema = effective_schema(tool_call, default_schema).unwrap_or_default();
 
-    let columns = crate::schema::get_columns_core(state, connection_id, database, &schema, &table)
+    let columns = crate::schema::get_columns_core(state, connection_id, &database, &schema, &table)
         .await
         .map_err(|e| format!("Failed to get columns for {table}: {e}"))?;
 
@@ -999,6 +1039,7 @@ async fn execute_get_sample_data(
     default_schema: Option<&str>,
     db_type: &DatabaseType,
 ) -> Result<String, String> {
+    let database = effective_database(tool_call, database);
     let table =
         tool_call.arguments.get("table").and_then(|v| v.as_str()).ok_or("Missing required parameter: table")?.trim();
 
@@ -1032,7 +1073,7 @@ async fn execute_get_sample_data(
         &synthetic_call,
         state,
         connection_id,
-        database,
+        &database,
         schema.as_deref(),
         db_type,
         AgentSqlPermissions::default(),
@@ -1169,6 +1210,17 @@ fn effective_schema(tool_call: &ToolCall, default_schema: Option<&str>) -> Optio
             .filter(|schema| !schema.is_empty())
             .map(ToOwned::to_owned)
     })
+}
+
+fn effective_database(tool_call: &ToolCall, default_database: &str) -> String {
+    tool_call
+        .arguments
+        .get("database")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|database| !database.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_database.to_string())
 }
 
 /// Execute list_collections tool (vector databases).

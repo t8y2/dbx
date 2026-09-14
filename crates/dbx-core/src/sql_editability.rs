@@ -129,7 +129,7 @@ pub fn analyze_editable_query(sql: &str) -> Option<EditableQueryInfo> {
 }
 
 pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
-    let normalized = strip_sql_comments(sql).trim_end_matches(';').trim().to_string();
+    let normalized = strip_sql_comments(sql).trim().trim_end_matches(';').trim().to_string();
     if normalized.is_empty() {
         return not_editable(QueryEditabilityReason::NotSelect);
     }
@@ -142,7 +142,7 @@ pub fn analyze_editable_query_editability(sql: &str) -> QueryEditability {
     if has_top_level_keyword(&normalized, &["UNION", "INTERSECT", "EXCEPT", "MINUS"]) {
         return not_editable(QueryEditabilityReason::SetOperation);
     }
-    if normalized.contains(';') {
+    if has_top_level_semicolon(&normalized) {
         return not_editable(QueryEditabilityReason::ComplexSource);
     }
 
@@ -982,6 +982,28 @@ fn has_top_level_keyword(sql: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|keyword| find_top_level_keyword(sql, keyword, 0).is_some())
 }
 
+fn has_top_level_semicolon(sql: &str) -> bool {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for ch in sql.chars() {
+        if let Some(close) = quote {
+            if ch == close {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '[' => quote = Some(']'),
+            '(' => depth += 1,
+            ')' => depth = 0.max(depth - 1),
+            ';' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn first_top_level_keyword_index(sql: &str, keywords: &[&str], start: usize) -> Option<usize> {
     keywords.iter().filter_map(|keyword| find_top_level_keyword(sql, keyword, start)).min()
 }
@@ -1148,6 +1170,43 @@ mod tests {
 
             assert!(result.editable, "{sql}: {:?}", result.reason);
             assert_eq!(result.analysis.unwrap().table_name, "users", "{sql}");
+        }
+    }
+
+    #[test]
+    fn ignores_semicolons_inside_literals_identifiers_and_comments() {
+        for sql in [
+            "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111'",
+            "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';",
+            "SELECT * FROM users WHERE name = 'a;b'  ",
+            r#"SELECT * FROM "weird;name""#,
+            "SELECT * FROM `weird;name`",
+            "SELECT * FROM [weird;name]",
+            "SELECT * FROM users -- keep; going\nWHERE active = 1",
+            "SELECT * FROM users /* keep; going */ WHERE active = 1",
+        ] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(result.editable, "{sql}: {:?}", result.reason);
+        }
+
+        let issue = analyze_editable_query_editability(
+            "SELECT c.*  FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';",
+        );
+        assert!(issue.editable);
+        let analysis = issue.analysis.unwrap();
+        assert_eq!(analysis.table_name, "CONTAINER");
+        assert_eq!(analysis.table_alias.as_deref(), Some("c"));
+        assert!(analysis.select_star);
+    }
+
+    #[test]
+    fn treats_top_level_semicolons_as_complex_source() {
+        for sql in ["SELECT * FROM users; SELECT * FROM orders", "SELECT * FROM users WHERE name = 'a;b'; SELECT 1"] {
+            let result = analyze_editable_query_editability(sql);
+
+            assert!(!result.editable, "{sql}");
+            assert_eq!(result.reason, Some(QueryEditabilityReason::ComplexSource), "{sql}");
         }
     }
 

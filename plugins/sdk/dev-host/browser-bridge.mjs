@@ -21,6 +21,63 @@ function installBridge(channel) {
     return btoa(result);
   };
   const decode = (value) => Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
+  const stream = async (method, params = {}, options = {}) => {
+    const streamId = options.streamId || globalThis.crypto?.randomUUID?.() || "stream-" + Date.now() + "-" + ++sequence;
+    const closeMethod = options.closeMethod || "filesystem/stream/close";
+    let removeListener;
+    let closeRequested = false;
+    let resolveOpen;
+    let rejectOpen;
+    const metadata = {};
+    const opened = new Promise((resolve, reject) => {
+      resolveOpen = resolve;
+      rejectOpen = reject;
+    });
+    const readable = new ReadableStream({
+      start(controller) {
+        const onEvent = (message) => {
+          if (message?.method !== "host.stream.chunk" && message?.method !== "host.stream.end" && message?.method !== "host.stream.error") return;
+          const event = message.params || {};
+          if (event.streamId !== streamId) return;
+          if (message.method === "host.stream.chunk") {
+            try {
+              controller.enqueue(decode(event.dataBase64 || ""));
+            } catch (error) {
+              controller.error(error);
+            }
+            return;
+          }
+          removeListener?.();
+          removeListener = undefined;
+          if (message.method === "host.stream.error") {
+            const error = new Error(event.message || "Plugin stream failed");
+            rejectOpen(error);
+            controller.error(error);
+          } else {
+            Object.assign(metadata, event);
+            controller.close();
+          }
+        };
+        removeListener = () => listeners.event.delete(onEvent);
+        listeners.event.add(onEvent);
+        request("backend.invoke", { method, params: { ...params, streamId }, timeoutMs: options.timeoutMs }).then(resolveOpen, (error) => {
+          removeListener?.();
+          removeListener = undefined;
+          rejectOpen(error);
+          controller.error(error);
+        });
+      },
+      cancel() {
+        removeListener?.();
+        removeListener = undefined;
+        if (closeRequested) return undefined;
+        closeRequested = true;
+        return request("backend.invoke", { method: closeMethod, params: { streamId } }).catch(() => undefined);
+      },
+    });
+    Object.assign(metadata, await opened);
+    return { stream: readable, metadata };
+  };
   const request = (method, params) =>
     new Promise((resolve, reject) => {
       const id = ++sequence;
@@ -56,6 +113,7 @@ function installBridge(channel) {
     },
     request,
     invoke: (method, params, options = {}) => request("backend.invoke", { method, params, timeoutMs: options.timeoutMs }),
+    stream,
     notify: (method, params) => request("backend.notify", { method, params }),
     sendBinary: (channel, data) => request("backend.sendBinary", { channel, dataBase64: typeof data === "string" ? data : encode(data) }),
     readAsset: (path) => request("ui.readAsset", { path }),

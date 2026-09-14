@@ -50,7 +50,6 @@ import {
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -156,7 +155,7 @@ import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelectio
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { fetchNamespaceOptionsForConnection, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
-import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseCapabilities";
@@ -1405,18 +1404,42 @@ const dbSelectOptions = computed(() => {
   }));
 });
 
-const selectedNamespace = computed(() => (props.connection && props.tab ? resolveAiNamespaceSelection(props.tab, props.connection).value : ""));
+// AI can inspect more than the tab's active database. Keep this selection local
+// to the composer so changing the visible query tab does not rewrite SQL state.
+const selectedDatabases = ref<string[]>([]);
 
-const selectedDatabaseSelectValue = computed(() => (props.connection ? encodeSelectableDatabaseValue(props.connection.db_type, selectedNamespace.value) : ""));
-
+const selectedDatabaseValues = computed(() => new Set(selectedDatabases.value));
 const selectedDatabaseLabel = computed(() => {
   if (!props.connection) return t("editor.selectDatabase");
-  if (!props.tab) return t("editor.selectDatabase");
-  return formatDatabaseLabel(props.connection, selectedNamespace.value, {
-    defaultDatabase: t("editor.defaultDatabase"),
-    noDatabase: t("editor.noDatabase"),
-  });
+  const labels = dbSelectOptions.value.filter((option) => selectedDatabaseValues.value.has(option.database)).map((option) => option.label);
+  return labels.length ? labels.join(", ") : t("editor.selectDatabase");
 });
+
+function syncSelectedDatabases() {
+  const active = selectedNamespace.value;
+  const available = dbSelectOptions.value.map((option) => option.database);
+  const retained = selectedDatabases.value.filter((database) => available.includes(database));
+  selectedDatabases.value = retained.length ? retained : active ? [active] : [];
+}
+
+function toggleDatabase(database: string) {
+  if (selectedDatabaseValues.value.has(database)) {
+    if (selectedDatabases.value.length === 1) return;
+    selectedDatabases.value = selectedDatabases.value.filter((item) => item !== database);
+  } else {
+    selectedDatabases.value = [...selectedDatabases.value, database];
+  }
+}
+
+const selectedNamespace = computed(() => (props.connection && props.tab ? resolveAiNamespaceSelection(props.tab, props.connection).value : ""));
+
+watch(
+  () => `${props.connection?.id ?? ""}:${props.tab?.id ?? ""}`,
+  () => {
+    selectedDatabases.value = selectedNamespace.value ? [selectedNamespace.value] : [];
+  },
+);
+watch([dbSelectOptions, selectedNamespace], syncSelectedDatabases, { immediate: true });
 
 const showAiSchemaSelector = computed(() => {
   const connection = props.connection;
@@ -1475,20 +1498,6 @@ async function changeConnection(connectionId: string) {
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     toast(t("connection.connectFailed", { message: translateBackendError(t, message) }), 5000);
-  }
-}
-
-function changeNamespace(value: string) {
-  const tab = props.tab;
-  const connection = props.connection;
-  if (!tab || !connection) return;
-  const namespace = decodeSelectableDatabaseValue(connection.db_type, value);
-  if (resolveAiNamespaceSelection(tab, connection).value === namespace) return;
-  clearContextReferences();
-  if (resolveAiNamespaceSelection(tab, connection).kind === "schema") {
-    queryStore.updateSchema(tab.id, namespace || undefined);
-  } else {
-    queryStore.updateDatabase(tab.id, namespace);
   }
 }
 
@@ -2793,6 +2802,9 @@ async function send() {
     clearPendingWriteGrant();
     return;
   }
+  // Capture the selection before context loading or queued run scheduling can
+  // yield to another conversation. Dameng's top-level selector is a schema.
+  const runDatabases = resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
   const activeConfig = activeFullConfig.value;
   if (!activeConfig) {
     clearPendingWriteGrant();
@@ -3086,11 +3098,21 @@ async function send() {
     // paying for buildAiContext() too; it can do real backend/schema work that
     // would be entirely wasted on an already-abandoned request.
     if (!generationCanContinue()) return;
-    const context = await buildAiContext(tab, connection, {
-      mentionedTables,
-      sqlFiles,
-      csvFiles: csvAttachments,
-    });
+    const requestDatabase = runDatabases[0] ?? tab.database;
+    const context = await buildAiContext(
+      {
+        ...tab,
+        database: requestDatabase,
+        schema: runDatabases.length > 1 || requestDatabase !== tab.database ? undefined : tab.schema,
+      },
+      connection,
+      {
+        mentionedTables,
+        sqlFiles,
+        csvFiles: csvAttachments,
+      },
+    );
+    context.selectedDatabases = runDatabases;
     // Superseded while awaiting buildAiContext() above — must bail before ever
     // calling runAgentStream(), not just before writing its results. Without
     // this recheck, a clear/switch/unmount that fires during context
@@ -4970,27 +4992,26 @@ async function openExternalUrl(url: string) {
               />
               <template v-if="connection">
                 <Database class="h-3 w-3 shrink-0 text-foreground/40" />
-                <Select
-                  :model-value="selectedDatabaseSelectValue"
-                  @update:model-value="
-                    (v) => {
-                      if (typeof v === 'string') changeNamespace(v);
-                    }
-                  "
+                <Popover
                   @update:open="
                     (open: boolean) => {
                       if (open) loadDatabases();
                     }
                   "
                 >
-                  <SelectTrigger :class="['h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3', showAiSchemaSelector && 'min-w-0 max-w-56 flex-1']">
-                    <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="option in dbSelectOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
-                    <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
-                  </SelectContent>
-                </Select>
+                  <PopoverTrigger as-child>
+                    <Button variant="ghost" :class="['h-5 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'min-w-0 flex-1']">
+                      <span class="truncate">{{ selectedDatabaseLabel }}</span>
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" class="w-64 p-1">
+                    <button v-for="option in dbSelectOptions" :key="option.value" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted" @click="toggleDatabase(option.database)">
+                      <Check :class="['h-4 w-4', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
+                      <span class="truncate">{{ option.label }}</span>
+                    </button>
+                    <div v-if="!dbSelectOptions.length" class="px-2 py-1.5 text-sm text-muted-foreground">{{ t("editor.selectDatabase") }}</div>
+                  </PopoverContent>
+                </Popover>
                 <template v-if="showAiSchemaSelector">
                   <Layers class="h-3 w-3 shrink-0 text-foreground/40" />
                   <SearchableSelect

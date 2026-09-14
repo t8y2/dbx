@@ -33,6 +33,46 @@ describe("document store structured filters", () => {
     expect(() => buildDocumentFilterCondition({ ...baseRule, rawValue: "not-a-number", valueType: "number" }, { kind: "mongodb" })).toThrow("Invalid MongoDB number filter value");
   });
 
+  it("matches numeric MongoDB fields by their string representation", () => {
+    expect(buildDocumentFilterCondition({ id: "contains", fieldName: "age", mode: "like", rawValue: "2", conjunction: "AND" }, { kind: "mongodb", sampleValue: 28 })).toEqual({
+      $expr: {
+        $regexMatch: {
+          input: { $convert: { input: "$age", to: "string", onError: "", onNull: "" } },
+          regex: "2",
+          options: "i",
+        },
+      },
+    });
+    expect(buildDocumentFilterCondition({ id: "contains", fieldName: "age", mode: "like", rawValue: "2", valueType: "number", conjunction: "AND" }, { kind: "mongodb" })).toEqual({
+      $expr: {
+        $regexMatch: {
+          input: { $convert: { input: "$age", to: "string", onError: "", onNull: "" } },
+          regex: "2",
+          options: "i",
+        },
+      },
+    });
+    expect(buildDocumentFilterCondition({ id: "not-contains", fieldName: "age", mode: "not-like", rawValue: "2", valueType: "number", conjunction: "AND" }, { kind: "mongodb" })).toEqual({
+      $expr: {
+        $not: [
+          {
+            $regexMatch: {
+              input: { $convert: { input: "$age", to: "string", onError: "", onNull: "" } },
+              regex: "2",
+              options: "i",
+            },
+          },
+        ],
+      },
+    });
+  });
+
+  it("keeps MongoDB string contains filters on the field regex path", () => {
+    expect(buildDocumentFilterCondition({ id: "contains", fieldName: "name", mode: "like", rawValue: "张", conjunction: "AND" }, { kind: "mongodb", sampleValue: "张三" })).toEqual({
+      name: { $regex: "张", $options: "i" },
+    });
+  });
+
   it("keeps the MongoDB _id sample for automatic type inference", () => {
     const tree = documentFieldPathTreeFromDocuments([{ _id: "001", name: "Alice" }]);
 

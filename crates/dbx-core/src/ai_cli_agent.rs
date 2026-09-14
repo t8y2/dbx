@@ -14,6 +14,7 @@ pub struct CliAgentRunOptions {
     pub connection_id: String,
     pub connection_name: String,
     pub database: String,
+    pub selected_databases: Vec<String>,
     pub schema: Option<String>,
     pub agent_mode: bool,
     pub allow_writes: bool,
@@ -72,14 +73,27 @@ pub fn dbx_mcp_enabled_tools(agent_mode: bool) -> Vec<&'static str> {
 }
 
 pub fn dbx_mcp_scope_env(options: &CliAgentRunOptions) -> Vec<(&'static str, String)> {
+    let mut databases: Vec<&str> = Vec::new();
+    for database in &options.selected_databases {
+        let database = database.trim();
+        if !database.is_empty() && !databases.contains(&database) {
+            databases.push(database);
+        }
+    }
+    let multiple_databases = databases.len() > 1;
+    // An empty value explicitly clears inherited/configured single-database
+    // bounds. MCP's persisted connection/database policy still applies.
+    let database_scope = if multiple_databases { "" } else { databases.first().copied().unwrap_or(&options.database) };
     let mut env = vec![
         ("DBX_MCP_ALLOW_WRITES", if options.allow_writes { "1" } else { "0" }.to_string()),
         ("DBX_MCP_ALLOW_DANGEROUS_SQL", if options.allow_dangerous { "1" } else { "0" }.to_string()),
         ("DBX_MCP_SCOPE_CONNECTION_ID", options.connection_id.clone()),
         ("DBX_MCP_SCOPE_CONNECTION_NAME", options.connection_name.clone()),
-        ("DBX_MCP_SCOPE_DATABASE", options.database.clone()),
+        ("DBX_MCP_SCOPE_DATABASE", database_scope.to_string()),
     ];
-    if let Some(schema) = options.schema.as_deref().filter(|schema| !schema.trim().is_empty()) {
+    if multiple_databases {
+        env.push(("DBX_MCP_SCOPE_SCHEMA", String::new()));
+    } else if let Some(schema) = options.schema.as_deref().filter(|schema| !schema.trim().is_empty()) {
         env.push(("DBX_MCP_SCOPE_SCHEMA", schema.to_string()));
     }
     if let Some(ref sql) = options.confirmed_write_sql {
@@ -93,11 +107,42 @@ mod scope_env_tests {
     use super::*;
 
     #[test]
+    fn database_selection_controls_runtime_bounds_without_changing_write_permissions() {
+        for (selection, expected_database, expected_schema) in [
+            (vec![], "db_a", "public"),
+            (vec!["db_b"], "db_b", "public"),
+            (vec!["db_a", "db_b"], "", ""),
+            (vec![" db_a ", "db_a", " "], "db_a", "public"),
+        ] {
+            let options = CliAgentRunOptions {
+                connection_id: "conn-1".into(),
+                connection_name: "Test".into(),
+                database: "db_a".into(),
+                selected_databases: selection.into_iter().map(str::to_string).collect(),
+                schema: Some("public".into()),
+                agent_mode: true,
+                allow_writes: false,
+                allow_dangerous: false,
+                confirmed_write_sql: None,
+                mcp_server_command: None,
+            };
+            let env: std::collections::HashMap<_, _> = dbx_mcp_scope_env(&options).into_iter().collect();
+            assert_eq!(env["DBX_MCP_SCOPE_DATABASE"], expected_database);
+            assert_eq!(env["DBX_MCP_SCOPE_SCHEMA"], expected_schema);
+            assert_eq!(env["DBX_MCP_SCOPE_CONNECTION_ID"], "conn-1");
+            assert_eq!(env["DBX_MCP_ALLOW_WRITES"], "0");
+            assert_eq!(env["DBX_MCP_ALLOW_DANGEROUS_SQL"], "0");
+            assert!(!env.contains_key("DBX_MCP_CONFIRMED_WRITE_SQL"));
+        }
+    }
+
+    #[test]
     fn confirmed_write_sql_is_passed_to_the_scoped_mcp_subprocess() {
         let options = CliAgentRunOptions {
             connection_id: "dameng-1".to_string(),
             connection_name: "Dameng".to_string(),
             database: "APPDB".to_string(),
+            selected_databases: Vec::new(),
             schema: Some("REPORTING".to_string()),
             agent_mode: true,
             allow_writes: true,

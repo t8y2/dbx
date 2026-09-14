@@ -9,12 +9,18 @@ export interface QueryResultSourceLabelOptions {
 
 export function queryResultNameFromPreamble(preamble: string): string | undefined {
   let name: string | undefined;
+  let fallback: string | undefined;
   const withoutBlockComments = preamble.replace(/\/\*[\s\S]*?\*\//g, "");
   for (const line of withoutBlockComments.split(/\r?\n/)) {
-    const candidate = line.match(/^\s*--\s*name\s*:\s*(.*)$/i)?.[1]?.trim();
+    const comment = line.match(/^\s*--\s*(.*)$/)?.[1]?.trim();
+    if (!comment) continue;
+
+    const nameMatch = comment.match(/^name\s*:\s*(.*)$/i);
+    const candidate = nameMatch?.[1]?.trim();
     if (candidate) name = candidate;
+    else if (!nameMatch) fallback = comment;
   }
-  return name;
+  return name ?? fallback;
 }
 
 function firstSourceOfKind(sources: SqlSemanticRowSource[], kind: SqlSemanticRowSource["kind"]): SqlSemanticRowSource | undefined {

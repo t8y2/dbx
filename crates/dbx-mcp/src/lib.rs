@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod backend;
 pub mod diagnostics;
 pub mod http;

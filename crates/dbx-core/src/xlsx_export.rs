@@ -238,7 +238,10 @@ fn push_data_row_xml(
 /// `inlineStr` cell encoding is highly repetitive, so Deflate typically shrinks
 /// the file several-fold over `Stored` (matching what Excel/Navicat produce).
 fn xlsx_zip_options() -> zip::write::SimpleFileOptions {
-    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+    // Table exports can exceed the ZIP32 4 GiB entry limit even when the
+    // result is streamed row by row. Enable ZIP64 up front so the writer does
+    // not fail after a long export has already queried the database.
+    zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated).large_file(true)
 }
 
 fn write_zip_entry<W: Write + Seek>(zip: &mut zip::ZipWriter<W>, path: &str, content: &str) -> Result<(), String> {
@@ -1226,7 +1229,7 @@ mod tests {
     use calamine::{open_workbook_auto, Reader};
     use serde_json::{json, Value};
     use std::fs;
-    use std::io::{Read, Write};
+    use std::io::{Cursor, Read, Write};
 
     #[derive(Default)]
     struct WriteStats {
@@ -1255,6 +1258,20 @@ mod tests {
         let mut content = String::new();
         entry.read_to_string(&mut content).expect("read zip entry");
         content
+    }
+
+    #[test]
+    fn xlsx_zip_entries_enable_zip64_for_large_exports() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("large-entry.xml", super::xlsx_zip_options()).expect("start ZIP64 entry");
+        zip.write_all(b"test").expect("write ZIP64 entry");
+        let bytes = zip.finish().expect("finish ZIP64 archive").into_inner();
+
+        assert_eq!(&bytes[..4], b"PK\x03\x04");
+        let name_len = u16::from_le_bytes([bytes[26], bytes[27]]) as usize;
+        let extra_len = u16::from_le_bytes([bytes[28], bytes[29]]) as usize;
+        let extra_data = &bytes[30 + name_len..30 + name_len + extra_len];
+        assert!(extra_data.windows(2).any(|tag| tag == [0x01, 0x00]));
     }
 
     /// Assert every entry in the XLSX (ZIP) buffer is Deflate-compressed, which

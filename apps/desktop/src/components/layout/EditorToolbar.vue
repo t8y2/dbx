@@ -520,6 +520,8 @@ async function changeCatalog(selectedCatalog: string) {
             size="icon"
             class="h-6 w-6"
             :class="blockDangerousRedisCommands !== false ? 'text-orange-600 bg-orange-100 dark:text-orange-300 dark:bg-orange-900/30' : 'text-muted-foreground/50'"
+            :aria-label="t('toolbar.blockDangerousRedisCommands')"
+            :aria-pressed="blockDangerousRedisCommands !== false"
             @click="emit('update:blockDangerousRedisCommands', blockDangerousRedisCommands === false)"
           >
             <Shield class="h-3.5 w-3.5" />

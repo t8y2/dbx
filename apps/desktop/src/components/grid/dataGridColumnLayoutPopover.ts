@@ -13,6 +13,7 @@ export interface DataGridColumnLayoutHandle {
   orderedColumnLayoutOptions: readonly DataGridColumnLayoutOption[];
   filteredColumnLayoutOptions: (search: string) => DataGridColumnLayoutOption[];
   toggleColumnVisibility: (columnIndex: number) => void;
+  hideColumns: (columnIndexes: number[]) => void;
   showAllColumns: () => void;
   invertColumnVisibility: () => void;
   hasCustomColumnOrder: boolean;

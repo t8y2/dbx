@@ -45,6 +45,24 @@ test("context-menu invalidation clears cell and header targets together", () => 
   assert.match(handler, /contextHeaderVisibleColIdx\.value = null;/);
 });
 
+test("header context menu wires batch hide and show-all to the column layout pipeline", () => {
+  assert.match(dataGridSource, /hideColumn: hideContextColumn,/);
+  assert.match(dataGridSource, /hideSelectedColumns,/);
+  assert.match(dataGridSource, /showAllColumnsMenu: showAllColumns,/);
+  assert.match(dataGridSource, /hiddenColumnCount: hiddenColumnCount\.value,/);
+
+  const hideWrapper = dataGridSource.match(/function hideColumns\(columnIndexes: number\[\]\) \{[^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(hideWrapper, /applyColumnOrderChange\(\(\) => hideColumnsInLayout\(columnIndexes\)\)/);
+  assert.match(hideWrapper, /clearCellSelection\(\);/);
+  assert.match(hideWrapper, /clampGridHorizontalScroll\(\)/);
+
+  // 显示全部列也走 applyColumnOrderChange，隐藏期间产生的可见索引偏移会被重新对齐。
+  const showAllWrapper = dataGridSource.match(/function showAllColumns\(\) \{[^]*?\n\}/)?.[0] ?? "";
+
+  assert.match(showAllWrapper, /applyColumnOrderChange\(showAllColumnsInLayout\)/);
+});
+
 test("select-all context menus invalidate a stale specialized target", () => {
   const header = dataGridSource.match(/<div\s+class="data-grid-header-cell shrink-0 px-2 py-1\.5[^]*?@click="selectAllCells"[^]*?>/u)?.[0] ?? "";
 

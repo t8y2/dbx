@@ -252,6 +252,8 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
+import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
+import type { TableStructureEditorDraft } from "@/types/database";
 
 const mountedApps: App[] = [];
 
@@ -272,13 +274,14 @@ async function settle() {
   }
 }
 
-async function mountStructureEditor() {
+async function mountStructureEditor(draft?: TableStructureEditorDraft) {
   const root = document.createElement("div");
   document.body.append(root);
   const app = createApp(TableStructureEditor, {
     connectionId: mocks.connection.id,
     database: "test",
     tableName: "users",
+    draft,
   });
   mountedApps.push(app);
   app.mount(root);
@@ -402,5 +405,63 @@ describe("TableStructureEditor metadata revalidation (#8816)", () => {
     await vi.waitFor(() => expect(columnsFacetCalls().length).toBe(2), { timeout: 3000 });
     await settle();
     expect(root.textContent).toContain("email");
+  });
+});
+
+describe("restored structure snapshots after external DDL", () => {
+  function restoredDraft(dirty: boolean | undefined): TableStructureEditorDraft {
+    return {
+      initialized: true,
+      dirty,
+      activeTab: "columns",
+      newTableName: "",
+      tableComment: "",
+      originalTableComment: "",
+      columns: createColumnDrafts(
+        initialColumns.map((column) => ({ name: column.name, data_type: column.data_type, is_nullable: column.nullable, column_default: column.default_value, is_primary_key: false, extra: null, comment: column.comment })),
+        "mysql",
+      ),
+      indexes: [],
+      foreignKeys: [],
+      triggers: [],
+      loadedMetadataFacets: ["columns", "comment"],
+    };
+  }
+
+  it("revalidates an explicitly clean restored snapshot", async () => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const root = await mountStructureEditor(restoredDraft(false));
+    await vi.waitFor(() => expect(Array.from(root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")).map((input) => input.value)).toContain("email"));
+    expect(columnsFacetCalls()).toHaveLength(1);
+  });
+
+  it.each([true, undefined])("preserves restored edits when dirty is %s", async (dirty) => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const draft = restoredDraft(dirty);
+    draft.columns[0].name = "local_edit";
+    const root = await mountStructureEditor(draft);
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("local_edit");
+    expect(columnsFacetCalls()).toHaveLength(0);
+  });
+
+  it("preserves an edit started while restored snapshot validation is pending", async () => {
+    let resolveColumns!: (value: unknown) => void;
+    mocks.loadObjectMetadataFacet.mockImplementation((_request, facet) =>
+      facet === "columns"
+        ? new Promise((resolve) => {
+            resolveColumns = resolve;
+          })
+        : Promise.resolve({ value: facet === "comment" ? "" : [], cacheStatus: "remote" }),
+    );
+    const root = await mountStructureEditor(restoredDraft(false));
+    await vi.waitFor(() => expect(resolveColumns).toBeDefined());
+    const input = root.querySelector<HTMLInputElement>("[data-column-name-input]")!;
+    input.value = "local_edit";
+    input.dispatchEvent(new Event("input"));
+    await settle();
+    resolveColumns({ value: rebuiltColumns, cacheStatus: "remote" });
+    await settle();
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("local_edit");
   });
 });

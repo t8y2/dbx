@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.12"
+version = "0.6.13"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -82,6 +82,7 @@ sysinfo = { version = "0.32", features = ["system"] }
 
 [dev-dependencies]
 tauri = { version = "2.10.3", features = ["test"] }
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }

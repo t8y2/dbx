@@ -607,8 +607,11 @@ function sqlStatementsForTable(r: GeneratedTableResult): string[] {
     stmts.push(...r.statements);
   } else {
     const colList = r.columns.map((c) => quoteTableIdentifier(dbType.value, c)).join(", ");
+    // Match by column name: rows may carry a leading tbname (TDengine stable),
+    // so positional indexes into resolvedColumns would drift.
+    const dataTypeByName = new Map(r.resolvedColumns.map((c) => [c.columnName.toLowerCase(), c.dataType]));
     for (const row of r.rows) {
-      const vals = row.map((value) => formatGeneratedValue(value)).join(", ");
+      const vals = row.map((value, index) => formatGeneratedValue(value, dbType.value, dataTypeByName.get(r.columns[index]?.toLowerCase() ?? ""))).join(", ");
       stmts.push(`INSERT INTO ${targetTable} (${colList}) VALUES (${vals});`);
     }
   }

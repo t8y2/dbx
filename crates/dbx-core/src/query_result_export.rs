@@ -324,6 +324,63 @@ struct SqlInsertWriter {
     identifier_quote: Option<String>,
 }
 
+/// Streams query-result JSON rows without retaining the complete result set.
+/// The staged target is committed only after the closing array delimiter is
+/// written, so cancellation or an execution error cannot replace an existing
+/// destination with invalid JSON.
+struct JsonStreamWriter {
+    file: Option<BufWriter<File>>,
+    target: Option<StagedExportTarget>,
+    wrote_row: bool,
+}
+
+impl JsonStreamWriter {
+    fn create(request: &QueryResultExportRequest) -> Result<Self, String> {
+        let target = StagedExportTarget::new(&request.file_path)?;
+        let mut file = BufWriter::new(
+            File::create(target.path()).map_err(|e| format!("Failed to create JSON export temp file: {e}"))?,
+        );
+        file.write_all(b"[\n").map_err(|e| format!("Failed to start JSON export: {e}"))?;
+        Ok(Self { file: Some(file), target: Some(target), wrote_row: false })
+    }
+
+    fn write_row(&mut self, columns: &[String], row: &[Value]) -> Result<(), String> {
+        let file = self.file.as_mut().ok_or_else(|| "JSON export file already closed".to_string())?;
+        if self.wrote_row {
+            file.write_all(b",\n").map_err(|e| format!("Failed to write JSON separator: {e}"))?;
+        }
+        let mut object = serde_json::Map::new();
+        for (index, column) in columns.iter().enumerate() {
+            if let Some(value) = row.get(index) {
+                object.insert(column.clone(), value.clone());
+            }
+        }
+        serde_json::to_writer_pretty(&mut *file, &Value::Object(object))
+            .map_err(|e| format!("Failed to write JSON row: {e}"))?;
+        self.wrote_row = true;
+        Ok(())
+    }
+
+    fn write_rows(&mut self, columns: &[String], rows: &[Vec<Value>]) -> Result<(), String> {
+        for row in rows {
+            self.write_row(columns, row)?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        let file = self.file.as_mut().ok_or_else(|| "JSON export file already closed".to_string())?;
+        file.write_all(b"\n]\n").map_err(|e| format!("Failed to finish JSON export: {e}"))?;
+        file.flush().map_err(|e| format!("Failed to flush JSON export: {e}"))?;
+        self.file.take();
+        self.target
+            .take()
+            .ok_or_else(|| "JSON export target already finalized".to_string())?
+            .commit()
+            .map_err(|error| format!("Failed to finalize JSON export file: {error}"))
+    }
+}
+
 impl SqlInsertWriter {
     /// Create the writer and open the temp file. Column metadata is supplied later
     /// via [`SqlInsertWriter::set_columns`] once the executed result is known.
@@ -730,7 +787,7 @@ async fn export_query_result_core_inner(
     session_id: &mut Option<String>,
 ) -> Result<(), String> {
     let format = request.format.to_lowercase();
-    if format != "csv" && format != "xlsx" && format != "txt" && format != "sql" {
+    if format != "csv" && format != "xlsx" && format != "json" && format != "txt" && format != "sql" {
         return Err(format!("Unsupported streaming query-result export format: {format}"));
     }
 
@@ -791,6 +848,7 @@ async fn export_query_result_core_inner(
         return Err(error.to_string());
     }
 
+    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
         if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
 
@@ -914,11 +972,10 @@ async fn export_query_result_core_inner(
             result.rows.truncate(this_page);
         }
         let row_count = result.rows.len();
-        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_for_csv_cow(
+        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_cow(
             &result.rows,
             &column_types,
             request.date_time_format.as_deref(),
-            format == "csv",
         );
 
         if format == "csv" || format == "txt" {
@@ -946,6 +1003,9 @@ async fn export_query_result_core_inner(
                     )?;
                 }
             }
+        } else if format == "json" {
+            let writer = json_writer.as_mut().ok_or_else(|| "JSON export writer missing".to_string())?;
+            writer.write_rows(&columns, formatted_rows.as_ref())?;
         } else if format == "sql" {
             let writer = sql_writer.as_mut().ok_or_else(|| "SQL export writer missing".to_string())?;
             for (row_index, row) in formatted_rows.into_owned().into_iter().enumerate() {
@@ -1019,6 +1079,10 @@ async fn export_query_result_core_inner(
         }
         if let Some(file) = text_file.as_mut() {
             file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
+        }
+    } else if format == "json" {
+        if let Some(writer) = json_writer.take() {
+            writer.finish()?;
         }
     } else if format == "sql" {
         if let Some(writer) = sql_writer.take() {
@@ -1100,6 +1164,7 @@ async fn try_export_postgres_query_result_stream(
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
+    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
         if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
     let budget = operation_budget_for_pool_key(state, &pool_key, query_export_timeout(request.timeout_secs)).await;
@@ -1125,7 +1190,7 @@ async fn try_export_postgres_query_result_stream(
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
-                    } else {
+                    } else if json_writer.is_none() {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx = Some(start_query_result_xlsx_workbook(
@@ -1137,11 +1202,10 @@ async fn try_export_postgres_query_result_stream(
                     }
                 }
                 crate::db::postgres::PostgresQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1153,6 +1217,8 @@ async fn try_export_postgres_query_result_stream(
                             &mut text_buffer,
                             request.csv_quote_mode,
                         )?;
+                    } else if let Some(writer) = json_writer.as_mut() {
+                        writer.write_row(&columns, formatted.as_ref())?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1211,6 +1277,8 @@ async fn try_export_postgres_query_result_stream(
         file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
     }
     if let Some(writer) = sql_writer.take() {
+        writer.finish()?;
+    } else if let Some(writer) = json_writer.take() {
         writer.finish()?;
     } else if let Some(writer) = xlsx {
         let mut buf =
@@ -1292,6 +1360,7 @@ async fn try_export_mysql_query_result_stream(
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
+    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
         if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
     let query_timeout = query_export_timeout(request.timeout_secs);
@@ -1367,7 +1436,7 @@ async fn try_export_mysql_query_result_stream(
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
-                    } else {
+                    } else if json_writer.is_none() {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx = Some(start_query_result_xlsx_workbook(
@@ -1379,11 +1448,10 @@ async fn try_export_mysql_query_result_stream(
                     }
                 }
                 crate::db::mysql::MySqlQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1395,6 +1463,8 @@ async fn try_export_mysql_query_result_stream(
                             &mut text_buffer,
                             request.csv_quote_mode,
                         )?;
+                    } else if let Some(writer) = json_writer.as_mut() {
+                        writer.write_row(&columns, formatted.as_ref())?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1486,6 +1556,8 @@ async fn try_export_mysql_query_result_stream(
     }
     if let Some(writer) = sql_writer.take() {
         writer.finish()?;
+    } else if let Some(writer) = json_writer.take() {
+        writer.finish()?;
     } else if let Some(writer) = xlsx {
         let mut buf =
             finish_streaming_xlsx_workbook(writer).map_err(|e| format!("Failed to finalize XLSX file: {e}"))?;
@@ -1562,6 +1634,7 @@ async fn try_export_clickhouse_query_result_stream(
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
+    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
         if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
     let query_timeout = query_export_timeout(request.timeout_secs);
@@ -1588,7 +1661,7 @@ async fn try_export_clickhouse_query_result_stream(
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
-                    } else {
+                    } else if json_writer.is_none() {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx = Some(start_query_result_xlsx_workbook(
@@ -1600,11 +1673,10 @@ async fn try_export_clickhouse_query_result_stream(
                     }
                 }
                 crate::db::clickhouse_driver::ClickHouseQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1616,6 +1688,8 @@ async fn try_export_clickhouse_query_result_stream(
                             &mut text_buffer,
                             request.csv_quote_mode,
                         )?;
+                    } else if let Some(writer) = json_writer.as_mut() {
+                        writer.write_row(&columns, formatted.as_ref())?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1681,6 +1755,8 @@ async fn try_export_clickhouse_query_result_stream(
     }
     if let Some(writer) = sql_writer.take() {
         writer.finish()?;
+    } else if let Some(writer) = json_writer.take() {
+        writer.finish()?;
     } else if let Some(writer) = xlsx {
         let mut buf =
             finish_streaming_xlsx_workbook(writer).map_err(|e| format!("Failed to finalize XLSX file: {e}"))?;
@@ -1738,6 +1814,7 @@ async fn try_export_sqlserver_query_result_stream(
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
+    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
         if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
     let query_timeout = query_export_timeout(request.timeout_secs);
@@ -1778,7 +1855,7 @@ async fn try_export_sqlserver_query_result_stream(
                     } else if let Some(file) = text_file.as_mut() {
                         let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
-                    } else {
+                    } else if json_writer.is_none() {
                         let xlsx_file =
                             File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
                         xlsx =
@@ -1786,11 +1863,10 @@ async fn try_export_sqlserver_query_result_stream(
                     }
                 }
                 crate::db::sqlserver::SqlServerStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1802,6 +1878,8 @@ async fn try_export_sqlserver_query_result_stream(
                             &mut text_buffer,
                             request.csv_quote_mode,
                         )?;
+                    } else if let Some(writer) = json_writer.as_mut() {
+                        writer.write_row(&columns, formatted.as_ref())?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1871,6 +1949,8 @@ async fn try_export_sqlserver_query_result_stream(
         file.flush().map_err(|e| format!("Failed to flush text export file: {e}"))?;
     }
     if let Some(writer) = sql_writer.take() {
+        writer.finish()?;
+    } else if let Some(writer) = json_writer.take() {
         writer.finish()?;
     } else if let Some(writer) = xlsx {
         let mut buf =
@@ -2082,6 +2162,37 @@ mod tests {
         assert_eq!(
             format_text_export_header("txt", &["id".to_string(), "note".to_string()], CsvQuoteMode::All),
             "id\tnote"
+        );
+    }
+
+    #[test]
+    fn json_stream_writer_emits_a_valid_array_without_retaining_rows() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("result.json");
+        let mut req = request("json", None, None);
+        req.file_path = destination.to_string_lossy().into_owned();
+
+        let mut writer = JsonStreamWriter::create(&req).expect("create JSON writer");
+        writer
+            .write_rows(
+                &["id".to_string(), "name".to_string()],
+                &[vec![serde_json::json!(1), serde_json::json!("Ada")]],
+            )
+            .expect("write first batch");
+        writer
+            .write_rows(&["id".to_string(), "name".to_string()], &[vec![serde_json::json!(2), serde_json::Value::Null]])
+            .expect("write second batch");
+        writer.finish().expect("finish JSON writer");
+
+        let output: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(destination).expect("read JSON output"))
+                .expect("parse JSON output");
+        assert_eq!(
+            output,
+            serde_json::json!([
+                {"id": 1, "name": "Ada"},
+                {"id": 2, "name": null}
+            ])
         );
     }
 

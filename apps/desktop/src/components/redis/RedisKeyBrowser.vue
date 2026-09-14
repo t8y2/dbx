@@ -2,7 +2,7 @@
 import { computed, markRaw, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
-import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy, X } from "@lucide/vue";
+import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, Radio, Clock, Copy, X, Shield } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Splitpanes, Pane } from "splitpanes";
@@ -3470,9 +3470,23 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   {{ t("redis.slowlog") }}
                 </TabsTrigger>
               </TabsList>
-              <Button v-if="activeSidePanel === 'command'" variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearInMemoryHistory">
-                <History class="size-3.5" />
-              </Button>
+              <div v-if="activeSidePanel === 'command'" class="flex shrink-0 items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-6 w-6"
+                  :class="props.blockDangerousRedisCommands ? 'text-orange-600 bg-orange-100 dark:text-orange-300 dark:bg-orange-900/30' : 'text-muted-foreground/50'"
+                  :aria-label="t('toolbar.blockDangerousRedisCommands')"
+                  :aria-pressed="props.blockDangerousRedisCommands"
+                  :title="t('toolbar.blockDangerousRedisCommands')"
+                  @click="settingsStore.updateEditorSettings({ blockDangerousRedisCommands: !props.blockDangerousRedisCommands })"
+                >
+                  <Shield class="size-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearInMemoryHistory">
+                  <Trash2 class="size-3.5" />
+                </Button>
+              </div>
             </div>
 
             <TabsContent value="detail" class="m-0 min-h-0 flex-1 flex flex-col">

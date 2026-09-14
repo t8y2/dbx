@@ -1,9 +1,13 @@
 import { ref, type Ref } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
-const PANEL_MIN_WIDTH = 180;
+const PANEL_MIN_WIDTH = 240;
 const DEFAULT_PANEL_MAX_WIDTH = 800;
 type PanelMaxWidth = number | ((handle: HTMLElement | null) => number);
+
+function restoredPanelWidth(storageKey: string, fallback: number): number {
+  return Math.max(PANEL_MIN_WIDTH, Number(safeLocalStorageGet(storageKey)) || fallback);
+}
 
 function availableAiPanelMaxWidth(handle: HTMLElement | null) {
   const panel = handle?.parentElement;
@@ -16,12 +20,12 @@ function availableAiPanelMaxWidth(handle: HTMLElement | null) {
 }
 
 export function usePanelResize() {
-  const sidebarWidth = ref(Number(safeLocalStorageGet("dbx-sidebar-width")) || 260);
-  const aiPanelWidth = ref(Number(safeLocalStorageGet("dbx-ai-panel-width")) || 360);
-  const historyWidth = ref(Number(safeLocalStorageGet("dbx-history-width")) || 288);
-  const sqlLibraryWidth = ref(Number(safeLocalStorageGet("dbx-sql-library-width")) || 288);
-  const sqlFilePanelWidth = ref(Number(safeLocalStorageGet("dbx-sql-file-panel-width")) || 288);
-  const tabBarWidth = ref(Number(safeLocalStorageGet("dbx-tab-bar-width")) || 240);
+  const sidebarWidth = ref(restoredPanelWidth("dbx-sidebar-width", 260));
+  const aiPanelWidth = ref(restoredPanelWidth("dbx-ai-panel-width", 360));
+  const historyWidth = ref(restoredPanelWidth("dbx-history-width", 288));
+  const sqlLibraryWidth = ref(restoredPanelWidth("dbx-sql-library-width", 288));
+  const sqlFilePanelWidth = ref(restoredPanelWidth("dbx-sql-file-panel-width", 288));
+  const tabBarWidth = ref(restoredPanelWidth("dbx-tab-bar-width", 240));
   const tabBarCollapsed = ref(safeLocalStorageGet("dbx-tab-bar-collapsed") === "true");
 
   function startPanelResize(widthRef: Ref<number>, storageKey: string, direction: "left" | "right", maxWidth: PanelMaxWidth = DEFAULT_PANEL_MAX_WIDTH) {

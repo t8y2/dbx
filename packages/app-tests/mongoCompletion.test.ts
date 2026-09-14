@@ -272,7 +272,7 @@ test("suggests aggregation stages inside aggregate pipeline", () => {
 test("completion context is tolerant of unfinished input", () => {
   const context = getMongoCompletionContext('db.getCollection("users").find({ "', 'db.getCollection("users").find({ "'.length);
 
-  assert.equal(context.mode, "field");
+  assert.equal(context.mode, "filterField");
   assert.equal(context.collection, "users");
 });
 
@@ -329,6 +329,46 @@ test("auto trigger opens for useful MongoDB characters only", () => {
   assert.equal(shouldAutoOpenMongoCompletion("db.", "db.".length), true);
   assert.equal(shouldAutoOpenMongoCompletion("db.users.find({ $", "db.users.find({ $".length), true);
   assert.equal(shouldAutoOpenMongoCompletion("db.users.find({", "db.users.find({".length), true);
+});
+
+test("offers whole-filter operators at the top level and field operators under a field", () => {
+  // `$and` / `$or` belong at the top of a filter, where nothing was offered before.
+  const top = labels("db.users.find({ $", { fields });
+  assert.ok(top.includes("$or"));
+  assert.ok(top.includes("$and"));
+  assert.ok(top.includes("$expr"));
+  assert.equal(top.includes("$gte"), false, "field operators are not valid at the top level");
+
+  // Under a field only the constraint operators apply; `{ _id: { $or: ... } }` is invalid.
+  const under = labels("db.users.find({ _id: { $", { fields });
+  assert.ok(under.includes("$gte"));
+  assert.ok(under.includes("$oid"));
+  assert.equal(under.includes("$or"), false, "$or is not valid under a field");
+  assert.equal(under.includes("$and"), false);
+  assert.deepEqual(labels("db.users.find({ _id: { $o", { fields }), ["$oid"]);
+
+  // Fields lead when nothing has been typed yet.
+  const bare = labels("db.users.find({ ", { fields });
+  assert.ok(
+    bare.slice(0, fields.length).every((label) => !label.startsWith("$")),
+    `fields first: ${bare.join(", ")}`,
+  );
+  assert.ok(bare.includes("$or"));
+});
+
+test("treats $and / $or sub-filters, $elemMatch bodies and $match as filters", () => {
+  for (const text of ["db.users.find({ $or: [{ $", "db.users.find({ items: { $elemMatch: { $", "db.users.aggregate([{ $match: { $"]) {
+    const items = labels(text, { fields });
+    assert.ok(items.includes("$or"), text);
+    assert.equal(items.includes("$gte"), false, text);
+  }
+  assert.ok(labels("db.users.find({ $or: [{ ", { fields }).includes("name"));
+  assert.ok(labels("db.users.find({ $or: [{ age: { $", { fields }).includes("$gte"));
+});
+
+test("does not offer filter operators in update or insert documents", () => {
+  assert.equal(labels("db.users.updateOne({}, { $set: { ", { fields }).includes("$or"), false);
+  assert.equal(labels("db.users.insertOne({ $", { fields }).length, 0);
 });
 
 test("keeps query and update operators in their own positions", () => {
@@ -473,7 +513,8 @@ test("completes both arguments of distinct", () => {
 
   // Second argument is a filter, so it behaves like find()'s.
   const filterArg = labels('db.users.distinct("name", { ', { fields });
-  assert.deepEqual(filterArg, ["_id", "createdAt", "name", "profile.email"]);
+  assert.deepEqual(filterArg.slice(0, 4), ["_id", "createdAt", "name", "profile.email"]);
+  assert.ok(filterArg.includes("$or"), "a filter argument offers whole-filter operators after the fields");
   assert.ok(labels('db.users.distinct("name", { age: { $g', { fields }).includes("$gte"));
 });
 

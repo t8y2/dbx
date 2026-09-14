@@ -15,7 +15,7 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 vi.mock("@/components/ui/dialog", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, Teleport } = await import("vue");
   const passthrough = defineComponent({
     setup(_props, { slots }) {
       return () => h("div", slots.default?.());
@@ -27,9 +27,20 @@ vi.mock("@/components/ui/dialog", async () => {
       return () => (props.open ? h("div", slots.default?.()) : null);
     },
   });
+  const dialogContent = defineComponent({
+    props: {
+      class: [String, Array, Object],
+      overlayClass: [String, Array, Object],
+      portalClass: [String, Array, Object],
+    },
+    inheritAttrs: false,
+    setup(props, { slots }) {
+      return () => h(Teleport, { to: "body" }, [h("div", { class: ["dialog-overlay", "z-50", props.overlayClass] }), h("div", { class: ["dialog-positioner", "z-50", props.portalClass] }, [h("div", { class: ["dialog-content", props.class] }, slots.default?.())])]);
+    },
+  });
   return {
     Dialog: dialog,
-    DialogContent: passthrough,
+    DialogContent: dialogContent,
     DialogDescription: passthrough,
     DialogFooter: passthrough,
     DialogHeader: passthrough,
@@ -131,6 +142,51 @@ describe("SshHostKeyPromptDialog web bridge", () => {
     // it and block the whole window. It must opt out of the default layer.
     expect(dialogSource).toContain('overlay-class="z-[200]"');
     expect(dialogSource).toContain('portal-class="z-[200]"');
+  });
+
+  it("keeps the prompt above a later body-mounted connection dialog and answerable", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "prompt-layered",
+        kind: "HostKeyVerify",
+        host: "layered.example.test",
+        port: 22,
+        key_type: "ssh-ed25519",
+        fingerprint: "SHA256:layered",
+      },
+    });
+    await nextTick();
+
+    // Simulate ConnectionDialog opening after the global prompt: its portal is
+    // appended later and remains on the shared default z-50 layer.
+    const connectionPositioner = document.createElement("div");
+    connectionPositioner.className = "dialog-positioner z-50";
+    connectionPositioner.textContent = "New connection";
+    document.body.append(connectionPositioner);
+
+    const promptPositioner = document.body.querySelector<HTMLElement>(".dialog-positioner.z-\\[200\\]");
+    const promptOverlay = document.body.querySelector<HTMLElement>(".dialog-overlay.z-\\[200\\]");
+    expect(promptPositioner).not.toBeNull();
+    expect(promptOverlay).not.toBeNull();
+    expect(connectionPositioner.classList.contains("z-50")).toBe(true);
+    expect(promptPositioner?.classList.contains("z-[200]")).toBe(true);
+    expect(promptOverlay?.classList.contains("z-[200]")).toBe(true);
+    expect(document.body.textContent).toContain("layered.example.test:22");
+
+    const buttons = document.body.querySelectorAll<HTMLButtonElement>("button");
+    buttons.item(buttons.length - 1).click();
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "prompt-layered",
+        action: "accept",
+        remember: true,
+        secret: undefined,
+      });
+    });
   });
 
   it("shows an SSE host-key prompt and posts the user's acceptance", async () => {

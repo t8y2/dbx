@@ -2,7 +2,7 @@
 
 Creates and packages DBX plugins as frontend-only universal bundles or full-stack projects with Rust or Go sidecars. The CLI also includes a Svelte + Vite workbench starter.
 
-For a complete Chinese walkthrough covering installation, templates, local DBX testing, signing, and publishing, see [`../../GETTING_STARTED.zh-CN.md`](../../GETTING_STARTED.zh-CN.md).
+For the complete [English plugin development guide](https://dbxio.com/en/docs/plugin-development), see the [Chinese quickstart](../../GETTING_STARTED.zh-CN.md) for a step-by-step walkthrough covering installation, templates, local DBX testing, signing, and publishing.
 
 ```bash
 npm install --global @dbx-app/plugin-cli

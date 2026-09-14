@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, it } from "vitest";
-import { buildAgentRequest, buildSystemPrompt, buildUserPrompt, type AiContext } from "@/lib/ai/ai";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { buildAgentRequest, buildSystemPrompt, buildUserPrompt, runAgentStream, type AiContext } from "@/lib/ai/ai";
+import * as api from "@/lib/backend/api";
 import { setLocale } from "@/i18n";
 
 function context(overrides: Partial<AiContext> = {}): AiContext {
@@ -18,6 +19,31 @@ function context(overrides: Partial<AiContext> = {}): AiContext {
 }
 
 describe("AI SQL dialect prompt", () => {
+  it("sends database selections to the backend as well as the model", async () => {
+    const stream = vi.spyOn(api, "aiAgentStream").mockResolvedValue("done");
+    try {
+      await runAgentStream(
+        {
+          config: { provider: "openai", apiKey: "test", apiUrl: "https://example.invalid", model: "model" },
+          action: "general",
+          mode: "agent",
+          instruction: "Join users and orders",
+          context: context({ databaseType: "mysql", database: "db_a", selectedDatabases: ["db_a", "db_b"] }),
+        },
+        [],
+        () => {},
+        "multi-db-run",
+      );
+      const args = stream.mock.calls[0];
+      expect(args[3]).toBe("db_a");
+      expect(args[14]).toEqual(["db_a", "db_b"]);
+      expect(args[1].systemPrompt).toContain('Selected databases: ["db_a","db_b"]');
+      expect(args[8]).toBe(false);
+    } finally {
+      stream.mockRestore();
+    }
+  });
+
   // buildSystemPrompt picks zh/en copy via currentLocale(); pin to en so the
   // English-string assertions are deterministic regardless of the host OS locale.
   beforeAll(async () => {

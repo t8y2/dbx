@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use serde::Serialize;
-use tauri::{Emitter, State};
+use tauri::{AppHandle, Emitter, State};
 
 use dbx_core::agent_service::AgentProgressEvent;
 use dbx_core::jdbc::{
@@ -195,6 +195,31 @@ pub async fn install_plugin_package(
     })
     .await
     .map_err(|error| error.to_string())??;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    Ok(result.response())
+}
+
+#[tauri::command]
+pub async fn install_plugin_package_from_url(
+    state: State<'_, Arc<AppState>>,
+    url: String,
+    allow_unsigned: bool,
+    app: AppHandle,
+) -> Result<PluginInstallResponse, String> {
+    let marketplace =
+        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?;
+    let policy = if allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
+    let result = marketplace
+        .install_url_package(&url, policy, move |downloaded, total| {
+            let _ = app.emit(
+                "plugin-url-download-progress",
+                serde_json::json!({
+                    "downloaded": downloaded,
+                    "total": total,
+                }),
+            );
+        })
+        .await?;
     stop_replaced_plugin_runtime(&state, &result.plugin).await;
     Ok(result.response())
 }

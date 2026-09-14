@@ -39,14 +39,14 @@ if (violations.length > 0) {
 console.log(`Static export verified: ${files.length} files contain no GitHub API endpoints.`);
 
 // `<html lang>` uses BCP 47, which is not always the route segment.
-const HTML_LANG = { en: "en", cn: "zh-CN", tr: "tr" };
+const HTML_LANG = { en: "en", cn: "zh-CN" };
 
 const requiredContent = [
   ...LANGUAGES.map((language) => ({
     file: `${language}.html`,
     includes: [`<html lang="${HTML_LANG[language] ?? language}"`, '"@type":"SoftwareApplication"'],
   })),
-  { file: "llms.txt", includes: ["90+ database", "20 MB", "Apache-2.0"] },
+  { file: "llms.txt", includes: ["90+ database", "25 MB", "Apache-2.0"] },
 ];
 
 for (const requirement of requiredContent) {

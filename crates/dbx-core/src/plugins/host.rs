@@ -133,6 +133,7 @@ impl PluginHost {
         if !plugin.compatibility.compatible {
             return Err(format!("Plugin '{plugin_id}' is incompatible: {}", plugin.compatibility.errors.join("; ")));
         }
+        let env = env.with_plugin_data_dir(&self.inner.registry.plugin_data_dir(&plugin.manifest.id));
         let session = PluginSidecarSession::start(plugin, self.inner.registry.app_version().to_string(), env).await?;
         self.forward_session_events(&session);
         self.inner.sessions.write().await.insert(plugin_id.to_string(), session.clone());
@@ -177,6 +178,15 @@ impl PluginHost {
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.send_binary(channel, data).await
+    }
+
+    /// Builds the standard plugin connection lifecycle payload for a config
+    /// using the config endpoint as the runtime endpoint (no desktop tunnel
+    /// available, e.g. the MCP CLI bridge). Validates that the config maps
+    /// to an installed connection provider.
+    pub fn connection_params_standalone(&self, config: &ConnectionConfig) -> Result<serde_json::Value, String> {
+        let (_, provider) = self.resolve_connection_provider(config)?;
+        plugin_connection_params(config, &provider, &config.host, config.port)
     }
 
     pub async fn test_connection(
@@ -390,7 +400,8 @@ fn plugin_connection_params(
         "runtime": {
             "host": runtime_host,
             "port": runtime_port,
-        }
+        },
+        "operationId": uuid::Uuid::new_v4().to_string(),
     }))
 }
 
@@ -430,10 +441,22 @@ fn validate_plugin_connection_values_for_action(
     }
     for field in &provider.fields {
         let value = plugin_connection_field_value(config, field);
-        if require_required_fields && field.required && plugin_field_value_is_empty(value.as_ref()) {
+        // Required enforcement is condition-aware (Host API 1.1): fields hidden
+        // by `visible_when` or only conditionally required via `required_when`
+        // are validated against the current stored values, mirroring the
+        // connection dialog's `pluginFieldConditions` semantics. This keeps
+        // non-dialog write paths (MCP/import) from unconditionally rejecting
+        // connections whose protocol-specific fields are simply not visible.
+        if require_required_fields
+            && plugin_field_is_visible(field, config, provider)
+            && plugin_field_is_required(field, config, provider)
+            && plugin_field_value_is_empty(value.as_ref())
+        {
             return Err(format!("Plugin connection field '{}' is required", field.label));
         }
-        if let Some(value) = value {
+        // A stored JSON null means "unset" (older dialog builds wrote nulls for
+        // untouched optional fields); it must not fail the declared type check.
+        if let Some(value) = value.filter(|value| !value.is_null()) {
             validate_plugin_field_type(field, &value)?;
             if field.effective_binding() == PluginFormFieldBinding::Port
                 && value.as_u64().is_none_or(|port| port == 0 || port > u16::MAX as u64)
@@ -520,6 +543,89 @@ fn plugin_field_value_is_empty(value: Option<&serde_json::Value>) -> bool {
         None | Some(serde_json::Value::Null) => true,
         Some(serde_json::Value::String(value)) => value.trim().is_empty(),
         _ => false,
+    }
+}
+
+/// Evaluates a plugin manifest field condition (`visible_when` / `required_when`,
+/// Host API 1.1) against the stored connection values. Mirrors the frontend
+/// `pluginFieldConditions.ts` semantics: the condition matches when the current
+/// value of the referenced sibling field is listed in `one_of`; a missing
+/// sibling field or an unset/empty value never matches.
+fn plugin_field_condition_matches(
+    condition: &super::PluginFieldCondition,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+) -> bool {
+    let Some(sibling) = provider.fields.iter().find(|field| field.key == condition.field) else {
+        return false;
+    };
+    let Some(value) = plugin_connection_field_value(config, sibling) else {
+        return false;
+    };
+    let text = match value {
+        serde_json::Value::Null => return false,
+        serde_json::Value::String(text) => text,
+        other => other.to_string(),
+    };
+    if text.trim().is_empty() {
+        return false;
+    }
+    condition.one_of.iter().any(|option| option == &text)
+}
+
+/// A field participates in the form when its `visible_when` (if any) matches.
+/// Mirrors the frontend cascade (`pluginFieldConditions.ts`): once the raw
+/// condition matches, the referenced sibling must itself be visible — a hidden
+/// container field's stored default (e.g. `krb_credential_type: "password"`
+/// while auth is simple) must not mark grandchild fields visible + required,
+/// otherwise non-dialog write paths reject connections the dialog accepts.
+fn plugin_field_is_visible(
+    field: &PluginFormFieldDefinition,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+) -> bool {
+    let mut seen = HashSet::new();
+    seen.insert(field.key.clone());
+    plugin_field_is_visible_cached(field, config, provider, &mut seen)
+}
+
+fn plugin_field_is_visible_cached(
+    field: &PluginFormFieldDefinition,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+    seen: &mut HashSet<String>,
+) -> bool {
+    let Some(condition) = &field.visible_when else {
+        return true;
+    };
+    if !plugin_field_condition_matches(condition, config, provider) {
+        return false;
+    }
+    // The condition matched, so the sibling exists (its value was readable);
+    // guard cycles anyway and fall through to visible, mirroring the frontend.
+    let Some(sibling) = provider.fields.iter().find(|candidate| candidate.key == condition.field) else {
+        return true;
+    };
+    if seen.contains(&sibling.key) {
+        return true;
+    }
+    seen.insert(sibling.key.clone());
+    plugin_field_is_visible_cached(sibling, config, provider, seen)
+}
+
+/// Effective required = static `required` OR a matching `required_when`
+/// (a missing `required_when` never implies required).
+fn plugin_field_is_required(
+    field: &PluginFormFieldDefinition,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+) -> bool {
+    if field.required {
+        return true;
+    }
+    match &field.required_when {
+        None => false,
+        Some(condition) => plugin_field_condition_matches(condition, config, provider),
     }
 }
 
@@ -625,6 +731,225 @@ mod tests {
     }
 
     #[test]
+    fn tolerates_stored_null_config_values_for_type_check() {
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-connection",
+            "name": "Plugin connection",
+            "db_type": "plugin",
+            "host": "localhost",
+            "port": 22,
+            "username": "root",
+            "password": "",
+            "database": null,
+            "plugin_id": "sample",
+            "plugin_connection_provider": "sample.connection",
+            "plugin_connection_type": "sample",
+            "external_config": { "authentication": "agent", "agent_socket": null }
+        }))
+        .unwrap();
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                {
+                    "key": "authentication",
+                    "label": "Authentication",
+                    "type": "select",
+                    "binding": "config",
+                    "default": "password",
+                    "options": [
+                        { "value": "password", "label": "Password" },
+                        { "value": "agent", "label": "Agent" }
+                    ]
+                },
+                { "key": "agent_socket", "label": "Agent socket", "type": "text", "binding": "config" }
+            ]
+        }))
+        .unwrap();
+
+        assert!(validate_plugin_connection_values(&config, &provider).is_ok());
+    }
+
+    /// Mirrors the files plugin manifest shape: `bucket` is required only when
+    /// `protocol` selects `s3` (`required_when` paired with `visible_when`).
+    #[test]
+    fn conditional_required_field_enforced_only_when_condition_matches() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                {
+                    "key": "protocol",
+                    "label": "Protocol",
+                    "type": "select",
+                    "binding": "config",
+                    "required": true,
+                    "default": "fs",
+                    "options": [
+                        { "value": "fs", "label": "fs" },
+                        { "value": "s3", "label": "s3" }
+                    ]
+                },
+                {
+                    "key": "bucket",
+                    "label": "Bucket",
+                    "type": "text",
+                    "binding": "config",
+                    "visible_when": { "field": "protocol", "one_of": ["s3"] },
+                    "required_when": { "field": "protocol", "one_of": ["s3"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let config_for = |external: serde_json::Value| -> ConnectionConfig {
+            serde_json::from_value(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "Plugin connection",
+                "db_type": "plugin",
+                "host": "localhost",
+                "port": 22,
+                "username": "",
+                "password": "",
+                "database": null,
+                "plugin_id": "sample",
+                "plugin_connection_provider": "sample.connection",
+                "plugin_connection_type": "sample",
+                "external_config": external
+            }))
+            .unwrap()
+        };
+
+        // fs: bucket not visible → not required → connection accepted.
+        assert!(
+            validate_plugin_connection_values(&config_for(serde_json::json!({ "protocol": "fs" })), &provider).is_ok()
+        );
+        // s3: bucket visible and conditionally required → empty bucket rejected.
+        assert!(validate_plugin_connection_values(&config_for(serde_json::json!({ "protocol": "s3" })), &provider)
+            .unwrap_err()
+            .contains("field 'Bucket' is required"));
+        // s3 with a bucket value passes.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "protocol": "s3", "bucket": "demo" })),
+            &provider
+        )
+        .is_ok());
+        // Whitespace-only values count as empty.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "protocol": "s3", "bucket": "  " })),
+            &provider
+        )
+        .unwrap_err()
+        .contains("field 'Bucket' is required"));
+    }
+
+    #[test]
+    fn statically_required_field_only_enforced_while_visible() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                {
+                    "key": "mode",
+                    "label": "Mode",
+                    "type": "select",
+                    "binding": "config",
+                    "default": "simple",
+                    "options": [
+                        { "value": "simple", "label": "Simple" },
+                        { "value": "custom", "label": "Custom" }
+                    ]
+                },
+                {
+                    "key": "secret_key",
+                    "label": "Secret key",
+                    "type": "password",
+                    "binding": "secret",
+                    "required": true,
+                    "visible_when": { "field": "mode", "one_of": ["custom"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let config_for = |external: serde_json::Value, secrets: serde_json::Value| -> ConnectionConfig {
+            serde_json::from_value(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "Plugin connection",
+                "db_type": "plugin",
+                "host": "localhost",
+                "port": 22,
+                "username": "",
+                "password": "",
+                "database": null,
+                "plugin_id": "sample",
+                "plugin_connection_provider": "sample.connection",
+                "plugin_connection_type": "sample",
+                "external_config": external,
+                "connection_secrets": secrets
+            }))
+            .unwrap()
+        };
+
+        // Hidden static-required field must not block the connection.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "mode": "simple" }), serde_json::json!({})),
+            &provider
+        )
+        .is_ok());
+        // Visible and empty → rejected.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "mode": "custom" }), serde_json::json!({})),
+            &provider
+        )
+        .unwrap_err()
+        .contains("field 'Secret key' is required"));
+        // Visible and filled → accepted.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "mode": "custom" }), serde_json::json!({ "secret_key": "k" })),
+            &provider
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn required_when_referencing_missing_sibling_field_is_never_required() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                { "key": "root", "label": "Root", "type": "text", "binding": "config" },
+                {
+                    "key": "orphan",
+                    "label": "Orphan",
+                    "type": "text",
+                    "binding": "config",
+                    "required_when": { "field": "ghost", "one_of": ["x"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-connection",
+            "name": "Plugin connection",
+            "db_type": "plugin",
+            "host": "localhost",
+            "port": 22,
+            "username": "",
+            "password": "",
+            "database": null,
+            "plugin_id": "sample",
+            "plugin_connection_provider": "sample.connection",
+            "plugin_connection_type": "sample"
+        }))
+        .unwrap();
+
+        assert!(validate_plugin_connection_values(&config, &provider).is_ok());
+    }
+
+    #[test]
     fn allows_incomplete_fields_only_for_declared_permissive_actions() {
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "plugin-connection",
@@ -698,5 +1023,98 @@ mod tests {
         assert!(plugin_connection_action_result(serde_json::json!({ "fieldValues": { "port": "5432" } }), &provider,)
             .unwrap_err()
             .contains("invalid value type"));
+    }
+
+    /// Mirrors the ldap plugin manifest shape: `krb_password` conditions on
+    /// `krb_credential_type`, which is itself hidden unless `auth_type` is
+    /// `kerberos`. A stored default on the hidden container field ("password")
+    /// must not make `krb_password` visible + required — the connection dialog
+    /// (cascading visibility) accepts such a save, so validation must too.
+    #[test]
+    fn cascaded_hidden_container_default_does_not_force_grandchild_required() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "ldap.connection",
+            "label": "LDAP",
+            "database_type": "ldap",
+            "fields": [
+                {
+                    "key": "auth_type",
+                    "label": "Authentication",
+                    "type": "select",
+                    "binding": "config",
+                    "default": "simple",
+                    "options": [
+                        { "value": "simple", "label": "Simple" },
+                        { "value": "kerberos", "label": "Kerberos (GSSAPI)" }
+                    ]
+                },
+                {
+                    "key": "krb_credential_type",
+                    "label": "Kerberos credential type",
+                    "type": "select",
+                    "binding": "config",
+                    "default": "password",
+                    "visible_when": { "field": "auth_type", "one_of": ["kerberos"] },
+                    "options": [
+                        { "value": "password", "label": "Password" },
+                        { "value": "keytab", "label": "Keytab" }
+                    ]
+                },
+                {
+                    "key": "krb_password",
+                    "label": "Kerberos password",
+                    "type": "password",
+                    "binding": "secret",
+                    "visible_when": { "field": "krb_credential_type", "one_of": ["password"] },
+                    "required_when": { "field": "krb_credential_type", "one_of": ["password"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let config_for = |external: serde_json::Value| -> ConnectionConfig {
+            serde_json::from_value(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "KN-LDAP",
+                "db_type": "plugin",
+                "host": "ldap.example.com",
+                "port": 389,
+                "username": "",
+                "password": "",
+                "database": null,
+                "plugin_id": "io.dbx.ldap",
+                "plugin_connection_provider": "ldap.connection",
+                "plugin_connection_type": "ldap",
+                "external_config": external
+            }))
+            .unwrap()
+        };
+
+        // Simple auth with the stale stored default on the hidden container
+        // field: dialog saves it, host must not demand the hidden secret.
+        let simple = config_for(serde_json::json!({ "auth_type": "simple", "krb_credential_type": "password" }));
+        assert!(validate_plugin_connection_values(&simple, &provider).is_ok());
+
+        // Kerberos + password credential type: the grandchild is genuinely
+        // visible and required, and the empty secret must still be rejected.
+        let kerberos = config_for(serde_json::json!({ "auth_type": "kerberos", "krb_credential_type": "password" }));
+        assert!(validate_plugin_connection_values(&kerberos, &provider)
+            .unwrap_err()
+            .contains("Kerberos password' is required"));
+
+        // Cycle guard: mutual references must not hang or misclassify.
+        let cyclic: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "cyclic.connection",
+            "label": "Cyclic",
+            "database_type": "cyclic",
+            "fields": [
+                { "key": "a", "label": "A", "type": "text", "binding": "config",
+                  "visible_when": { "field": "b", "one_of": ["x"] } },
+                { "key": "b", "label": "B", "type": "text", "binding": "config",
+                  "visible_when": { "field": "a", "one_of": ["x"] } }
+            ]
+        }))
+        .unwrap();
+        let cyclic_config = config_for(serde_json::json!({ "a": "x", "b": "x" }));
+        assert!(validate_plugin_connection_values(&cyclic_config, &cyclic).is_ok());
     }
 }

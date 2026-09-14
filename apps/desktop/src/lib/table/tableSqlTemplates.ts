@@ -1,5 +1,5 @@
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { metricRangeQuery, qualifiedTableName, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { metricRangeQuery, qualifiedTableName, quoteTableDataIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
 
 export interface TableSqlTemplateOptions {
   databaseType?: DatabaseType;
@@ -9,7 +9,7 @@ export interface TableSqlTemplateOptions {
   catalog?: string;
   database?: string;
   includeDatabaseName?: boolean;
-  /** Emit bare table identifiers instead of dialect-specific quotes. */
+  /** Omit optional identifier quotes while retaining quotes required by the dialect. */
   quoteIdentifiers?: boolean;
   tableName: string;
   columns?: ColumnInfo[];
@@ -116,7 +116,7 @@ function templateTableName(options: TableSqlTemplateOptions): string {
 }
 
 function templateIdentifier(options: TableSqlTemplateOptions, name: string): string {
-  return quoteTableDataIdentifier(options.databaseType, name, options.identifierQuote);
+  return options.quoteIdentifiers === false ? quoteTableIdentifierIfNeeded(options.databaseType, name, options.identifierQuote) : quoteTableDataIdentifier(options.databaseType, name, options.identifierQuote);
 }
 
 function buildWhereClause(options: TableSqlTemplateOptions, primaryKeys: ColumnInfo[]): string {

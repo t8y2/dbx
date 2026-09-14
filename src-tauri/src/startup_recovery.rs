@@ -83,7 +83,7 @@ fn compatibility_marker_path() -> Option<PathBuf> {
 }
 
 fn compatibility_marker_contents(version: &str) -> String {
-    format!("version={version}\nmode=isolated-profile-no-sandbox\n")
+    format!("version={version}\nmode=isolated-profile-no-sandbox-disable-gpu\n")
 }
 
 fn compatibility_marker_matches_version(path: &Path, version: &str) -> bool {
@@ -309,17 +309,25 @@ fn install_panic_hook() {
     }));
 }
 
-#[cfg(target_os = "windows")]
-fn append_webview2_argument(argument: &str) {
-    let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+fn append_webview2_argument_to_value(mut args: String, argument: &str) -> String {
     if args.split_whitespace().any(|value| value == argument) {
-        return;
+        return args;
     }
     if !args.is_empty() {
         args.push(' ');
     }
     args.push_str(argument);
-    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
+    args
+}
+
+fn webview2_compatibility_arguments(mut args: String, enterprise_compat: bool, manual_no_sandbox: bool) -> String {
+    if enterprise_compat || manual_no_sandbox {
+        args = append_webview2_argument_to_value(args, "--no-sandbox");
+    }
+    if enterprise_compat {
+        args = append_webview2_argument_to_value(args, "--disable-gpu");
+    }
+    args
 }
 
 #[cfg(target_os = "windows")]
@@ -339,8 +347,15 @@ fn configure_webview2_compatibility(enterprise_compat: bool) {
         }
     }
     if enterprise_compat || manual_no_sandbox {
-        append_webview2_argument("--no-sandbox");
+        let args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            webview2_compatibility_arguments(args, enterprise_compat, manual_no_sandbox),
+        );
         record(format!("WebView2 no-sandbox enabled enterprise_compat={enterprise_compat} manual={manual_no_sandbox}"));
+    }
+    if enterprise_compat {
+        record("WebView2 GPU acceleration disabled for enterprise compatibility recovery");
     }
 }
 
@@ -525,11 +540,11 @@ fn confirm_keep_compatibility_mode() -> bool {
     let locale = sys_locale::get_locale().unwrap_or_default().to_ascii_lowercase();
     let body = if locale.starts_with("zh") {
         format!(
-            "DBX 已通过企业环境兼容模式恢复主界面。\n\n该模式会为 WebView2 使用独立数据目录并关闭沙箱，仅建议在标准模式无法显示窗口时保留。\n\n是否让当前 DBX 版本后续启动直接使用兼容模式？\n选择“否”后，下次启动会重新尝试标准模式。\n\n本次恢复日志：{log_path}"
+            "DBX 已通过企业环境兼容模式恢复主界面。\n\n该模式会为 WebView2 使用独立数据目录，并关闭沙箱和 GPU 加速，仅建议在标准模式无法显示窗口时保留。\n\n是否让当前 DBX 版本后续启动直接使用兼容模式？\n选择“否”后，下次启动会重新尝试标准模式。\n\n本次恢复日志：{log_path}"
         )
     } else {
         format!(
-            "DBX restored the main window using enterprise environment compatibility mode.\n\nThis mode uses an isolated WebView2 data directory and disables the sandbox. Keep it only when the standard mode cannot display the window.\n\nUse compatibility mode directly for future launches of this DBX version?\nChoose No to retry standard mode on the next launch.\n\nRecovery log: {log_path}"
+            "DBX restored the main window using enterprise environment compatibility mode.\n\nThis mode uses an isolated WebView2 data directory and disables the sandbox and GPU acceleration. Keep it only when the standard mode cannot display the window.\n\nUse compatibility mode directly for future launches of this DBX version?\nChoose No to retry standard mode on the next launch.\n\nRecovery log: {log_path}"
         )
     };
     let title = "DBX".encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
@@ -572,7 +587,8 @@ mod tests {
     use super::{
         compatibility_marker_contents, compatibility_marker_path_from_appdata, compatibility_profile_path_from_inputs,
         compatibility_profile_ready_record, configure_recovery_child, resolve_compatibility_mode,
-        should_attempt_enterprise_recovery, startup_log_dir_from_inputs, RECOVERY_ATTEMPT_ENV, RECOVERY_PARENT_PID_ENV,
+        should_attempt_enterprise_recovery, startup_log_dir_from_inputs, webview2_compatibility_arguments,
+        RECOVERY_ATTEMPT_ENV, RECOVERY_PARENT_PID_ENV,
     };
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -682,6 +698,28 @@ mod tests {
 
     #[test]
     fn compatibility_marker_is_scoped_to_the_current_version() {
-        assert_eq!(compatibility_marker_contents("0.5.72"), "version=0.5.72\nmode=isolated-profile-no-sandbox\n");
+        assert_eq!(
+            compatibility_marker_contents("0.5.72"),
+            "version=0.5.72\nmode=isolated-profile-no-sandbox-disable-gpu\n"
+        );
+    }
+
+    #[test]
+    fn webview2_recovery_arguments_only_disable_gpu_for_enterprise_compatibility() {
+        let existing = "--remote-debugging-port=9222".to_string();
+
+        assert_eq!(webview2_compatibility_arguments(existing.clone(), false, false), existing);
+        assert_eq!(
+            webview2_compatibility_arguments(existing.clone(), false, true),
+            "--remote-debugging-port=9222 --no-sandbox"
+        );
+        assert_eq!(
+            webview2_compatibility_arguments(existing, true, false),
+            "--remote-debugging-port=9222 --no-sandbox --disable-gpu"
+        );
+        assert_eq!(
+            webview2_compatibility_arguments("--no-sandbox --disable-gpu".to_string(), true, false),
+            "--no-sandbox --disable-gpu"
+        );
     }
 }

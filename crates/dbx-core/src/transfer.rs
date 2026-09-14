@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use futures::{SinkExt, StreamExt};
+
 #[cfg(test)]
 #[path = "transfer/rebuild_tests.rs"]
 mod rebuild_tests;
@@ -1332,6 +1334,30 @@ fn postgres_schema_exists_sql(schema: &str) -> String {
 
 fn query_result_has_rows(result: &db::QueryResult) -> bool {
     !result.rows.is_empty()
+}
+
+async fn ensure_postgres_transfer_schema_exists(
+    state: &AppState,
+    target_pool_key: &str,
+    target_schema: &str,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    if target_schema.trim().is_empty() {
+        return Ok(());
+    }
+
+    let schema_exists = execute_on_pool(state, target_pool_key, &postgres_schema_exists_sql(target_schema))
+        .await
+        .map_err(|e| format!("Failed to check PostgreSQL target schema: {e}"))?;
+    if query_result_has_rows(&schema_exists) {
+        return Ok(());
+    }
+
+    let create_schema_sql = format!("CREATE SCHEMA {}", quote_identifier(target_schema, target_db_type));
+    execute_on_pool(state, target_pool_key, &create_schema_sql)
+        .await
+        .map_err(|e| format!("Failed to create PostgreSQL target schema: {e}"))?;
+    Ok(())
 }
 
 fn is_postgres_compat_transfer(source_db: &DatabaseType, target_db: &DatabaseType) -> bool {
@@ -5114,6 +5140,169 @@ fn advance_keyset_cursor(
     }
 }
 
+/// Whether a table copy may stream through the PostgreSQL COPY protocol
+/// (`COPY ... TO STDOUT` on the source piped into `COPY ... FROM STDIN` on the
+/// target) instead of the paged SELECT + multi-row INSERT loop.
+///
+/// Requirements:
+/// - both endpoints speak a PostgreSQL-compatible dialect over the native
+///   PostgreSQL pool (PostgreSQL, openGauss, KingbaseES);
+/// - the effective write mode is append or overwrite — upsert needs
+///   `ON CONFLICT`, which COPY cannot express;
+/// - no column needs INSERT-only handling such as `OVERRIDING SYSTEM VALUE`
+///   for GENERATED ALWAYS identity columns.
+///
+/// When any requirement fails — or when the COPY stream errors at runtime —
+/// the transfer falls back to the existing paged INSERT path unchanged.
+fn transfer_copy_fast_path_supported(
+    pg_compat_transfer: bool,
+    effective_mode: &TransferMode,
+    overrides_postgres_system_values: bool,
+) -> bool {
+    pg_compat_transfer
+        && matches!(effective_mode, TransferMode::Append | TransferMode::Overwrite)
+        && !overrides_postgres_system_values
+}
+
+/// Builds the COPY read/write statements for the fast path. The column lists
+/// mirror the quoting rules of the paged SELECT / multi-row INSERT statements,
+/// so identifier folding behaves identically on both paths.
+fn postgres_copy_transfer_sql(
+    col_names: &[String],
+    table: &str,
+    source_schema: &str,
+    source_db_type: &DatabaseType,
+    source_catalog: Option<&str>,
+    target_table: &str,
+    target_schema: &str,
+    target_db_type: &DatabaseType,
+    target_catalog: Option<&str>,
+    quote_target_column_names: bool,
+) -> (String, String) {
+    let source_col_list = col_names.iter().map(|c| quote_identifier(c, source_db_type)).collect::<Vec<_>>().join(", ");
+    let full_source_table = qualified_table(table, source_schema, source_db_type, source_catalog);
+    let copy_out = format!("COPY (SELECT {source_col_list} FROM {full_source_table}) TO STDOUT");
+
+    let target_col_list = col_names
+        .iter()
+        .map(|c| transfer_column_identifier(c, target_db_type, quote_target_column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let full_target_table = qualified_table(target_table, target_schema, target_db_type, target_catalog);
+    let copy_in = format!("COPY {full_target_table} ({target_col_list}) FROM STDIN");
+    (copy_out, copy_in)
+}
+
+/// Counts records in a chunk of COPY text-format data. Field values escape a
+/// literal newline as the two-byte sequence `\n`, so every raw `0x0A` byte is
+/// a record separator.
+fn count_copy_text_rows(chunk: &[u8]) -> u64 {
+    chunk.iter().filter(|byte| **byte == b'\n').count() as u64
+}
+
+/// How often the COPY pipe polls the transfer cancellation flag between chunks.
+const COPY_CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Streams one table from the source pool to the target pool through the
+/// PostgreSQL COPY protocol: `COPY (SELECT ...) TO STDOUT` bytes are piped
+/// chunk-by-chunk into `COPY ... FROM STDIN` without decoding, so both servers
+/// handle all type formatting/parsing and the client never materializes the
+/// table. Returns the number of rows the target server reports as copied.
+///
+/// Any error — including cancellation and inactivity timeout — leaves the
+/// target's COPY statement aborted atomically (dropping the sink sends
+/// `COPY FAIL`), so no partial rows survive and the caller can safely retry
+/// through the paged INSERT path.
+async fn transfer_table_via_copy(
+    state: &AppState,
+    transfer_id: &str,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    copy_out_sql: &str,
+    copy_in_sql: &str,
+    inactivity_timeout: Option<std::time::Duration>,
+    report_rows_interval: u64,
+    on_rows: &mut impl FnMut(u64),
+) -> Result<u64, String> {
+    let (source_pool, target_pool) =
+        match (state.pool_handle(source_pool_key).await, state.pool_handle(target_pool_key).await) {
+            (Some(PoolKind::Postgres(source)), Some(PoolKind::Postgres(target))) => (source, target),
+            _ => return Err("COPY fast path requires native PostgreSQL pools on both endpoints".to_string()),
+        };
+
+    crate::query::check_read_only_for_connection(state, target_pool_key, copy_in_sql).await?;
+
+    let source_client = db::postgres::checkout_postgres_client(&source_pool, None, db::connection_timeout()).await?;
+    let target_client = db::postgres::checkout_postgres_client(&target_pool, None, db::connection_timeout()).await?;
+
+    // Open the read side first so an invalid source SELECT fails before the
+    // target COPY is started.
+    let source_stream =
+        source_client.copy_out(copy_out_sql).await.map_err(|error| format!("COPY read failed to start: {error}"))?;
+    let sink = target_client
+        .copy_in::<_, bytes::Bytes>(copy_in_sql)
+        .await
+        .map_err(|error| format!("COPY write failed to start: {error}"))?;
+
+    let mut source_stream = std::pin::pin!(source_stream);
+    let mut sink = std::pin::pin!(sink);
+    let mut rows_seen: u64 = 0;
+    let mut rows_reported: u64 = 0;
+    let mut last_cancel_poll = std::time::Instant::now();
+
+    loop {
+        if last_cancel_poll.elapsed() >= COPY_CANCEL_POLL_INTERVAL {
+            last_cancel_poll = std::time::Instant::now();
+            if is_cancelled(transfer_id).await {
+                return Err("Cancelled".to_string());
+            }
+        }
+
+        // The inactivity window mirrors the progress-aware budget of paged
+        // reads: it resets for every chunk the servers deliver, so a long but
+        // steady COPY is never cut short for exceeding the configured query
+        // timeout in total.
+        let next_chunk = match inactivity_timeout {
+            Some(window) => tokio::time::timeout(window, source_stream.as_mut().next())
+                .await
+                .map_err(|_| format!("COPY read timed out after {} seconds without progress", window.as_secs()))?,
+            None => source_stream.as_mut().next().await,
+        };
+        let Some(chunk) = next_chunk else { break };
+        let chunk = chunk.map_err(|error| format!("COPY read failed: {error}"))?;
+
+        rows_seen += count_copy_text_rows(&chunk);
+        match inactivity_timeout {
+            Some(window) => {
+                tokio::time::timeout(window, sink.as_mut().send(chunk))
+                    .await
+                    .map_err(|_| format!("COPY write timed out after {} seconds without progress", window.as_secs()))
+                    .and_then(|result| result.map_err(|error| format!("COPY write failed: {error}")))?;
+            }
+            None => sink.as_mut().send(chunk).await.map_err(|error| format!("COPY write failed: {error}"))?,
+        }
+
+        if rows_seen - rows_reported >= report_rows_interval {
+            rows_reported = rows_seen;
+            on_rows(rows_seen);
+        }
+    }
+
+    // The target's CommandComplete tag is the authoritative row count.
+    let finish_future = sink.as_mut().finish();
+    let rows_copied = match inactivity_timeout {
+        Some(window) => match tokio::time::timeout(window, finish_future).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(format!("COPY write timed out after {} seconds without progress", window.as_secs()));
+            }
+        },
+        None => finish_future.await,
+    }
+    .map_err(|error| format!("COPY write failed to complete: {error}"))?;
+    Ok(rows_copied)
+}
+
 fn is_mongodb_transfer_type(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::MongoDb)
 }
@@ -8472,11 +8661,9 @@ async fn create_transfer_target_table(
     if transfer_table_needs_inline_postgres_schema_ensure(source_db_type, target_db_type)
         && !request.target_schema.trim().is_empty()
     {
-        let create_schema_sql =
-            format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(&request.target_schema, target_db_type));
-        execute_on_pool(state, target_pool_key, &create_schema_sql)
-            .await
-            .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
+        // CREATE SCHEMA requires database-level CREATE privilege even with
+        // IF NOT EXISTS, so skip it when the target schema is already present.
+        ensure_postgres_transfer_schema_exists(state, target_pool_key, &request.target_schema, target_db_type).await?;
     }
 
     // The pre-pass renamed the target away, so the name is free again. Resetting the
@@ -8940,6 +9127,81 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
+
+    // COPY fast path: PG-family append/overwrite transfers stream the whole
+    // table through the COPY protocol instead of paged SELECT + multi-row
+    // INSERT — no per-batch statement parsing, no JSON round-trip. Any failure
+    // is atomic (the target's COPY statement aborts), so the paged INSERT loop
+    // below runs unchanged as a fallback.
+    let mut copy_rows: Option<u64> = None;
+    if transfer_copy_fast_path_supported(pg_compat_transfer, &effective_mode, overrides_postgres_system_values) {
+        let (copy_out_sql, copy_in_sql) = postgres_copy_transfer_sql(
+            &col_names,
+            table,
+            &request.source_schema,
+            source_db_type,
+            request.source_catalog.as_deref(),
+            &target_table,
+            &request.target_schema,
+            target_db_type,
+            request.target_catalog.as_deref(),
+            request.quote_target_column_names,
+        );
+        let (_, _, _, source_timeout_secs) = transfer_pool_context(state, source_pool_key).await;
+        let (_, _, _, target_timeout_secs) = transfer_pool_context(state, target_pool_key).await;
+        let inactivity_timeout = match (source_timeout_secs, target_timeout_secs) {
+            (Some(source_secs), Some(target_secs)) => query_timeout_duration(Some(source_secs.min(target_secs))),
+            (source_secs, target_secs) => query_timeout_duration(source_secs.or(target_secs)),
+        };
+        log::info!("[transfer] {table}: streaming through COPY fast path");
+        let started = std::time::Instant::now();
+        let copy_result = transfer_table_via_copy(
+            state,
+            &request.transfer_id,
+            source_pool_key,
+            target_pool_key,
+            &copy_out_sql,
+            &copy_in_sql,
+            inactivity_timeout,
+            batch_size as u64,
+            &mut |rows| {
+                progress_callback(TransferProgress {
+                    transfer_id: request.transfer_id.clone(),
+                    table: table.to_string(),
+                    table_index,
+                    total_tables,
+                    rows_transferred: rows,
+                    total_rows,
+                    status: TransferStatus::Running,
+                    error: None,
+                    terminal: false,
+                });
+            },
+        )
+        .await;
+        match copy_result {
+            Ok(rows) => {
+                copy_rows = Some(rows);
+                total_transferred = rows;
+                log::info!("[transfer] {table}: COPY fast path moved {rows} rows in {:?}", started.elapsed());
+                progress_callback(TransferProgress {
+                    transfer_id: request.transfer_id.clone(),
+                    table: table.to_string(),
+                    table_index,
+                    total_tables,
+                    rows_transferred: rows,
+                    total_rows,
+                    status: TransferStatus::Running,
+                    error: None,
+                    terminal: false,
+                });
+            }
+            Err(error) if error == "Cancelled" => return Err(error),
+            Err(error) => {
+                log::warn!("[transfer] {table}: COPY fast path unavailable ({error}); using paged INSERT transfer");
+            }
+        }
+    }
     // Keyset paging state: when the source can page by key cursor, each page
     // seeks with `WHERE (pk...) > <cursor>` instead of OFFSET, which rescans
     // and discards every previously read row (quadratic in table size). Falls
@@ -8962,6 +9224,10 @@ where
     let mut hive_server_cursor = HiveServerTransferCursor::default();
 
     let transfer_result: Result<(), String> = async {
+        if copy_rows.is_some() {
+            // The COPY fast path already streamed the whole table.
+            return Ok(());
+        }
         loop {
             if is_cancelled(&request.transfer_id).await {
                 return Err("Cancelled".to_string());
@@ -9525,21 +9791,7 @@ where
         return Ok(());
     }
 
-    if !request.target_schema.trim().is_empty() {
-        let schema_exists =
-            execute_on_pool(state, target_pool_key, &postgres_schema_exists_sql(&request.target_schema))
-                .await
-                .map_err(|e| format!("Failed to check PostgreSQL target schema: {e}"))?;
-        if !query_result_has_rows(&schema_exists) {
-            // CREATE SCHEMA requires database-level CREATE privilege even with
-            // IF NOT EXISTS, so only issue it after confirming the schema is absent.
-            let create_schema_sql =
-                format!("CREATE SCHEMA {}", quote_identifier(&request.target_schema, &DatabaseType::Postgres));
-            execute_on_pool(state, target_pool_key, &create_schema_sql)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL target schema: {e}"))?;
-        }
-    }
+    ensure_postgres_transfer_schema_exists(state, target_pool_key, &request.target_schema, &target_db_type).await?;
 
     let extensions =
         get_postgres_extension_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
@@ -13553,6 +13805,66 @@ mod tests {
         ));
         // Empty pages leave the cursor untouched.
         assert!(matches!(advance_keyset_cursor(&mut cursor, &Vec::new(), &[0], "t"), Ok(KeysetAdvance::Advanced)));
+    }
+
+    #[test]
+    fn copy_fast_path_requires_pg_compat_append_or_overwrite() {
+        for mode in [TransferMode::Append, TransferMode::Overwrite] {
+            assert!(transfer_copy_fast_path_supported(true, &mode, false));
+        }
+        // Upsert needs ON CONFLICT, which COPY cannot express.
+        assert!(!transfer_copy_fast_path_supported(true, &TransferMode::Upsert, false));
+        // Non-PG-compatible endpoint pairs (the caller passes pg_compat_transfer).
+        assert!(!transfer_copy_fast_path_supported(false, &TransferMode::Append, false));
+        // GENERATED ALWAYS identity values need OVERRIDING SYSTEM VALUE.
+        assert!(!transfer_copy_fast_path_supported(true, &TransferMode::Append, true));
+    }
+
+    #[test]
+    fn postgres_copy_transfer_sql_wraps_select_and_targets_columns() {
+        let cols = vec!["id".to_string(), "userName".to_string()];
+
+        // PostgreSQL -> PostgreSQL: source columns are always quoted, target
+        // columns follow the INSERT path quoting rules.
+        let (copy_out, copy_in) = postgres_copy_transfer_sql(
+            &cols,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            "users",
+            "backup",
+            &DatabaseType::Postgres,
+            None,
+            false,
+        );
+        assert_eq!(copy_out, r#"COPY (SELECT "id", "userName" FROM "public"."users") TO STDOUT"#);
+        assert_eq!(copy_in, r#"COPY "backup"."users" ("id", "userName") FROM STDIN"#);
+
+        // With target quoting disabled, openGauss folds simple unquoted column
+        // names — the same rule the multi-row INSERT fallback uses.
+        let (_, copy_in) = postgres_copy_transfer_sql(
+            &cols,
+            "users",
+            "",
+            &DatabaseType::OpenGauss,
+            None,
+            "users",
+            "",
+            &DatabaseType::OpenGauss,
+            None,
+            false,
+        );
+        assert_eq!(copy_in, r#"COPY "users" (id, userName) FROM STDIN"#);
+    }
+
+    #[test]
+    fn count_copy_text_rows_counts_separators_not_escaped_newlines() {
+        // COPY text format escapes newlines inside field values as `\n`, so
+        // only raw 0x0A bytes are record separators.
+        assert_eq!(count_copy_text_rows(b"id\tname\n1\ttwo\nlines\n"), 3);
+        assert_eq!(count_copy_text_rows(b"1\ta\\nb\n2\t\\\\N\n"), 2);
+        assert_eq!(count_copy_text_rows(b""), 0);
     }
 
     #[test]

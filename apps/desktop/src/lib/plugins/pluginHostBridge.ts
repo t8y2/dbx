@@ -217,15 +217,40 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
   return [...origins];
 }
 
-export function pluginSandboxDocument(html: string, permissions?: readonly string[]): string {
+export function pluginSandboxDocument(html: string, permissions?: readonly string[], theme?: PluginBridgeTheme): string {
   const networkOrigins = pluginNetworkOrigins(permissions);
   const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; ${connectSrc} media-src data: blob:;">`;
-  const sdk = `<script>${pluginSdkSource()}</script>`;
+  const sdk = `<script>${pluginSdkSource(theme)}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
-  const injection = `${csp}${uiKit}${sdk}`;
+  // Placed after the uiKit so the boot `color-scheme` wins the cascade: the
+  // bridge init message (and the SDK's applyTheme) only runs once the iframe
+  // has loaded, and the uiKit's token fallbacks would otherwise paint the
+  // first frame white on dark hosts.
+  const bootTheme = pluginBootThemeCss(theme);
+  const injection = `${csp}${uiKit}${bootTheme ? `<style>${bootTheme}</style>` : ""}${sdk}`;
   if (/<head(?:\s[^>]*)?>/i.test(html)) return html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${injection}`);
   return `<!doctype html><html><head>${injection}</head><body>${html}</body></html>`;
+}
+
+/**
+ * Pre-paint theme seed for the sandbox document. The bridge init message only
+ * arrives after the iframe load event, so without this style the first frame
+ * renders with the uiKit fallbacks (white background) before the real tokens
+ * land — the white flash when opening a plugin workbench on a dark host.
+ */
+export function pluginBootThemeCss(theme?: PluginBridgeTheme): string {
+  if (!theme || (theme.appearance !== "dark" && theme.appearance !== "light")) return "";
+  const declarations: string[] = [`color-scheme: ${theme.appearance}`];
+  const tokens = theme.tokens && typeof theme.tokens === "object" ? theme.tokens : {};
+  for (const [name, value] of Object.entries(tokens)) {
+    // Same name validation as the SDK's applyTheme; values must stay inside a
+    // single CSS declaration so they cannot break out of the style element.
+    if (!/^--[a-z0-9-]+$/i.test(name) || typeof value !== "string" || !value.trim()) continue;
+    if (!/^[^"{}<>;]*$/.test(value)) continue;
+    declarations.push(`${name}: ${value}`);
+  }
+  return `:root{${declarations.join(";")}}`;
 }
 
 /**
@@ -304,7 +329,14 @@ body {
 `.trim();
 }
 
-function pluginSdkSource(): string {
+export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
+  const safeTokens = Object.fromEntries(Object.entries(initialTheme?.tokens || {}).filter(([name, value]) => /^--[a-z0-9-]+$/i.test(name) && typeof value === "string" && !!value.trim() && /^[^"{}<>;]*$/.test(value)));
+  const safeInitialTheme = initialTheme && (initialTheme.appearance === "dark" || initialTheme.appearance === "light") ? { appearance: initialTheme.appearance, tokens: safeTokens } : null;
+  const serializedInitialTheme = JSON.stringify(safeInitialTheme)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
     const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set() };
@@ -313,21 +345,36 @@ function pluginSdkSource(): string {
     let locale = 'en';
     let theme;
     let resolveReady;
+    const initialTheme = ${serializedInitialTheme};
     const applyTheme = (value) => {
       if (!value || typeof value !== 'object') return;
       theme = value;
       const root = document.documentElement;
-      root.dataset.dbxTheme = value.appearance === 'dark' ? 'dark' : 'light';
+      root.dataset.dbxTheme = theme.appearance === "dark" ? "dark" : "light";
+      root.style.colorScheme = theme.appearance === "dark" ? "dark" : "light";
       const tokens = value.tokens && typeof value.tokens === 'object' ? value.tokens : {};
       for (const [name, tokenValue] of Object.entries(tokens)) {
         if (/^--[a-z0-9-]+$/i.test(name) && typeof tokenValue === 'string') root.style.setProperty(name, tokenValue);
       }
     };
     const ready = new Promise((resolve) => { resolveReady = resolve; });
+    if (initialTheme) applyTheme(initialTheme);
+    // Plugin UIs routinely hand reactive state (Vue Proxy arrays/objects)
+    // straight to invoke(); postMessage cannot structured-clone a Proxy and
+    // WebKit rejects with "The object can not be cloned.". Mirror the host's
+    // structuredCloneSafe: clone when possible, otherwise recover the plain
+    // data with a JSON round-trip (the sidecar transport is JSON anyway).
+    const toPlain = (value) => {
+      if (!value || typeof value !== 'object') return value;
+      if (typeof structuredClone === 'function') {
+        try { return structuredClone(value); } catch {}
+      }
+      return JSON.parse(JSON.stringify(value));
+    };
     const request = (method, params, options = {}) => new Promise((resolve, reject) => {
       const id = String(++sequence);
       pending.set(id, { resolve, reject });
-      const message = { source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'request', id, method, params };
+      const message = { source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'request', id, method, params: toPlain(params) };
       if (options.transfer) {
         message.data = options.transfer;
         parent.postMessage(message, '*', [options.transfer]);
@@ -342,6 +389,56 @@ function pluginSdkSource(): string {
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return btoa(binary);
     };
+    const stream = async (method, params = {}, options = {}) => {
+      const streamId = options.streamId || (globalThis.crypto?.randomUUID?.() || 'stream-' + Date.now() + '-' + (++sequence));
+      const closeMethod = options.closeMethod || 'filesystem/stream/close';
+      let removeListener;
+      let closeRequested = false;
+      let resolveOpen;
+      let rejectOpen;
+      const metadata = {};
+      const opened = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject; });
+      const readable = new ReadableStream({
+        start(controller) {
+          const onEvent = (message) => {
+            if (message?.method !== 'host.stream.chunk' && message?.method !== 'host.stream.end' && message?.method !== 'host.stream.error') return;
+            const event = message.params || {};
+            if (event.streamId !== streamId) return;
+            if (message.method === 'host.stream.chunk') {
+              try { controller.enqueue(decode(event.dataBase64 || '')); } catch (error) { controller.error(error); }
+              return;
+            }
+            removeListener?.();
+            removeListener = undefined;
+            if (message.method === 'host.stream.error') {
+              const error = new Error(event.message || 'Plugin stream failed');
+              rejectOpen(error);
+              controller.error(error);
+            } else {
+              Object.assign(metadata, event);
+              controller.close();
+            }
+          };
+          removeListener = () => listeners.event.delete(onEvent);
+          listeners.event.add(onEvent);
+          request('backend.invoke', { method, params: { ...(params || {}), streamId }, timeoutMs: options.timeoutMs }).then(resolveOpen, (error) => {
+            removeListener?.();
+            removeListener = undefined;
+            rejectOpen(error);
+            controller.error(error);
+          });
+        },
+        cancel() {
+          removeListener?.();
+          removeListener = undefined;
+          if (closeRequested) return undefined;
+          closeRequested = true;
+          return request('backend.invoke', { method: closeMethod, params: { streamId } }).catch(() => undefined);
+        },
+      });
+      Object.assign(metadata, await opened);
+      return { stream: readable, metadata };
+    };
     window.dbxPlugin = Object.freeze({
       ready,
       get context() { return context; },
@@ -349,6 +446,7 @@ function pluginSdkSource(): string {
       get theme() { return theme; },
       request,
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
+      stream,
       notify: (method, params) => request('backend.notify', { method, params }),
       sendBinary: (channel, data) => {
         if (typeof data === 'string') return request('backend.sendBinary', { channel, dataBase64: data });
@@ -383,23 +481,26 @@ function pluginSdkSource(): string {
         applyTheme(message.theme);
         resolveReady(context);
         listeners.init.forEach((listener) => listener(context));
-        dispatchEvent(new CustomEvent('dbx-plugin-init', { detail: message }));
+        // Plugin listeners register on the document (onHostThemeChange);
+        // bare dispatchEvent targets window, which document listeners never
+        // receive — env theme pushes were silently lost.
+        document.dispatchEvent(new CustomEvent('dbx-plugin-init', { detail: message }));
       } else if (message.type === 'context') {
         context = message.context;
         listeners.context.forEach((listener) => listener(context));
-        dispatchEvent(new CustomEvent('dbx-plugin-context', { detail: context }));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-context', { detail: context }));
       } else if (message.type === 'env') {
         if (typeof message.locale === 'string') locale = message.locale;
         if (message.theme) applyTheme(message.theme);
         listeners.event.forEach((listener) => listener(message));
-        dispatchEvent(new CustomEvent('dbx-plugin-env', { detail: message }));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-env', { detail: message }));
       } else if (message.type === 'event') {
         listeners.event.forEach((listener) => listener(message));
-        dispatchEvent(new CustomEvent('dbx-plugin-event', { detail: message }));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-event', { detail: message }));
       } else if (message.type === 'binary') {
         const payload = { channel: message.channel, data: message.data ? new Uint8Array(message.data) : new Uint8Array(0) };
         listeners.binary.forEach((listener) => listener(payload));
-        dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       }
     });
     addEventListener('keydown', (event) => {

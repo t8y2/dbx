@@ -115,7 +115,7 @@ import { normalizeSqlExecutionTarget, sqlExecutionTargetCapabilities } from "@/l
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { buildHistoryAiAnalysisPrompt } from "@/lib/history/historyAiAnalysis";
 import { countAvailableAgentDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
-import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
+import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
@@ -152,6 +152,7 @@ import { resolveWindowContext } from "@/lib/app/windowContext";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
+const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
 const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
@@ -416,6 +417,12 @@ const blockingAiRunCount = computed(() => (isDesktop ? blockingDesktopAiRunsForQ
 let aiRunsQuitConfirmed = false;
 
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
+// Plugin workbench tabs stay mounted once opened (hidden via v-show): an
+// iframe moved out of the DOM reloads from scratch, so KeepAlive/ContentArea
+// remounts flash the whole webview and drop its live session state.
+const mountedPluginWorkbenchTabs = computed(() => queryStore.tabs.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench));
+type PluginWorkbenchTabHandle = { refresh: () => Promise<unknown> };
+const pluginWorkbenchTabRefs = new Map<string, PluginWorkbenchTabHandle>();
 const tabNavigationHistory = ref(createTabNavigationHistory());
 let pendingTabHistoryNavigationId: string | null = null;
 let detachedEventUnlisteners: Array<() => void> = [];
@@ -789,7 +796,10 @@ async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, execu
   });
 }
 
-const blockDangerousRedisCommands = ref(true);
+const blockDangerousRedisCommands = computed({
+  get: () => settingsStore.editorSettings.blockDangerousRedisCommands,
+  set: (value: boolean) => settingsStore.updateEditorSettings({ blockDangerousRedisCommands: value }),
+});
 const databaseRequiredSignal = ref(0);
 const databaseRequiredTabId = ref<string | null>(null);
 const pendingToolbarExecutionSnapshot = ref<SqlExecutionSnapshot & { tabId?: string }>();
@@ -867,10 +877,10 @@ function requestActiveEditorExecuteInNewResultTab() {
 const specialPageTabs = computed(() => ({
   settingsOpen: settingsPageTabOpen.value,
   settingsActive: settingsStore.settingsPageActive,
-  driverStoreOpen: driverStoreTabOpen.value,
-  driverStoreActive: driverStoreActive.value,
   pluginCenterOpen: pluginCenterTabOpen.value,
   pluginCenterActive: pluginCenterActive.value,
+  driverStoreOpen: driverStoreTabOpen.value,
+  driverStoreActive: driverStoreActive.value,
   driverUpdateCount: toolbarAgentDriverUpdateCount.value,
 }));
 provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(computed(() => !isDetachedWindowContext && (driverStoreActive.value || pluginCenterActive.value || settingsStore.settingsPageActive))));
@@ -900,10 +910,10 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   specialPageTabs,
   activateSettingsPage,
   closeSettingsPage,
-  activateDriverStore: () => openDriverStorePage(),
-  closeDriverStore: closeDriverStorePage,
   activatePluginCenter: () => openPluginCenterPage(pluginCenterFocus.value),
   closePluginCenter: closePluginCenterPage,
+  activateDriverStore: () => openDriverStorePage(),
+  closeDriverStore: closeDriverStorePage,
 });
 
 // Upstream "preview changes" entry: dormant until the group toolbar wires the
@@ -987,8 +997,8 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openSqlFilePath,
   openDbFilePath,
   openConnectionDeepLink,
-  openAiConfigDeepLink,
   closeActiveSurface,
+  openAiConfigDeepLink,
 });
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
@@ -1056,6 +1066,10 @@ function activateOpenSpecialPageFallback() {
   }
   if (driverStoreTabOpen.value) {
     activateMainContentSurface("driverStore");
+    return;
+  }
+  if (pluginCenterTabOpen.value) {
+    activateMainContentSurface("pluginCenter");
   }
 }
 
@@ -1069,12 +1083,20 @@ function closeSettingsPage() {
     activateMainContentSurface("pluginCenter");
     return;
   }
+  if (driverStoreTabOpen.value) {
+    activateMainContentSurface("driverStore");
+    return;
+  }
+  if (pluginCenterTabOpen.value) {
+    activateMainContentSurface("pluginCenter");
+    return;
+  }
   activateMainContentSurface("query");
 }
 
 const driverStoreFocus = ref<DriverStoreFocus | null>(null);
 
-function openDriverStorePage(target?: "agent" | "jdbc" | "storage" | "runtime" | DriverStoreFocus | null) {
+function openDriverStorePage(target?: DriverStoreTab | DriverStoreFocus | null) {
   if (typeof target === "string") {
     driverStoreActiveTab.value = target;
     driverStoreFocus.value = null;
@@ -1086,11 +1108,22 @@ function openDriverStorePage(target?: "agent" | "jdbc" | "storage" | "runtime" |
   }
   driverStoreTabOpen.value = true;
   activateMainContentSurface("driverStore");
+  pluginCenterActive.value = false;
 }
 
 function closeDriverStorePage() {
   driverStoreTabOpen.value = false;
-  activateMainContentSurface("query");
+  // Keep another open special page visible when closing the active one. The
+  // previous implementation always switched to the query surface, which
+  // cleared pluginCenterActive and made an already-open Plugin Center tab
+  // disappear together with Driver Manager.
+  if (pluginCenterTabOpen.value) {
+    activateMainContentSurface("pluginCenter");
+  } else if (settingsPageTabOpen.value) {
+    activateMainContentSurface("settings");
+  } else {
+    activateMainContentSurface("query");
+  }
   driverStoreActiveTab.value = "agent";
   driverStoreFocus.value = null;
 }
@@ -1104,7 +1137,13 @@ function openPluginCenterPage(focus?: PluginCenterFocus | null) {
 function closePluginCenterPage() {
   pluginCenterTabOpen.value = false;
   pluginCenterFocus.value = null;
-  activateMainContentSurface("query");
+  if (driverStoreTabOpen.value) {
+    activateMainContentSurface("driverStore");
+  } else if (settingsPageTabOpen.value) {
+    activateMainContentSurface("settings");
+  } else {
+    activateMainContentSurface("query");
+  }
 }
 
 function openPluginConnectionDialog(pluginId: string, providerId: string) {
@@ -1298,6 +1337,7 @@ watch(
     if (id) newQueryContextSource.value = "tab";
     if (id) activateQuerySurface();
     else if (previousId) activateOpenSpecialPageFallback();
+    if (id && pluginCenterActive.value) pluginCenterActive.value = false;
     const tab = id ? queryStore.tabs.find((candidate) => candidate.id === id) : undefined;
     const selection = tab?.editorSelection;
     selectedSql.value = tab && selection && selection.anchor !== selection.head ? tab.sql.slice(Math.min(selection.anchor, selection.head), Math.max(selection.anchor, selection.head)) : "";
@@ -2277,6 +2317,7 @@ async function openConnectionDeepLink(url: string) {
     if (!draft) return;
     connectionStore.stopEditing();
     connectionStore.stopCreatingConnectionInGroup();
+    connectionPluginProvider.value = null;
     connectionDialogPrefill.value = draft;
     showConnectionDialog.value = true;
   } catch (e: any) {
@@ -2341,6 +2382,7 @@ function setConnectionDialogOpen(value: boolean) {
 
 function openConnectionSettings(connectionId: string, initialTab: ConfigTab = "connection") {
   if (!connectionStore.getConfig(connectionId)) return;
+  connectionPluginProvider.value = null;
   connectionDialogInitialTab.value = initialTab;
   connectionStore.startEditing(connectionId);
   showConnectionDialog.value = true;
@@ -2367,6 +2409,8 @@ async function newQuery() {
       } else if (connectionTarget.kind === "nacos-admin") {
         await connectionStore.loadNacosNamespaces(target.connectionId);
         queryStore.openNacosAdmin(target.connectionId);
+      } else if (connectionTarget.kind === "plugin-workbench") {
+        await queryStore.openPluginConnection(target.connectionId);
       } else {
         queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
       }
@@ -2587,7 +2631,7 @@ function onEditTableStructure(table: SqlObjectNavigationTarget) {
   queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, undefined, undefined, target.catalog);
 }
 
-async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
+function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditing: boolean) {
   const provisionalTarget = tableTargetFromActiveTab(table);
   if (!provisionalTarget) return;
   const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(provisionalTarget.connectionId));
@@ -2599,42 +2643,22 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
   const sourceName = sqlObjectNavigationSourceName(navigation);
   const sourceSchema = sqlObjectNavigationSourceSchema(navigation, target.schema || target.database);
   try {
-    await connectionStore.ensureConnected(target.connectionId);
-    connectionStore.activeConnectionId = target.connectionId;
-    // Align Ctrl/Cmd+click with sidebar "view source" (dialog vs data tab).
+    // Keep the editor navigation path aligned with the sidebar: create a visible
+    // pending tab first, then let the store own connection/source loading.
     if (settingsStore.editorSettings.routineSourceOpenMode === "query-tab") {
-      try {
-        const resolvedDatabaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
-        if (!resolvedDatabaseType) throw new Error("Connection type is unavailable.");
-        // Wrap Oracle bare ALL_SOURCE (`procedure name is ...`) as CREATE OR REPLACE for the editor.
-        const {
-          raw,
-          editableSource,
-          objectType: resolvedType,
-        } = await loadEditableObjectSourceForEditor(api.getObjectSource, buildEditableObjectSource, {
-          connectionId: target.connectionId,
-          database: target.database,
-          schema: sourceSchema || target.database,
-          name: sourceName,
-          objectType,
-          databaseType: resolvedDatabaseType,
-          signature: navigation.signature,
-        });
-        const tabId = queryStore.createTab(target.connectionId, target.database, `Source - ${sourceName}`, "query", sourceSchema, editableSource, target.catalog, { forceNew: true, sourceView: true });
-        const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
-        if (sourceIsEditable) {
-          queryStore.setObjectSource(tabId, {
-            schema: sourceSchema || target.database,
-            name: sourceName,
-            objectType: resolvedType,
-            signature: navigation.signature,
-          });
-        }
-      } catch (e: any) {
-        toast(e?.message || String(e), 5000);
-      }
+      queryStore.openObjectSourceTabPending({
+        connectionId: target.connectionId,
+        database: target.database,
+        title: `Source - ${sourceName}`,
+        schema: sourceSchema || target.database,
+        catalog: target.catalog,
+        request: { name: sourceName, objectType, signature: navigation.signature },
+      });
       return;
     }
+
+    // The dialog owns ensureConnected so its existing loading/error/retry UI is
+    // mounted before a slow connection health check or Oracle metadata query.
     queryEditorObjectSourceTarget.value = {
       connectionId: target.connectionId,
       database: target.database,
@@ -3027,6 +3051,7 @@ function activateQueryTab(tabId: string): boolean {
   dispatchBeforeTabSwitch(tabId);
   if (!queryStore.activateTab(tabId)) return false;
   activateQuerySurface();
+  pluginCenterActive.value = false;
   return true;
 }
 
@@ -3119,6 +3144,23 @@ const tabSwitcherKeyboard = createTabSwitcherKeyboardController({
 
 function handleNativeSelectAll(e: KeyboardEvent) {
   if (shouldBlockAppNativeSelectAll(e)) e.preventDefault();
+}
+
+function setPluginWorkbenchTabRef(tabId: string, element: unknown) {
+  if (element && typeof element === "object" && "refresh" in element && typeof element.refresh === "function") {
+    pluginWorkbenchTabRefs.set(tabId, element as PluginWorkbenchTabHandle);
+  } else {
+    pluginWorkbenchTabRefs.delete(tabId);
+  }
+}
+
+function refreshActivePluginWorkbench(): boolean {
+  const tab = activeTab.value;
+  if (tab?.mode !== "plugin-workbench") return false;
+  const pluginWorkbench = pluginWorkbenchTabRefs.get(tab.id);
+  if (!pluginWorkbench) return false;
+  void pluginWorkbench.refresh();
+  return true;
 }
 
 async function closeActiveSurface() {
@@ -3280,6 +3322,11 @@ async function handleKeydown(e: KeyboardEvent) {
     if (selectedSql.value.trim()) sendSelectionToAi(selectedSql.value);
     return;
   }
+  if (isModRShortcut(e) && refreshActivePluginWorkbench()) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (isModRShortcut(e) && e.target instanceof Element && contentAreaRef.value?.handleModRTarget(e.target)) {
     e.preventDefault();
     e.stopPropagation();
@@ -3346,6 +3393,11 @@ async function initApp() {
         onOptionalStateError: (error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error),
       });
     }
+    // Restored plugin tabs need the sidecar connection registry repopulated
+    // (see reconnectRestoredPluginTabs); kick it off before the heavier
+    // optional init so it races ahead of each plugin webview's first
+    // session/open. Fire-and-forget: it must never block startup.
+    void queryStore.reconnectRestoredPluginTabs();
     await settingsStore.initDesktopSettings().catch(() => {});
     if (isDesktop) {
       updateWindowReady = true;
@@ -3640,6 +3692,7 @@ onUnmounted(() => {
                 :tab-bar-width="tabBarWidth"
                 :tab-bar-collapsed="tabBarCollapsed"
                 @activate-driver-store="openDriverStorePage"
+                @activate-plugin-center="openPluginCenterPage(pluginCenterFocus)"
                 @activate-settings-page="activateSettingsPage"
                 @activate-tab="activateQueryTab"
                 @close-driver-store="closeDriverStorePage"
@@ -3696,9 +3749,10 @@ onUnmounted(() => {
                 </DialogContent>
               </Dialog>
               <div v-show="!driverStoreActive && !pluginCenterActive && !settingsStore.settingsPageActive" class="flex min-h-0 min-w-0 flex-1 flex-col">
-                <div class="flex flex-col flex-1 min-h-0">
+                <div class="flex flex-col min-h-0" :class="activeTab?.mode === 'plugin-workbench' ? 'flex-none' : 'flex-1'">
                   <SqlEditorWorkspace
                     ref="contentAreaRef"
+                    :content-suppressed="activeTab?.mode === 'plugin-workbench'"
                     @locate-tab="locateTabInSidebar"
                     @close-tab="
                       (tabId: string) => {
@@ -3709,7 +3763,7 @@ onUnmounted(() => {
                     @start-resize="startTabBarResize"
                     @toggle-collapse="toggleTabBarCollapsed"
                     :active-tab="activeTab ?? undefined"
-                    :show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"
+                    :show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen || pluginCenterTabOpen"
                     :active-connection="activeConnection"
                     :tab-bar-width="tabBarWidth"
                     :tab-bar-collapsed="tabBarCollapsed"
@@ -3839,6 +3893,21 @@ onUnmounted(() => {
                     </template>
                   </SqlEditorWorkspace>
                 </div>
+                <!-- Always-mounted plugin workbench layer: switching tabs only
+                       toggles visibility, so plugin webviews (SSH terminals) are
+                       never destroyed and reloaded. SqlEditorWorkspace no longer
+                       renders plugin tabs — this layer owns them. It in turn
+                       yields the layout (display:none) while a plugin tab is
+                       active, or both flex-1 siblings would split the column. -->
+                <div v-for="workbenchTab in mountedPluginWorkbenchTabs" :key="workbenchTab.id" v-show="activeTab && workbenchTab.id === activeTab.id" class="flex min-h-0 flex-1 flex-col">
+                  <PluginWorkbenchTab
+                    :ref="(element) => setPluginWorkbenchTabRef(workbenchTab.id, element)"
+                    :plugin-id="workbenchTab.pluginWorkbench!.pluginId"
+                    :contribution-id="workbenchTab.pluginWorkbench!.contributionId"
+                    :context="workbenchTab.pluginWorkbench!.context"
+                    @close-tab="queryStore.closeTab(workbenchTab.id)"
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -3846,7 +3915,7 @@ onUnmounted(() => {
           <div
             v-if="!isDetachedWindowContext && showAiPanel"
             v-show="!isZenMode"
-            :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[180px] max-w-full']"
+            :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
             <div v-if="!isAiPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @mousedown="startAiPanelResize" />

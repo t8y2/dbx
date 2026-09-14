@@ -270,6 +270,18 @@ async fn run_temporary_connection_test(
 ) -> Result<ConnectionTestResult, String> {
     let temp_id = format!("{TEST_PROBE_ID_PREFIX}{}", uuid::Uuid::new_v4());
     app.configs.write().await.insert(temp_id.clone(), config.clone());
+
+    if config.db_type == DatabaseType::Plugin {
+        let result = async {
+            let (host, port) = app.connection_host_port(&temp_id, &config).await?;
+            app.plugin_host.test_connection(&config, &host, port).await
+        }
+        .await;
+        app.reset_connection_transport_for_config(&temp_id, &config).await;
+        app.configs.write().await.remove(&temp_id);
+        return result;
+    }
+
     let mut nacos_database_info = None;
 
     let pool_result = if config.db_type == DatabaseType::Nacos {
@@ -414,6 +426,39 @@ pub async fn connect_db(
     app.nacos_registry.drop_connection(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &runtime_config).await;
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
+
+    if config.db_type == dbx_core::models::connection::DatabaseType::Plugin {
+        let (host, port) = match app.connection_host_port(&connection_id, &config).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                app.reset_connection_transport_for_config(&connection_id, &config).await;
+                rollback_session_credential_writes(app, &session_credential_writes);
+                return Err(AppError::from(error));
+            }
+        };
+        if let Err(error) = app.ensure_current_connection_attempt(&connection_id, Some(attempt)).await {
+            app.reset_connection_transport_for_config(&connection_id, &config).await;
+            rollback_session_credential_writes(app, &session_credential_writes);
+            return Err(AppError::from(error));
+        }
+        let handle = match app.plugin_host.connect_connection(&config, &host, port).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                app.reset_connection_transport_for_config(&connection_id, &config).await;
+                rollback_session_credential_writes(app, &session_credential_writes);
+                return Err(AppError::from(error));
+            }
+        };
+        let pool = PoolKind::PluginConnection(handle);
+        if let Err(error) =
+            app.insert_connection_pool_for_attempt(&connection_id, attempt, connection_id.clone(), pool, &config).await
+        {
+            app.reset_connection_transport_for_config(&connection_id, &config).await;
+            rollback_session_credential_writes(app, &session_credential_writes);
+            return Err(AppError::from(error));
+        }
+        return Ok(Json(connection_id));
+    }
 
     if let Err(error) = app.get_or_create_pool_for_connection_attempt(&connection_id, None, attempt).await {
         // 连接失败：仅回滚本次请求刚写入的会话凭据，避免前端误判"已记住密码"而用
@@ -897,6 +942,15 @@ mod tests {
         config
     }
 
+    fn plugin_config(id: &str) -> ConnectionConfig {
+        let mut config = sqlite_config(id, "s3.amazonaws.com");
+        config.name = "S3".to_string();
+        config.db_type = DatabaseType::Plugin;
+        config.port = 443;
+        config.plugin_connection_type = Some("s3".to_string());
+        config
+    }
+
     fn nacos_config(id: &str) -> ConnectionConfig {
         let mut config = sqlite_config(id, "");
         config.name = "Nacos".to_string();
@@ -1040,6 +1094,36 @@ mod tests {
         assert_eq!(detailed.0.database_info, None);
         assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
         assert!(state.app.with_connection_pools(|pools| pools.keys().all(|key| !key.starts_with("__test_"))).await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn plugin_connection_test_uses_plugin_host_in_web_mode() {
+        let (state, dir) = test_web_state().await;
+        let config = plugin_config("plugin-test");
+
+        let error = run_temporary_connection_test(&state.app, config, false).await.unwrap_err();
+
+        assert_eq!(error, "Plugin connection is missing plugin_id");
+        assert!(state.app.configs.read().await.keys().all(|key| !key.starts_with("__test_")));
+        assert!(state.app.with_connection_pools(|pools| pools.keys().all(|key| !key.starts_with("__test_"))).await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn plugin_connection_connect_uses_plugin_host_in_web_mode() {
+        let (state, dir) = test_web_state().await;
+        let config = plugin_config("plugin-connect");
+
+        let error =
+            connect_db(State(state.clone()), HeaderMap::new(), Json(ConnectRequest { config, client_attempt: None }))
+                .await
+                .unwrap_err();
+
+        assert_eq!(error.message, "Plugin connection is missing plugin_id");
+        assert!(state.app.with_connection_pools(|pools| !pools.contains_key("plugin-connect")).await);
 
         let _ = std::fs::remove_dir_all(dir);
     }

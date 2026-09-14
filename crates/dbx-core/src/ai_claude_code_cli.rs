@@ -602,6 +602,7 @@ mod tests {
             connection_id: "conn-1".to_string(),
             connection_name: "local".to_string(),
             database: "demo".to_string(),
+            selected_databases: Vec::new(),
             schema: None,
             agent_mode: true,
             allow_writes: false,

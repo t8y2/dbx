@@ -12,10 +12,6 @@ const pageMetadata = {
     title: "DBX Contributors",
     description: "Explore the people building DBX and download a certificate generated from public GitHub activity.",
   },
-  tr: {
-    title: "DBX Katkıda Bulunanlar",
-    description: "DBX'i birlikte geliştiren açık kaynak katkıcılarını görün ve herkese açık GitHub etkinliğinden üretilen bir katkı sertifikası indirin.",
-  },
   cn: {
     title: "DBX 贡献者",
     description: "查看共同建设 DBX 的开源贡献者，并根据公开 GitHub 活动生成贡献证书。",

@@ -312,6 +312,12 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   return isSchemaAware(type) ? schema || database : undefined;
 }
 
+/** GBase 8s reports the table owner as a schema, but does not accept it in table DML/DDL names. */
+export function connectionTableSqlSchema(connection: JdbcDialectConnection | undefined, schema?: string): string | undefined {
+  if (connection?.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return undefined;
+  return schema;
+}
+
 /** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */
 export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" | "postgres" | "sqlserver" {
   if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";

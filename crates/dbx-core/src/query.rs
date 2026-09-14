@@ -793,6 +793,21 @@ async fn connection_database_type(state: &AppState, connection_id: &str) -> Opti
     configs.get(connection_id).map(|config| config.db_type)
 }
 
+async fn connection_sql_compatibility_mode(
+    state: &AppState,
+    pool_key: &str,
+    db_type: Option<DatabaseType>,
+) -> Option<String> {
+    if db_type != Some(DatabaseType::OpenGauss) {
+        return None;
+    }
+    let pool = match state.pool_handle(pool_key).await {
+        Some(PoolKind::Postgres(pool)) => pool,
+        _ => return None,
+    };
+    db::postgres::opengauss_compatibility_mode(&pool).await.ok().flatten()
+}
+
 async fn connection_mysql_query_dialect(state: &AppState, connection_id: &str) -> db::mysql::MySqlQueryDialect {
     let configs = state.configs.read().await;
     configs
@@ -2760,6 +2775,33 @@ pub async fn execute_sql_statement_with_options_typed(
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<db::QueryResult, QueryExecutionError> {
+    let db_type = connection_database_type(state, connection_id).await;
+    let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    let result = execute_sql_statement_with_options_typed_inner(
+        state,
+        connection_id,
+        database,
+        sql,
+        schema,
+        cancel_token,
+        options,
+    )
+    .await;
+    if invalidate {
+        crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
+    }
+    result
+}
+
+async fn execute_sql_statement_with_options_typed_inner(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+) -> Result<db::QueryResult, QueryExecutionError> {
     // MongoDB connections use shell-style commands dispatched through the
     // frontend parser. Queries that fall through to the generic SQL executor
     // (e.g. typos) must be rejected before any pool/key creation so that
@@ -3079,6 +3121,35 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     options: QueryExecutionOptions,
     progress: Option<ExecuteMultiProgressCallback>,
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
+    let db_type = connection_database_type(state, connection_id).await;
+    let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    let result = execute_multi_core_with_options_for_client_and_progress_typed_inner(
+        state,
+        connection_id,
+        database,
+        sql,
+        schema,
+        cancel_token,
+        options,
+        progress,
+    )
+    .await;
+    if invalidate {
+        crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
+    }
+    result
+}
+
+async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    options: QueryExecutionOptions,
+    progress: Option<ExecuteMultiProgressCallback>,
+) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
     let pool_database = query_pool_database(database, options.catalog.as_deref());
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
@@ -3112,7 +3183,9 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         }
     };
 
-    let execution_plan = query_execution_plan(sql, db_type, is_sqlserver_agent);
+    let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
+    let execution_plan =
+        query_execution_plan_with_compatibility(sql, db_type, is_sqlserver_agent, compatibility_mode.as_deref());
     let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
     let statements = execution_plan.statements;
     if statements.is_empty() {
@@ -3305,13 +3378,26 @@ pub fn query_execution_plan(
     db_type: Option<DatabaseType>,
     preserve_sqlserver_batches: bool,
 ) -> crate::sql::SqlExecutionPlan {
+    query_execution_plan_with_compatibility(sql, db_type, preserve_sqlserver_batches, None)
+}
+
+/// Same as [`query_execution_plan`], but lets openGauss callers pass the
+/// database compatibility mode so A-mode PL/SQL (package) bodies are never split
+/// on inner semicolons. `None` keeps the conservative PL/SQL-capable openGauss
+/// profile while the probe is cold or unavailable.
+pub fn query_execution_plan_with_compatibility(
+    sql: &str,
+    db_type: Option<DatabaseType>,
+    preserve_sqlserver_batches: bool,
+    compatibility_mode: Option<&str>,
+) -> crate::sql::SqlExecutionPlan {
     if preserve_sqlserver_batches && db_type == Some(DatabaseType::SqlServer) {
         return crate::sql::SqlExecutionPlan { statements: split_sql_batches(sql), stop_on_error: false };
     }
 
     db_type.map_or_else(
         || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
-        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
+        |db_type| crate::sql::sql_execution_plan_for_database_with_compatibility(sql, db_type, compatibility_mode),
     )
 }
 
@@ -3902,6 +3988,23 @@ pub async fn execute_statements(
     schema: Option<&str>,
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, String> {
+    let db_type = connection_database_type(state, connection_id).await;
+    let invalidate = statements.iter().any(|sql| crate::object_cache::sql_may_change_object_metadata(sql, db_type));
+    let result = execute_statements_inner(state, connection_id, database, statements, schema, timeout_secs).await;
+    if invalidate {
+        crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
+    }
+    result
+}
+
+async fn execute_statements_inner(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    statements: &[String],
+    schema: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<db::QueryResult, String> {
     let sql_ctx = statements.first().map(|s| s.as_str()).unwrap_or("");
     let pool_key = if database.is_empty() {
         connection_id.to_string()
@@ -4151,6 +4254,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         PoolKind::MessageQueue
         | PoolKind::Nacos
         | PoolKind::Consul(_)
+        | PoolKind::PluginConnection(_)
         | PoolKind::HBase(_)
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
@@ -4163,8 +4267,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
         | PoolKind::VictoriaMetrics(_)
-        | PoolKind::ExternalDriver { .. }
-        | PoolKind::PluginConnection(_) => false,
+        | PoolKind::ExternalDriver { .. } => false,
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(_) => false,
     }
@@ -4191,10 +4294,41 @@ pub async fn execute_schema_diff_deploy(
     let now = chrono::Utc::now().to_rfc3339();
     let db_type = connection_database_type(state, connection_id).await;
 
+    // openGauss A-mode deploy scripts may contain CREATE PACKAGE … / blocks
+    // that must stay intact. Probe the database compatibility mode when a pool
+    // is available; on failure fall back to the plain openGauss splitter.
+    let compatibility_mode = if db_type == Some(DatabaseType::OpenGauss) {
+        let pool = match state
+            .get_or_create_pool(connection_id, if database.is_empty() { None } else { Some(database) })
+            .await
+        {
+            Ok(pool_key) => match state.pool_handle(&pool_key).await {
+                Some(PoolKind::Postgres(pool)) => Some(pool),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+        match pool {
+            Some(pool) => db::postgres::opengauss_compatibility_mode(&pool).await.ok().flatten(),
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let parsed: Vec<String> = statements
         .iter()
         .flat_map(|s| {
-            db_type.map_or_else(|| split_sql_statements(s), |dt| crate::sql::split_sql_statements_for_database(s, dt))
+            db_type.map_or_else(
+                || split_sql_statements(s),
+                |dt| {
+                    crate::sql::split_sql_statements_for_database_with_compatibility(
+                        s,
+                        dt,
+                        compatibility_mode.as_deref(),
+                    )
+                },
+            )
         })
         .map(|s| s.trim().to_string())
         .filter(|s| {
@@ -4514,9 +4648,11 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         PoolKind::Sqlite(pool) => BatchTransactionPath::Sqlite(pool.clone()),
         PoolKind::SqlServer(_) => BatchTransactionPath::Explicit,
         PoolKind::Agent(client) => BatchTransactionPath::Agent(client.clone()),
-        PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => {
-            BatchTransactionPath::Unsupported
-        }
+        PoolKind::MessageQueue
+        | PoolKind::Nacos
+        | PoolKind::PluginConnection(_)
+        | PoolKind::Consul(_)
+        | PoolKind::HBase(_) => BatchTransactionPath::Unsupported,
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(_) => BatchTransactionPath::Unsupported,
         PoolKind::DuckDbWorker(_)
@@ -4534,8 +4670,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
         | PoolKind::VictoriaMetrics(_)
-        | PoolKind::ExternalDriver { .. }
-        | PoolKind::PluginConnection(_) => BatchTransactionPath::Unsupported,
+        | PoolKind::ExternalDriver { .. } => BatchTransactionPath::Unsupported,
     }
 }
 
@@ -5351,9 +5486,16 @@ pub async fn execute_in_manual_transaction_with_options(
     };
 
     let db_type = connection_database_type(state, &connection_id).await;
+    let compatibility_mode = connection_sql_compatibility_mode(state, &pool_key, db_type).await;
     let statements = db_type.map_or_else(
         || split_sql_statements(sql),
-        |db_type| crate::sql::split_sql_statements_for_database(sql, db_type),
+        |db_type| {
+            crate::sql::split_sql_statements_for_database_with_compatibility(
+                sql,
+                db_type,
+                compatibility_mode.as_deref(),
+            )
+        },
     );
     if statements.is_empty() {
         // Oracle-only UX marker: the no-op is Core's decision that the script
@@ -7417,6 +7559,136 @@ for line in sys.stdin:
         }
     }
 
+    #[tokio::test]
+    async fn ddl_schema_cache_invalidates_persisted_object_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "schema-cache";
+        let sqlite =
+            db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap()).await.unwrap();
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+            })
+            .await;
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Sqlite));
+        let keys = [
+            "object-meta:v1:schema-cache:db:public:users::TABLE:columns:",
+            "object-meta:v1:schema-cache:db:public:users::backend-columns:",
+            "object-ddl:v1:schema-cache:db:public:users::TABLE:",
+        ];
+        for key in keys {
+            state.storage.save_schema_cache(key, &serde_json::json!({"old": true})).await.unwrap();
+        }
+        let unrelated = "object-meta:v1:schema-cache-other:db:public:users::backend-columns:";
+        state.storage.save_schema_cache(unrelated, &serde_json::json!([])).await.unwrap();
+        execute_sql_statement(&state, connection_id, "", "SELECT 1", None, None).await.unwrap();
+        for key in keys {
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_some());
+        }
+        execute_sql_statement(&state, connection_id, "", "CREATE TABLE users (id INTEGER)", None, None).await.unwrap();
+        for key in keys {
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_none(), "stale cache: {key}");
+        }
+        assert!(state.storage.load_schema_cache(unrelated).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn ddl_schema_cache_batch_outcomes_and_transaction_completion() {
+        for (sql, use_transaction, expected_error, expected_column) in [
+            ("ALTER TABLE users ADD COLUMN added INTEGER; SELECT 1", false, false, true),
+            ("ALTER TABLE users ADD COLUMN added INTEGER; SELECT * FROM missing_table", false, true, true),
+            ("ALTER TABLE users ADD COLUMN added INTEGER; SELECT 1", true, false, true),
+            ("ALTER TABLE users ADD COLUMN added INTEGER; SELECT * FROM missing_table", true, true, false),
+            ("BEGIN; ALTER TABLE users ADD COLUMN added INTEGER; COMMIT", false, false, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let state = AppState::new(storage);
+            let sqlite = db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap())
+                .await
+                .unwrap();
+            state
+                .update_connection_pools(|pools| {
+                    pools.insert("cache".into(), PoolKind::Sqlite(sqlite));
+                })
+                .await;
+            state.configs.write().await.insert("cache".into(), test_connection_config(DatabaseType::Sqlite));
+            execute_sql_statement(&state, "cache", "", "CREATE TABLE users (id INTEGER)", None, None).await.unwrap();
+            let key = "object-meta:v1:cache:db:public:users::backend-columns:";
+            state.storage.save_schema_cache(key, &serde_json::json!([])).await.unwrap();
+            let result = execute_multi_core_with_options(
+                &state,
+                "cache",
+                "",
+                sql,
+                None,
+                None,
+                QueryExecutionOptions { use_transaction: Some(use_transaction), ..Default::default() },
+            )
+            .await;
+            let failed = match &result {
+                Err(_) => true,
+                Ok(results) => results.iter().any(|r| r.columns == vec!["Error"]),
+            };
+            assert_eq!(failed, expected_error, "{sql}");
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_none(), "{sql}");
+            let columns =
+                execute_sql_statement(&state, "cache", "", "PRAGMA table_info(users)", None, None).await.unwrap();
+            assert_eq!(columns.rows.iter().any(|row| row[1] == "added"), expected_column, "{sql}");
+            // A failed DDL still keeps its execution error while clearing cache.
+            state.storage.save_schema_cache(key, &serde_json::json!([])).await.unwrap();
+            let error = execute_sql_statement(
+                &state,
+                "cache",
+                "",
+                "ALTER TABLE missing_table ADD COLUMN x INTEGER",
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("missing_table"));
+            assert!(state.storage.load_schema_cache(key).await.unwrap().is_none());
+            for sql in ["BEGIN", "COMMIT", "BEGIN", "ROLLBACK"] {
+                state.storage.save_schema_cache(key, &serde_json::json!([])).await.unwrap();
+                execute_sql_statement(&state, "cache", "", sql, None, None).await.unwrap();
+                assert_eq!(state.storage.load_schema_cache(key).await.unwrap().is_some(), sql == "BEGIN");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ddl_schema_cache_storage_failure_preserves_sql_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("storage.db");
+        let state = AppState::new(Storage::open(&storage_path).await.unwrap());
+        let sqlite =
+            db::sqlite::connect_path_create_if_missing(dir.path().join("query.db").to_str().unwrap()).await.unwrap();
+        state
+            .update_connection_pools(|pools| {
+                pools.insert("cache".into(), PoolKind::Sqlite(sqlite));
+            })
+            .await;
+        state.configs.write().await.insert("cache".into(), test_connection_config(DatabaseType::Sqlite));
+        let key = "object-meta:v1:cache:db:public:users::backend-columns:";
+        state.storage.save_schema_cache(key, &serde_json::json!([])).await.unwrap();
+        // Fail only deletion; SQL execution and cache reads remain available.
+        let fault = rusqlite::Connection::open(&storage_path).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_cache_delete BEFORE DELETE ON schema_cache BEGIN SELECT RAISE(FAIL, 'injected cache delete failure'); END;").unwrap();
+        execute_sql_statement(&state, "cache", "", "CREATE TABLE users (id INTEGER)", None, None).await.unwrap();
+        assert!(state.storage.load_schema_cache(key).await.unwrap().is_some());
+        let result = execute_sql_statement(&state, "cache", "", "SELECT id FROM users", None, None).await.unwrap();
+        assert_eq!(result.columns, vec!["id"]);
+        let error =
+            execute_sql_statement(&state, "cache", "", "ALTER TABLE missing_table ADD COLUMN x INTEGER", None, None)
+                .await
+                .unwrap_err();
+        assert!(error.contains("missing_table"));
+        assert!(!error.contains("injected cache delete failure"));
+    }
+
     async fn assert_sqlite_batch_error_behavior(failure_first: bool, continue_on_error: bool) {
         let dir = std::env::temp_dir().join(format!("dbx-query-batch-error-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8741,7 +9013,7 @@ for line in sys.stdin:
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeQueryPage\"'*)\n      echo executeQueryPage >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding \\\"UTF8\\\": 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n    *'\"method\":\"executeQuery\"'*)\n      echo executeQuery >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding \\\"UTF8\\\": 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n  esac\ndone\n",
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeQueryPage\"'*)\n      echo executeQueryPage >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding UTF8: 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n    *'\"method\":\"executeQuery\"'*)\n      echo executeQuery >> '{}'\n      case \"$line\" in\n        *'left('*) printf '{{\"id\":%s,\"error\":{{\"message\":\"ERROR: invalid byte sequence for encoding UTF8: 0xe2\"}}}}\\n' \"$id\" ;;\n        *) printf '{{\"id\":%s,\"result\":{{\"columns\":[\"id\",\"description\",\"__DBX_LARGE_VALUE_BYTES_T_1\"],\"column_types\":[\"integer\",\"text\",\"text\"],\"rows\":[[1,\"abcdef\",\"T:3\"]],\"affected_rows\":0,\"execution_time_ms\":1,\"truncated\":false}}}}\\n' \"$id\" ;;\n      esac\n      ;;\n  esac\ndone\n",
                 calls.display(),
                 calls.display()
             ),

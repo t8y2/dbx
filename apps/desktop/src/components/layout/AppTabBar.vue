@@ -28,6 +28,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "activate-driver-store": [];
   "close-driver-store": [];
+  "activate-plugin-center": [];
   "close-plugin-center": [];
   "activate-settings-page": [];
   "close-settings-page": [];
@@ -129,6 +130,9 @@ type SpecialRegularSurface = "driverStore" | "pluginCenter" | "settings";
 function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   if (keep !== "driverStore" && props.driverStoreOpen) {
     emit("close-driver-store");
+  }
+  if (keep !== "pluginCenter" && props.pluginCenterOpen) {
+    emit("close-plugin-center");
   }
   if (keep !== "settings" && props.settingsPageOpen) {
     emit("close-settings-page");

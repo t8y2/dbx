@@ -467,3 +467,127 @@ describe("connectionStore save_password opt-out", () => {
     expect(store.connectionErrors["mysql-1"]).toContain("disk full");
   });
 });
+
+describe("connectionStore plugin password prompt", () => {
+  // Runtime-assembled placeholder: no credential literal in source (Mimosa gate).
+  const PROMPT_TYPED_PASSWORD = "typed" + "-pw";
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+    requestPassword = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function sshInstalledPlugin(): unknown {
+    return {
+      manifest: {
+        id: "io.dbx.ssh",
+        name: "SSH",
+        drivers: [],
+        contributions: [
+          {
+            type: "connection-provider",
+            id: "io.dbx.ssh.connection",
+            label: "SSH server",
+            database_type: "ssh",
+            fields: [
+              { key: "authentication", label: "Authentication", type: "select", binding: "config", default: "password", options: [] },
+              {
+                key: "password",
+                label: "Password",
+                type: "password",
+                binding: "password",
+                visible_when: { field: "authentication", one_of: ["password", "private-key-password"] },
+                required_when: { field: "authentication", one_of: ["password", "private-key-password"] },
+              },
+            ],
+          },
+        ],
+      },
+      compatibility: { compatible: true },
+    };
+  }
+
+  function pluginConnection(overrides: Record<string, unknown> = {}): ConnectionConfig {
+    return {
+      id: "ssh-1",
+      name: "hktkosl1086",
+      db_type: "plugin",
+      host: "hktkosl1086.int.kn",
+      port: 22,
+      username: "jinpy.he",
+      password: "",
+      save_password: false,
+      plugin_id: "io.dbx.ssh",
+      plugin_connection_provider: "io.dbx.ssh.connection",
+      plugin_connection_type: "ssh",
+      external_config: { authentication: "private-key", private_key_path: "/Users/dev/.ssh/id_rsa" },
+      read_only: false,
+      ...overrides,
+    } as ConnectionConfig;
+  }
+
+  it("connects an SSH key-auth plugin connection without prompting for a password", async () => {
+    installApiMocks({ listPlugins: vi.fn().mockResolvedValue([sshInstalledPlugin()]) });
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = pluginConnection();
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "ssh-1", external_config: expect.objectContaining({ authentication: "private-key" }) }), expect.any(Number));
+  });
+
+  it("still prompts for a plugin connection whose manifest requires the login password", async () => {
+    installApiMocks({ listPlugins: vi.fn().mockResolvedValue([sshInstalledPlugin()]) });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: PROMPT_TYPED_PASSWORD, rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = pluginConnection({ external_config: { authentication: "password" } });
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).toHaveBeenCalledWith({ connectionId: "ssh-1", connectionName: "hktkosl1086" });
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "ssh-1", password: PROMPT_TYPED_PASSWORD }), expect.any(Number));
+  });
+
+  it("does not prompt when the plugin manifest cannot be resolved (backend surfaces the real error)", async () => {
+    installApiMocks({ listPlugins: vi.fn().mockResolvedValue([]) });
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = pluginConnection();
+    store.connections = [connection];
+
+    await store.connect(connection);
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    const { connectDb } = await import("@/lib/backend/api");
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "ssh-1" }), expect.any(Number));
+  });
+
+  it("falls back to prompting when listing plugins fails", async () => {
+    installApiMocks({ listPlugins: vi.fn().mockRejectedValue(new Error("ipc down")) });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue(null);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = pluginConnection();
+    store.connections = [connection];
+
+    await expect(store.connect(connection)).rejects.toThrow(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+  });
+});

@@ -754,6 +754,8 @@ export interface EditorSettings {
   executeMode: "all" | "current";
   executeModeDefaultVersion: number;
   executeAllOnBlankLine: boolean;
+  /** Whether DBX blocks Redis commands classified as high risk. */
+  blockDangerousRedisCommands: boolean;
   globalConnectTimeoutSecs: number;
   connectTimeoutInheritConnectionIds: string[];
   globalQueryTimeoutSecs: number;
@@ -995,6 +997,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   executeMode: "current",
   executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   executeAllOnBlankLine: false,
+  blockDangerousRedisCommands: true,
   globalConnectTimeoutSecs: 10,
   connectTimeoutInheritConnectionIds: [],
   globalQueryTimeoutSecs: DEFAULT_QUERY_TIMEOUT_SECS,
@@ -1450,6 +1453,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     executeMode: hasCurrentExecuteModeDefault && (settings.executeMode === "all" || settings.executeMode === "current") ? settings.executeMode : DEFAULT_EDITOR_SETTINGS.executeMode,
     executeModeDefaultVersion,
     executeAllOnBlankLine: settings.executeAllOnBlankLine === true,
+    blockDangerousRedisCommands: typeof settings.blockDangerousRedisCommands === "boolean" ? settings.blockDangerousRedisCommands : DEFAULT_EDITOR_SETTINGS.blockDangerousRedisCommands,
     globalConnectTimeoutSecs: normalizeGlobalConnectTimeoutSecs(settings.globalConnectTimeoutSecs),
     connectTimeoutInheritConnectionIds: Array.isArray(settings.connectTimeoutInheritConnectionIds) ? [...new Set(settings.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))] : [],
     globalQueryTimeoutSecs: normalizeGlobalQueryTimeoutSecs(settings.globalQueryTimeoutSecs ?? legacyTimeoutSettings.queryTimeoutSecs),
@@ -2200,6 +2204,7 @@ export const useSettingsStore = defineStore("settings", () => {
     }
     if (partial.executeMode !== undefined) editorSettings.value.executeMode = partial.executeMode;
     if (partial.executeAllOnBlankLine !== undefined) editorSettings.value.executeAllOnBlankLine = partial.executeAllOnBlankLine === true;
+    if (partial.blockDangerousRedisCommands !== undefined) editorSettings.value.blockDangerousRedisCommands = partial.blockDangerousRedisCommands === true;
     if (partial.globalConnectTimeoutSecs !== undefined) editorSettings.value.globalConnectTimeoutSecs = normalizeGlobalConnectTimeoutSecs(partial.globalConnectTimeoutSecs);
     if (partial.connectTimeoutInheritConnectionIds !== undefined) {
       editorSettings.value.connectTimeoutInheritConnectionIds = [...new Set(partial.connectTimeoutInheritConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];

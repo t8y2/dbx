@@ -248,6 +248,23 @@ pub struct PluginFormFieldDefinition {
     pub options: Vec<PluginFormFieldOption>,
     #[serde(default)]
     pub binding: Option<PluginFormFieldBinding>,
+    /// Plugin method returning `{ options: [{ value, label }] }`; the host
+    /// connection form fetches it and renders the field as a dynamic select.
+    /// Optional and forward/backward compatible: older hosts reject the
+    /// manifest, hosts without UI support keep the declared type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<PluginFieldCondition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_when: Option<PluginFieldCondition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFieldCondition {
+    pub field: String,
+    pub one_of: Vec<String>,
 }
 
 impl PluginFormFieldDefinition {
@@ -964,6 +981,7 @@ fn validate_connection_actions(
 
 fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index: usize, errors: &mut Vec<String>) {
     let mut seen_keys = HashSet::new();
+    let field_keys = fields.iter().map(|field| field.key.as_str()).collect::<HashSet<_>>();
     for (field_index, field) in fields.iter().enumerate() {
         if !valid_identifier(&field.key) || !seen_keys.insert(&field.key) {
             errors.push(format!(
@@ -975,6 +993,25 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             &format!("Contribution at index {contribution_index} field {field_index} label"),
             errors,
         );
+
+        for (name, condition) in
+            [("visible_when", field.visible_when.as_ref()), ("required_when", field.required_when.as_ref())]
+        {
+            let Some(condition) = condition else {
+                continue;
+            };
+            if condition.one_of.is_empty() {
+                errors.push(format!(
+                    "Contribution at index {contribution_index} field {field_index} {name} one_of cannot be empty"
+                ));
+            }
+            if !field_keys.contains(condition.field.as_str()) {
+                errors.push(format!(
+                    "Contribution at index {contribution_index} field {field_index} {name} references unknown field '{}'",
+                    condition.field
+                ));
+            }
+        }
 
         if matches!(field.field_type, PluginFormFieldType::Select | PluginFormFieldType::Radio) {
             if field.options.is_empty() {
@@ -1674,5 +1711,114 @@ mod tests {
         assert!(errors.iter().any(|error| error.contains("label cannot be empty")));
         assert!(errors.iter().any(|error| error.contains("invalid or duplicate id")));
         assert!(errors.iter().any(|error| error.contains("timeout_ms must be between")));
+    }
+
+    #[test]
+    fn parses_form_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    {
+                        "key": "mode",
+                        "label": "Mode",
+                        "type": "select",
+                        "options": [
+                            { "label": "Local", "value": "local" },
+                            { "label": "Custom", "value": "custom" }
+                        ],
+                        "default": "local"
+                    },
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key",
+                        "type": "text",
+                        "visible_when": { "field": "mode", "one_of": ["custom"] },
+                        "required_when": { "field": "mode", "one_of": ["custom"] }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+        let compatibility = manifest.compatibility(dir.path(), "0.5.68");
+        let provider = manifest.connection_provider("conditions.connection").unwrap().unwrap();
+
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let visible_when = provider.fields[1].visible_when.as_ref().unwrap();
+        assert_eq!(visible_when.field, "mode");
+        assert_eq!(visible_when.one_of, vec!["custom".to_string()]);
+        assert_eq!(provider.fields[1].required_when.as_ref().unwrap().one_of, vec!["custom".to_string()]);
+    }
+
+    #[test]
+    fn rejects_invalid_form_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let malformed = serde_json::from_value::<PluginManifest>(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    { "key": "mode", "label": "Mode", "type": "text" },
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key",
+                        "type": "text",
+                        "visible_when": { "field": "missing", "one_of": [] },
+                        "required_when": { "field": "mode", "one_of": ["custom"], "extra": true }
+                    }
+                ]
+            }]
+        }));
+
+        assert!(malformed.is_err());
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    { "key": "mode", "label": "Mode", "type": "text" },
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key",
+                        "type": "text",
+                        "visible_when": { "field": "missing", "one_of": [] },
+                        "required_when": { "field": "mode", "one_of": ["custom"] }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+        let compatibility = manifest.compatibility(dir.path(), "0.5.68");
+
+        assert!(!compatibility.compatible);
+        assert!(compatibility.errors.iter().any(|error| error.contains("visible_when one_of cannot be empty")));
+        assert!(compatibility
+            .errors
+            .iter()
+            .any(|error| error.contains("visible_when references unknown field 'missing'")));
     }
 }

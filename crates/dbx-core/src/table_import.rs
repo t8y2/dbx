@@ -492,9 +492,8 @@ pub fn effective_delimited_config(
     })
 }
 
-/// Undo the `="..."` force-text wrapper that CSV export writes around temporal
-/// cells (see `temporal_format::wrap_csv_force_text`). Without this, exporting a
-/// table with a datetime column and importing the file straight back stores the
+/// Undo the `="..."` force-text wrapper that older DBX versions wrote around
+/// temporal CSV cells. Without this, importing an older DBX export stores the
 /// literal `="2026-06-24 02:00:07"` instead of the timestamp, which every
 /// temporal column type then rejects.
 ///

@@ -274,6 +274,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     if (format === "csv") return "CSV";
     if (format === "json") return "JSON";
     if (format === "ndjson") return "NDJSON";
+    if (format === "bson" || format === "bson.gz") return "MongoDB BSON dump";
     if (format === "xlsx") return "Excel";
     return "SQL";
   }
@@ -287,7 +288,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
         defaultPath: fileName,
-        filters: [{ name: exportFilterName(format), extensions: [format] }],
+        filters: [{ name: exportFilterName(format), extensions: [format === "bson.gz" ? "gz" : format] }],
       });
       return path ? String(path) : null;
     }
@@ -472,10 +473,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return pickTableExportDirectory();
   }
 
-  async function exportMongoCollection(format: "csv" | "ndjson") {
+  async function exportMongoCollection(outputFormat: "csv" | "ndjson" | "bson" | "bsonGzip") {
     const node = activeNode.value;
     if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
-    const outputPath = await resolveExportOutputPath(node.label, format);
+    const format: api.MongoExportFormat = outputFormat === "bsonGzip" ? "bson" : outputFormat;
+    const fileExtension = outputFormat === "bsonGzip" ? "bson.gz" : outputFormat;
+    const outputPath = await resolveExportOutputPath(node.label, fileExtension);
     if (!outputPath) return;
     let task: ExportTask | null = null;
     try {
@@ -490,6 +493,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           collection: node.label,
           format,
           includeHeader: true,
+          gzip: outputFormat === "bsonGzip",
           filePath: outputPath,
         },
         (progress) => {

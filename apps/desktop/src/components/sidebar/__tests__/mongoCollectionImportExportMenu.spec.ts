@@ -23,6 +23,8 @@ describe("mongo collection import/export UI", () => {
     expect(block).toContain('t("contextMenu.exportData")');
     expect(block).toContain('exportMongoCollection("csv")');
     expect(block).toContain('exportMongoCollection("ndjson")');
+    expect(block).toContain('exportMongoCollection("bson")');
+    expect(block).toContain('exportMongoCollection("bsonGzip")');
     expect(block).not.toContain("openMongoExport");
   });
 

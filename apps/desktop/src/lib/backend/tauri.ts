@@ -5045,12 +5045,12 @@ export async function releaseTableImportSource(_sourceRef: string): Promise<bool
   return false;
 }
 
-export type MongoImportFormat = "csv" | "json" | "ndjson";
+export type MongoImportFormat = "csv" | "json" | "ndjson" | "bson";
 export type MongoImportTypeMode = "string" | "auto" | "extendedJson";
 export type MongoImportInferredType = "boolean" | "integer" | "decimal" | "date" | "objectId" | "object" | "array" | "mixed" | "string";
 export type MongoImportStatus = "running" | "done" | "error" | "cancelled";
 export type MongoImportPhase = "preparing" | "parsing" | "writing" | "done";
-export type MongoExportFormat = "csv" | "ndjson";
+export type MongoExportFormat = "csv" | "ndjson" | "bson";
 export type MongoExportStatus = "running" | "done" | "error" | "cancelled";
 
 export interface MongoImportIssue {
@@ -5151,6 +5151,7 @@ export interface MongoExportRequest {
   collation?: string | null;
   format: MongoExportFormat;
   includeHeader?: boolean;
+  gzip?: boolean;
   filePath: string;
   executionId?: string | null;
 }

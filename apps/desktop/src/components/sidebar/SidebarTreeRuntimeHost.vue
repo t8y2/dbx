@@ -5937,6 +5937,8 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       children: [
         { label: "CSV", action: () => void exportMongoCollection("csv") },
         { label: "NDJSON", action: () => void exportMongoCollection("ndjson") },
+        { label: "BSON dump", action: () => void exportMongoCollection("bson") },
+        { label: "BSON dump (gzip)", action: () => void exportMongoCollection("bsonGzip") },
       ],
     });
     if (canDropMongoCollection.value) {

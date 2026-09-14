@@ -1871,24 +1871,6 @@ mod tests {
         }
     }
 
-    fn plugin_connection(id: &str, secret: &str) -> ConnectionConfig {
-        let mut config = postgres_connection(id, "");
-        config.name = "Hello plugin".to_string();
-        config.db_type = DatabaseType::Plugin;
-        config.driver_profile = Some("plugin".to_string());
-        config.driver_label = Some("Hello connection".to_string());
-        config.host = "localhost".to_string();
-        config.port = 22;
-        config.username.clear();
-        config.database = None;
-        config.external_config = Some(serde_json::json!({ "greeting": "Hello" }));
-        config.plugin_id = Some("dbx.example.hello".to_string());
-        config.plugin_connection_provider = Some("dbx.example.hello.connection".to_string());
-        config.plugin_connection_type = Some("hello".to_string());
-        config.connection_secrets.insert("api_token".to_string(), secret.to_string());
-        config
-    }
-
     fn cassandra_connection(id: &str) -> ConnectionConfig {
         let mut config = postgres_connection(id, "");
         config.name = "Cassandra".to_string();

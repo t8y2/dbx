@@ -228,6 +228,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
  *    rather than fail.
  */
 export async function copyRichTextToClipboard(html: string, text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
+  text = clipboardLineEndings(text);
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {
       const { writeHtml } = await import("@tauri-apps/plugin-clipboard-manager");

@@ -122,6 +122,18 @@ describe("copyRichTextToClipboard", () => {
     expect(flavors["text/plain"]).toMatchObject({ parts: ["SELECT"], options: { type: "text/plain" } });
   });
 
+  it("normalizes the plain-text flavor to CRLF on Windows", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+    const { env, write } = richClipboardEnvironment();
+
+    await copyRichTextToClipboard("<pre>SELECT 1\nFROM t</pre>", "SELECT 1\nFROM t", env);
+
+    const [items] = write.mock.calls[0]!;
+    const [item] = items as FakeClipboardItem[];
+    expect(item!.items["text/html"]).toMatchObject({ parts: ["<pre>SELECT 1\nFROM t</pre>"] });
+    expect(item!.items["text/plain"]).toMatchObject({ parts: ["SELECT 1\r\nFROM t"] });
+  });
+
   it("falls back to plain text when the async clipboard rejects the rich write", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const env: ClipboardEnvironment = {

@@ -209,6 +209,19 @@ pub fn build_query_pagination_execution_plan(
         plan.page_sql = paginated.sql;
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
+        if options.use_agent_cursor
+            && matches!(
+                pagination_strategy(options.database_type, PaginationContext::UserQuery),
+                TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded
+            )
+        {
+            // The dialect cannot rewrite the statement with server-side
+            // pagination (Oracle user queries, generic JDBC), so the page
+            // metadata alone cannot reach a non-zero offset. Keep the Agent
+            // result session enabled and let the client consume through to
+            // the requested offset (#8993).
+            plan.use_agent_result_session = true;
+        }
     } else if can_use_first_page_cursor && options.database_type != Some(DatabaseType::Highgo) {
         // Kingbase JDBC may buffer an entire result in auto-commit mode, so use
         // LIMIT/OFFSET whenever the statement can be rewritten safely. Keep the
@@ -4604,6 +4617,55 @@ WHERE u.id = picked.id;
         assert_eq!(plan.page_offset, Some(0));
         assert!(plan.page_sql.is_none());
         assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn oracle_offset_jump_keeps_agent_result_session() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit: 100, offset: 200, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        // Oracle user queries are Unbounded: the SQL stays unchanged, so the
+        // client must consume the agent result session through to the offset.
+        assert_eq!(plan.sql_to_execute, "SELECT * FROM events;");
+        assert_eq!(plan.page_limit, Some(100));
+        assert_eq!(plan.page_offset, Some(200));
+        assert!(plan.use_agent_result_session);
+    }
+
+    #[test]
+    fn jdbc_offset_jump_keeps_agent_result_session() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Jdbc),
+            pagination: QueryPagination { limit: 100, offset: 200, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert!(plan.use_agent_result_session);
+        assert_eq!(plan.page_offset, Some(200));
+    }
+
+    #[test]
+    fn rewritten_offset_jump_does_not_use_agent_result_session() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT * FROM events".to_string(),
+            query_base_sql: "SELECT * FROM events".to_string(),
+            database_type: Some(DatabaseType::Postgres),
+            pagination: QueryPagination { limit: 100, offset: 200, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert!(plan.sql_to_execute.contains("LIMIT"));
+        assert!(!plan.use_agent_result_session);
     }
 
     #[test]

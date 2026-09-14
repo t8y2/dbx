@@ -6532,6 +6532,10 @@ export const useQueryStore = defineStore("query", () => {
       }
 
       const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, targetSchema, tab.mode === "data");
+      // Jumping to a non-zero offset without a live cursor session: the plan
+      // could not rewrite the SQL for these engines, so a plain execution
+      // would return the first page again (#8993).
+      const isOffsetJumpPage = typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId;
       const frontendTimeoutSecs = frontendQueryTimeoutSecsForSql(sqlToExecute, effectiveDbType, queryTimeoutSecs);
       const sourceLabelDatabase = targetDatabase || conn?.database;
       const executionClientSessionId = options?.pagination?.clientSessionId ?? (tab.mode === "query" || tab.mode === "data" ? tabClientSessionId(tab) : undefined);
@@ -6582,7 +6586,7 @@ export const useQueryStore = defineStore("query", () => {
           clientSession: Boolean(executionClientSessionId),
         });
         executionDispatched = true;
-        if (useAgentResultSession && tab.mode === "query" && typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId) {
+        if (useAgentResultSession && tab.mode === "query" && typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId && !(tab.batchSqlExecution && tab.batchSqlExecution.total > 1)) {
           return (async () => {
             let sessionId: string | undefined;
             let skipped = 0;
@@ -6595,10 +6599,18 @@ export const useQueryStore = defineStore("query", () => {
               if (!page) return pageResults;
               if (skipped + page.rows.length > pageOffset) {
                 const start = pageOffset - skipped;
-                return [{ ...page, rows: page.rows.slice(start, start + pageLimit!) }];
+                const limit = typeof pageLimit === "number" ? pageLimit : page.rows.length - start;
+                return [{ ...page, rows: page.rows.slice(start, start + limit) }];
               }
               skipped += page.rows.length;
-              if (!page.has_more || !page.session_id) return [{ ...page, rows: page.rows.slice(Math.max(0, pageOffset - skipped)) }];
+              if (!page.has_more || !page.session_id) {
+                if (page.has_more) {
+                  // The cursor session ended before the requested offset;
+                  // returning the short page would show the wrong rows.
+                  throw new Error("Result session ended before the requested page offset");
+                }
+                return [{ ...page, rows: [] }];
+              }
               sessionId = page.session_id;
             }
           })();
@@ -6654,8 +6666,12 @@ export const useQueryStore = defineStore("query", () => {
           executionPromise = (async () => {
             const txnSessionId = tab.txnSessionId;
             if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+            // Offset jumps inside a manual transaction keep the legacy
+            // single-shot call: the session-consume loop only runs in the
+            // auto-commit path, and opening a cursor session here would
+            // strand it after returning the first page.
             const executeInTransaction = (sessionId: string) =>
-              useAgentResultSession
+              useAgentResultSession && !isOffsetJumpPage
                 ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId, classificationSql)
                 : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, undefined, undefined, classificationSql);
             try {

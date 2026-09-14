@@ -1458,7 +1458,7 @@ fn plugin_connection_summaries(
         })
         .map(plugin_connection_summary)
         .collect();
-    summaries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    summaries.sort_by_key(|summary| summary.name.to_lowercase());
     summaries
 }
 

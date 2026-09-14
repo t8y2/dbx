@@ -2,20 +2,26 @@
 
 use std::future::Future;
 
+const EXPORT_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 /// Spawns a long-running export task that interleaves async database fetches
 /// with synchronous row formatting and buffered disk writes.
 ///
 /// Running such a task directly on a tokio worker (`tokio::spawn`) blocks that
 /// worker for the whole synchronous write slice of every page, so a multi-GB
 /// export stalls every concurrent command sharing the runtime. This helper
-/// instead runs the task on the blocking pool and drives it with
-/// [`tokio::runtime::Handle::block_on`]: the blocking thread owns the
+/// instead runs the task on a dedicated worker with an enlarged stack and
+/// drives it with [`tokio::runtime::Handle::block_on`]. The worker owns the
 /// synchronous formatting and writes while async fetches still execute on the
-/// regular workers. The blocking pool grows on demand, so concurrent exports
-/// and other `spawn_blocking` users do not starve each other.
+/// regular workers. Metadata queries can have a deep async call chain, so the
+/// default Tokio blocking-thread stack is not sufficient for every export.
 pub fn spawn_export_task(task: impl Future<Output = ()> + Send + 'static) {
     let handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || handle.block_on(task));
+    std::thread::Builder::new()
+        .name("dbx-export".to_string())
+        .stack_size(EXPORT_THREAD_STACK_SIZE)
+        .spawn(move || handle.block_on(task))
+        .expect("failed to spawn DBX export worker");
 }
 
 #[cfg(test)]

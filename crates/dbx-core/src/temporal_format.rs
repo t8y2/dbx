@@ -624,6 +624,13 @@ mod tests {
     }
 
     #[test]
+    fn mysql_csv_export_preserves_raw_temporal_values_without_force_text_wrapper() {
+        let row = vec![json!("2024-02-25 13:02:15")];
+        let column_types = [Some("DATETIME".into())];
+        assert_eq!(format_temporal_export_row_for_csv_cow(&row, &column_types, None, false).into_owned(), row);
+    }
+
+    #[test]
     fn csv_export_with_string_types_wraps_temporal_values() {
         let row = vec![json!("2024-02-25"), json!(42)];
         let column_types = ["DATE".to_string(), "INT".to_string()];

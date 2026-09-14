@@ -1,5 +1,6 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import type { DatabaseType } from "@/types/database";
 import dayjs, { Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import utc from "dayjs/plugin/utc";
@@ -459,9 +460,10 @@ export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly 
 // standard cross-app way to force text interpretation; the surrounding CSV
 // quoting/escaping (which already doubles embedded `"`) makes it round-trip
 // correctly. Only applied to already-string temporal cells so numeric/plain
-// columns keep exporting as-is.
-export function forceCsvTextForTemporalColumns<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[]): T[][] {
-  if (!columnTypes.some((type) => isTemporalColumnType(type))) return rows.map((row) => [...row]);
+// columns keep exporting as-is. MySQL CSV exports must preserve the raw value
+// because its consumers expect the database string, not an Excel formula.
+export function forceCsvTextForTemporalColumns<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[], databaseType?: DatabaseType): T[][] {
+  if (databaseType === "mysql" || !columnTypes.some((type) => isTemporalColumnType(type))) return rows.map((row) => [...row]);
   return rows.map((row) =>
     row.map((value, index) => {
       if (typeof value !== "string" || !isTemporalColumnType(columnTypes[index])) return value;

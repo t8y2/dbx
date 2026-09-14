@@ -2193,7 +2193,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
         executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
       });
       if (format === "csv") {
-        await api.exportQueryResultCsv(filePath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), settingsStore.editorSettings.csvQuoteMode);
+        await api.exportQueryResultCsv(filePath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? [], effectiveDatabaseType.value), settingsStore.editorSettings.csvQuoteMode);
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);

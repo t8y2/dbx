@@ -918,7 +918,7 @@ async fn export_query_result_core_inner(
             &result.rows,
             &column_types,
             request.date_time_format.as_deref(),
-            format == "csv",
+            format == "csv" && request.database_type != DatabaseType::Mysql,
         );
 
         if format == "csv" || format == "txt" {
@@ -1383,7 +1383,7 @@ async fn try_export_mysql_query_result_stream(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
+                        false,
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;

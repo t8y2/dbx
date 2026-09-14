@@ -399,7 +399,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           executePage: (sql) => api.executeQuery(connectionId, database, sql),
         });
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? []), target.csvQuoteMode);
+          await api.exportQueryResultCsv(outputPath, result.columns, forceCsvTextForTemporalColumns(result.rows, result.column_types ?? [], target.databaseType), target.csvQuoteMode);
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);

@@ -1022,7 +1022,7 @@ async fn try_export_native_table_stream(
                         row,
                         column_types,
                         request.date_time_format.as_deref(),
-                        request.format.eq_ignore_ascii_case("csv"),
+                        request.format.eq_ignore_ascii_case("csv") && *db_type != DatabaseType::Mysql,
                     );
                     write_table_text_row(&mut file, true, formatted.as_ref(), &mut row_buffer, request.csv_quote_mode)?;
                     rows_exported += 1;
@@ -1629,7 +1629,7 @@ async fn export_table_data_core_inner(
                     &result.rows,
                     &column_types,
                     request.date_time_format.as_deref(),
-                    request.format.eq_ignore_ascii_case("csv"),
+                    request.format.eq_ignore_ascii_case("csv") && db_type != DatabaseType::Mysql,
                 );
 
                 if is_first_batch {

@@ -801,8 +801,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         // we avoid mapping every cell synchronously on the UI thread. Temporal
         // columns are the one exception: force-text them here (see
         // forceCsvTextForTemporalColumns) so WPS/Excel-style CSV import can't
-        // re-guess and truncate/reformat a date-looking string.
-        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
+        // re-guess and truncate/reformat a date-looking string. MySQL keeps
+        // the raw temporal string for compatibility with database exports.
+        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes, databaseType.value);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -863,7 +864,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path as string;
         }
         const result = await resultToExport(undefined, undefined, false);
-        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
+        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes, databaseType.value);
         await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
         toast(t("grid.exported"));
       } catch (e: any) {

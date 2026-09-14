@@ -213,6 +213,12 @@ describe("forceCsvTextForTemporalColumns", () => {
     expect(forceCsvTextForTemporalColumns(rows, columnTypes)).toEqual([[null, 1700000000000]]);
   });
 
+  it("leaves MySQL temporal strings in their raw CSV form", () => {
+    const rows = [["2026-07-25 00:00:00.000"]];
+    const columnTypes = ["TIMESTAMP"];
+    expect(forceCsvTextForTemporalColumns(rows, columnTypes, "mysql")).toEqual(rows);
+  });
+
   it("returns shallow copies of rows when no column is temporal", () => {
     const rows = [["plain", 1]];
     const columnTypes = ["VARCHAR", "INT"];

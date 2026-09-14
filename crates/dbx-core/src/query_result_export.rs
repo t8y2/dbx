@@ -914,11 +914,10 @@ async fn export_query_result_core_inner(
             result.rows.truncate(this_page);
         }
         let row_count = result.rows.len();
-        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_for_csv_cow(
+        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_cow(
             &result.rows,
             &column_types,
             request.date_time_format.as_deref(),
-            format == "csv",
         );
 
         if format == "csv" || format == "txt" {
@@ -1137,11 +1136,10 @@ async fn try_export_postgres_query_result_stream(
                     }
                 }
                 crate::db::postgres::PostgresQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1379,11 +1377,10 @@ async fn try_export_mysql_query_result_stream(
                     }
                 }
                 crate::db::mysql::MySqlQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1600,11 +1597,10 @@ async fn try_export_clickhouse_query_result_stream(
                     }
                 }
                 crate::db::clickhouse_driver::ClickHouseQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
@@ -1786,11 +1782,10 @@ async fn try_export_sqlserver_query_result_stream(
                     }
                 }
                 crate::db::sqlserver::SqlServerStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
                         row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
-                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;

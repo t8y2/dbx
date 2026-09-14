@@ -333,45 +333,6 @@ pub fn format_temporal_export_rows_with_string_types(
     format_temporal_export_rows_with_string_types_cow(rows, column_types, pattern).into_owned()
 }
 
-/// Format temporal values for CSV without changing their representation into
-/// formulas. The boolean parameter is retained for API compatibility with
-/// callers that previously requested the `="..."` wrapper.
-pub fn format_temporal_export_row_for_csv_cow<'a>(
-    row: &'a [Value],
-    column_types: &[Option<String>],
-    pattern: Option<&str>,
-    _force_csv_text: bool,
-) -> Cow<'a, [Value]> {
-    format_temporal_export_row_cow(row, column_types, pattern)
-}
-
-pub fn format_temporal_export_rows_for_csv_cow<'a>(
-    rows: &'a [Vec<Value>],
-    column_types: &[Option<String>],
-    pattern: Option<&str>,
-    _force_csv_text: bool,
-) -> Cow<'a, [Vec<Value>]> {
-    format_temporal_export_rows_cow(rows, column_types, pattern)
-}
-
-pub fn format_temporal_export_row_with_string_types_for_csv_cow<'a>(
-    row: &'a [Value],
-    column_types: &[String],
-    pattern: Option<&str>,
-    _force_csv_text: bool,
-) -> Cow<'a, [Value]> {
-    format_temporal_export_row_with_string_types_cow(row, column_types, pattern)
-}
-
-pub fn format_temporal_export_rows_with_string_types_for_csv_cow<'a>(
-    rows: &'a [Vec<Value>],
-    column_types: &[String],
-    pattern: Option<&str>,
-    _force_csv_text: bool,
-) -> Cow<'a, [Vec<Value>]> {
-    format_temporal_export_rows_with_string_types_cow(rows, column_types, pattern)
-}
-
 pub(crate) fn normalize_temporal_import_value_cow<'a>(
     value: &'a Value,
     data_type: Option<&str>,
@@ -452,7 +413,7 @@ mod tests {
         // into a formula.
         let rows = vec![vec![json!("1785042135456"), json!("device-a")]];
         let types = vec!["TIMESTAMP(ms)".to_string(), "TEXT".to_string()];
-        let exported = format_temporal_export_rows_with_string_types_for_csv_cow(&rows, &types, pattern, true);
+        let exported = format_temporal_export_rows_with_string_types_cow(&rows, &types, pattern);
         let cell = exported[0][0].as_str().expect("string");
         assert_eq!(cell, rendered);
     }
@@ -511,7 +472,7 @@ mod tests {
         let row = vec![json!(1), json!("2024-02-25 13:02:15"), json!("plain text")];
         let column_types = [Some("NUMBER".into()), Some("TIMESTAMP".into()), Some("VARCHAR2".into())];
         assert_eq!(
-            format_temporal_export_row_for_csv_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss"), true).into_owned(),
+            format_temporal_export_row_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss")).into_owned(),
             vec![json!(1), json!("2024/2/25 13:02:15"), json!("plain text")]
         );
     }
@@ -520,7 +481,7 @@ mod tests {
     fn csv_export_serializes_temporal_values_without_formula_wrapper() {
         let row = vec![json!("2024-02-25 13:02:15")];
         let column_types = [Some("TIMESTAMP".into())];
-        let formatted = format_temporal_export_row_for_csv_cow(&row, &column_types, None, true);
+        let formatted = format_temporal_export_row_cow(&row, &column_types, None);
         let csv = crate::csv_export::format_csv_with_quote_mode(
             &["created_at".to_string()],
             &[formatted.into_owned()],
@@ -538,7 +499,7 @@ mod tests {
         let row = vec![json!("2024-02-25 13:02:15.000")];
         let column_types = [Some("DATETIME".into())];
         assert_eq!(
-            format_temporal_export_row_for_csv_cow(&row, &column_types, None, true).into_owned(),
+            format_temporal_export_row_cow(&row, &column_types, None).into_owned(),
             vec![json!("2024-02-25 13:02:15.000")]
         );
     }
@@ -547,10 +508,7 @@ mod tests {
     fn csv_export_preserves_null_temporal_values() {
         let row = vec![json!(Value::Null)];
         let column_types = [Some("DATE".into())];
-        assert_eq!(
-            format_temporal_export_row_for_csv_cow(&row, &column_types, None, true).into_owned(),
-            vec![json!(Value::Null)]
-        );
+        assert_eq!(format_temporal_export_row_cow(&row, &column_types, None).into_owned(), vec![json!(Value::Null)]);
     }
 
     #[test]
@@ -559,11 +517,11 @@ mod tests {
         let column_types = [Some("TIMESTAMP".into())];
         let expected = format_temporal_export_row(&row, &column_types, Some("YYYY/M/D HH:mm:ss"));
         assert_eq!(
-            format_temporal_export_row_for_csv_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss"), false).into_owned(),
+            format_temporal_export_row_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss")).into_owned(),
             expected
         );
         assert_eq!(
-            format_temporal_export_row_for_csv_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss"), true).into_owned(),
+            format_temporal_export_row_cow(&row, &column_types, Some("YYYY/M/D HH:mm:ss")).into_owned(),
             expected
         );
     }
@@ -573,7 +531,7 @@ mod tests {
         let row = vec![json!("2024-02-25"), json!(42)];
         let column_types = ["DATE".to_string(), "INT".to_string()];
         assert_eq!(
-            format_temporal_export_row_with_string_types_for_csv_cow(&row, &column_types, None, true).into_owned(),
+            format_temporal_export_row_with_string_types_cow(&row, &column_types, None).into_owned(),
             vec![json!("2024-02-25"), json!(42)]
         );
     }

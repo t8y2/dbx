@@ -6598,7 +6598,7 @@ export const useQueryStore = defineStore("query", () => {
                 return [{ ...page, rows: page.rows.slice(start, start + pageLimit!) }];
               }
               skipped += page.rows.length;
-              if (!page.has_more || !page.session_id) return [{ ...page, rows: [] }];
+              if (!page.has_more || !page.session_id) return [{ ...page, rows: page.rows.slice(Math.max(0, pageOffset - skipped)) }];
               sessionId = page.session_id;
             }
           })();

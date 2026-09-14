@@ -1,7 +1,18 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnLookup.ts";
-import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesAfterHiding, hiddenColumnIndexesForKeys, hiddenColumnIndexesWithAllNullColumns, hiddenColumnKeysForIndexes, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnVisibility.ts";
+import {
+  allNullColumnIndexes,
+  filterColumnVisibilityOptions,
+  hiddenColumnIndexesAfterHiding,
+  hiddenColumnIndexesForKeys,
+  hiddenColumnIndexesWithAllNullColumns,
+  hiddenColumnKeysForIndexes,
+  invertedHiddenColumnIndexes,
+  nextHiddenColumnIndexes,
+  removeAutoHiddenColumnIndexes,
+  visibleColumnIndexesForFilter,
+} from "../../apps/desktop/src/lib/dataGrid/dataGridColumnVisibility.ts";
 
 test("filters column visibility options by trimmed case-insensitive text", () => {
   const options = filterColumnVisibilityOptions(["id", "created_at", "CustomerName"], "  NAME ");

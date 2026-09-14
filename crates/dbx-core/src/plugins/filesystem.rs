@@ -481,6 +481,7 @@ mod tests {
             label: "Sample files".to_string(),
             schemes: vec!["sample".to_string()],
             description: None,
+            icon: None,
             capabilities: vec![PluginFilesystemCapability::Read],
             root_uri: Some("sample:/home".to_string()),
         }

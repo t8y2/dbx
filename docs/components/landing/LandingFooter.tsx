@@ -3,15 +3,11 @@ import type { DocsLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
-    tagline: "20 MB to manage 90+ databases.",
+    tagline: "25 MB to manage 90+ databases.",
     copyright: `© ${new Date().getFullYear()} DBX. All rights reserved.`,
   },
-  tr: {
-    tagline: "90+ veritabanını 20 MB ile yönetin.",
-    copyright: `© ${new Date().getFullYear()} DBX. Tüm hakları saklıdır.`,
-  },
   cn: {
-    tagline: "20MB，管理90+种数据库。",
+    tagline: "25MB，管理90+种数据库。",
     copyright: `© ${new Date().getFullYear()} DBX.`,
   },
 };

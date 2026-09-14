@@ -4316,22 +4316,35 @@ impl AppState {
     }
 
     pub async fn close_database_pool(&self, connection_id: &str, database: Option<&str>) -> Result<bool, String> {
-        let db_type = {
+        let (db_type, default_database) = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|c| c.db_type)
+            configs
+                .get(connection_id)
+                .map_or((None, None), |config| (Some(config.db_type), config.effective_database().map(str::to_string)))
         };
         if database.is_some() && db_type.is_some_and(|db_type| shares_database_pool_with_connection(&db_type)) {
             return Ok(false);
         }
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
-        let session_prefix = format!("{base_pool_key}:session:");
-        let metadata_role_key = format!("{base_pool_key}:role:metadata");
+        let target_database = database.map(str::trim).filter(|database| !database.is_empty());
+        let mut base_pool_keys = vec![base_pool_key_for(db_type, connection_id, target_database, false)];
+        if target_database.is_some() && target_database == default_database.as_deref() {
+            let connection_pool_key = base_pool_key_for(db_type, connection_id, None, false);
+            if !base_pool_keys.contains(&connection_pool_key) {
+                base_pool_keys.push(connection_pool_key);
+            }
+        }
+        let session_prefixes: Vec<String> = base_pool_keys.iter().map(|key| format!("{key}:session:")).collect();
+        let metadata_role_keys: Vec<String> = base_pool_keys.iter().map(|key| format!("{key}:role:metadata")).collect();
         let keys_to_remove: Vec<String> = self
             .connections
             .read()
             .await
             .keys()
-            .filter(|key| *key == &base_pool_key || *key == &metadata_role_key || key.starts_with(&session_prefix))
+            .filter(|key| {
+                base_pool_keys.iter().any(|base_key| *key == base_key)
+                    || metadata_role_keys.iter().any(|metadata_key| *key == metadata_key)
+                    || session_prefixes.iter().any(|prefix| key.starts_with(prefix))
+            })
             .cloned()
             .collect();
         self.stop_keepalive_tasks(&keys_to_remove).await;
@@ -9276,6 +9289,30 @@ for line in sys.stdin:
         assert!(!conns.contains_key("conn:analytics:role:metadata"));
         assert!(!conns.contains_key("conn:analytics:session:tab-1"));
         assert!(conns.contains_key("conn:billing"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn close_database_pool_removes_default_connection_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::Postgres;
+        config.database = Some("analytics".to_string());
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+
+        {
+            let mut conns = state.connections.write().await;
+            conns.insert("conn".to_string(), PoolKind::Sqlite(pool.clone()));
+            conns.insert("conn:analytics".to_string(), PoolKind::Sqlite(pool.clone()));
+            conns.insert("conn:analytics:role:metadata".to_string(), PoolKind::Sqlite(pool.clone()));
+            conns.insert("conn:analytics:session:tab-1".to_string(), PoolKind::Sqlite(pool));
+        }
+
+        assert!(state.close_database_pool("conn", Some("analytics")).await.unwrap());
+        assert!(state.connections.read().await.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }

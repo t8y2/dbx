@@ -46,6 +46,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -965,6 +966,13 @@ function connectionIconType(connectionId?: string) {
   return config?.driver_profile || config?.db_type || "postgres";
 }
 
+const pluginConnectionIcon = computed(() => {
+  if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return undefined;
+  const config = connectionStore.getConfig(activeNode.value.connectionId);
+  if (config?.db_type !== "plugin" || !config.plugin_id) return undefined;
+  return { pluginId: config.plugin_id, contributionId: config.plugin_connection_provider };
+});
+
 const connectionColor = computed(() => {
   const connectionId = activeNode.value.connectionId;
   return connectionId ? connectionStore.getConfig(connectionId)?.color || "" : "";
@@ -1570,7 +1578,8 @@ function onKeydown(event: KeyboardEvent) {
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
         <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false }">
-          <DatabaseIcon v-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
+          <PluginIcon v-if="node.type === 'connection' && pluginConnectionIcon" :plugin-id="pluginConnectionIcon.pluginId" :contribution-id="pluginConnectionIcon.contributionId" class="h-3.5 w-3.5 shrink-0" />
+          <DatabaseIcon v-else-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />

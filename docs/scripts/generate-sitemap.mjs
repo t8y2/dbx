@@ -8,7 +8,7 @@ const EXCLUDE = new Set(["index.html", "404.html", "_not-found.html"]);
 const EXCLUDE_PATHS = new Set(LANGUAGES.map((language) => `/${language}/issue`));
 // hreflang codes differ from the route segment for locales whose segment is not
 // already a language code.
-const HREFLANG = { en: "en", cn: "zh", tr: "tr" };
+const HREFLANG = { en: "en", cn: "zh" };
 
 function* walkDir(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });

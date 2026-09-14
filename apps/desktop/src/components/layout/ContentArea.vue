@@ -61,6 +61,8 @@ import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
 import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
+import PluginFilesystemTab from "@/components/plugins/PluginFilesystemTab.vue";
+import PluginWorkbenchTab from "@/components/plugins/PluginWorkbenchTab.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
@@ -123,8 +125,6 @@ const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admi
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
-const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
-const PluginFilesystemTab = defineAsyncComponent(() => import("@/components/plugins/PluginFilesystemTab.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
@@ -206,6 +206,10 @@ type SearchableBrowserHandle = {
   refresh?: () => boolean;
   insertCommand?: (command: string) => Promise<boolean>;
   executeCommand?: (command: string) => Promise<boolean>;
+};
+
+type PluginTabHandle = {
+  refresh?: () => Promise<void> | void;
 };
 
 type ElasticsearchJsonResponsePanelHandle = {
@@ -323,6 +327,8 @@ const consulOverviewRef = ref<{ refresh?: () => boolean }>();
 const consulWorkspaceRef = ref<SearchableBrowserHandle>();
 const databaseBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
+const pluginWorkbenchRef = ref<PluginTabHandle>();
+const pluginFilesystemRef = ref<PluginTabHandle>();
 const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
 const activeResultExecutionTarget = computed(() => queryStore.activeResultExecutionTarget(props.activeTab.id));
@@ -961,6 +967,12 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "consul-overview") return consulOverviewRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.refresh?.() ?? false;
   if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.refresh?.() ?? false;
+  if (props.activeTab.mode === "plugin-workbench" || props.activeTab.mode === "plugin-filesystem") {
+    const pluginTab = props.activeTab.mode === "plugin-workbench" ? pluginWorkbenchRef.value : pluginFilesystemRef.value;
+    if (!pluginTab?.refresh) return false;
+    void pluginTab.refresh();
+    return true;
+  }
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
     reloadUnavailableDataTab();
@@ -1186,6 +1198,7 @@ function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
   if (target.closest("[data-grid-root], [data-elasticsearch-json-response-root]")) return refreshData();
   if (canReloadUnavailableDataTab(props.activeTab)) return refreshData();
+  if (props.activeTab.mode === "plugin-workbench" || props.activeTab.mode === "plugin-filesystem") return refreshData();
   return false;
 }
 
@@ -2527,13 +2540,22 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'plugin-workbench' && activeTab.pluginWorkbench">
-      <div class="flex-1 min-h-0">
-        <PluginWorkbenchTab :key="activeTab.id" :plugin-id="activeTab.pluginWorkbench.pluginId" :contribution-id="activeTab.pluginWorkbench.contributionId" :context="activeTab.pluginWorkbench.context" />
+      <div class="min-w-0 flex-1 min-h-0 bg-background">
+        <PluginWorkbenchTab
+          ref="pluginWorkbenchRef"
+          :key="activeTab.id"
+          :plugin-id="activeTab.pluginWorkbench.pluginId"
+          :contribution-id="activeTab.pluginWorkbench.contributionId"
+          :connection-id="activeTab.connectionId || undefined"
+          :context="activeTab.pluginWorkbench.context"
+          @close-tab="emit('closeTab', activeTab.id)"
+        />
       </div>
     </template>
     <template v-else-if="activeTab.mode === 'plugin-filesystem' && activeTab.pluginFilesystem">
-      <div class="flex h-full min-h-0 flex-col">
+      <div class="flex h-full min-h-0 min-w-0 flex-col">
         <PluginFilesystemTab
+          ref="pluginFilesystemRef"
           :key="activeTab.id"
           :plugin-id="activeTab.pluginFilesystem.pluginId"
           :provider-id="activeTab.pluginFilesystem.providerId"

@@ -247,6 +247,9 @@ export default withEnglishFallback({
     parentDirectory: "Diretório superior",
     filesystemUri: "URI do sistema de arquivos",
     refresh: "Atualizar",
+    reloadRequired: "A página do plugin precisa ser recarregada.",
+    reloadHintPrefix: "Pressione ",
+    reloadHintSuffix: " ou clique no botão de atualização abaixo para recarregar.",
     loadingFiles: "Carregando arquivos",
     emptyDirectory: "Este diretório está vazio.",
     loadMore: "Carregar mais",
@@ -1385,6 +1388,7 @@ export default withEnglishFallback({
     mqttNoLocal: "Proibir encaminhamento local",
     doltShowSystemTables: "Exibir tabelas internas do Dolt",
     doltShowSystemTablesHint: "Exibir as tabelas de controle de versão internas do Dolt na lista de tabelas da conexão atual.",
+    clientCertHint: "Quando o mTLS for exigido, o certificado do cliente e a chave privada devem ser preenchidos juntos.",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

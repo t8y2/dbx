@@ -56,7 +56,10 @@ export function parseTemporalInputValue(value: string, kind: TemporalCellEditorK
   const text = value.trim();
   if (!text) return null;
   if (kind === "date") return text;
-  if (kind === "time") return normalizeTimeInput(text) || text;
+  if (kind === "time") {
+    const normalized = normalizeTimeInput(text);
+    return normalized ? `${normalized}${temporalOffsetSuffix(text, kind)}` : text;
+  }
 
   const datetime = text.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2})(\.\d{1,9})?)?$/);
   if (!datetime) return text;
@@ -65,9 +68,27 @@ export function parseTemporalInputValue(value: string, kind: TemporalCellEditorK
 
 export type TemporalCellEditorPart = "year" | "month" | "day" | "hour" | "minute" | "second";
 
+export function temporalOffsetSuffix(value: string, kind: TemporalCellEditorKind): string {
+  const text = value.trim();
+  const offset = text.match(/(Z|[+-]\d{2}(?::?\d{2})?)$/i)?.[1];
+  if (!offset) return "";
+
+  const withoutOffset = text.slice(0, -offset.length);
+  const basePattern = kind === "time" ? /^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$/ : /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$/;
+  return basePattern.test(withoutOffset) ? offset : "";
+}
+
+export function hostTimezoneOffsetSuffix(now: Date): string {
+  const minutes = -now.getTimezoneOffset();
+  const sign = minutes >= 0 ? "+" : "-";
+  const abs = Math.abs(minutes);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+}
+
 export function stepTemporalInputValue(value: string, kind: TemporalCellEditorKind, part: TemporalCellEditorPart, delta: number): string {
   const dateParts = temporalDateParts(value);
   const timeParts = temporalTimeParts(value, kind);
+  const offset = temporalOffsetSuffix(value, kind);
 
   if (part === "year") dateParts.year = Math.max(1, Math.min(9999, dateParts.year + delta));
   else if (part === "month") dateParts.month = Math.max(1, Math.min(12, dateParts.month + delta));
@@ -82,8 +103,8 @@ export function stepTemporalInputValue(value: string, kind: TemporalCellEditorKi
   const timeText = [timeParts.hour, timeParts.minute, timeParts.second].map((item) => String(item).padStart(2, "0")).join(":") + timeParts.fraction;
 
   if (kind === "date") return dateText;
-  if (kind === "time") return timeText;
-  return `${dateText} ${timeText}`;
+  if (kind === "time") return `${timeText}${offset}`;
+  return `${dateText} ${timeText}${offset}`;
 }
 
 function normalizeTemporalType(dataType: string | undefined): string {

@@ -6,11 +6,11 @@ import { Tag } from "lucide-react";
 import type { DocsLang } from "@/lib/i18n";
 
 const sectionLabels: Record<string, Record<string, string>> = {
-  added: { en: "New Features", cn: "新功能", tr: "Yeni Özellikler" },
-  improved: { en: "Improvements", cn: "改进", tr: "İyileştirmeler" },
-  fixed: { en: "Bug Fixes", cn: "问题修复", tr: "Hata Düzeltmeleri" },
-  changed: { en: "Changes", cn: "变更", tr: "Değişiklikler" },
-  removed: { en: "Removed", cn: "移除", tr: "Kaldırılanlar" },
+  added: { en: "New Features", cn: "新功能" },
+  improved: { en: "Improvements", cn: "改进" },
+  fixed: { en: "Bug Fixes", cn: "问题修复" },
+  changed: { en: "Changes", cn: "变更" },
+  removed: { en: "Removed", cn: "移除" },
 };
 
 const listText: Record<DocsLang, { publishedOn: string; download: string; seeGitHub: string; loading: string; releaseList: string; versions: string; content: string; tocTitle: (tag: string) => string; tocSubtitle: string; currentContents: string }> = {
@@ -38,18 +38,6 @@ const listText: Record<DocsLang, { publishedOn: string; download: string; seeGit
     tocSubtitle: "更新内容",
     currentContents: "当前版本目录",
   },
-  tr: {
-    publishedOn: "Yayımlanma",
-    download: "İndir",
-    seeGitHub: "Ayrıntılar için GitHub Release sayfasına bakın",
-    loading: "Sürüm yükleniyor…",
-    releaseList: "Sürüm listesi",
-    versions: "Sürümler",
-    content: "Değişiklik günlüğü içeriği",
-    tocTitle: (tag) => `${tag} içinde`,
-    tocSubtitle: "Sürüm içeriği",
-    currentContents: "Geçerli sürüm içeriği",
-  },
 };
 
 // 与 .github/scripts/sync-changelog.mjs 的 SECTION_MAP 保持一致，
@@ -67,7 +55,7 @@ const sectionTypeByTitle: Record<string, string> = {
   Removed: "removed",
 };
 
-const DATE_LOCALE: Record<DocsLang, string> = { en: "en-US", cn: "zh-CN", tr: "tr-TR" };
+const DATE_LOCALE: Record<DocsLang, string> = { en: "en-US", cn: "zh-CN" };
 
 function formatDate(dateStr: string, lang: DocsLang) {
   const date = new Date(dateStr);

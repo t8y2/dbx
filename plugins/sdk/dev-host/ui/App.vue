@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { Plus, Upload, Plug, Unplug, Pencil, Trash2, X, RefreshCw, Sun, Moon, Terminal, Settings2, Languages } from "lucide-vue-next";
 import { hostMessage } from "./messages.js";
 import DebugPanel from "./DebugPanel.vue";
+import PluginIcon from "./PluginIcon.vue";
 import { localizeManifest, translate } from "./i18n.js";
 const rawManifest = ref(),
   connections = ref([]),
@@ -73,6 +74,15 @@ const editor = ref(),
   draft = ref(),
   editing = ref(false);
 const windows = new Map();
+const iconRequests = new Map();
+function loadIcon(contributionId) {
+  if (!iconRequests.has(contributionId))
+    iconRequests.set(
+      contributionId,
+      api("icon", { contributionId }).catch(() => null),
+    );
+  return iconRequests.get(contributionId);
+}
 let csrf, stream, finishAsk;
 const providers = computed(() => manifest.value?.contributions.filter((c) => c.type === "connection-provider") || []);
 const workbenches = computed(() => manifest.value?.contributions.filter((c) => c.type === "workbench") || []);
@@ -345,7 +355,7 @@ onBeforeUnmount(() => {
         <div v-if="workbenches.length" class="border-b border-base-300 p-2">
           <h2 class="px-1 py-2 text-xs font-semibold">{{ t("工作台") }}</h2>
           <button v-for="workbench in workbenches" :key="workbench.id" class="btn btn-sm btn-ghost w-full justify-start" :title="workbench.label" :disabled="busy" @click="openWorkbench(workbench)">
-            <Terminal :size="14" /><span class="truncate">{{ workbench.label }}</span>
+            <PluginIcon :contribution-id="workbench.id" :load-icon="loadIcon"><Terminal :size="14" /></PluginIcon><span class="truncate">{{ workbench.label }}</span>
           </button>
         </div>
         <div class="flex items-center gap-1 border-b border-base-300 p-2">
@@ -356,7 +366,7 @@ onBeforeUnmount(() => {
         <div class="min-h-0 flex-1 overflow-auto p-2">
           <div v-for="c in connections" :key="c.id" class="mb-1 border-b border-base-300 pb-2" :data-connection="c.id">
             <button class="flex w-full min-w-0 items-center gap-2 py-2 text-left text-sm" :title="c.name" :disabled="busy || state !== 'ready'" @click="connect(c)">
-              <Plug :size="15" class="shrink-0" :class="c.connected ? 'text-success' : 'text-base-content/40'" /><span class="truncate">{{ c.name }}</span>
+              <PluginIcon :contribution-id="c.providerId" :load-icon="loadIcon" :connected="c.connected"><Plug :size="15" :class="c.connected ? 'text-success' : 'text-base-content/40'" /></PluginIcon><span class="truncate">{{ c.name }}</span>
             </button>
             <div class="flex items-center gap-1">
               <span class="mr-auto truncate text-xs text-base-content/60">{{ providers.find((p) => p.id === c.providerId)?.label || c.label }}</span
@@ -372,7 +382,8 @@ onBeforeUnmount(() => {
         <div class="flex min-h-10 items-center border-b border-base-300">
           <div class="flex min-w-0 flex-1 overflow-x-auto" role="tablist">
             <div v-for="f in frames" :key="f.id" class="flex shrink-0 items-center border-r border-base-300" :class="active === f.id ? 'bg-base-200 border-b-2 border-b-info' : ''">
-              <button role="tab" class="max-w-44 truncate px-3 py-2 text-xs" :aria-selected="active === f.id" :title="frameName(f)" @click="active = f.id">{{ frameName(f) }}</button
+              <button role="tab" class="flex max-w-44 items-center gap-2 px-3 py-2 text-xs" :aria-selected="active === f.id" :title="frameName(f)" @click="active = f.id">
+                <PluginIcon :contribution-id="f.contributionId" :load-icon="loadIcon"><Terminal :size="14" /></PluginIcon><span class="truncate">{{ frameName(f) }}</span></button
               ><button class="btn btn-xs btn-square btn-ghost mr-1" :aria-label="t('关闭') + ' ' + frameName(f)" :disabled="busy" @click="closeFrame(f)"><X :size="12" /></button>
             </div>
           </div>

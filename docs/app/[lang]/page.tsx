@@ -31,20 +31,14 @@ function formatStars(count: number) {
 
 function metrics(starLabel: string) {
   return {
-    tr: [
-      { value: "~20 MB", label: "masaüstü yükleyici" },
-      { value: "90+", label: "veritabanı motoru" },
-      { value: "2 mod", label: "masaüstü ve Docker" },
-      { value: starLabel, label: "GitHub yıldızı, tümüyle açık kaynak" },
-    ],
     en: [
-      { value: "~20 MB", label: "desktop installer" },
+      { value: "~25 MB", label: "desktop installer" },
       { value: "90+", label: "database engines" },
       { value: "2 modes", label: "desktop and Docker" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
-      { value: "~20 MB", label: "桌面安装包" },
+      { value: "~25 MB", label: "桌面安装包" },
       { value: "90+", label: "数据库引擎" },
       { value: "2 种模式", label: "桌面与 Docker" },
       { value: starLabel, label: "GitHub Star，完全开源" },
@@ -53,32 +47,6 @@ function metrics(starLabel: string) {
 }
 
 const workflows = {
-  tr: [
-    {
-      icon: Terminal,
-      title: "SQL yazın ve çalıştırın",
-      desc: "Meta veri farkındalıklı tamamlama, biçimlendirme, geçmiş ve seçili SQL çalıştırma sunan bir CodeMirror 6 düzenleyicisi.",
-      href: "/tr/docs/query-editor",
-    },
-    {
-      icon: Table,
-      title: "Veriye gözatın ve düzenleyin",
-      desc: "Sanallaştırılmış ızgaralar, satır içi düzenleme, WHERE/ORDER BY denetimleri, SQL önizlemesi ve dışa aktarma araçları.",
-      href: "/tr/docs/data-grid",
-    },
-    {
-      icon: Search,
-      title: "Şemaları keşfedin",
-      desc: "Veritabanları, şemalar, tablolar, sütunlar, dizinler, yabancı anahtarlar ve tetikleyiciler arasında sade bir kenar çubuğundan gezinin.",
-      href: "/tr/docs/schema-browser",
-    },
-    {
-      icon: GitCompare,
-      title: "Karşılaştırın ve taşıyın",
-      desc: "Şema karşılaştırma, tablo içe aktarma, veritabanı dışa aktarma, SQL dosyası çalıştırma ve motorlar arası veri aktarımı.",
-      href: "/tr/docs/schema-diff",
-    },
-  ],
   en: [
     {
       icon: Terminal,
@@ -134,14 +102,6 @@ const workflows = {
 };
 
 const capabilities = {
-  tr: [
-    { icon: Database, label: "Yerel Rust sürücüleri, JDBC çalışma zamanı gerekmez" },
-    { icon: Shield, label: "SSH tünelleri, şifreli yapılandırma dışa aktarımı, yıkıcı işlem korumaları" },
-    { icon: Bot, label: "Yapay zekâ asistanı ve Claude Code, Cursor ile agent'lar için MCP sunucusu" },
-    { icon: Network, label: "Daha derin analiz için ER diyagramları, şema karşılaştırma ve alan soy ağacı" },
-    { icon: FileCode, label: "CSV, Excel, SQL dosyaları, tam dışa aktarım ve motorlar arası aktarım" },
-    { icon: Zap, label: "Aynı projeden masaüstü uygulaması ve kendi sunucunuzda web dağıtımı" },
-  ],
   en: [
     { icon: Database, label: "Native Rust drivers, no JDBC runtime" },
     { icon: Shield, label: "SSH tunnels, encrypted config export, destructive action guards" },
@@ -326,59 +286,13 @@ const testimonials = {
 const METRICS_LABEL: Record<DocsLang, string> = {
   en: "DBX key metrics",
   cn: "DBX 核心指标",
-  tr: "DBX temel ölçümleri",
 };
 
-// Testimonials are direct quotes from named people, so the Turkish page reuses
-// the English set verbatim instead of translating what they said.
-const localizedTestimonials = { ...testimonials, tr: testimonials.en };
+const localizedTestimonials = testimonials;
 
 const i18nText = {
-  tr: {
-    heroTitle: "90+ veritabanını 20 MB ile yönetin!",
-    heroSubtitle: "DBX; bağlantı yönetimini, SQL düzenlemeyi, veri tablolarını, şema araçlarını, yapay zekâ desteğini ve kendi sunucunuzda barındırmayı tek bir hafif üründe toplar.",
-    download: "DBX'i indir",
-    downloadName: "DBX'i indir",
-    readDocs: "Dokümanları okuyun",
-    docsStart: "Buradan başlayın",
-    docsStartDesc: "DBX'i kurun, ilk bağlantınızı oluşturun ve temel iş akışını öğrenin.",
-    workflowsTitle: "Temel iş akışları",
-    workflowsDesc: "Dokümanlar, bir veritabanı istemcisinde gerçekten yaptığınız işlere göre düzenlenmiştir.",
-    supportTitle: "90+ veritabanını destekler",
-    supportDesc: "SQL, NoSQL, vektör, zaman serisi ve gömülü veritabanlarını, mesaj kuyruklarını ve uyumlu motorları tek yerden bağlayın.",
-    supportLink: "Tümünü görüntüle",
-    testimonialsTitle: "DBX ne işe yarar",
-    testimonialsDesc: "DBX'in kolaylaştırmak için tasarlandığı günlük veritabanı iş akışlarına daha yakından bir bakış.",
-    capabilitiesTitle: "Gerçek veritabanı işleri için tasarlandı",
-    contributorsTitle: "Toplulukla birlikte geliştirildi",
-    contributorsDesc: "DBX tümüyle açık kaynaktır. Her özellik, düzeltme ve sürücü bir katkıcıyla başlar.",
-    sponsorsLabel: "❤️ Sponsorlar",
-    partnersLabel: "🤝 İş Ortakları",
-    qiniuSponsorDesc: "Qiniu Cloud, DBX'e nesne depolama, CDN ve diğer bulut altyapı kaynaklarını sağlıyor.",
-    qiniuSponsorAction: "Ziyaret edin",
-    rainyunSponsorDesc: "RainYun; bulut sunucular, fiziksel sunucular, oyun barındırma ve geliştirici dostu altyapı hizmetleri sunan bir bulut servis sağlayıcısıdır.",
-    rainyunSponsorAction: "Ziyaret edin",
-    easysearchSponsorDesc: "Easysearch, Elasticsearch API'leriyle uyumlu kurumsal düzeyde dağıtık bir arama motorudur; tam metin, vektör ve coğrafi aramayı, gerçek zamanlı analitiği ve yapay zekâ yeteneklerini tek platformda birleştirir.",
-    easysearchSponsorAction: "Ziyaret edin",
-    atlasCloudSponsorDesc: "Atlas Cloud, geliştiricilere sohbet, görsel, video ve ses alanlarında 400+ yapay zekâ modeli için tek ve birleşik bir API sunar.",
-    atlasCloudSponsorAction: "Ziyaret edin",
-    trustasiaSponsorDesc: "TrustAsia, DBX için bulut tabanlı kod imzalama hizmeti sağlayarak otomatik CI/CD derlemeleriyle güvenilir yazılım üretilmesini sağlıyor.",
-    trustasiaSponsorAction: "Ziyaret edin",
-    jalapenoSponsorDesc: "Jalapeño Cloud, yapay zekâ altyapısı ve belirteç hesaplama platformudur; DBX'e özel giriş noktasıyla ücretsiz kredi ve yükleme bonusu sunar.",
-    jalapenoSponsorAction: "Ziyaret edin",
-    astraflowSponsorDesc: "UCloud, Çin'in STAR Market borsasına kote ilk genel bulut sağlayıcısıdır; 28 küresel bölgede bulut sunucu, veritabanı ve CDN hizmeti verir. AstraFlow platformu 200+ yaygın büyük dil modeline tek tıklamayla erişim sağlar.",
-    astraflowSponsorAction: "Ziyaret edin",
-    onepanelSponsorDesc: "1Panel, modern, açık kaynaklı bir Linux sunucu yönetim paneli ve hafif yapay zekâ yönetim platformudur; yapay zekâ ajanları, yerel büyük dil modelleri, web siteleri, veritabanları, konteynerler ve dosyaları tek web arayüzünden yönetir.",
-    onepanelSponsorAction: "Ziyaret edin",
-    hualongSponsorDesc: "HuaLongAI, yoğun yapay zekâ geliştiricileri için bir model API aktarıcısıdır; %100 resmî kaynaktan Codex ve Claude modelleri, şeffaf belirteç düzeyinde faturalandırma, kurumsal sözleşme ve fatura sunar.",
-    hualongSponsorAction: "Ziyaret edin",
-    footerTitle: "DBX'i denemeye hazır mısınız?",
-    footerDesc: "Yerel çalışma için masaüstü uygulamasını kullanın ya da tarayıcıdan erişim için Docker sürümünü dağıtın.",
-    release: "En son sürüm",
-    docker: "Docker kurulumu",
-  },
   en: {
-    heroTitle: "20 MB to manage 90+ databases!",
+    heroTitle: "25 MB to manage 90+ databases!",
     heroSubtitle: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
     download: "Download DBX",
     downloadName: "Download DBX",
@@ -421,7 +335,7 @@ const i18nText = {
     docker: "Docker setup",
   },
   cn: {
-    heroTitle: "20MB，管理90+种数据库！",
+    heroTitle: "25MB，管理90+种数据库！",
     heroSubtitle: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
     download: "下载 DBX",
     downloadName: "下载 DBX",
@@ -466,16 +380,12 @@ const i18nText = {
 };
 
 const landingMeta = {
-  tr: {
-    title: "DBX - 90+ veritabanını 20 MB ile yönetin!",
-    description: "DBX; bağlantı yönetimini, SQL düzenlemeyi, veri tablolarını, şema araçlarını, yapay zekâ desteğini ve kendi sunucunuzda barındırmayı tek bir hafif üründe toplar.",
-  },
   en: {
-    title: "DBX - 20 MB to manage 90+ databases!",
+    title: "DBX - 25 MB to manage 90+ databases!",
     description: "DBX brings connections, SQL editing, data grids, schema tools, AI assistance, and self-hosted access into one lightweight product.",
   },
   cn: {
-    title: "DBX - 20MB，管理90+种数据库！",
+    title: "DBX - 25MB，管理90+种数据库！",
     description: "DBX 将连接管理、SQL 编辑、数据表格、结构工具、AI 助手和自托管访问放进一个轻量产品里。",
   },
 };

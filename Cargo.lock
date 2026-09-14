@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -2100,7 +2100,6 @@ dependencies = [
  "fs2",
  "futures",
  "httpdate",
- "iana-time-zone",
  "insta",
  "json5",
  "jsonwebtoken",
@@ -2196,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.11"
+version = "0.6.12"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

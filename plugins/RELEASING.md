@@ -65,7 +65,7 @@ Human review decides whether a plugin is allowed in the official catalog. SHA-25
 Install the precompiled CLI and run `dbx-plugin create <directory> --template frontend|rust|go` for a complete project, or copy `sdk/templates/github/plugin-release.yml`:
 
 ```bash
-npm install --global @dbx-app/plugin-cli@0.1.0
+npm install --global @dbx-app/plugin-cli@0.1.2
 ```
 
 Pin both the reusable workflow reference and `plugin-cli-version`. The npm package contains the matching CLI binary, packager, and Rust/Go SDK sources. Building the CLI from a DBX checkout is reserved for SDK development and can be enabled with `install-plugin-cli-from-source: true` plus a reviewed `sdk-ref`.

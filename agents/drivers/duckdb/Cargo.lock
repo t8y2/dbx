@@ -1252,7 +1252,6 @@ dependencies = [
  "fs2",
  "futures",
  "httpdate",
- "iana-time-zone",
  "insta",
  "json5",
  "jsonwebtoken",

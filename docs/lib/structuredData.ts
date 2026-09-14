@@ -3,8 +3,7 @@ import type { DocsLang } from "./i18n";
 
 const localizedDescription = {
   en: DEFAULT_DESCRIPTION,
-  cn: "90+ 种数据库，仅 20 MB。支持桌面端、Docker 自托管、AI 助手与 MCP Server。",
-  tr: "90+ veritabanı, yalnızca 20 MB. Masaüstü uygulamaları, Docker ile kendi sunucunuzda barındırma, yapay zekâ asistanı ve MCP Server.",
+  cn: "90+ 种数据库，仅 25 MB。支持桌面端、Docker 自托管、AI 助手与 MCP Server。",
 } as const;
 
 const localizedFeatureList = {
@@ -24,14 +23,6 @@ const localizedFeatureList = {
     "通过 MCP Server 连接 AI 编程智能体",
     "提供结构浏览、结构对比、数据编辑、导入与导出",
   ],
-  tr: [
-    "90+ SQL, NoSQL, vektör, zaman serisi, gömülü veritabanı ve mesaj kuyruğunu tek yerden yönetin",
-    "Windows, macOS ve Linux için masaüstü uygulamaları",
-    "Tarayıcıdan erişim için Docker ile kendi sunucunuzda barındırma",
-    "Yapay zekâ destekli SQL üretme, açıklama, iyileştirme ve düzeltme",
-    "Yapay zekâ kodlama agent'ları için MCP Server tümleştirmesi",
-    "Şemaya gözatma, şema karşılaştırma, veri düzenleme, içe ve dışa aktarma",
-  ],
 } as const;
 
 export function buildSiteStructuredData() {
@@ -44,7 +35,7 @@ export function buildSiteStructuredData() {
       url: SITE_URL,
       description: DEFAULT_DESCRIPTION,
       publisher: { "@id": `${SITE_URL}/#organization` },
-      inLanguage: ["en", "zh-CN", "tr"],
+      inLanguage: ["en", "zh-CN"],
     },
     {
       "@context": "https://schema.org",

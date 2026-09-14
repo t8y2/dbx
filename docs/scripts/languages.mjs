@@ -1,7 +1,7 @@
 // Build-script view of `lib/i18n.ts`. The Next.js config is TypeScript, so the
 // plain-JS build scripts keep their own copy; add a language in both places.
 export const DEFAULT_LANGUAGE = "en";
-export const LANGUAGES = ["en", "cn", "tr"];
+export const LANGUAGES = ["en", "cn"];
 
 /** Suffix a documentation page uses for a language: `faq.mdx` vs `faq.cn.mdx`. */
 export function pageSuffix(language) {

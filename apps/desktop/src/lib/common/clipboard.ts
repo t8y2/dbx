@@ -1,4 +1,5 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { getPlatform, type Platform } from "@/lib/backend/platform";
 
 interface ClipboardApi {
   readText?: () => Promise<string> | string;
@@ -40,6 +41,21 @@ interface ClipboardDocument {
 export interface ClipboardEnvironment {
   navigator?: ClipboardNavigator;
   document?: ClipboardDocument;
+}
+
+/**
+ * Rewrites the line endings of text destined for the system clipboard.
+ *
+ * Windows native edit controls (the Win32 EDIT control, and applications built
+ * on it such as PowerBuilder) only treat CRLF as a line break, so text copied
+ * with bare LF arrives as a single line. Other platforms keep LF.
+ *
+ * Existing CRLF pairs are matched before bare CR and LF so that already
+ * normalized text is left byte-identical.
+ */
+export function clipboardLineEndings(text: string, platform: Platform = getPlatform()): string {
+  if (platform !== "windows") return text;
+  return text.replace(/\r\n|\r|\n/g, "\r\n");
 }
 
 export interface ClipboardShortcutEvent {
@@ -136,6 +152,8 @@ export async function readTextFromClipboard(env: ClipboardEnvironment = globalTh
 }
 
 export async function copyToClipboard(text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
+  text = clipboardLineEndings(text);
+
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {
       const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");

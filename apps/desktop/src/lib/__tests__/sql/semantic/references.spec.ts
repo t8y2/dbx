@@ -86,6 +86,34 @@ describe("sqlSemanticReferences shared consumers", () => {
     expect(diagnostics).toEqual([]);
   });
 
+  it("keeps flagging a HAVING alias for PostgreSQL, which rejects it", () => {
+    const sql = `SELECT COUNT(*) AS cnt, g FROM amounts GROUP BY g HAVING cnt > 1`;
+    const aliasStart = sql.indexOf("cnt", sql.indexOf("HAVING"));
+    const analysis: SqlReferenceAnalysis = {
+      tables: [
+        {
+          name: "amounts",
+          span: span(sql.indexOf("amounts") + 1, sql.indexOf("amounts") + "amounts".length),
+        },
+      ],
+      columns: [
+        {
+          name: "cnt",
+          span: span(aliasStart + 1, aliasStart + "cnt".length),
+        },
+      ],
+    };
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [],
+      columnsByTable: new Map([["amounts", [{ name: "price" }, { name: "g" }]]]),
+      sql,
+      databaseType: "postgres",
+    });
+
+    expect(diagnostics.map((diagnostic) => diagnostic.message)).toEqual(["Unknown column cnt"]);
+  });
+
   it("resolves navigation targets from subquery aliases and projected columns", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT sq.user_| FROM (SELECT id, name AS user_name FROM users) sq");
     const model = buildSqlSemanticModel(sql, cursor);

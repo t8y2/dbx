@@ -161,6 +161,8 @@ watch(
   () => [props.pluginId, props.provider.id, props.connectionId, props.initialUri, rootUri.value] as const,
   () => void load(props.initialUri || rootUri.value),
 );
+
+defineExpose({ refresh: () => load(currentUri.value) });
 </script>
 
 <template>

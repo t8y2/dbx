@@ -247,6 +247,9 @@ export default withEnglishFallback({
     parentDirectory: "親ディレクトリ",
     filesystemUri: "ファイルシステム URI",
     refresh: "更新",
+    reloadRequired: "プラグインページを再読み込みする必要があります。",
+    reloadHintPrefix: "",
+    reloadHintSuffix: " を押すか、下の更新ボタンをクリックして再読み込みします。",
     loadingFiles: "ファイルを読み込み中",
     emptyDirectory: "このディレクトリは空です。",
     loadMore: "さらに読み込む",
@@ -1405,6 +1408,7 @@ export default withEnglishFallback({
     mqttNoLocal: "ローカル転送禁止",
     doltShowSystemTables: "Dolt 組み込みテーブルを表示",
     doltShowSystemTablesHint: "現在の接続のテーブルリストに Dolt 組み込みのバージョン管理テーブルを表示します。",
+    clientCertHint: "mTLS が要求される場合、クライアント証明書と秘密鍵は一緒に入力する必要があります。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

@@ -247,6 +247,9 @@ export default withEnglishFallback({
     parentDirectory: "上層目錄",
     filesystemUri: "檔案系統 URI",
     refresh: "重新整理",
+    reloadRequired: "外掛頁面需要重新載入。",
+    reloadHintPrefix: "按下 ",
+    reloadHintSuffix: " 或點擊下方重新整理按鈕重新載入。",
     loadingFiles: "正在載入檔案",
     emptyDirectory: "此目錄為空。",
     loadMore: "載入更多",
@@ -1384,6 +1387,7 @@ export default withEnglishFallback({
     mqttClientCertPath: "用戶端憑證路徑",
     mqttClientKeyPath: "用戶端私鑰路徑",
     mqttNoLocal: "禁止本機轉送",
+    clientCertHint: "要求 mTLS 時，用戶端憑證和私密金鑰必須一起填寫。",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",

@@ -34,7 +34,6 @@ function ContributorAvatar({ c }: { c: Contributor }) {
 const WALL_TEXT: Record<DocsLang, { explore: (count: number) => string; certificate: string }> = {
   en: { explore: (count) => `Explore ${count}+ contributors`, certificate: "Download contributor certificate" },
   cn: { explore: (count) => `查看 ${count}+ 位贡献者`, certificate: "下载贡献者证书" },
-  tr: { explore: (count) => `${count}+ katkıcıyı görüntüle`, certificate: "Katkı sertifikasını indir" },
 };
 
 export function ContributorsWallContent({ contributors, title, desc, lang }: { contributors: Contributor[]; title: string; desc: string; lang: DocsLang }) {

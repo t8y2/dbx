@@ -61,6 +61,7 @@ export interface ContentAreaSurfaceProps {
  * global active tab after an await (see redevelopment guide §6.1).
  */
 export interface ContentAreaSurfaceEmits {
+  closeTab: [tabId: string];
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];

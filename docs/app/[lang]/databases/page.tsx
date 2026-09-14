@@ -20,15 +20,6 @@ const i18n = {
     footer: "Want to learn more about what works with each engine?",
     footerLink: "Read the feature matrix",
   },
-  tr: {
-    title: "Desteklenen Veritabanları",
-    desc: "DBX 90+ veritabanı motorunu destekler: Rust yerel sürücüleri, MySQL/PostgreSQL uyumlu türler ve JDBC uzantıları.",
-    ctaTitle: "Kullandığınız veritabanını göremiyor musunuz?",
-    ctaDesc: "Yeni bir veritabanı motoru için GitHub Discussions'ta bir başlık açın. Üreticiler ve topluluk kullanıcıları katkı verebilir.",
-    ctaLink: "GitHub'da talep edin",
-    footer: "Her motorun hangi özellikleri desteklediğini merak ediyor musunuz?",
-    footerLink: "Özellik matrisine bakın",
-  },
   cn: {
     title: "支持的数据库",
     desc: "DBX 支持 90+ 种数据库引擎。涵盖 Rust 原生驱动、MySQL/PostgreSQL 兼容类型和 JDBC 扩展。",

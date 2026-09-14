@@ -21,6 +21,7 @@ const groupHandleModRCalls = vi.hoisted(() => [] as Element[]);
 const groupFocusSearchCalls = vi.hoisted(() => [] as Array<Element | null>);
 const resultHandleModRCalls = vi.hoisted(() => [] as Element[]);
 const resultFocusSearchCalls = vi.hoisted(() => [] as boolean[]);
+const groupExecutionCalls = vi.hoisted(() => ({ capture: [] as string[], request: [] as string[] }));
 
 vi.mock("@/components/layout/EditorGroup.vue", () => ({
   default: {
@@ -42,6 +43,14 @@ vi.mock("@/components/layout/EditorGroup.vue", () => ({
       },
       focusSearch(target?: Element | null) {
         groupFocusSearchCalls.push(target ?? null);
+        return true;
+      },
+      captureQueryEditorExecutionSnapshot(this: { groupId: string }) {
+        groupExecutionCalls.capture.push(this.groupId);
+        return { fullSql: `SELECT ${this.groupId}`, selectedSql: `SELECT ${this.groupId}`, cursorPos: 0, selectionFrom: 0, selectionTo: 13 };
+      },
+      requestQueryEditorExecute(this: { groupId: string }) {
+        groupExecutionCalls.request.push(this.groupId);
         return true;
       },
     },
@@ -149,6 +158,8 @@ describe("SqlEditorWorkspace mount contract", () => {
     groupFocusSearchCalls.length = 0;
     resultHandleModRCalls.length = 0;
     resultFocusSearchCalls.length = 0;
+    groupExecutionCalls.capture.length = 0;
+    groupExecutionCalls.request.length = 0;
     pinia = createPinia();
     setActivePinia(pinia);
     i18n = createI18n({
@@ -156,6 +167,47 @@ describe("SqlEditorWorkspace mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it("routes toolbar execution to the requested tab's editor group", async () => {
+    const store = useQueryStore();
+    const tabs = [tab("tab-a"), tab("tab-b")];
+    store.tabs = tabs;
+    store.activeTabId = "tab-a";
+    store.groups = [
+      { id: "g1", tabIds: ["tab-a"], activeTabId: "tab-a" },
+      { id: "g2", tabIds: ["tab-b"], activeTabId: "tab-b" },
+    ];
+    store.focusedGroupId = "g1";
+    store.sizes = [50, 50];
+    const host = createHost();
+    const app = createApp(SqlEditorWorkspace, {
+      activeTab: tabs[0]!,
+      activeConnection: undefined,
+      executableSql: "SELECT 1",
+      activeOutputView: "result",
+      formatSqlRequest: null,
+      compressSqlRequest: null,
+      selectedSql: "",
+      cursorPos: 0,
+      blockDangerousRedisCommands: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    const vm = app.mount(host) as unknown as {
+      captureQueryEditorExecutionSnapshot: (tabId?: string) => { selectedSql: string } | undefined;
+      requestQueryEditorExecute: (tabId?: string) => boolean;
+    };
+    await nextTick();
+
+    const snapshot = vm.captureQueryEditorExecutionSnapshot("tab-b");
+    expect(snapshot?.selectedSql).toBe("SELECT g2");
+    expect(groupExecutionCalls.capture).toEqual(["g2"]);
+    expect(vm.requestQueryEditorExecute("tab-b")).toBe(true);
+    expect(groupExecutionCalls.request).toEqual(["g2"]);
+
+    app.unmount();
+    host.remove();
   });
 
   it("gives an idle query the full editor pane without a result surface or re-show button", async () => {

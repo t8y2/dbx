@@ -758,7 +758,7 @@ describe("EditorGroupTabBar special page navigation", () => {
       expect(host.querySelector(".app-tab-bar")?.classList.contains("vertical-tab-layout")).toBe(vertical);
       const special = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
       expect(special.classList.contains("h-8")).toBe(vertical);
-      expect(special.style.boxShadow).toBe(vertical ? "" : layout === "classic" ? "inset 0 -2px 0 var(--ring)" : "");
+      expect(special.style.boxShadow).toBe(vertical ? "" : layout === "classic" ? "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)" : "");
     }
     app.unmount();
     host.remove();

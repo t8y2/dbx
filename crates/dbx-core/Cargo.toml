@@ -93,9 +93,6 @@ arc-swap = "1"
 insta = { version = "1", features = ["json", "glob"] }
 tempfile = "3"
 
-[target.'cfg(not(all(windows, target_vendor = "win7")))'.dependencies]
-iana-time-zone = "0.1"
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
 

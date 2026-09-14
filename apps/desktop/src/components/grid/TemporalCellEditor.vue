@@ -4,7 +4,7 @@ import type { FocusOutsideEvent, PointerDownOutsideEvent } from "reka-ui";
 import { CalendarClock, ChevronDown, ChevronUp, CircleSlash } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { formatTemporalInputValue, parseTemporalInputValue, stepTemporalInputValue, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
+import { formatTemporalInputValue, hostTimezoneOffsetSuffix, parseTemporalInputValue, stepTemporalInputValue, temporalOffsetSuffix, type TemporalCellEditorKind } from "@/lib/dataGrid/dataGridTemporalEditor";
 
 const props = withDefaults(
   defineProps<{
@@ -134,7 +134,7 @@ function updateTime(part: "hour" | "minute" | "second", rawValue: string | numbe
   const parts = { ...timeParts.value, [part]: normalizeTimePart(rawValue, part === "hour" ? 23 : 59) };
   const nextTime = `${parts.hour}:${parts.minute}:${parts.second}${fractionSuffix.value}`;
   if (props.kind === "time") {
-    setModelValue(nextTime, true);
+    setModelValue(`${nextTime}${temporalOffsetSuffix(localValue.value, props.kind)}`, true);
     return;
   }
   setDateTimeValue(dateParts.value.year, dateParts.value.month, dateParts.value.day, nextTime);
@@ -162,7 +162,7 @@ function updateFractionValue(rawValue: string) {
   const digits = rawValue.replace(/\D/g, "").slice(0, maxLength);
   const nextTime = `${timeParts.value.hour}:${timeParts.value.minute}:${timeParts.value.second}${digits ? `.${digits}` : ""}`;
   if (props.kind === "time") {
-    setModelValue(nextTime, true);
+    setModelValue(`${nextTime}${temporalOffsetSuffix(localValue.value, props.kind)}`, true);
     return;
   }
   setDateTimeValue(dateParts.value.year, dateParts.value.month, dateParts.value.day, nextTime);
@@ -192,9 +192,12 @@ function setNow() {
   const now = new Date();
   const dateText = [String(now.getFullYear()).padStart(4, "0"), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
   const nextTime = [String(now.getHours()).padStart(2, "0"), String(now.getMinutes()).padStart(2, "0"), String(now.getSeconds()).padStart(2, "0")].join(":") + nowFractionSuffix(now);
+  // tz-aware columns must carry an explicit offset, otherwise the server parses
+  // the host wall clock in its own session timezone
+  const offsetSuffix = temporalOffsetSuffix(localValue.value, props.kind) ? hostTimezoneOffsetSuffix(now) : "";
   if (props.kind === "date") setModelValue(dateText, true);
-  else if (props.kind === "time") setModelValue(nextTime, true);
-  else setModelValue(`${dateText} ${nextTime}`, true);
+  else if (props.kind === "time") setModelValue(`${nextTime}${offsetSuffix}`, true);
+  else setModelValue(`${dateText} ${nextTime}${offsetSuffix}`, true);
 }
 
 function finishCommit() {
@@ -267,7 +270,7 @@ function normalizeTimePart(value: string | number, max: number): string {
 function setDateTimeValue(year: number, month: number, day: number, time: string) {
   const dateText = [String(year).padStart(4, "0"), String(month).padStart(2, "0"), String(day).padStart(2, "0")].join("-");
   if (props.kind === "date") setModelValue(dateText, true);
-  else setModelValue(`${dateText} ${time}`, true);
+  else setModelValue(`${dateText} ${time}${temporalOffsetSuffix(localValue.value, props.kind)}`, true);
 }
 
 function parseFractionDigits(value: string): string {

@@ -7,7 +7,7 @@
   "databend": "0.1.45",
   "databricks": "0.1.52",
   "db2": "0.1.58",
-  "duckdb": "0.1.17",
+  "duckdb": "0.1.18",
   "exasol": "0.1.52",
   "firebird": "0.1.53",
   "gbase8a": "0.1.52",
@@ -46,9 +46,9 @@
   "iotdb": "0.1.41",
   "etcd": "0.1.43",
   "etcd2": "0.1.1",
-  "zookeeper": "0.1.30",
+  "zookeeper": "0.1.31",
   "kafka": "0.1.14",
   "rocketmq": "0.1.13",
   "rabbitmq": "0.1.11",
-  "sqlserver-legacy": "0.1.29"
+  "sqlserver-legacy": "0.1.30"
 }

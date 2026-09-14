@@ -356,7 +356,7 @@ Clicking the item dispatches a `contextMenu/<id>` backend request with a non-sec
 
 ### `filesystem-provider`
 
-A filesystem provider declares URI schemes, an optional `root_uri`, and capabilities (`read`, `write`, `delete`, `rename`, `mkdir`). It is the reusable boundary for OpenDAL-like storage integrations: DBX owns the generic file-browser tab, while the plugin owns authentication, remote API calls, and provider-specific state.
+A filesystem provider declares URI schemes, an optional icon, `root_uri`, and capabilities (`read`, `write`, `delete`, `rename`, `mkdir`). It is the reusable boundary for OpenDAL-like storage integrations: DBX owns the generic file-browser tab, while the plugin owns authentication, remote API calls, and provider-specific state. The provider icon is used for the saved connection in the sidebar and for its DBX tab; it falls back to the plugin-level icon when omitted.
 
 A connection provider can set `filesystem_provider` instead of `workbench`. Opening that saved connection connects the plugin lifecycle and opens the DBX host file manager. A provider may declare both: DBX opens the custom workbench by default, and the sandboxed UI can call `openFilesystem(providerId, context)` with `host.filesystem` permission.
 
@@ -365,6 +365,7 @@ A connection provider can set `filesystem_provider` instead of `workbench`. Open
   "type": "filesystem-provider",
   "id": "vendor.storage.files",
   "label": "Object storage",
+  "icon": "assets/filesystem.svg",
   "schemes": ["s3"],
   "root_uri": "s3://bucket/",
   "capabilities": ["read"]

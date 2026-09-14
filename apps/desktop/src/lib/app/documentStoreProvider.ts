@@ -501,9 +501,15 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
       return { [rule.fieldName]: { $ne: value } };
     case "like":
       if (options.kind === "dynamodb") return { [rule.fieldName]: { $contains: value } };
+      if (options.kind === "mongodb" && mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) {
+        return mongoNumericContainsCondition(rule.fieldName, textValue);
+      }
       return { [rule.fieldName]: { $regex: escapeRegexLiteral(textValue), $options: "i" } };
     case "not-like":
       if (options.kind === "dynamodb") return { [rule.fieldName]: { $notContains: value } };
+      if (options.kind === "mongodb" && mongoFilterValueIsNumeric(rule.valueType, options.sampleValue)) {
+        return mongoNumericContainsCondition(rule.fieldName, textValue, true);
+      }
       return { [rule.fieldName]: { $not: { $regex: escapeRegexLiteral(textValue), $options: "i" } } };
     case "greater-than":
       return { [rule.fieldName]: { $gt: value } };
@@ -522,6 +528,19 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
 
 function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function mongoFilterValueIsNumeric(valueType?: DocumentFilterValueType, sampleValue?: unknown): boolean {
+  if (valueType === "number" || valueType === "int32" || valueType === "int64" || valueType === "decimal128") return true;
+  if (typeof sampleValue === "number") return true;
+  if (!isPlainRecord(sampleValue)) return false;
+  const keys = Object.keys(sampleValue);
+  return keys.length === 1 && ["$numberInt", "$numberLong", "$numberDouble", "$numberDecimal"].includes(keys[0]);
+}
+
+function mongoNumericContainsCondition(fieldName: string, textValue: string, negate = false): Record<string, unknown> {
+  const regexMatch = { $regexMatch: { input: { $convert: { input: `$${fieldName}`, to: "string", onError: "", onNull: "" } }, regex: escapeRegexLiteral(textValue), options: "i" } };
+  return negate ? { $expr: { $not: [regexMatch] } } : { $expr: regexMatch };
 }
 
 export function combineDocumentFilterConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[], arrayObjectParents: Array<string | null> = []): Record<string, unknown> | null {

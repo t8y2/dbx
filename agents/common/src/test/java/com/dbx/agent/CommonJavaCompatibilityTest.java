@@ -750,6 +750,36 @@ class CommonJavaCompatibilityTest {
         assertTrue(ddl.contains("\"NAME\" NVARCHAR(100) NOT NULL"));
     }
 
+    @Test
+    void appendsOracleObjectGrantSqlAfterTableDdl() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "APP",
+            "USERS",
+            Collections.singletonList(new ColumnInfo("ID", "NUMBER", false, null, true)),
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+        String grants = DdlBuilder.buildOracleObjectGrantSql(
+            "APP",
+            "USERS",
+            Arrays.asList(
+                new OracleObjectPrivilege("READER", "SELECT", false),
+                new OracleObjectPrivilege("READER", "INSERT", false),
+                new OracleObjectPrivilege("ADMIN", "SELECT", true),
+                new OracleObjectPrivilege("ANALYST", "UPDATE", false, "NAME")
+            )
+        );
+
+        String combined = DdlBuilder.appendTrailingSql(ddl, grants);
+
+        assertTrue(combined.contains("CREATE TABLE \"APP\".\"USERS\""));
+        assertTrue(combined.contains("GRANT SELECT, INSERT ON \"APP\".\"USERS\" TO \"READER\";"));
+        assertTrue(combined.contains("GRANT SELECT ON \"APP\".\"USERS\" TO \"ADMIN\" WITH GRANT OPTION;"));
+        assertTrue(combined.contains("GRANT UPDATE (\"NAME\") ON \"APP\".\"USERS\" TO \"ANALYST\";"));
+        assertEquals("", DdlBuilder.buildOracleObjectGrantSql("APP", "USERS", Collections.emptyList()));
+        assertEquals(ddl, DdlBuilder.appendTrailingSql(ddl, "   "));
+    }
+
     private static class MinimalAgent implements DatabaseAgent {
         @Override
         public void connect(ConnectParams params) {

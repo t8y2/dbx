@@ -766,6 +766,9 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
         PoolKind::Mysql(p, _) => db::mysql::list_databases_with_timeout(p, mysql_database_list_timeout).await,
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) => {
+            db::postgres::list_opengauss_databases(p).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
@@ -5816,7 +5819,26 @@ pub async fn completion_assistant_search_core(
                 PoolKind::Postgres(pool) => Some(pool.clone()),
                 _ => None,
             }) {
-                return db::postgres::completion_assistant_search(&pool, &request).await;
+                let db_config = connection_config(state, &request.connection_id).await;
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss)
+                    && request.parent_name.as_deref().is_some_and(|name| !name.trim().is_empty())
+                    && request.object_kinds.iter().any(db::CompletionAssistantObjectKind::is_routine_like)
+                {
+                    let response = db::postgres::opengauss_package_members(&pool, &request).await?;
+                    // fallback_used marks "parent is not a package": continue with
+                    // the ordinary routine completion instead of returning nothing.
+                    if !response.fallback_used {
+                        return Ok(response);
+                    }
+                }
+                return if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
+                    // openGauss variant excludes package/private members from the
+                    // ordinary routine lookup, so the fallback stays consistent
+                    // with the package-aware path above.
+                    db::postgres::opengauss_completion_assistant_search(&pool, &request).await
+                } else {
+                    db::postgres::completion_assistant_search(&pool, &request).await
+                };
             }
         }
 
@@ -6327,9 +6349,29 @@ async fn list_objects_once(
             let include_routines = object_types_include_routines(object_types);
             let include_custom_types = db_config.as_ref().is_some_and(supports_pg_custom_type_objects)
                 && object_types_include_custom_types(object_types);
-            db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types)
-                .await
-                .map(unpaged_object_list)
+            let mut objects = if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
+                // openGauss variant excludes package members (propackage=true)
+                // from the top-level routine list; they are surfaced under
+                // their PACKAGE nodes below.
+                db::postgres::list_opengauss_objects(
+                    p,
+                    schema,
+                    include_relations,
+                    include_routines,
+                    include_custom_types,
+                )
+                .await?
+            } else {
+                db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types).await?
+            };
+            if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
+                let (include_package_spec, include_package_body) = object_types_include_packages(object_types);
+                objects.extend(
+                    db::postgres::list_opengauss_packages(p, schema, include_package_spec, include_package_body)
+                        .await?,
+                );
+            }
+            Ok(unpaged_object_list(objects))
         }
         _ => Ok(unpaged_object_list(
             list_tables_core(state, connection_id, database, schema, None, None, None, None, None)
@@ -6456,6 +6498,11 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) => {
             db::postgres::list_redshift_objects(p, schema, false, true).await.map(filter_completion_objects)
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) => {
+            let mut objects = db::postgres::list_opengauss_objects(p, schema, false, true, false).await?;
+            objects.extend(db::postgres::list_opengauss_packages(p, schema, true, true).await?);
+            Ok(filter_completion_objects_with_packages(objects))
+        }
         PoolKind::Postgres(p) => {
             db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
         }
@@ -6474,6 +6521,19 @@ fn filter_completion_objects(objects: Vec<db::ObjectInfo>) -> Vec<db::ObjectInfo
         .filter(|object| {
             let object_type = object.object_type.to_ascii_uppercase();
             object_type.contains("PROCEDURE") || object_type.contains("FUNCTION") || object_type.contains("TRIGGER")
+        })
+        .collect()
+}
+
+fn filter_completion_objects_with_packages(objects: Vec<db::ObjectInfo>) -> Vec<db::ObjectInfo> {
+    objects
+        .into_iter()
+        .filter(|object| {
+            let object_type = object.object_type.to_ascii_uppercase();
+            object_type.contains("PROCEDURE")
+                || object_type.contains("FUNCTION")
+                || object_type.contains("TRIGGER")
+                || object_type == "PACKAGE"
         })
         .collect()
 }
@@ -8294,6 +8354,16 @@ fn object_types_include_custom_types(object_types: Option<&[String]>) -> bool {
         .is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY")))
 }
 
+fn object_types_include_packages(object_types: Option<&[String]>) -> (bool, bool) {
+    match object_types {
+        None => (true, true),
+        Some(types) => (
+            types.iter().any(|value| value.eq_ignore_ascii_case("PACKAGE")),
+            types.iter().any(|value| value.eq_ignore_ascii_case("PACKAGE_BODY")),
+        ),
+    }
+}
+
 /// Whether the object-type filter exclusively asks for user-defined types.
 ///
 /// Used to keep agent errors visible: the native PostgreSQL fallback never
@@ -9473,6 +9543,18 @@ async fn get_object_source_once(
                     mysql_object_source(pool, mysql_table_metadata_catalog(database, schema), name, &object_type)
                         .await?
                 }
+                PoolKind::Postgres(pool)
+                    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss)
+                        && matches!(object_type, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody) =>
+                {
+                    db::postgres::opengauss_package_source(
+                        pool,
+                        schema,
+                        name,
+                        matches!(object_type, db::ObjectSourceKind::PackageBody),
+                    )
+                    .await?
+                }
                 PoolKind::Postgres(pool) if db_config.as_ref().is_some_and(is_questdb_config) => {
                     // only view
                     db::questdb::questdb_object_source(pool, name).await?
@@ -9527,7 +9609,14 @@ async fn get_object_source_once(
         }
     };
 
-    let editable = if matches!(object_type, db::ObjectSourceKind::Trigger)
+    let editable = if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss)
+        && matches!(object_type, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody)
+    {
+        // gs_source returns the original CREATE text. Re-executing CREATE for an
+        // existing package is not a safe edit operation unless the user changes
+        // it to CREATE OR REPLACE explicitly, so keep the initial implementation read-only.
+        Some(false)
+    } else if matches!(object_type, db::ObjectSourceKind::Trigger)
         && db_config.as_ref().is_some_and(|config| {
             matches!(
                 config.db_type,
@@ -9542,7 +9631,8 @@ async fn get_object_source_once(
                     | DatabaseType::Uxdb
                     | DatabaseType::Vastbase
             )
-        }) {
+        })
+    {
         Some(false)
     } else {
         None

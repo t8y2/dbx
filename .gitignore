@@ -1,4 +1,5 @@
 # Dependencies
+openGauss-server/
 node_modules
 .claude/
 .codex/

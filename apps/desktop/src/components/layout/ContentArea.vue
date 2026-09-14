@@ -176,6 +176,7 @@ import type { QueryTab, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/t
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
@@ -342,6 +343,9 @@ const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConne
 const canOpenTableImport = computed(() => supportsTableImport(activeEffectiveDatabaseType.value));
 const activeVectorConnection = computed(() => connectionStore.getConfig(props.activeTab.connectionId) ?? props.activeConnection);
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
+const activeSqlStatementParameterOptions = computed(() =>
+  sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
+);
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
 const productionSessionDetail = computed(() => {
@@ -474,6 +478,7 @@ const activeStatementExecutionMarkers = computed(() =>
     props.activeTab.resultBaseSql || props.activeTab.lastExecutedSql || props.activeTab.sql,
     props.activeTab.resultEditorFingerprint ?? "",
     props.activeTab.batchSqlExecution,
+    activeSqlStatementParameterOptions.value,
   ),
 );
 const activeElasticsearchJsonResponse = computed(() => elasticsearchJsonResponseForResult(activeEffectiveDatabaseType.value, activeResultSql.value, props.activeTab.result));
@@ -1159,7 +1164,7 @@ function toggleResultAutoSave() {
 function selectResultItem(item: (typeof visibleResultItems.value)[number]) {
   queryStore.setActiveResultIndex(props.activeTab.id, item.index);
   emit("update:activeOutputView", props.activeTab.id, "result");
-  const range = resultSourceRange(props.activeTab.sql, item.result, item.index, activeEffectiveDatabaseType.value) ?? null;
+  const range = resultSourceRange(props.activeTab.sql, item.result, item.index, activeEffectiveDatabaseType.value, activeSqlStatementParameterOptions.value) ?? null;
   if (queryEditorRef.value) {
     nextTick(() => queryEditorRef.value?.previewStatementRange(range));
   } else {
@@ -1171,7 +1176,7 @@ function executionSummaryItemRange(item: ExecutionSummaryItem) {
   if (typeof item.sourceFrom === "number" && typeof item.sourceTo === "number" && item.sql && props.activeTab.sql.slice(item.sourceFrom, item.sourceTo) === item.sql) {
     return { from: item.sourceFrom, to: item.sourceTo };
   }
-  return item.result ? resultSourceRange(props.activeTab.sql, item.result, item.statementIndex, activeEffectiveDatabaseType.value) : undefined;
+  return item.result ? resultSourceRange(props.activeTab.sql, item.result, item.statementIndex, activeEffectiveDatabaseType.value, activeSqlStatementParameterOptions.value) : undefined;
 }
 
 function previewExecutionSummaryItem(item: ExecutionSummaryItem) {

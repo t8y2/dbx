@@ -499,7 +499,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         continue;
       }
     }
-    if (isOracleLikeDatabase(databaseType) && isAtLineStart(sql, i) && isSlashLine(sql, i)) {
+    if (isOracleLikeDatabase(databaseType, parameterOptions) && isAtLineStart(sql, i) && isSlashLine(sql, i)) {
       const lineEnd = findLineEnd(sql, i);
       flush(i);
       i = nextLineStart(sql, lineEnd);
@@ -579,7 +579,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const tagMatch = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i));
       if (tagMatch) {
         markContent(i);
-        if (databaseType === "gaussdb" && statementStart !== -1 && startsWithPostgresDollarQuotedRoutinePrefix(sql.slice(statementStart, i))) {
+        if ((databaseType === "gaussdb" || isOpenGaussOracleCompatibility(databaseType, parameterOptions)) && statementStart !== -1 && startsWithPostgresDollarQuotedRoutinePrefix(sql.slice(statementStart, i))) {
           postgresDollarQuotedRoutine = true;
         }
         dollarTag = tagMatch[0].slice(1, -1);
@@ -609,7 +609,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         // Internal semicolons remain part of the routine body.
         flush();
       } else {
-        if (oraclePlSqlStatementEnd === undefined && isOracleLikeDatabase(databaseType) && !postgresDollarQuotedRoutine && statementStart !== -1) {
+        if (oraclePlSqlStatementEnd === undefined && isOracleLikeDatabase(databaseType, parameterOptions) && !postgresDollarQuotedRoutine && statementStart !== -1) {
           const statementSoFar = sql.slice(statementStart, i);
           oraclePlSqlStatementEnd = startsWithOraclePlSqlBlock(statementSoFar) ? statementStart + (oraclePlSqlBlockEnd(sql.slice(statementStart)) ?? sql.length - statementStart) : null;
         }
@@ -740,7 +740,7 @@ function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: nu
 }
 
 function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
-  if (isOraclePlSqlStatement(statement.sql, databaseType)) return [statement];
+  if (isOraclePlSqlStatement(statement.sql, databaseType, parameterOptions)) return [statement];
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
@@ -1575,12 +1575,27 @@ function isSqlWhitespace(ch: string): boolean {
   return ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
 }
 
-export function isOracleLikeDatabase(databaseType?: DatabaseType): boolean {
-  return !!databaseType && ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType);
+function isOpenGaussOracleCompatibility(databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
+  if (databaseType !== "opengauss") return false;
+  const mode = options?.compatibilityMode?.trim().toUpperCase();
+  // Unknown mode is handled conservatively so an A-mode package is never
+  // split into executable fragments before metadata loading finishes.
+  return mode === undefined || mode === "A";
 }
 
-export function isOraclePlSqlStatement(sql: string, databaseType?: DatabaseType): boolean {
-  return isOracleLikeDatabase(databaseType) && startsWithOraclePlSqlBlock(sql);
+export function sqlStatementParameterOptionsForCompatibility(databaseType?: DatabaseType, compatibilityMode?: string): SqlParameterOptions | undefined {
+  if (databaseType !== "opengauss") return undefined;
+  // Keep the browser-side splitter aligned with the backend's conservative
+  // behavior while the compatibility probe is still cold or unavailable.
+  return { compatibilityMode: compatibilityMode?.trim() || "A" };
+}
+
+export function isOracleLikeDatabase(databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
+  return !!databaseType && (ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || isOpenGaussOracleCompatibility(databaseType, options));
+}
+
+export function isOraclePlSqlStatement(sql: string, databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
+  return isOracleLikeDatabase(databaseType, options) && startsWithOraclePlSqlBlock(sql);
 }
 
 function isSapHanaScriptBlockDatabase(databaseType?: DatabaseType): boolean {

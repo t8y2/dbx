@@ -902,7 +902,8 @@ async function toggle(requestId = beginNavigationRequest()) {
       return;
     }
 
-    if (node.type === "package" && node.connectionId && supportsPackageMemberExpansion(currentDatabaseType())) {
+    const packageDatabaseType = currentDatabaseType();
+    if (node.type === "package" && node.connectionId && supportsPackageMemberExpansion(packageDatabaseType, packageDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(node.connectionId, node.database) : undefined)) {
       await connectionStore.loadPackageMembers(node);
       emitNodeToggled(node, wasExpanded);
       return;

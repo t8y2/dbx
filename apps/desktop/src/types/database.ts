@@ -652,6 +652,8 @@ export interface DatabaseInfo {
   comment?: string | null;
   default_charset?: string | null;
   default_collation?: string | null;
+  /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
+  compatibility_mode?: string | null;
 }
 
 export interface DatabaseStorageInfo {
@@ -1336,6 +1338,8 @@ export interface TreeNode {
   pinned?: boolean;
   connectionId?: string;
   database?: string;
+  /** Database-level compatibility mode, for example openGauss A/B/C/PG. */
+  compatibilityMode?: string;
   catalog?: string;
   catalogType?: string;
   linkedServer?: string;

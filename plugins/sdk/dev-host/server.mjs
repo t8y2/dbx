@@ -228,7 +228,7 @@ export async function createMockHost(options) {
       if (p.contributionId !== undefined && !contribution) throw new Error("Unknown icon contribution");
       const icon = contribution?.icon || manifest.icon;
       if (!icon) return null;
-      if (typeof icon !== "string" || /[:\\\0]/.test(icon) || icon.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("Invalid plugin icon path");
+      if (typeof icon !== "string" || icon.includes(":") || icon.includes("\\") || icon.includes("\u0000") || icon.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("Invalid plugin icon path");
       const asset = await readAsset(project, icon);
       if (!asset.contentType.startsWith("image/")) throw new Error("Plugin icon is not an image");
       return asset;

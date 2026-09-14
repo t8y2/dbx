@@ -22,14 +22,17 @@ function installBridge(channel) {
   };
   const decode = (value) => Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
   const stream = async (method, params = {}, options = {}) => {
-    const streamId = options.streamId || (globalThis.crypto?.randomUUID?.() || "stream-" + Date.now() + "-" + (++sequence));
+    const streamId = options.streamId || globalThis.crypto?.randomUUID?.() || "stream-" + Date.now() + "-" + ++sequence;
     const closeMethod = options.closeMethod || "filesystem/stream/close";
     let removeListener;
     let closeRequested = false;
     let resolveOpen;
     let rejectOpen;
     const metadata = {};
-    const opened = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject; });
+    const opened = new Promise((resolve, reject) => {
+      resolveOpen = resolve;
+      rejectOpen = reject;
+    });
     const readable = new ReadableStream({
       start(controller) {
         const onEvent = (message) => {
@@ -37,7 +40,11 @@ function installBridge(channel) {
           const event = message.params || {};
           if (event.streamId !== streamId) return;
           if (message.method === "host.stream.chunk") {
-            try { controller.enqueue(decode(event.dataBase64 || "")); } catch (error) { controller.error(error); }
+            try {
+              controller.enqueue(decode(event.dataBase64 || ""));
+            } catch (error) {
+              controller.error(error);
+            }
             return;
           }
           removeListener?.();
@@ -53,7 +60,7 @@ function installBridge(channel) {
         };
         removeListener = () => listeners.event.delete(onEvent);
         listeners.event.add(onEvent);
-        request("backend.invoke", { method, params: { ...(params || {}), streamId }, timeoutMs: options.timeoutMs }).then(resolveOpen, (error) => {
+        request("backend.invoke", { method, params: { ...params, streamId }, timeoutMs: options.timeoutMs }).then(resolveOpen, (error) => {
           removeListener?.();
           removeListener = undefined;
           rejectOpen(error);

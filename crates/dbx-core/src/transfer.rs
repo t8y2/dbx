@@ -1334,6 +1334,30 @@ fn query_result_has_rows(result: &db::QueryResult) -> bool {
     !result.rows.is_empty()
 }
 
+async fn ensure_postgres_transfer_schema_exists(
+    state: &AppState,
+    target_pool_key: &str,
+    target_schema: &str,
+    target_db_type: &DatabaseType,
+) -> Result<(), String> {
+    if target_schema.trim().is_empty() {
+        return Ok(());
+    }
+
+    let schema_exists = execute_on_pool(state, target_pool_key, &postgres_schema_exists_sql(target_schema))
+        .await
+        .map_err(|e| format!("Failed to check PostgreSQL target schema: {e}"))?;
+    if query_result_has_rows(&schema_exists) {
+        return Ok(());
+    }
+
+    let create_schema_sql = format!("CREATE SCHEMA {}", quote_identifier(target_schema, target_db_type));
+    execute_on_pool(state, target_pool_key, &create_schema_sql)
+        .await
+        .map_err(|e| format!("Failed to create PostgreSQL target schema: {e}"))?;
+    Ok(())
+}
+
 fn is_postgres_compat_transfer(source_db: &DatabaseType, target_db: &DatabaseType) -> bool {
     is_postgres_transfer_dialect(source_db) && is_postgres_transfer_dialect(target_db)
 }
@@ -8472,11 +8496,9 @@ async fn create_transfer_target_table(
     if transfer_table_needs_inline_postgres_schema_ensure(source_db_type, target_db_type)
         && !request.target_schema.trim().is_empty()
     {
-        let create_schema_sql =
-            format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(&request.target_schema, target_db_type));
-        execute_on_pool(state, target_pool_key, &create_schema_sql)
-            .await
-            .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
+        // CREATE SCHEMA requires database-level CREATE privilege even with
+        // IF NOT EXISTS, so skip it when the target schema is already present.
+        ensure_postgres_transfer_schema_exists(state, target_pool_key, &request.target_schema, target_db_type).await?;
     }
 
     // The pre-pass renamed the target away, so the name is free again. Resetting the
@@ -9525,21 +9547,7 @@ where
         return Ok(());
     }
 
-    if !request.target_schema.trim().is_empty() {
-        let schema_exists =
-            execute_on_pool(state, target_pool_key, &postgres_schema_exists_sql(&request.target_schema))
-                .await
-                .map_err(|e| format!("Failed to check PostgreSQL target schema: {e}"))?;
-        if !query_result_has_rows(&schema_exists) {
-            // CREATE SCHEMA requires database-level CREATE privilege even with
-            // IF NOT EXISTS, so only issue it after confirming the schema is absent.
-            let create_schema_sql =
-                format!("CREATE SCHEMA {}", quote_identifier(&request.target_schema, &DatabaseType::Postgres));
-            execute_on_pool(state, target_pool_key, &create_schema_sql)
-                .await
-                .map_err(|e| format!("Failed to create PostgreSQL target schema: {e}"))?;
-        }
-    }
+    ensure_postgres_transfer_schema_exists(state, target_pool_key, &request.target_schema, &target_db_type).await?;
 
     let extensions =
         get_postgres_extension_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;

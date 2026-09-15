@@ -3116,6 +3116,14 @@ function handleTabSwitcherKeydownCapture(e: KeyboardEvent) {
   tabSwitcherKeyboard.handleKeydownCapture(e);
 }
 
+function handleAuxiliarySearchKeydownCapture(e: KeyboardEvent) {
+  if (e.defaultPrevented || !isFocusSearchShortcut(e, settingsStore.editorSettings.shortcuts)) return;
+  const target = e.target instanceof Element ? e.target : document.activeElement instanceof Element ? document.activeElement : null;
+  if (!focusSearchInAuxiliarySurface(target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+}
+
 function handleTabSwitcherWindowBlur() {
   tabSwitcherKeyboard.handleWindowBlur();
 }
@@ -3543,6 +3551,7 @@ onMounted(async () => {
   void applyUiScale(settingsStore.editorSettings.uiScale);
   window.addEventListener("keydown", handleNativeSelectAll, true);
   window.addEventListener("keydown", handleTabSwitcherKeydownCapture, true);
+  window.addEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("keyup", handleKeyup, true);
   window.addEventListener("blur", handleTabSwitcherWindowBlur);
@@ -3623,6 +3632,7 @@ onUnmounted(() => {
   }
   window.removeEventListener("keydown", handleNativeSelectAll, true);
   window.removeEventListener("keydown", handleTabSwitcherKeydownCapture, true);
+  window.removeEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("keyup", handleKeyup, true);
   window.removeEventListener("blur", handleTabSwitcherWindowBlur);

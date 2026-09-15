@@ -3,7 +3,7 @@ use std::path::Path;
 
 use dbx_core::mongodb_import_export::{
     for_each_mongodb_import_document, preview_mongodb_import_file, MongoImportFormat, MongoImportIssue,
-    MongoImportParseOptions, MongoImportPreviewRequest,
+    MongoImportParseOptions, MongoImportPreviewRequest, ParsedMongoDocument,
 };
 use flate2::{write::GzEncoder, Compression};
 use mongodb::bson::{doc, Bson, Document};
@@ -18,17 +18,20 @@ fn encode(documents: &[Document], gzip: bool) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn read(path: &Path) -> Result<Vec<Document>, MongoImportIssue> {
+fn read(path: &Path) -> Result<Vec<Document>, Box<MongoImportIssue>> {
     let mut documents = Vec::new();
+    #[expect(clippy::result_large_err, reason = "The public import callback requires MongoImportIssue by value")]
+    let collect = |parsed: Result<ParsedMongoDocument, MongoImportIssue>| {
+        documents.push(parsed?.document);
+        Ok(())
+    };
     for_each_mongodb_import_document(
         path.to_str().unwrap(),
         MongoImportFormat::Bson,
         &MongoImportParseOptions::default(),
-        |parsed| {
-            documents.push(parsed?.document);
-            Ok(())
-        },
-    )?;
+        collect,
+    )
+    .map_err(Box::new)?;
     Ok(documents)
 }
 
@@ -107,11 +110,13 @@ fn invalid_bson_is_fatal_even_when_callback_skips_errors() {
         let mut bytes = prefix.clone();
         bytes.extend(tail);
         std::fs::write(&path, bytes).unwrap();
+        #[expect(clippy::result_large_err, reason = "The public import callback requires MongoImportIssue by value")]
+        let ignore = |_: Result<ParsedMongoDocument, MongoImportIssue>| Ok(());
         let error = for_each_mongodb_import_document(
             path.to_str().unwrap(),
             MongoImportFormat::Bson,
             &MongoImportParseOptions { skip_error_rows: Some(true), ..Default::default() },
-            |_| Ok(()),
+            ignore,
         )
         .unwrap_err();
         assert_eq!(error.code, "BSON_STRUCTURE");

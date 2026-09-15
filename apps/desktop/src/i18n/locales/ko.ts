@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementKo } from "./meilisearchManagement";
 import { redisGroupingKo as redisGrouping } from "./redisGrouping";
 import docs from "./docs/ko";
@@ -82,6 +83,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "변환 미리보기",
     description: "현재 값을 변환하여 보거나 복사합니다. 원래 값과 편집 초안은 변경되지 않습니다.",

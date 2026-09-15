@@ -445,6 +445,7 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
                         verbosity: parse_explain_verbosity(&call_args)?,
                     });
                 }
+                _ if is_noop_cursor_call(&name, &call_args) => {}
                 _ => return Err(format!("Unsupported MongoDB find() chain: {name}()")),
             }
         }
@@ -503,8 +504,15 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
 
     if let Some((args, tail)) = method_call(source, prefix_end, "aggregate") {
-        if !tail.is_empty() || !(1..=2).contains(&args.len()) {
+        if !(1..=2).contains(&args.len()) {
             return Err("Invalid MongoDB aggregate() command.".to_string());
+        }
+        for (name, call_args) in chained_calls(&tail)? {
+            if !is_noop_cursor_call(&name, &call_args) {
+                return Err(format!(
+                    "Unsupported MongoDB aggregate() chain: {name}(). Use pipeline stages such as $sort and $limit instead."
+                ));
+            }
         }
         let pipeline = normalized_json(&args[0])?;
         if !parse_json_value(&pipeline).is_some_and(|value| value.is_array()) {
@@ -815,6 +823,12 @@ fn database_method_call(source: &str, method: &str) -> Option<(Vec<String>, Stri
     let open = source.len() - after_method.len();
     let close = matching_paren(source, open)?;
     Some((split_top_level(&source[open + 1..close]), source[close + 1..].trim().to_string()))
+}
+
+/// Cursor methods that change nothing here: results are always materialised, so
+/// the `.toArray()` that mongosh and Compass append can simply be dropped.
+fn is_noop_cursor_call(name: &str, args: &[String]) -> bool {
+    matches!(name, "toArray" | "pretty") && args.is_empty()
 }
 
 fn chained_calls(chain: &str) -> Result<Vec<(String, Vec<String>)>, String> {
@@ -1752,6 +1766,43 @@ mod tests {
             panic!("expected a find command");
         };
         assert_eq!(filter, r#"{"u":{"$uuid":"3B241101-E2BB-4255-8CAF-4136C566A962"}}"#);
+    }
+
+    #[test]
+    fn drops_noop_cursor_methods_after_find_and_aggregate() {
+        // mongosh and Compass append .toArray(); results are always materialised
+        // here, so it changes nothing and must not be an error.
+        let expected = MongoCommand::Aggregate {
+            collection: "orders".to_string(),
+            pipeline: r#"[{"$match":{"a":1}}]"#.to_string(),
+            options: None,
+        };
+        for source in [
+            "db.orders.aggregate([{$match: {a: 1}}]).toArray()",
+            "db.orders.aggregate([{$match: {a: 1}}]).pretty()",
+            "db.orders.aggregate([{$match: {a: 1}}]).toArray().pretty()",
+            "db.orders.aggregate([{$match: {a: 1}}])\n  .toArray()",
+        ] {
+            assert_eq!(parse(source).unwrap(), expected, "{source}");
+        }
+
+        let with_chain = parse("db.orders.find({a: 1}).sort({b: 1}).limit(5).toArray()").unwrap();
+        assert!(matches!(with_chain, MongoCommand::Find { limit: 5, sort: Some(_), .. }), "{with_chain:?}");
+        assert!(matches!(parse("db.orders.find({a: 1}).pretty()").unwrap(), MongoCommand::Find { .. }));
+    }
+
+    #[test]
+    fn still_rejects_real_cursor_methods_after_aggregate() {
+        for source in [
+            "db.orders.aggregate([]).limit(5)",
+            "db.orders.aggregate([]).sort({a: 1})",
+            "db.orders.aggregate([]).toArray().limit(5)",
+            "db.orders.aggregate([]).toArray(1)",
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains("aggregate() chain"), "{source} => {error}");
+        }
+        assert!(parse("db.orders.find({}).toArray(1)").unwrap_err().contains("find() chain"));
     }
 
     #[test]

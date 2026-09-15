@@ -936,6 +936,31 @@ test("parseMongoAggregateCommand parses db collection aggregate", () => {
   });
 });
 
+test("parseMongoAggregateCommand drops the no-op cursor methods mongosh and Compass append", () => {
+  const expected = { collection: "orders", pipeline: '[{"$match": {"a": 1}}]' };
+  for (const source of [
+    "db.orders.aggregate([{$match: {a: 1}}]).toArray()",
+    "db.orders.aggregate([{$match: {a: 1}}]).pretty()",
+    "db.orders.aggregate([{$match: {a: 1}}]).toArray().pretty()",
+    "db.orders.aggregate([{$match: {a: 1}}])\n  .toArray()",
+    "db.orders.aggregate([{$match: {a: 1}}]).toArray();",
+  ]) {
+    assert.deepEqual(parseMongoAggregateCommand(source), expected, source);
+  }
+  assert.deepEqual(parseMongoAggregateCommand("db.orders.aggregate([], {allowDiskUse: true}).toArray()"), {
+    collection: "orders",
+    pipeline: "[]",
+    options: '{"allowDiskUse": true}',
+  });
+});
+
+test("parseMongoAggregateCommand still rejects cursor methods that would change the result", () => {
+  for (const source of ["db.orders.aggregate([]).limit(5)", "db.orders.aggregate([]).sort({a: 1})", "db.orders.aggregate([]).toArray().limit(5)", "db.orders.aggregate([]).toArray(1)"]) {
+    assert.equal(parseMongoAggregateCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), /Chaining .* is not supported/, source);
+  }
+});
+
 test("parseMongoAggregateCommand accepts an empty pipeline", () => {
   assert.deepEqual(parseMongoAggregateCommand("db.products.aggregate([])"), {
     collection: "products",

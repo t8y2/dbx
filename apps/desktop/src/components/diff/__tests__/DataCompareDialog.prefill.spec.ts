@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   listTables: vi.fn().mockResolvedValue([{ name: "CODEX_7467_META", table_type: "TABLE" }]),
   getColumns: vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_primary_key: true }]),
   buildDataCompareSyncPlan: vi.fn(),
+  executeBatch: vi.fn(),
 }));
 
 const sessionMocks = vi.hoisted(() => ({
@@ -58,6 +59,7 @@ vi.mock("@/lib/backend/api", () => ({
   listTables: mocks.listTables,
   getColumns: mocks.getColumns,
   buildDataCompareSyncPlan: mocks.buildDataCompareSyncPlan,
+  executeBatch: mocks.executeBatch,
 }));
 
 const mountedApps: App[] = [];
@@ -274,6 +276,28 @@ describe("DataCompareDialog session restore", () => {
 
     expect(mocks.ensureConnected).toHaveBeenCalledWith("oracle-11g");
     expect(mocks.ensureConnected).toHaveBeenCalledWith("oracle-jdbc-11g");
+  });
+
+  it("disables recompare while sync SQL is still executing against the target", async () => {
+    mocks.executeBatch.mockImplementation(() => new Promise(() => {}));
+    mountSessionDialog(completedSession());
+
+    await flushAsyncSetup();
+    mocks.ensureConnected.mockClear();
+
+    const executeButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("diff.executeSync")));
+    expect(executeButton).toBeDefined();
+    executeButton?.click();
+    await flushAsyncSetup();
+
+    const recompareButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.recompare")));
+    expect(recompareButton).toBeDefined();
+    expect(recompareButton?.disabled).toBe(true);
+
+    recompareButton?.click();
+    await flushAsyncSetup();
+
+    expect(mocks.ensureConnected).not.toHaveBeenCalledWith("oracle-11g");
   });
 
   it("persists the latest selection plan when the dialog closes during planning", async () => {

@@ -510,7 +510,7 @@ async function rebuildSyncPlan() {
 }
 
 function startCompare(): void {
-  if (!canCompare.value || comparing.value) return;
+  if (!canCompare.value || comparing.value || executing.value) return;
   const tasks = buildCompareTasks();
   if (tasks.length === 0) {
     toast(t("dataCompare.noComparableTables"), 5000);
@@ -1116,7 +1116,7 @@ onBeforeUnmount(() => {
 
       <DialogFooter v-else class="flex items-center gap-2">
         <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
-        <Button variant="outline" size="sm" :disabled="comparing || !canCompare" @click="startCompare">
+        <Button variant="outline" size="sm" :disabled="comparing || executing || !canCompare" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3 h-3 animate-spin mr-1" />
           <RotateCcw v-else class="w-3 h-3 mr-1" />
           {{ t("dataCompare.recompare") }}

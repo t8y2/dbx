@@ -1430,6 +1430,9 @@ function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
   applyRightSidebarPanelState(transitionRightSidebarPanels(currentRightSidebarPanelState(), panelId, open, exclusive));
   if (open) {
     lastOpenedRightSidebarPanel = panelId;
+    if (panelId === "ai" || panelId === "history" || panelId === "sqlLibrary") {
+      lastFocusedAuxiliarySurface.value = panelId;
+    }
   } else if (lastOpenedRightSidebarPanel === panelId) {
     lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((candidate) => rightSidebarPanelRefs[candidate].value);
   }

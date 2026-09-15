@@ -3797,7 +3797,8 @@ fn filter_export_table_infos(
 }
 
 fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseType) -> String {
-    format!("DROP TABLE IF EXISTS {};", crate::transfer::qualified_table(table_name, schema, db_type, None))
+    let cascade = (db_type == &DatabaseType::Postgres).then_some(" CASCADE").unwrap_or_default();
+    format!("DROP TABLE IF EXISTS {}{};", crate::transfer::qualified_table(table_name, schema, db_type, None), cascade)
 }
 
 fn build_database_export_object_source_sql(
@@ -4305,7 +4306,7 @@ mod tests {
     fn builds_drop_table_if_exists_without_empty_schema() {
         let sql = drop_table_if_exists_sql("users", "", &DatabaseType::Postgres);
 
-        assert_eq!(sql, "DROP TABLE IF EXISTS \"users\";");
+        assert_eq!(sql, "DROP TABLE IF EXISTS \"users\" CASCADE;");
     }
 
     #[test]

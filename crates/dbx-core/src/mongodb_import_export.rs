@@ -2497,7 +2497,7 @@ where
 
 enum BsonExportWriter {
     Plain(BufWriter<File>),
-    Gzip(GzEncoder<BufWriter<File>>),
+    Gzip(Box<GzEncoder<BufWriter<File>>>),
 }
 
 impl BsonExportWriter {
@@ -2547,7 +2547,7 @@ where
     let file = File::create(temp).map_err(|error| error.to_string())?;
     let buffered = BufWriter::new(file);
     let mut writer = if request.gzip {
-        BsonExportWriter::Gzip(GzEncoder::new(buffered, Compression::default()))
+        BsonExportWriter::Gzip(Box::new(GzEncoder::new(buffered, Compression::default())))
     } else {
         BsonExportWriter::Plain(buffered)
     };
@@ -2783,6 +2783,35 @@ mod tests {
             output.extend_from_slice(&mongodb::bson::to_vec(document).unwrap());
         }
         output
+    }
+
+    #[test]
+    fn bson_export_writer_finishes_plain_and_gzip_dumps() {
+        let root = tempfile::tempdir().unwrap();
+        let documents = vec![doc! { "_id": 1, "name": "first" }, doc! { "_id": 2, "value": 42i64 }];
+        for expected in [Vec::new(), bson_dump_bytes(&documents)] {
+            for gzip in [false, true] {
+                let path = root.path().join(if gzip { "records.bson.gz" } else { "records.bson" });
+                let buffered = BufWriter::new(File::create(&path).unwrap());
+                let mut writer = if gzip {
+                    BsonExportWriter::Gzip(Box::new(GzEncoder::new(buffered, Compression::default())))
+                } else {
+                    BsonExportWriter::Plain(buffered)
+                };
+                writer.write_all(&expected).unwrap();
+                writer.finish().unwrap();
+
+                let bytes = std::fs::read(&path).unwrap();
+                let actual = if gzip {
+                    let mut decoded = Vec::new();
+                    MultiGzDecoder::new(bytes.as_slice()).read_to_end(&mut decoded).unwrap();
+                    decoded
+                } else {
+                    bytes
+                };
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

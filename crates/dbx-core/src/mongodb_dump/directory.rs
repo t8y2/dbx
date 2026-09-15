@@ -23,12 +23,12 @@ pub(super) fn reader(path: &Path, gzip: bool) -> Result<Box<dyn Read>, String> {
 
 fn reject_link(path: &Path) -> Result<std::fs::Metadata, String> {
     let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    let mut is_link = metadata.file_type().is_symlink();
+    let is_link = metadata.file_type().is_symlink();
     #[cfg(windows)]
-    {
+    let is_link = {
         use std::os::windows::fs::MetadataExt;
-        is_link |= metadata.file_attributes() & 0x400 != 0;
-    }
+        is_link || metadata.file_attributes() & 0x400 != 0
+    };
     if is_link {
         return Err(format!("Dump sources cannot contain links: {}", path.display()));
     }
@@ -272,4 +272,31 @@ pub(super) fn publish_files(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regular_file_accepts_files_and_rejects_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("records.bson");
+        std::fs::write(&file, []).unwrap();
+        regular_file(&file).unwrap();
+        assert!(regular_file(root.path()).unwrap_err().contains("Not a regular dump file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_link_rejects_file_and_directory_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("records.bson");
+        std::fs::write(&file, []).unwrap();
+        for (name, target) in [("file-link", file.as_path()), ("directory-link", root.path())] {
+            let link = root.path().join(name);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            assert!(reject_link(&link).unwrap_err().contains("Dump sources cannot contain links"));
+        }
+    }
 }

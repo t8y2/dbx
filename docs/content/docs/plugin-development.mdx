@@ -101,7 +101,6 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.workbench",
     "host.events",
     "host.filesystem",
-    "host.ai",
     "host.binary",
     "host.network:https://s3.example.com:443"
   ],
@@ -117,7 +116,8 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 ```
 
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
-- `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, `host.filesystem` enables filesystem entrypoints, and `host.ai` enables the DBX-configured AI conversation API.
+- `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
+- `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -245,14 +245,29 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
 | `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
-| `ai.capabilities()` | Reports whether DBX has a usable configured AI model; requires `host.ai`. |
-| `ai.complete(request)` | Generates one reply through DBX's active AI configuration. Only messages, system prompt, and output limit cross the boundary; API keys stay in the host; requires `host.ai`. |
-| `ai.stream(request)` | Streams a reply and returns `{ stream, metadata }`; stream items contain `delta`, `reasoningDelta`, and `done`. Cancelling the stream asks the host to stop generation; requires `host.ai`. |
+| `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai`. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
 `readAsset` paths are relative to `ui.root`: `assets/empty-state.svg` resolves to the package's `ui/assets/empty-state.svg`. Call `URL.revokeObjectURL(assetUrl)` when done, and call the unsubscribe functions returned by `onContext`/`onEvent` when a component is destroyed.
+
+### Analyse plugin data in DBX AI
+
+Declare `"permissions": ["host.ai"]` in the manifest, then call this from the plugin's analysis action:
+
+```js
+await dbxPlugin.ai.openConversation({
+  title: "Watchlist analysis",
+  prompt: "Compare the supplied quotes and explain risks and missing data.",
+  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  send: true,
+});
+```
+
+`title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object; the complete request is limited to 2 MiB. The host binds the installed plugin identity and copies the snapshot. Quote refreshes or database tab changes do not replace conversation data. The snapshot is stored as conversation data for history restoration and export. Include source, data timestamp, delays and missing fields; AI does not fetch market data itself.
+
+This method opens the built-in conversation and returns no model response or AI configuration to the plugin. The initial implementation uses text-only Ask through DBX's HTTP providers and Ollama, without database tools or CLI Agents. If no model is configured, the prompt remains an editable draft so the user can select a model and continue.
 
 ### Themes, Layout, and Static Assets
 

@@ -1,5 +1,6 @@
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginWorkbenchContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
+import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -21,43 +22,12 @@ export interface PluginWorkbenchContext {
   [key: string]: unknown;
 }
 
-export interface PluginAiMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-}
-
-export interface PluginAiRequest {
-  messages: PluginAiMessage[];
-  systemPrompt?: string;
-  maxTokens?: number;
-  /** Optional DBX AI configuration id; the API key never enters the plugin UI. */
-  configId?: string;
-}
-
-export interface PluginAiCapabilities {
-  available: boolean;
-  streaming: boolean;
-  provider?: string;
-  model?: string;
-}
-
-export interface PluginAiStreamChunk {
-  streamId: string;
-  delta?: string;
-  reasoningDelta?: string;
-  done: boolean;
-  error?: string;
-}
-
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
-  aiCapabilities?(pluginId: string): Promise<PluginAiCapabilities>;
-  aiComplete?(pluginId: string, request: PluginAiRequest): Promise<string>;
-  aiStream?(pluginId: string, request: PluginAiRequest, streamId: string, onChunk: (chunk: PluginAiStreamChunk) => void): Promise<void>;
-  aiCancel?(pluginId: string, streamId: string): Promise<boolean>;
+  openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   closeTab?(): Promise<void> | void;
@@ -171,6 +141,13 @@ export class PluginHostBridge {
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
+    if (method === "host.ai.openConversation") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
+      const request = createPluginAiConversation(this.plugin.manifest, params);
+      await this.api.openAiConversation(request);
+      return null;
+    }
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
       const backendMethod = requireProtocolName(input.method, "backend method");
@@ -181,34 +158,6 @@ export class PluginHostBridge {
       const input = requireRecord(params, "backend.notify params");
       await this.api.notify(this.plugin.manifest.id, requireProtocolName(input.method, "backend method"), input.params ?? null);
       return null;
-    }
-    if (method === "host.ai.capabilities") {
-      this.requirePermission("host.ai");
-      if (!this.api.aiCapabilities) throw new Error("Host AI is unavailable");
-      return this.api.aiCapabilities(this.plugin.manifest.id);
-    }
-    if (method === "host.ai.complete") {
-      this.requirePermission("host.ai");
-      if (!this.api.aiComplete) throw new Error("Host AI is unavailable");
-      const input = requireAiRequest(params, "host.ai.complete params");
-      return this.api.aiComplete(this.plugin.manifest.id, input);
-    }
-    if (method === "host.ai.stream") {
-      this.requirePermission("host.ai");
-      if (!this.api.aiStream) throw new Error("Host AI streaming is unavailable");
-      const input = requireRecord(params, "host.ai.stream params");
-      const streamId = requireProtocolName(input.streamId, "AI stream id");
-      const request = requireAiRequest(input.request, "host.ai.stream request");
-      await this.api.aiStream(this.plugin.manifest.id, request, streamId, (chunk) => {
-        this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "event", method: "host.ai.chunk", params: { ...chunk, streamId } });
-      });
-      return { streamId };
-    }
-    if (method === "host.ai.cancel") {
-      this.requirePermission("host.ai");
-      if (!this.api.aiCancel) throw new Error("Host AI cancellation is unavailable");
-      const input = requireRecord(params, "host.ai.cancel params");
-      return { cancelled: await this.api.aiCancel(this.plugin.manifest.id, requireProtocolName(input.streamId, "AI stream id")) };
     }
     if (method === "backend.sendBinary") {
       this.requirePermission("host.binary");
@@ -399,7 +348,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), ai: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set() };
     let sequence = 0;
     let context;
     let locale = 'en';
@@ -499,48 +448,14 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       Object.assign(metadata, await opened);
       return { stream: readable, metadata };
     };
-    const aiStream = async (requestInput = {}) => {
-      const streamId = globalThis.crypto?.randomUUID?.() || 'ai-' + Date.now() + '-' + (++sequence);
-      let removeListener;
-      let closeRequested = false;
-      let resolveOpen;
-      let rejectOpen;
-      const metadata = { streamId };
-      const opened = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject; });
-      const readable = new ReadableStream({
-        start(controller) {
-          const onChunk = (chunk) => {
-            if (!chunk || chunk.streamId !== streamId) return;
-            if (chunk.error) { removeListener?.(); removeListener = undefined; rejectOpen(new Error(chunk.error)); controller.error(new Error(chunk.error)); return; }
-            if (chunk.delta || chunk.reasoningDelta) controller.enqueue(chunk);
-            if (chunk.done) { removeListener?.(); removeListener = undefined; controller.close(); }
-          };
-          removeListener = () => listeners.ai.delete(onChunk);
-          listeners.ai.add(onChunk);
-          request('host.ai.stream', { streamId, request: toPlain(requestInput) }).then(resolveOpen, (error) => { removeListener?.(); removeListener = undefined; rejectOpen(error); controller.error(error); });
-        },
-        cancel() {
-          removeListener?.(); removeListener = undefined;
-          if (closeRequested) return undefined;
-          closeRequested = true;
-          return request('host.ai.cancel', { streamId }).catch(() => undefined);
-        },
-      });
-      await opened;
-      return { stream: readable, metadata };
-    };
     window.dbxPlugin = Object.freeze({
       ready,
       get context() { return context; },
       get locale() { return locale; },
       get theme() { return theme; },
       request,
+      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
-      ai: Object.freeze({
-        capabilities: () => request('host.ai.capabilities'),
-        complete: (requestInput) => request('host.ai.complete', toPlain(requestInput)),
-        stream: aiStream,
-      }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),
       sendBinary: (channel, data) => {
@@ -590,8 +505,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         listeners.event.forEach((listener) => listener(message));
         document.dispatchEvent(new CustomEvent('dbx-plugin-env', { detail: message }));
       } else if (message.type === 'event') {
-        if (message.method === 'host.ai.chunk') listeners.ai.forEach((listener) => listener(message.params || {}));
-        else listeners.event.forEach((listener) => listener(message));
+        listeners.event.forEach((listener) => listener(message));
         document.dispatchEvent(new CustomEvent('dbx-plugin-event', { detail: message }));
       } else if (message.type === 'binary') {
         const payload = { channel: message.channel, data: message.data ? new Uint8Array(message.data) : new Uint8Array(0) };
@@ -612,22 +526,6 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
 
 function validRequestMessage(value: Record<string, unknown>): value is Record<string, unknown> & PluginRequestMessage {
   return typeof value.id === "string" && value.id.length > 0 && value.id.length <= 128 && typeof value.method === "string" && value.method.length > 0 && value.method.length <= 128;
-}
-
-function requireAiRequest(value: unknown, label: string): PluginAiRequest {
-  const input = requireRecord(value, label);
-  if (!Array.isArray(input.messages) || input.messages.length > 100) throw new Error(`${label} messages must be an array with at most 100 items`);
-  const messages = input.messages.map((message, index) => {
-    const item = requireRecord(message, `${label} message ${index + 1}`);
-    if (item.role !== "user" && item.role !== "assistant" && item.role !== "system") throw new Error(`${label} message ${index + 1} has an invalid role`);
-    if (typeof item.content !== "string") throw new Error(`${label} message ${index + 1} content must be a string`);
-    return { role: item.role, content: item.content } as PluginAiMessage;
-  });
-  if (input.systemPrompt !== undefined && typeof input.systemPrompt !== "string") throw new Error(`${label} systemPrompt must be a string`);
-  if (input.configId !== undefined && typeof input.configId !== "string") throw new Error(`${label} configId must be a string`);
-  const maxTokens = input.maxTokens;
-  if (maxTokens !== undefined && (typeof maxTokens !== "number" || !Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 1_000_000)) throw new Error(`${label} maxTokens must be an integer between 1 and 1000000`);
-  return { messages, systemPrompt: input.systemPrompt as string | undefined, maxTokens: maxTokens as number | undefined, configId: input.configId as string | undefined };
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {

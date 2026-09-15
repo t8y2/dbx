@@ -132,6 +132,8 @@ export interface AiRequestInput {
   confirmedConnectionId?: string;
   confirmedDatabase?: string;
   confirmedSchema?: string;
+  /** Stable per-conversation key forwarded to the Responses API. */
+  promptCacheKey?: string;
 }
 
 export interface AiNamespaceSelection {
@@ -194,6 +196,7 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
     messages,
     taskContract,
     maxTokens,
+    promptCacheKey: input.promptCacheKey,
   });
 }
 
@@ -209,6 +212,7 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
       messages,
       taskContract,
       maxTokens,
+      promptCacheKey: input.promptCacheKey,
     },
     (chunk) => {
       if (!chunk.done) {
@@ -232,6 +236,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
       messages,
       taskContract,
       maxTokens,
+      promptCacheKey: input.promptCacheKey,
     },
     input.context.connectionId,
     input.context.database,

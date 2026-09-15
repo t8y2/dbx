@@ -3151,6 +3151,7 @@ async function send() {
         confirmedConnectionId: confirmedTargetConnId,
         confirmedDatabase: confirmedTargetDb,
         confirmedSchema: confirmedTargetSchema,
+        promptCacheKey: conversationId.value || undefined,
       },
       history,
       (event: AgentEvent) => {

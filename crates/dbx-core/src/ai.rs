@@ -571,6 +571,19 @@ pub struct AiCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_contract: Option<AiTaskContract>,
     pub max_tokens: Option<u32>,
+    /// Stable key for reusing the provider's prompt cache within one conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+}
+
+fn apply_prompt_cache_key(body: &mut serde_json::Value, request: &AiCompletionRequest) {
+    // Only OpenAI's Responses API documents this field. Other providers may
+    // expose a Responses-compatible route with a strict request schema.
+    if request.config.api_style == AiApiStyle::Responses && is_openai_api_config(&request.config) {
+        if let Some(key) = request.prompt_cache_key.as_deref().filter(|key| !key.is_empty()) {
+            body["prompt_cache_key"] = json!(key);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2402,6 +2415,7 @@ pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionR
         "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
+    apply_prompt_cache_key(&mut body, request);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -3959,6 +3973,7 @@ async fn stream_responses_api(
         "stream": true,
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
+    apply_prompt_cache_key(&mut body, request);
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
@@ -4661,6 +4676,7 @@ async fn stream_responses_with_tools(
         "stream": true,
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
+    apply_prompt_cache_key(&mut body, request);
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();

@@ -496,6 +496,8 @@ export interface AiCompletionRequest {
   messages: AiMessage[];
   taskContract?: AiTaskContract;
   maxTokens?: number;
+  /** Stable per-conversation key used by the Responses API prompt cache. */
+  promptCacheKey?: string;
 }
 
 export interface AiModelInfo {

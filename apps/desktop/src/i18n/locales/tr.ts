@@ -7710,6 +7710,8 @@ export default withEnglishFallback({
     driverUninstallFailed: "{label} sürücüsü kaldırılamadı: {error}",
     chooseOfflineDriverPackage: "Çevrimdışı sürücü paketini seçin",
     offlineImportSuccess: "Çevrimdışı içe aktarma tamamlandı. {count} sürücü kuruldu.",
+    offlineJreImportSuccess: "Çevrimdışı içe aktarma tamamlandı. {jreCount} JRE kuruldu.",
+    offlineImportWithJreSuccess: "Çevrimdışı içe aktarma tamamlandı. {jreCount} JRE ve {count} sürücü kuruldu.",
     offlineImportFailed: "Çevrimdışı içe aktarma başarısız: {error}",
     driverImportSuccess: "{label} sürücüsü içe aktarıldı",
     driverImportFailed: "{label} sürücüsü içe aktarılamadı: {error}",

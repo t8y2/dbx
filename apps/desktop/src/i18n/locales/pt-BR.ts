@@ -7596,6 +7596,8 @@ export default withEnglishFallback({
     driverUninstallFailed: "Falha ao desinstalar o driver {label}: {error}",
     chooseOfflineDriverPackage: "Escolher pacote de driver offline",
     offlineImportSuccess: "Importação offline concluída. {count} driver(s) instalado(s).",
+    offlineJreImportSuccess: "Importação offline concluída. {jreCount} JRE(s) instalado(s).",
+    offlineImportWithJreSuccess: "Importação offline concluída. {jreCount} JRE(s) e {count} driver(s) instalado(s).",
     offlineImportFailed: "Falha na importação offline: {error}",
     driverImportSuccess: "Driver {label} importado",
     driverImportFailed: "Falha ao importar o driver {label}: {error}",

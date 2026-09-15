@@ -7646,6 +7646,8 @@ export default withEnglishFallback({
     driverUninstallFailed: "{label} ドライバーのアンインストールに失敗しました: {error}",
     chooseOfflineDriverPackage: "オフラインドライバーパッケージを選択",
     offlineImportSuccess: "オフラインインポートが完了しました。{count}件のドライバーをインストールしました。",
+    offlineJreImportSuccess: "オフラインインポートが完了しました。{jreCount}件のJREをインストールしました。",
+    offlineImportWithJreSuccess: "オフラインインポートが完了しました。{jreCount}件のJREと{count}件のドライバーをインストールしました。",
     offlineImportFailed: "オフラインインポートに失敗しました: {error}",
     driverImportSuccess: "{label} ドライバーをインポートしました",
     driverImportFailed: "{label} ドライバーのインポートに失敗しました: {error}",

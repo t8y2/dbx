@@ -6898,6 +6898,8 @@ export default withEnglishFallback({
     driverUninstallFailed: "{label} 驅動程式解除安裝失敗： {error}",
     chooseOfflineDriverPackage: "選擇離線驅動程式包",
     offlineImportSuccess: "離線匯入完成，已安裝 {count} 個驅動程式",
+    offlineJreImportSuccess: "離線匯入完成，已安裝 {jreCount} 個 JRE",
+    offlineImportWithJreSuccess: "離線匯入完成，已安裝 {jreCount} 個 JRE 和 {count} 個驅動程式",
     offlineImportFailed: "離線匯入失敗： {error}",
     driverImportSuccess: "{label} 驅動程式匯入成功",
     driverImportFailed: "{label} 驅動程式匯入失敗： {error}",

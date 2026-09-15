@@ -200,6 +200,11 @@ export interface AgentOfflineExportResult {
   bytes: number;
 }
 
+export interface AgentOfflineImportResult {
+  count: number;
+  jreCount: number;
+}
+
 export type JavaRuntimeMode = "managed" | "system" | "custom";
 
 export interface JavaRuntimeConfig {
@@ -2507,7 +2512,7 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   return invoke("invalidate_agent_registry_cache");
 }
 
-export async function importAgentsFromZip(path: string | File, operationId?: string): Promise<number> {
+export async function importAgentsFromZip(path: string | File, operationId?: string): Promise<AgentOfflineImportResult> {
   if (typeof path !== "string") {
     throw new Error("Desktop offline package import requires a local file path");
   }

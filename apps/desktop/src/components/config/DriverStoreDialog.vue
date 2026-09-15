@@ -744,9 +744,9 @@ async function importOfflineZip() {
   activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
-    const count = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
+    const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
     await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
-    toast(t("driverStore.offlineImportSuccess", { count }));
+    toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
   } catch (e: any) {
     toast(t("driverStore.offlineImportFailed", { error: backendError(e) }));
   } finally {
@@ -776,9 +776,9 @@ async function importDriverFile(driver: AgentDriverInfo) {
       activeAgentOperationId.value = uuid();
       resetAgentInstallProgress();
       try {
-        const count = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
+        const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
         await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
-        toast(t("driverStore.offlineImportSuccess", { count }));
+        toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
       } finally {
         activeAgentOperationId.value = null;
         resetAgentInstallProgress();

@@ -8018,6 +8018,8 @@ export default withEnglishFallback({
     driverUninstallFailed: "{label} 驱动卸载失败: {error}",
     chooseOfflineDriverPackage: "选择离线驱动包",
     offlineImportSuccess: "离线导入完成，已安装 {count} 个驱动",
+    offlineJreImportSuccess: "离线导入完成，已安装 {jreCount} 个 JRE",
+    offlineImportWithJreSuccess: "离线导入完成，已安装 {jreCount} 个 JRE 和 {count} 个驱动",
     offlineImportFailed: "离线导入失败: {error}",
     driverImportSuccess: "{label} 驱动导入成功",
     driverImportFailed: "{label} 驱动导入失败: {error}",

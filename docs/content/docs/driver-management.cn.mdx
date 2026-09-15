@@ -85,7 +85,7 @@ RabbitMQ 等消息队列 Agent 还可能同时使用业务协议和管理 API。
 
 所有 Agent 都提供单驱动 ZIP，可直接使用**导入离线包**安装。Java Agent 的单驱动包跨平台，但不重复携带 JRE；KingbaseES、Oracle、Xugu 等原生 Agent 的单驱动包按操作系统和 CPU 架构区分。
 
-如果目标机器尚未安装 Java Agent 所需的托管 JRE，请另外导入一次对应平台的 JRE，或者直接使用包含全部驱动和 JRE 的完整离线包。
+如果目标机器尚未安装 Java Agent 所需的托管 JRE，可在**导入离线包**中选择对应平台的 `dbx-jre-21-<platform>.tar.zst`，或者直接使用包含全部驱动和 JRE 的完整离线 ZIP 包。独立 JRE 包仅包含 Java 运行时，不包含数据库驱动，也不需要 `agent-registry.json`。DBX 会验证 Java 的操作系统和 CPU 架构后安装到托管 JRE 目录。
 
 ### Windows 导入 KingbaseES
 

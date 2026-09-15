@@ -8046,6 +8046,8 @@ export default {
     driverUninstallFailed: "Failed to uninstall {label} driver: {error}",
     chooseOfflineDriverPackage: "Choose offline driver package",
     offlineImportSuccess: "Offline import complete. Installed {count} driver(s).",
+    offlineJreImportSuccess: "Offline import complete. Installed {jreCount} JRE(s).",
+    offlineImportWithJreSuccess: "Offline import complete. Installed {jreCount} JRE(s) and {count} driver(s).",
     offlineImportFailed: "Offline import failed: {error}",
     driverImportSuccess: "{label} driver imported",
     driverImportFailed: "Failed to import {label} driver: {error}",

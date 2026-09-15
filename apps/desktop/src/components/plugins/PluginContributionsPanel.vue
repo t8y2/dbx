@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/composables/useToast";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
@@ -15,13 +16,14 @@ import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
-import { beaconPluginInstall, buildMarketplacePluginListings, filterMarketplacePluginListings, listingRepositoryCanVerify, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { beaconPluginInstall, buildMarketplacePluginListings, filterMarketplacePluginListings, listingRepositoryCanVerify, marketplaceHomepageUrl, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import type { InstalledPlugin, PluginInstallResult, PluginRepository, PluginRepositoryCatalogResult, PluginTrustedKey } from "@/types/database";
 import { useI18n } from "vue-i18n";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 const props = defineProps<{
   focusTarget?: PluginCenterFocus | null;
@@ -47,6 +49,7 @@ const GithubIcon = defineComponent({
 });
 
 const PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY = "dbx-plugin-allow-unsigned";
+const MARKETPLACE_VIEW_MODE_STORAGE_KEY = "dbx-plugin-marketplace-view-mode";
 
 type TauriFileDropPayload = { type: "enter"; paths: string[]; position: { x: number; y: number } } | { type: "over"; position: { x: number; y: number } } | { type: "drop"; paths: string[]; position: { x: number; y: number } } | { type: "leave" };
 
@@ -87,7 +90,7 @@ const repositoryName = ref("");
 const repositoryCatalogUrl = ref("");
 const marketplaceQuery = ref("");
 const marketplaceRepositoryId = ref("all");
-const marketplaceViewMode = ref<"grid" | "list">("grid");
+const marketplaceViewMode = ref<"grid" | "list">(safeLocalStorageGet(MARKETPLACE_VIEW_MODE_STORAGE_KEY) === "list" ? "list" : "grid");
 const webFileInput = ref<HTMLInputElement | null>(null);
 const panelRootRef = ref<HTMLElement | null>(null);
 const draggingPackage = ref(false);
@@ -112,6 +115,12 @@ const catalogErrors = computed(() => catalogResults.value.filter((result) => res
 const customRepositories = computed(() => repositories.value.filter((repository) => !repository.managed));
 const showCustomRepositoryTrustSettings = computed(() => customRepositories.value.length > 0 || trustedKeys.value.length > 0);
 const pluginDevelopmentDocsUrl = computed(() => `https://dbxio.com/${appLocale.value.startsWith("zh") ? "cn" : "en"}/docs/plugin-development`);
+
+function marketplaceActionClass(listing: MarketplacePluginListing): string {
+  if (listing.status === "update") return "text-blue-600 hover:bg-gray-200 dark:text-blue-400 dark:hover:bg-gray-700";
+  if (listing.status === "install") return "text-foreground hover:bg-gray-200 dark:hover:bg-gray-700";
+  return "cursor-default text-gray-600 dark:text-gray-400";
+}
 
 function openExternal(url?: string) {
   const target = url?.trim();
@@ -561,6 +570,7 @@ onMounted(() => {
   void refresh();
   if (isTauriRuntime()) document.addEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
+watch(marketplaceViewMode, (mode) => safeLocalStorageSet(MARKETPLACE_VIEW_MODE_STORAGE_KEY, mode));
 onBeforeUnmount(() => {
   if (isTauriRuntime()) document.removeEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
@@ -664,12 +674,12 @@ onBeforeUnmount(() => {
                     <GithubIcon icon-class="size-3.5" />
                   </button>
                   <button
-                    v-if="listing.plugin.homepage"
+                    v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
                     type="button"
                     class="rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
                     :title="t('pluginPlatform.pluginHomepage')"
                     :aria-label="t('pluginPlatform.pluginHomepage')"
-                    @click.stop="openExternal(listing.plugin.homepage)"
+                    @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
                   >
                     <Globe class="size-3.5" />
                   </button>
@@ -680,7 +690,12 @@ onBeforeUnmount(() => {
                 <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>
                 <Badge v-if="listing.plugin.permissions.length" variant="outline" class="h-5 px-1.5 text-[10px]">{{ t("pluginPlatform.permissionsCount", { count: listing.plugin.permissions.length }) }}</Badge>
               </div>
-              <p class="mt-3 line-clamp-3 text-xs leading-5 text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+              <Tooltip :delay-duration="700">
+                <TooltipTrigger as-child>
+                  <p class="mt-3 line-clamp-3 cursor-help text-xs leading-5 text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
+              </Tooltip>
               <div class="mt-auto flex items-center justify-between gap-3 pt-4">
                 <div class="text-[11px] text-muted-foreground">
                   <span v-if="listing.status === 'unsupported'">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
@@ -690,7 +705,7 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
-                  :class="listing.status === 'installed' || listing.status === 'unsupported' ? 'cursor-default text-gray-600 dark:text-gray-400' : 'text-blue-600 hover:bg-gray-200 dark:text-blue-400 dark:hover:bg-gray-700'"
+                  :class="marketplaceActionClass(listing)"
                   :disabled="listing.status === 'installed' || listing.status === 'unsupported' || !!marketplaceInstallingKey"
                   @click="installMarketplaceListing(listing)"
                 >
@@ -717,12 +732,12 @@ onBeforeUnmount(() => {
                     <GithubIcon icon-class="size-3.5" />
                   </button>
                   <button
-                    v-if="listing.plugin.homepage"
+                    v-if="marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage)"
                     type="button"
                     class="shrink-0 rounded p-0.5 opacity-60 transition-opacity [will-change:opacity] hover:opacity-100"
                     :title="t('pluginPlatform.pluginHomepage')"
                     :aria-label="t('pluginPlatform.pluginHomepage')"
-                    @click.stop="openExternal(listing.plugin.homepage)"
+                    @click.stop="openExternal(marketplaceHomepageUrl(listing.plugin.source, listing.plugin.homepage))"
                   >
                     <Globe class="size-3.5" />
                   </button>
@@ -732,7 +747,12 @@ onBeforeUnmount(() => {
                   <BadgeCheck v-if="listingRepositoryCanVerify(listing.repository)" class="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" :title="t('pluginPlatform.verified')" :aria-label="t('pluginPlatform.verified')" />
                   <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
                 </div>
-                <p class="mt-1 truncate text-xs text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+                <Tooltip :delay-duration="700">
+                  <TooltipTrigger as-child>
+                    <p class="mt-1 cursor-help truncate text-xs text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
+                </Tooltip>
               </div>
               <div class="hidden max-w-52 shrink-0 gap-1.5 lg:flex">
                 <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>
@@ -740,7 +760,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
-                :class="listing.status === 'installed' || listing.status === 'unsupported' ? 'cursor-default text-gray-600 dark:text-gray-400' : 'text-blue-600 hover:bg-gray-200 dark:text-blue-400 dark:hover:bg-gray-700'"
+                :class="marketplaceActionClass(listing)"
                 :disabled="listing.status === 'installed' || listing.status === 'unsupported' || !!marketplaceInstallingKey"
                 @click="installMarketplaceListing(listing)"
               >
@@ -803,12 +823,12 @@ onBeforeUnmount(() => {
                         <GithubIcon />
                       </button>
                       <button
-                        v-if="selectedDefinition.plugin.manifest.homepage"
+                        v-if="marketplaceHomepageUrl(selectedDefinition.plugin.manifest.source, selectedDefinition.plugin.manifest.homepage)"
                         type="button"
                         class="rounded p-0.5 text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100"
                         :title="t('pluginPlatform.pluginHomepage')"
                         :aria-label="t('pluginPlatform.pluginHomepage')"
-                        @click="openExternal(selectedDefinition.plugin.manifest.homepage)"
+                        @click="openExternal(marketplaceHomepageUrl(selectedDefinition.plugin.manifest.source, selectedDefinition.plugin.manifest.homepage))"
                       >
                         <Globe class="size-3" />
                       </button>

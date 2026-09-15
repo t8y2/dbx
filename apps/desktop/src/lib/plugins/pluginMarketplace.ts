@@ -17,6 +17,18 @@ export interface MarketplacePluginListing {
   status: MarketplacePluginStatus;
 }
 
+/**
+ * Returns the homepage only when it points somewhere different from the
+ * source repository. Marketplace metadata often repeats the repository URL in
+ * both fields, which otherwise renders two identical links.
+ */
+export function marketplaceHomepageUrl(source?: string, homepage?: string): string | undefined {
+  const normalizedSource = normalizeExternalUrl(source);
+  const normalizedHomepage = normalizeExternalUrl(homepage);
+  if (!normalizedHomepage || normalizedHomepage === normalizedSource) return undefined;
+  return homepage?.trim() || undefined;
+}
+
 export function buildMarketplacePluginListings(results: readonly PluginRepositoryCatalogResult[], installedPlugins: readonly InstalledPlugin[], locale: string): MarketplacePluginListing[] {
   const installedById = new Map(installedPlugins.map((plugin) => [plugin.manifest.id, plugin]));
   return results
@@ -103,4 +115,17 @@ function parseVersion(version: string): [number, number, number, string] | null 
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?/.exec(version);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] || "~"];
+}
+
+function normalizeExternalUrl(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return trimmed.replace(/\/+$/, "").toLowerCase();
+  }
 }

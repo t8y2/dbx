@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMarketplacePluginListings, filterMarketplacePluginListings, selectMarketplaceArtifact } from "./pluginMarketplace";
+import { buildMarketplacePluginListings, filterMarketplacePluginListings, marketplaceHomepageUrl, selectMarketplaceArtifact } from "./pluginMarketplace";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 
 const result: PluginRepositoryCatalogResult = {
@@ -80,5 +80,10 @@ describe("plugin marketplace listings", () => {
     ];
 
     expect(selectMarketplaceArtifact(artifacts, "darwin-arm64")?.target).toBe("darwin-arm64");
+  });
+
+  it("treats a repository URL and its homepage URL as one link", () => {
+    expect(marketplaceHomepageUrl("https://github.com/dbxio/example/", "https://github.com/dbxio/example#readme")).toBeUndefined();
+    expect(marketplaceHomepageUrl("https://github.com/dbxio/example", "https://dbxio.com/plugins/example")).toBe("https://dbxio.com/plugins/example");
   });
 });

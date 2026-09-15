@@ -2,7 +2,7 @@ import type { QueryResult } from "@/types/database";
 import { mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
   chainedMethodCallPattern,
-  describeMongoCommandParseFailure,
+  describeMongoCommandParseFailure as describeMongoCommandParseFailureBasic,
   findChainedMethodCallIndex,
   findMatchingParen,
   MONGO_SHELL_COMMAND_HINT,
@@ -16,7 +16,172 @@ import {
 } from "@dbx-app/mongo-shell";
 
 export type { MongoAggregateCommand };
-export { describeMongoCommandParseFailure, MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
+export { MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
+
+/* ------------------------------------------------------------------ *
+ * Parse-failure diagnostics
+ *
+ * When no parser accepts a command, say what was wrong with it rather than
+ * repeating the generic list of supported commands. The shared package only
+ * diagnoses aggregate-shaped input; this layer knows every method the editor
+ * supports, so it can name an unsupported method, an unsupported value
+ * constructor, or the argument shape a known method expects.
+ * ------------------------------------------------------------------ */
+
+interface MongoMethodShape {
+  /** What the method takes, in prose, for "expects ..." messages. */
+  expects: string;
+  /** Argument roles by position, for "the filter argument" wording. */
+  roles: string[];
+}
+
+const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
+  find: { expects: "an optional filter and an optional projection", roles: ["filter", "projection"] },
+  findOne: { expects: "an optional filter, an optional projection, and optional options", roles: ["filter", "projection", "options"] },
+  count: { expects: "an optional filter", roles: ["filter"] },
+  countDocuments: { expects: "an optional filter", roles: ["filter"] },
+  distinct: { expects: "a field name and an optional filter", roles: ["field", "filter"] },
+  insert: { expects: "one document or an array of documents", roles: ["document"] },
+  insertOne: { expects: "one document", roles: ["document"] },
+  insertMany: { expects: "an array of documents", roles: ["documents"] },
+  update: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  updateOne: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  updateMany: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  deleteOne: { expects: "a filter", roles: ["filter"] },
+  deleteMany: { expects: "a filter", roles: ["filter"] },
+  findOneAndUpdate: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  findOneAndReplace: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
+  findOneAndDelete: { expects: "a filter and optional options", roles: ["filter", "options"] },
+  createIndex: { expects: "an index keys document and optional options", roles: ["keys", "options"] },
+  dropIndex: { expects: "an index name or keys document", roles: ["index"] },
+  dropIndexes: { expects: "no arguments, or an index name or list of names", roles: ["index"] },
+  getIndexes: { expects: "no arguments", roles: [] },
+  drop: { expects: "no arguments", roles: [] },
+  stats: { expects: "an optional scale", roles: ["scale"] },
+  dataSize: { expects: "no arguments", roles: [] },
+  storageSize: { expects: "no arguments", roles: [] },
+  totalIndexSize: { expects: "no arguments", roles: [] },
+};
+
+const SUPPORTED_COLLECTION_METHODS = [
+  "find",
+  "findOne",
+  "aggregate",
+  "count",
+  "countDocuments",
+  "distinct",
+  "insertOne",
+  "insertMany",
+  "updateOne",
+  "updateMany",
+  "deleteOne",
+  "deleteMany",
+  "findOneAndUpdate",
+  "findOneAndReplace",
+  "findOneAndDelete",
+  "getIndexes",
+  "createIndex",
+  "dropIndex",
+  "dropIndexes",
+  "drop",
+  "stats",
+];
+
+/** Database-level methods with a supported equivalent worth pointing at. */
+const DATABASE_METHOD_HINTS: Record<string, string> = {
+  getSiblingDB: "switch databases with `use <database>` and then run the command against db.<collection>",
+  stats: "use db.runCommand({ dbStats: 1 })",
+  serverStatus: "use db.runCommand({ serverStatus: 1 })",
+  adminCommand: "use db.runCommand({ ... })",
+  getCollectionNames: "collections are listed in the sidebar",
+  createCollection: 'collections are created on first insert, or use db.runCommand({ create: "name" })',
+};
+
+const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
+  version: { expects: "no arguments", roles: [] },
+  createUser: { expects: "a user document and optional write concern", roles: ["user", "writeConcern"] },
+  runCommand: { expects: "one command document", roles: ["command"] },
+};
+
+const SUPPORTED_DATABASE_METHODS = ["version", "createUser", "runCommand", "getCollection"];
+
+const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
+
+const COMMAND_SHAPE = /^db\s*(?:\.\s*(?<collection>[A-Za-z_$][\w$]*)|\[\s*(["'])(?<bracket>.*?)\2\s*\]|\.\s*getCollection\s*\(\s*(["'])(?<named>.*?)\4\s*\))?\s*\.\s*(?<method>[A-Za-z_$][\w$]*)\s*\(/;
+
+export function describeMongoCommandParseFailure(input: string): string {
+  const basic = describeMongoCommandParseFailureBasic(input);
+  if (basic !== MONGO_SHELL_COMMAND_HINT) return basic;
+  const source = trimMongoOuterComments(input).trim().replace(/;$/, "").trim();
+  return diagnoseMongoCommand(source) ?? basic;
+}
+
+function diagnoseMongoCommand(source: string): string | null {
+  if (/^show\s+(collections|tables)\b/i.test(source)) {
+    return "show collections is not supported here; collections are listed in the sidebar. Only show dbs is supported.";
+  }
+
+  const shape = COMMAND_SHAPE.exec(source);
+  if (!shape?.groups) return null;
+  const { method } = shape.groups;
+  if (!method) return null;
+  const isDatabaseLevel = shape.groups.collection === undefined && shape.groups.bracket === undefined && shape.groups.named === undefined;
+
+  const shapeSpec = isDatabaseLevel ? DATABASE_METHOD_SHAPES[method] : COLLECTION_METHOD_SHAPES[method];
+  if (!shapeSpec) {
+    if (isDatabaseLevel && SUPPORTED_DATABASE_METHODS.includes(method)) return null;
+    if (isDatabaseLevel) {
+      const hint = DATABASE_METHOD_HINTS[method];
+      return `db.${method}() is not supported${hint ? `; ${hint}` : ""}. Supported database commands: ${SUPPORTED_DATABASE_METHODS.map((name) => `db.${name}()`).join(", ")}.`;
+    }
+    return `Collection method ${method}() is not supported. Supported collection methods: ${SUPPORTED_COLLECTION_METHODS.join(", ")}.`;
+  }
+
+  const openIndex = source.indexOf("(", shape[0].length - 1);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0) return null;
+  const rawArgs = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  const args = rawArgs.length === 1 && !rawArgs[0]?.trim() ? [] : rawArgs;
+
+  for (const [index, arg] of args.entries()) {
+    if (!arg.trim() || normalizeJsonArgument(arg) !== null) continue;
+    const role = shapeSpec.roles[index] ?? `argument ${index + 1}`;
+    const constructor = findUnsupportedValueConstructor(arg);
+    if (constructor) {
+      return `Unsupported value ${constructor}(...) in the ${role} argument of ${method}(). Supported value constructors: ${SUPPORTED_VALUE_CONSTRUCTORS.join(", ")}.`;
+    }
+    return `The ${role} argument of ${method}() is not a valid document.`;
+  }
+
+  const tail = source.slice(closeIndex + 1).trim();
+  if (tail) return `Unexpected text after ${method}(...): "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
+  return `${method}() expects ${shapeSpec.expects}.`;
+}
+
+/** First `Name(` outside a string that is not a constructor the parser understands. */
+function findUnsupportedValueConstructor(argument: string): string | null {
+  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < argument.length; index += 1) {
+    const char = argument[index]!;
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    const call = /^(?:new\s+)?([A-Za-z_$][\w$]*)\s*\(/.exec(argument.slice(index));
+    if (call && !known.has(call[1]!) && (index === 0 || !/[\w$.]/.test(argument[index - 1]!))) {
+      return /^new\s/.test(call[0]) ? `new ${call[1]}` : call[1]!;
+    }
+  }
+  return null;
+}
 
 export interface MongoFindCommand {
   collection: string;

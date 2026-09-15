@@ -1161,6 +1161,41 @@ test("parseMongoAggregateCommand rejects non-array pipelines and invalid options
   assert.equal(parseMongoAggregateCommand("db.products.aggregate([], {}, true)"), null);
 });
 
+test("describeMongoCommandParseFailure names an unsupported value constructor and where it is", () => {
+  const message = describeMongoCommandParseFailure('db.reports.updateOne({a: 1}, {$set: {t: Foo("x")}}, {upsert: true})');
+  assert.match(message, /Unsupported value Foo\(\.\.\.\) in the update argument of updateOne\(\)/);
+  assert.match(message, /ObjectId, ISODate, new Date, NumberLong/);
+
+  assert.match(describeMongoCommandParseFailure("db.c.find({a: new Bar()})"), /Unsupported value new Bar\(\.\.\.\) in the filter argument of find\(\)/);
+  // Text inside a string is not a constructor call.
+  assert.match(describeMongoCommandParseFailure('db.c.find({a: "Foo(1)", b: })'), /filter argument of find\(\) is not a valid document/);
+});
+
+test("describeMongoCommandParseFailure explains the argument shape a known method expects", () => {
+  assert.equal(describeMongoCommandParseFailure("db.c.insertOne({a: 1}, {writeConcern: {w: 1}})"), "insertOne() expects one document.");
+  assert.equal(describeMongoCommandParseFailure("db.c.deleteOne({a: 1}, {collation: {locale: 'en'}})"), "deleteOne() expects a filter.");
+  assert.equal(describeMongoCommandParseFailure("db.c.updateOne({a: 1})"), "updateOne() expects a filter, an update, and optional options.");
+  assert.equal(describeMongoCommandParseFailure("db.runCommand()"), "runCommand() expects one command document.");
+  assert.equal(describeMongoCommandParseFailure("db.version(1)"), "version() expects no arguments.");
+  assert.equal(describeMongoCommandParseFailure("db.c.find({a: 1}).count"), 'Unexpected text after find(...): ".count".');
+});
+
+test("describeMongoCommandParseFailure names unsupported methods and points at alternatives", () => {
+  const replaceOne = describeMongoCommandParseFailure("db.c.replaceOne({a: 1}, {b: 2})");
+  assert.match(replaceOne, /^Collection method replaceOne\(\) is not supported\. Supported collection methods: find, findOne/);
+  // Bracket and getCollection targets are recognised too.
+  assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
+  assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
+
+  assert.match(describeMongoCommandParseFailure("db.stats()"), /db\.stats\(\) is not supported; use db\.runCommand\(\{ dbStats: 1 \}\)/);
+  assert.match(describeMongoCommandParseFailure('db.getSiblingDB("other").c.find({})'), /use <database>/);
+  assert.match(describeMongoCommandParseFailure("db.adminCommand({ping: 1})"), /use db\.runCommand/);
+  assert.match(describeMongoCommandParseFailure("show collections"), /listed in the sidebar/);
+
+  // Leading comments do not hide the command shape.
+  assert.match(describeMongoCommandParseFailure("// note\ndb.c.bulkWrite([])"), /bulkWrite\(\) is not supported/);
+});
+
 test("describeMongoCommandParseFailure reports unclosed delimiters and shell hints", () => {
   const unclosed = describeMongoCommandParseFailure("db.uc_user.aggregate([], {explain: true");
   assert.match(unclosed, /unclosed/i);

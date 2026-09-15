@@ -101,6 +101,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.workbench",
     "host.events",
     "host.filesystem",
+    "host.ai",
     "host.binary",
     "host.plans:read",
     "host.storage",
@@ -121,6 +122,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
+- `host.ai` enables the DBX-configured AI conversation API (`ai.capabilities` / `ai.complete` / `ai.stream` in the [Frontend Host API](#frontend-host-api)).
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -297,6 +299,9 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
+| `ai.capabilities()` | Reports whether DBX has a usable configured AI model; requires `host.ai`. |
+| `ai.complete(request)` | Generates one reply through DBX's active AI configuration. Only messages, system prompt, and output limit cross the boundary; API keys stay in the host; requires `host.ai`. |
+| `ai.stream(request)` | Streams a reply and returns `{ stream, metadata }`; stream items contain `delta`, `reasoningDelta`, and `done`. Cancelling the stream asks the host to stop generation; requires `host.ai`. |
 | `capabilities` | `{ downloadFile, planApi, storage }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |

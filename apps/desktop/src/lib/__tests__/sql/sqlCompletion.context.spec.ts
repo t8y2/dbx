@@ -581,6 +581,30 @@ describe("sqlCompletion table aliases", () => {
     expect(table?.apply).toBe("order_items oi");
   });
 
+  it("never adds generated aliases to Cassandra table completions", () => {
+    const sql = "SELECT * FROM ord";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "order_items", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "cassandra",
+      autoAliasTables: true,
+    });
+
+    const table = items.find((item) => item.label === "order_items" && item.type === "table");
+    expect(table?.apply).toBe("order_items");
+  });
+
+  it("does not suggest table aliases for Cassandra", () => {
+    const sql = "SELECT * FROM order_items ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "order_items", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "cassandra",
+    });
+
+    expect(items.some((item) => item.type === "snippet" && item.detail === "alias for order_items")).toBe(false);
+  });
+
   it("keeps plain table completions when generated aliases are disabled", () => {
     const sql = "SELECT * FROM ord";
     const items = buildSqlCompletionItems(sql, sql.length, {

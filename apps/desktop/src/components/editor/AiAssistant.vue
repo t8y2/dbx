@@ -4774,7 +4774,7 @@ async function openExternalUrl(url: string) {
                           <span class="truncate">{{ mention.kind === "table" ? [mention.schema, mention.table].filter(Boolean).join(".") : mention.name }}</span>
                         </button>
                       </div>
-                      <div v-if="msg.content" class="whitespace-pre-wrap [overflow-wrap:anywhere]">{{ msg.content }}</div>
+                      <div v-if="msg.content" data-ai-user-message-content class="whitespace-pre-wrap">{{ msg.content }}</div>
                     </div>
                     <div v-if="canCopyMessage(msg)" class="mt-1 flex justify-end">
                       <button
@@ -5708,6 +5708,10 @@ html.dbx-legacy-webview.dark .ai-markdown :deep(.ai-markdown-table-wrap:hover::-
 
 .ai-message-scroll :deep([data-slot="scroll-area-viewport"]) {
   overflow-anchor: none;
+}
+
+.ai-message-scroll :deep([data-ai-user-message-content]) {
+  overflow-wrap: anywhere;
 }
 
 .resize-handle {

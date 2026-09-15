@@ -1707,7 +1707,16 @@ function navigateSuggestion(delta: number) {
   dataGridSearch.navigateSuggestion(delta);
 }
 
-function focusSearch(): boolean {
+function focusSearch(target: Element | null = null): boolean {
+  const tableInfoDrawer = target?.closest<HTMLElement>("[data-table-info-drawer]");
+  if (tableInfoDrawer) {
+    const input = tableInfoDrawer.querySelector<HTMLInputElement>("[data-table-info-search]");
+    if (input) {
+      input.focus();
+      input.select();
+      return true;
+    }
+  }
   searchOverlayVisible.value = true;
   nextTick(() => {
     searchBarRef.value?.focus(true);
@@ -8843,7 +8852,7 @@ async function onGridKeydown(event: KeyboardEvent) {
   if (!targetAllowsNativeClipboard && handleGridPaginationShortcut(event)) return;
   if (isFocusSearchShortcut(event) && !isGoToColumnShortcut(event, settingsStore.editorSettings.shortcuts)) {
     event.preventDefault();
-    focusSearch();
+    focusSearch(event.target instanceof Element ? event.target : document.activeElement instanceof Element ? document.activeElement : null);
     return;
   }
   if (isModRShortcut(event)) {
@@ -13076,6 +13085,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           <div
             v-if="showTableInfo"
             data-native-clipboard
+            data-table-info-drawer
             class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0 max-w-full"
             :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
             :style="ddlDrawerStyle"
@@ -13148,7 +13158,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <div class="flex min-w-0 items-center gap-1">
                 <div class="relative min-w-0 flex-1">
                   <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-                  <input v-model="searchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown="onTableInfoSearchKeydown" />
+                  <input v-model="searchQuery" data-table-info-search :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown="onTableInfoSearchKeydown" />
                   <button v-if="searchQuery" type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="searchQuery = ''">
                     <X class="w-3 h-3" />
                   </button>

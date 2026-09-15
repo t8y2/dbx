@@ -3047,7 +3047,16 @@ function getSearchInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-object-search-input]") ?? null;
 }
 
-function focusSearch(): boolean {
+function focusSearch(target: Element | null = null): boolean {
+  const tableInfoPanel = target?.closest<HTMLElement>("[data-object-table-info-panel]");
+  if (tableInfoPanel) {
+    const input = tableInfoPanel.querySelector<HTMLInputElement>("[data-table-info-search]");
+    if (input) {
+      input.focus();
+      input.select();
+      return true;
+    }
+  }
   const input = getSearchInput();
   if (!input) return false;
   input.focus();
@@ -3694,7 +3703,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         </div>
       </div>
       <!-- Right-side panel: table info or source -->
-      <div v-if="sidePanelRow || isEventEditor" class="object-browser-side-panel relative flex min-h-0 min-w-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `min(${sidePanelWidth}px, 100%)` }">
+      <div
+        v-if="sidePanelRow || isEventEditor"
+        :data-object-table-info-panel="sidePanelMode === 'table-info' ? '' : undefined"
+        class="object-browser-side-panel relative flex min-h-0 min-w-0 shrink-0 flex-col border-l bg-background"
+        :class="{ 'side-panel-resizing': isResizingSidePanel }"
+        :style="{ width: `min(${sidePanelWidth}px, 100%)` }"
+      >
         <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
         <!-- Table info mode -->
         <template v-if="sidePanelMode === 'table-info'">
@@ -3735,7 +3750,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 bg-background">
             <div class="relative min-w-0 flex-1">
               <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <input v-model="tableInfoSearchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
+              <input v-model="tableInfoSearchQuery" data-table-info-search :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
               <button v-if="tableInfoSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="tableInfoSearchQuery = ''">
                 <X class="w-3 h-3" />
               </button>

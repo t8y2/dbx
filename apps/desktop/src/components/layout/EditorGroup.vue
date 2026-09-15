@@ -70,7 +70,7 @@ const surfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits
 const activeSurfaceRef = ref<QueryEditorSurfaceHandle | null>(null);
 
 defineExpose({
-  focusSearch: () => activeSurfaceRef.value?.focusSearch() ?? false,
+  focusSearch: (target: Element | null = null) => activeSurfaceRef.value?.focusSearch(target) ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   refreshData: () => activeSurfaceRef.value?.refreshData() ?? false,
   toggleResultsPane: () => activeSurfaceRef.value?.toggleResultsPane() ?? false,

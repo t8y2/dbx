@@ -183,7 +183,7 @@ import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAcc
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
-  focusSearch: () => boolean;
+  focusSearch: (target?: Element | null) => boolean;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -206,7 +206,7 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
 };
 
 type SearchableBrowserHandle = {
-  focusSearch: () => boolean;
+  focusSearch: (target?: Element | null) => boolean;
   refresh?: () => boolean;
   insertCommand?: (command: string) => Promise<boolean>;
   executeCommand?: (command: string) => Promise<boolean>;
@@ -953,7 +953,7 @@ function onHandleCloseColumnPanel() {
   columnInfoError.value = undefined;
 }
 
-function focusSearch(): boolean {
+function focusSearch(target: Element | null = null): boolean {
   if (elasticsearchJsonResponsePanelRef.value?.focusSearch()) return true;
   if (props.activeTab.mode === "mongo") return documentBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "redis") return redisKeyBrowserRef.value?.focusSearch() ?? false;
@@ -961,15 +961,15 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "zookeeper") return zookeeperKeyBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.focusSearch() ?? false;
-  if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch(target) ?? false;
   if (props.activeTab.mode === "structure") return tableStructureEditorRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") {
     // The shared result surface (resultOnly) owns the grid, not the editor;
     // route its search to the DataGrid instead of the missing QueryEditor.
-    if (props.resultOnly) return dataGridRef.value?.focusSearch() ?? false;
+    if (props.resultOnly) return dataGridRef.value?.focusSearch(target) ?? false;
     return queryEditorRef.value?.openSearch() ?? false;
   }
-  return dataGridRef.value?.focusSearch() ?? false;
+  return dataGridRef.value?.focusSearch(target) ?? false;
 }
 
 function openGoToColumn(): boolean {

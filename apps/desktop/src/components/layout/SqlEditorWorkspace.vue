@@ -66,10 +66,10 @@ defineExpose({
     // A data-mode cell-detail dialog is portaled to body too but belongs to
     // the group's grid — indistinguishable in the DOM, hence the gate.
     if (element?.closest("[data-shared-result-surface]") || (showSharedResult.value && element?.closest("[data-cell-detail-editor-root]"))) {
-      return resultSurfaceRef.value?.focusSearch() ?? false;
+      return resultSurfaceRef.value?.focusSearch(element) ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
-    return group?.focusSearch() ?? false;
+    return group?.focusSearch(element) ?? false;
   },
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
   refreshData: (target: Element | null = null) => {

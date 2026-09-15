@@ -3225,6 +3225,9 @@ function focusSearchInAuxiliarySurface(target: Element | null): boolean {
   if (showHistory.value && target?.closest("[data-history-panel], [data-history-search]")) return focusSearchInput("[data-history-search]");
   if (showSqlLibraryPanel.value && target?.closest("[data-sql-library-panel], [data-sql-library-search]")) return focusSearchInput("[data-sql-library-search]");
 
+  const targetIsDocument = !target || target === document.body || target === document.documentElement;
+  if (!targetIsDocument) return false;
+
   if (lastFocusedAuxiliarySurface.value === "ai" && showAiPanel.value) {
     if (aiAssistantRef.value) return aiAssistantRef.value.focusSearch();
     invokeWhenAiReady((handle) => handle.focusSearch());

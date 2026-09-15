@@ -170,7 +170,6 @@ import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
-import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -304,8 +303,6 @@ const dataGridViewOptionsOpen = ref(false);
 const dataToolbarRef = ref<HTMLElement | null>(null);
 const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [() => props.activeTab.id, () => !!props.activeTab.result]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
-const showDataToolbarOverflow = computed(() => dataToolbarTier.value >= 2);
-const showDataTableInfoButton = computed(() => dataToolbarTier.value < 2);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
@@ -2174,14 +2171,7 @@ defineExpose({
           <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }} </span>
           <span class="ml-auto" />
           <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
-          <Button
-            v-if="showDataTableInfoButton && activeTab.result && activeDataTabTableMeta && activeTab.connectionId"
-            variant="ghost"
-            size="sm"
-            class="h-5 text-xs px-1.5 shrink-0"
-            :class="{ 'bg-accent': dataGridRef?.showDdl }"
-            :title="dataToolbarCompact ? t('grid.tableInfo') : undefined"
-            @click="dataGridRef?.toggleDdl()"
+          <Button v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" :title="dataToolbarCompact ? t('grid.tableInfo') : undefined" @click="dataGridRef?.toggleDdl()"
             ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button
           >
           <DropdownMenu v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId">
@@ -2426,12 +2416,6 @@ defineExpose({
               />
             </PopoverContent>
           </Popover>
-          <ToolbarOverflowMenu v-if="showDataToolbarOverflow" :label="t('toolbar.moreActions')">
-            <DropdownMenuItem v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" @select="dataGridRef?.toggleDdl()">
-              <TableProperties class="h-3.5 w-3.5" />
-              {{ t("grid.tableInfo") }}
-            </DropdownMenuItem>
-          </ToolbarOverflowMenu>
         </div>
         <DataGrid
           v-if="activeTab.result"

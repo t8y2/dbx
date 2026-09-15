@@ -74,7 +74,8 @@ test("AI request failures use localized backend diagnostics", () => {
 
 test("AI analysis export keeps the connection that produced each assistant response", () => {
   assert.match(source, /sourceConnectionName\?: string/);
-  assert.match(source, /runMessages\.push\(\{ role: "assistant", content: "", sourceConnectionName: connection\.name \}\)/);
+  assert.match(source, /const runSourceName = runPluginContext\?\.pluginName \?\? connection\?\.name \?\? ""/);
+  assert.match(source, /runMessages\.push\(\{ role: "assistant", content: "", sourceConnectionName: runSourceName \}\)/);
   assert.match(source, /connectionName: msg\.sourceConnectionName \?\? props\.connection\?\.name/);
   assert.match(source, /sourceConnectionName: m\.role === "assistant" \? conv\.connectionName : undefined/);
 });

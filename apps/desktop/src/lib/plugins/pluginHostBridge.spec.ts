@@ -13,6 +13,26 @@ function plugin(permissions: string[] = []): InstalledPlugin {
 const workbench: PluginWorkbenchContribution = { type: "workbench", id: "sample.main", label: "Sample" };
 
 describe("PluginHostBridge", () => {
+  it("opens the built-in AI conversation only with the declared permission and host-owned identity", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const openAiConversation = vi.fn().mockResolvedValue(undefined);
+    const api = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), openAiConversation };
+    const request = { source: "dbx-plugin", version: 1, type: "request", id: "ai", method: "host.ai.openConversation", params: { title: "自选分析", prompt: "分析", context: { snapshotId: "s1" }, send: true, pluginId: "forged" } };
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, api);
+    denied.handleWindowMessage({ source: target, data: request } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ error: "Plugin has not declared permission 'host.ai'" });
+    expect(openAiConversation).not.toHaveBeenCalled();
+
+    const allowed = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, api);
+    allowed.handleWindowMessage({ source: target, data: request } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(openAiConversation).toHaveBeenCalledWith({ context: { pluginId: "sample", pluginName: "Sample", title: "自选分析", capturedAt: expect.any(String), data: { snapshotId: "s1" } }, prompt: "分析", send: true });
+    expect(messages[1]).toMatchObject({ id: "ai", result: null });
+    expect(api.invoke).not.toHaveBeenCalled();
+  });
+
   it("binds backend calls to the owning plugin identity", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

@@ -1,5 +1,6 @@
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginWorkbenchContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
+import { createPluginAiConversation, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -38,6 +39,7 @@ export interface PluginHostBridgeApi {
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
+  openAiConversation?(request: AiPluginConversationRequest): Promise<void>;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   closeTab?(): Promise<void> | void;
@@ -153,6 +155,13 @@ export class PluginHostBridge {
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
+    if (method === "host.ai.openConversation") {
+      this.requirePermission("host.ai");
+      if (!this.api.openAiConversation) throw new Error("DBX AI conversation panel is unavailable");
+      const request = createPluginAiConversation(this.plugin.manifest, params);
+      await this.api.openAiConversation(request);
+      return null;
+    }
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
       const backendMethod = requireProtocolName(input.method, "backend method");
@@ -472,6 +481,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       get locale() { return locale; },
       get theme() { return theme; },
       request,
+      ai: Object.freeze({ openConversation: (options) => request('host.ai.openConversation', options) }),
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
       notify: (method, params) => request('backend.notify', { method, params }),

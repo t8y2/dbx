@@ -116,6 +116,55 @@ class AbstractJdbcAgentTest {
     }
 
     @Test
+    void ignoresGbase8sDriverBacktickIdentifierQuote() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.identifierQuote = "`";
+        tracking.jdbcUrl = "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s";
+        TestAgent agent = new TestAgent(tracking);
+
+        agent.connect(new ConnectParams());
+
+        assertEquals("", agent.getIdentifierQuote());
+    }
+
+    @Test
+    void ignoresBacktickQuoteForInformixFamilyConnectionString() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.identifierQuote = "`";
+        TestAgent agent = new TestAgent(tracking);
+
+        ConnectParams params = new ConnectParams();
+        params.setConnection_string("jdbc:informix-sqli://localhost:9088/appdb:INFORMIXSERVER=ol_informix");
+        agent.connect(params);
+
+        assertEquals("", agent.getIdentifierQuote());
+    }
+
+    @Test
+    void keepsInformixFamilyBacktickQuoteInMysqlCompatMode() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.identifierQuote = "`";
+        tracking.jdbcUrl = "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=mysql";
+        TestAgent agent = new TestAgent(tracking);
+
+        agent.connect(new ConnectParams());
+
+        assertEquals("`", agent.getIdentifierQuote());
+    }
+
+    @Test
+    void keepsNonBacktickQuotesForInformixFamilyDrivers() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.identifierQuote = "\"";
+        tracking.jdbcUrl = "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s";
+        TestAgent agent = new TestAgent(tracking);
+
+        agent.connect(new ConnectParams());
+
+        assertEquals("\"", agent.getIdentifierQuote());
+    }
+
+    @Test
     void testsConnectionsThroughSharedLifecycle() {
         TrackingConnection tracking = new TrackingConnection();
         TestAgent agent = new TestAgent(tracking);
@@ -453,6 +502,7 @@ class AbstractJdbcAgentTest {
         private boolean autoCommit = true;
         private String compatibilityMode;
         private String identifierQuote = "\"";
+        private String jdbcUrl;
         private boolean compatibilityQueryFails;
         private int compatibilityQueryCount;
         private boolean isValidUnsupported;
@@ -517,6 +567,9 @@ class AbstractJdbcAgentTest {
                     }
                     if ("getIdentifierQuoteString".equals(method.getName())) {
                         return identifierQuote;
+                    }
+                    if ("getURL".equals(method.getName())) {
+                        return jdbcUrl;
                     }
                     return defaultValue(method.getReturnType());
                 }

@@ -1399,7 +1399,10 @@ function startsLineComment(sql: string, pos: number, databaseType?: DatabaseType
 }
 
 function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  if (databaseType === "sqlserver" || sql[pos] !== "#") return false;
+  // `#` is a MySQL-family line-comment marker. Oracle also allows it in
+  // unquoted identifiers (for example `V$DATAFILE.FILE#`), so treating it as
+  // a comment for Oracle truncates otherwise valid statements.
+  if (databaseType === "oracle" || databaseType === "sqlserver" || sql[pos] !== "#") return false;
   return readSqlBracedParameterAt(sql, pos, parameterOptions)?.syntax !== "mybatis";
 }
 

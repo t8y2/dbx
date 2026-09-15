@@ -440,6 +440,17 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2"]);
   });
 
+  it("preserves hash characters in Oracle identifiers", () => {
+    const sql = "select a.FILE_ID,a.BLOCK_ID,a.BLOCKS,b.NAME from dba_extents a,v$datafile b where a.FILE_ID=b.FILE#";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oracle"))).toEqual([sql]);
+  });
+
+  it("keeps hash line comments scoped to MySQL", () => {
+    const sql = "SELECT 1 # comment;\n;\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "SELECT 2"]);
+  });
+
   it("keeps SQL Server temporary table names instead of treating them as hash comments", () => {
     const sql = "DROP TABLE IF EXISTS #Temp;\nSELECT * FROM ##GlobalTemp;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql, "sqlserver"))).toEqual(["DROP TABLE IF EXISTS #Temp", "SELECT * FROM ##GlobalTemp"]);

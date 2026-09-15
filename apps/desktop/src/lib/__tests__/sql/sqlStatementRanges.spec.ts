@@ -180,6 +180,36 @@ END;
 SELECT 1 AS after_procedure;
 SELECT 2 AS final_statement;`;
 
+const gaussDbMergeWithRecursiveUsing = `MERGE INTO TP_PIM_USER_RES a
+USING (
+  SELECT * FROM (
+    WITH RECURSIVE src AS (
+      SELECT userid, rptcode, appcde
+      FROM sjbase.ta_sys_rpt_aduser
+      WHERE appcde IN ('OSS', '1104')
+    ),
+    grp_oss AS (
+      SELECT s.userid, r.grp_id FROM src s
+      JOIN SJOSSRPT.TP_OSS_CORE_RPT r ON r.code = s.rptcode
+      WHERE s.appcde = 'OSS'
+      UNION ALL
+      SELECT t.userid, p.grp_id FROM grp_oss t
+      JOIN SJOSSRPT.TP_OSS_CORE_GRP c ON c.grp_id = t.grp_id
+      JOIN SJOSSRPT.TP_OSS_CORE_GRP p ON p.grp_id = c.up_grpid
+    )
+    SELECT DISTINCT u.userid, 'RES_OSS_RPT' AS restyp_code, u.res_id, u.appcde
+    FROM (
+      SELECT s.userid, s.rptcode AS res_id, s.appcde FROM src s
+      UNION
+      SELECT g.userid, g.grp_id AS res_id, 'OSS' AS appcde FROM grp_oss g
+    ) u
+  ) t
+) b
+ON (a.user_id = b.userid AND a.restyp_code = b.restyp_code AND a.res_id = b.res_id AND a.appcde = b.appcde)
+WHEN NOT MATCHED THEN
+  INSERT (user_id, restyp_code, res_id, appcde)
+  VALUES (b.userid, b.restyp_code, b.res_id, b.appcde);`;
+
 const xuguProgrammableObjectFixtures = [
   `CREATE OR REPLACE PROCEDURE dbx_xugu_procedure AS
   v_value INTEGER;
@@ -1386,6 +1416,12 @@ FROM orders;`;
   it("returns only the issue #4573 GaussDB procedure for a gutter cursor", () => {
     const expected = gaussDbIssue4573Script.slice(0, gaussDbIssue4573Script.indexOf("\n\nSELECT 1"));
     expect(statementRangeAtCursor(gaussDbIssue4573Script, indexOf(gaussDbIssue4573Script, "count(*)"), "gaussdb")?.sql.trim()).toBe(expected);
+  });
+
+  it("keeps a GaussDB MERGE with a recursive USING query together", () => {
+    for (const needle of ["MERGE INTO", "WITH RECURSIVE", "WHEN NOT MATCHED", "VALUES (b.userid)"]) {
+      expect(statementRangeAtCursor(gaussDbMergeWithRecursiveUsing, indexOf(gaussDbMergeWithRecursiveUsing, needle), "gaussdb")?.sql.trim()).toBe(gaussDbMergeWithRecursiveUsing.slice(0, -1));
+    }
   });
 
   it("returns the full SAP HANA DO block for cursors inside nested statements", () => {

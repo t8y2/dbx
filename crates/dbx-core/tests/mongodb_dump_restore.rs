@@ -120,11 +120,27 @@ fn invalid_bson_is_fatal_even_when_callback_skips_errors() {
 }
 
 fn run_tool(tools: &Path, name: &str, args: &[&str]) {
-    let output = std::process::Command::new(tools.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("stderr.log");
+    let mut child = std::process::Command::new(tools.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
         .args(args)
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
         .unwrap_or_else(|error| panic!("cannot run {name}: {error}"));
-    assert!(output.status.success(), "{name}: {}", String::from_utf8_lossy(&output.stderr));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success(), "{name}: {}", std::fs::read_to_string(&log).unwrap());
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("{name} timed out: {}", std::fs::read_to_string(&log).unwrap());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 async fn collection_bytes(client: &mongodb::Client, database: &str, collection: &str) -> Vec<Vec<u8>> {
@@ -322,4 +338,480 @@ async fn official_tools_round_trip_through_dbx_core() {
         assert_eq!(status, MongoImportStatus::Error);
     }
     client.database(&database).drop().await.unwrap();
+}
+
+async fn specs(client: &mongodb::Client, db: &str, collection: &str) -> (Document, Vec<Document>) {
+    use futures::TryStreamExt;
+    let specification = client
+        .database(db)
+        .list_collections()
+        .filter(doc! { "name": collection })
+        .await
+        .unwrap()
+        .try_next()
+        .await
+        .unwrap()
+        .unwrap();
+    let options = mongodb::bson::to_document(&specification.options).unwrap();
+    let mut indexes = Vec::new();
+    if !matches!(specification.collection_type, mongodb::results::CollectionType::View) {
+        let mut cursor = client.database(db).collection::<Document>(collection).list_indexes().await.unwrap();
+        while let Some(index) = cursor.try_next().await.unwrap() {
+            let mut index = mongodb::bson::to_document(&index).unwrap();
+            index.remove("ns");
+            index.remove("v");
+            indexes.push(index);
+        }
+        indexes.sort_by_key(|index| index.get_str("name").unwrap().to_string());
+    }
+    (options, indexes)
+}
+
+#[tokio::test]
+#[ignore = "opt-in: DBX_MONGO_DUMP_TEST_URI and DBX_MONGO_TOOLS_DIR; creates temporary databases"]
+async fn official_database_tools_round_trip_through_dbx() {
+    use dbx_core::{
+        connection::{AppState, PoolKind},
+        models::connection::ConnectionConfig,
+        mongodb_dump::*,
+        storage::Storage,
+    };
+    let uri = std::env::var("DBX_MONGO_DUMP_TEST_URI").expect("DBX_MONGO_DUMP_TEST_URI");
+    let tools = std::path::PathBuf::from(std::env::var("DBX_MONGO_TOOLS_DIR").expect("DBX_MONGO_TOOLS_DIR"));
+    let files = tempfile::tempdir().unwrap();
+    let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+    let database = format!("dbx_db_{}", uuid::Uuid::new_v4().simple());
+    let db = client.database(&database);
+    db.run_command(doc! { "create": "records", "validator": { "score": { "$gte": 0 } }, "validationLevel": "strict", "collation": { "locale": "en", "strength": 2 } }).await.unwrap();
+    db.collection("records")
+        .insert_many(vec![
+            doc! { "_id": 1, "score": 1i64, "name": "first" },
+            doc! { "_id": 2, "score": 2i64, "name": "second" },
+        ])
+        .await
+        .unwrap();
+    db.run_command(doc! { "createIndexes": "records", "indexes": [ { "key": { "name": 1, "score": -1 }, "name": "compound_unique", "unique": true }, { "key": { "expires": 1 }, "name": "ttl", "expireAfterSeconds": 3600 }] }).await.unwrap();
+    db.create_collection("empty").await.unwrap();
+    db.run_command(doc! { "create": "capped", "capped": true, "size": 65536i64, "max": 100i64 }).await.unwrap();
+    db.collection("capped").insert_one(doc! { "_id": 1, "n": 1 }).await.unwrap();
+    db.collection("odd/name").insert_one(doc! { "_id": 1, "binary": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3] } }).await.unwrap();
+    db.run_command(doc! { "create": "z_view", "viewOn": "records", "pipeline": [ { "$match": { "score": { "$gte": 1 } } } ], "collation": { "locale": "en", "strength": 2 } }).await.unwrap();
+    db.run_command(doc! { "create": "a_nested", "viewOn": "z_view", "pipeline": [], "collation": { "locale": "en", "strength": 2 } }).await.unwrap();
+    let collections = ["records", "empty", "capped", "odd/name", "z_view", "a_nested"];
+    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let connection_id = "database-dump-test";
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": connection_id, "name": "Database dump test", "db_type": "mongodb", "host": "127.0.0.1", "port": 27090, "username": "", "password": "", "database": database, "connection_string": uri, "driver_profile": "mongodb-native" })).unwrap();
+    state.configs.write().await.insert(connection_id.into(), config);
+    state
+        .update_connection_pools(|pools| {
+            pools.insert(connection_id.into(), PoolKind::MongoDb(client.clone()));
+        })
+        .await;
+    let mut databases = vec![database.clone()];
+    for format in [MongoDumpFormat::Directory, MongoDumpFormat::Archive] {
+        for gzip in [false, true] {
+            let tag = format!("{format:?}_{gzip}");
+            let official_path = files.path().join(format!("official-{tag}"));
+            let archive_arg = format!("--archive={}", official_path.display());
+            let mut args = vec!["--uri", uri.as_str(), "--db", &database];
+            if format == MongoDumpFormat::Archive {
+                args.push(&archive_arg);
+            } else {
+                args.extend(["--out", official_path.to_str().unwrap()]);
+            }
+            if gzip {
+                args.push("--gzip");
+            }
+            run_tool(&tools, "mongodump", &args);
+            let preview = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+                path: official_path.to_str().unwrap().into(),
+                format,
+                gzip,
+            })
+            .await
+            .unwrap();
+            assert_eq!(preview.catalog.collections.len(), 6);
+            assert!(preview.catalog.collections.iter().all(|c| c.documents.is_none()));
+            let restored = format!("{database}_{tag}");
+            databases.push(restored.clone());
+            let request = MongoDatabaseRestoreRequest {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                connection_id: connection_id.into(),
+                database: restored.clone(),
+                source_database: database.clone(),
+                source_ref: preview.source_ref.clone(),
+                collections: None,
+                drop_existing: false,
+                restore_options: true,
+                restore_indexes: true,
+                stop_on_error: true,
+                objcheck: gzip,
+                batch_size: 500,
+                execution_id: None,
+            };
+            let mut saw_data = false;
+            let result = restore_mongodb_database(
+                &state,
+                &request,
+                |_| Box::pin(async { false }),
+                |p| {
+                    assert_ne!(p.phase, "validating");
+                    saw_data |= p.phase == "data";
+                },
+            )
+            .await
+            .unwrap();
+            assert!(saw_data);
+            assert_eq!(result.documents_validated, if gzip { 4 } else { 0 });
+            assert_eq!(result.collections_done, 6);
+            assert_eq!(result.documents_written, 4);
+            for collection in collections {
+                assert_eq!(
+                    collection_bytes(&client, &database, collection).await,
+                    collection_bytes(&client, &restored, collection).await,
+                    "data: {tag} {collection}"
+                );
+                assert_eq!(
+                    specs(&client, &database, collection).await,
+                    specs(&client, &restored, collection).await,
+                    "metadata: {tag} {collection}"
+                );
+            }
+            client.database(&restored).collection("unselected").insert_one(doc! { "_id": "keep" }).await.unwrap();
+            client
+                .database(&restored)
+                .collection("records")
+                .insert_one(doc! { "_id": 999, "score": 999, "name": "remove" })
+                .await
+                .unwrap();
+            let mut selected = request.clone();
+            selected.drop_existing = true;
+            selected.collections = Some(vec!["records".into()]);
+            restore_mongodb_database(&state, &selected, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+            assert_eq!(
+                collection_bytes(&client, &database, "records").await,
+                collection_bytes(&client, &restored, "records").await
+            );
+            assert_eq!(collection_bytes(&client, &restored, "unselected").await.len(), 1);
+            if format == MongoDumpFormat::Directory && !gzip {
+                let cancel_dir = files.path().join("cancel_source");
+                std::fs::create_dir(&cancel_dir).unwrap();
+                let documents = (0..201).map(|id| doc! { "_id": id }).collect::<Vec<_>>();
+                std::fs::write(cancel_dir.join("records.bson"), encode(&documents, false)).unwrap();
+                let cancel_source = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+                    path: cancel_dir.to_str().unwrap().into(),
+                    format: MongoDumpFormat::Directory,
+                    gzip: false,
+                })
+                .await
+                .unwrap();
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let signal = cancel.clone();
+                let mut cancel_request = selected.clone();
+                cancel_request.source_ref = cancel_source.source_ref.clone();
+                cancel_request.source_database = "cancel_source".into();
+                cancel_request.batch_size = 100;
+                let mut final_progress = None;
+                let cancelled = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    restore_mongodb_database(
+                        &state,
+                        &cancel_request,
+                        |_| {
+                            let signal = signal.clone();
+                            Box::pin(async move { signal.load(std::sync::atomic::Ordering::Relaxed) })
+                        },
+                        |p| {
+                            if p.documents_written >= 100 {
+                                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            final_progress = Some(p);
+                        },
+                    ),
+                )
+                .await
+                .expect("cancellation must stop and join the reader")
+                .unwrap_err();
+                assert!(cancelled.contains("cancelled"), "{cancelled}");
+                let final_progress = final_progress.unwrap();
+                assert_eq!(final_progress.status, "cancelled");
+                assert_eq!(final_progress.documents_written, 100);
+                assert_eq!(collection_bytes(&client, &restored, "records").await.len(), 100);
+                let mut duplicate_request = cancel_request.clone();
+                duplicate_request.batch_size = 500;
+                duplicate_request.drop_existing = false;
+                let mut partial_progress = None;
+                let error = restore_mongodb_database(
+                    &state,
+                    &duplicate_request,
+                    |_| Box::pin(async { false }),
+                    |p| partial_progress = Some(p),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("duplicate key"), "{error}");
+                let partial_progress = partial_progress.unwrap();
+                assert_eq!(partial_progress.documents_written, 101);
+                assert_eq!(partial_progress.documents_failed, 100);
+                duplicate_request.stop_on_error = false;
+                let continued =
+                    restore_mongodb_database(&state, &duplicate_request, |_| Box::pin(async { false }), |_| {})
+                        .await
+                        .unwrap();
+                assert_eq!(continued.documents_written, 0);
+                assert_eq!(continued.documents_failed, 201);
+                release_mongodb_restore_source(&cancel_source.source_ref);
+                let broken_dir = files.path().join("broken_source");
+                std::fs::create_dir(&broken_dir).unwrap();
+                std::fs::write(broken_dir.join("records.bson"), encode(&[doc! { "_id": "replacement" }], false))
+                    .unwrap();
+                std::fs::write(broken_dir.join("zz_broken.bson"), b"invalid BSON").unwrap();
+                let broken = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+                    path: broken_dir.to_str().unwrap().into(),
+                    format,
+                    gzip,
+                })
+                .await
+                .unwrap();
+                let mut invalid = selected.clone();
+                invalid.source_ref = broken.source_ref.clone();
+                invalid.source_database = "broken_source".into();
+                invalid.collections = None;
+                let mut partial = 0;
+                let error = restore_mongodb_database(&state, &invalid, |_| Box::pin(async { false }), |_| {})
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("BSON"), "{error}");
+                assert_eq!(
+                    collection_bytes(&client, &restored, "records").await,
+                    vec![mongodb::bson::to_vec(&doc! { "_id": "replacement" }).unwrap()],
+                    "valid earlier collections are restored without a full pre-scan"
+                );
+                invalid.objcheck = true;
+                assert!(restore_mongodb_database(
+                    &state,
+                    &invalid,
+                    |_| Box::pin(async { false }),
+                    |p| partial = p.documents_written
+                )
+                .await
+                .is_err());
+                assert_eq!(partial, 1);
+                release_mongodb_restore_source(&broken.source_ref);
+                let mut no_metadata = request.clone();
+                no_metadata.database = format!("{database}_no_options");
+                databases.push(no_metadata.database.clone());
+                no_metadata.collections = Some(vec!["records".into()]);
+                no_metadata.restore_options = false;
+                no_metadata.restore_indexes = false;
+                restore_mongodb_database(&state, &no_metadata, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+                let (options, indexes) = specs(&client, &no_metadata.database, "records").await;
+                assert!(options.is_empty());
+                assert_eq!(indexes.len(), 1);
+                state.configs.write().await.get_mut(connection_id).unwrap().read_only = true;
+                let blocked = restore_mongodb_database(&state, &no_metadata, |_| Box::pin(async { false }), |_| {})
+                    .await
+                    .unwrap_err();
+                assert!(blocked.contains("Read-only"));
+                state.configs.write().await.get_mut(connection_id).unwrap().read_only = false;
+                let cancelled = restore_mongodb_database(&state, &no_metadata, |_| Box::pin(async { true }), |_| {})
+                    .await
+                    .unwrap_err();
+                assert!(cancelled.contains("cancelled"));
+            }
+            assert!(release_mongodb_restore_source(&preview.source_ref));
+
+            let output = files.path().join(format!("dbx-{tag}"));
+            let dump = MongoDatabaseDumpRequest {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                connection_id: connection_id.into(),
+                database: database.clone(),
+                file_path: output.to_str().unwrap().into(),
+                format,
+                gzip,
+                collections: None,
+            };
+            dump_mongodb_database(&state, &dump, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+            let target = format!("{database}_out_{tag}");
+            databases.push(target.clone());
+            let from = format!("{database}.*");
+            let to = format!("{target}.*");
+            let archive_arg = format!("--archive={}", output.display());
+            let mut args = vec!["--uri", uri.as_str(), "--nsFrom", &from, "--nsTo", &to];
+            if gzip {
+                args.push("--gzip");
+            }
+            if format == MongoDumpFormat::Archive {
+                args.push(&archive_arg);
+            } else {
+                args.push(output.to_str().unwrap());
+            }
+            run_tool(&tools, "mongorestore", &args);
+            for collection in collections {
+                assert_eq!(
+                    collection_bytes(&client, &database, collection).await,
+                    collection_bytes(&client, &target, collection).await,
+                    "exported data: {tag} {collection}"
+                );
+                assert_eq!(
+                    specs(&client, &database, collection).await,
+                    specs(&client, &target, collection).await,
+                    "exported metadata: {tag} {collection}"
+                );
+            }
+            println!("{tag}: six collections/views, BSON, options and indexes match in both directions");
+            if format == MongoDumpFormat::Archive && !gzip {
+                let mut bytes = std::fs::read(&output).unwrap();
+                let offset = bytes.windows(5).position(|bytes| bytes == b"first").unwrap();
+                bytes[offset] = b'F';
+                let corrupt = files.path().join("corrupt.archive");
+                std::fs::write(&corrupt, &bytes).unwrap();
+                let corrupt_preview = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+                    path: corrupt.to_str().unwrap().into(),
+                    format,
+                    gzip: false,
+                })
+                .await
+                .unwrap();
+                let mut corrupt_request = request.clone();
+                corrupt_request.source_ref = corrupt_preview.source_ref.clone();
+                corrupt_request.database = target.clone();
+                corrupt_request.drop_existing = true;
+                let mut partial = 0;
+                let error = restore_mongodb_database(
+                    &state,
+                    &corrupt_request,
+                    |_| Box::pin(async { false }),
+                    |p| partial = p.documents_written,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("checksum"), "{error}");
+                assert!(partial > 0, "archive CRC is checked as data streams, not in a separate pre-pass");
+                release_mongodb_restore_source(&corrupt_preview.source_ref);
+                bytes = std::fs::read(&output).unwrap();
+                bytes.truncate(bytes.len() - 1);
+                std::fs::write(&corrupt, bytes).unwrap();
+                let truncated = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+                    path: corrupt.to_str().unwrap().into(),
+                    format,
+                    gzip: false,
+                })
+                .await
+                .unwrap();
+                corrupt_request.source_ref = truncated.source_ref.clone();
+                assert!(restore_mongodb_database(&state, &corrupt_request, |_| Box::pin(async { false }), |_| {})
+                    .await
+                    .is_err());
+                assert_eq!(
+                    collection_bytes(&client, &database, "records").await,
+                    collection_bytes(&client, &target, "records").await
+                );
+                release_mongodb_restore_source(&truncated.source_ref);
+            }
+        }
+    }
+    for database in databases {
+        client.database(&database).drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn database_source_rejects_invalid_metadata_and_view_cycles() {
+    use dbx_core::mongodb_dump::*;
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("records.bson"), []).unwrap();
+    let request = MongoRestoreSourceRequest {
+        path: source.to_str().unwrap().into(),
+        format: MongoDumpFormat::Directory,
+        gzip: false,
+    };
+    for metadata in [
+        r#"{"collectionName":"records","options":{"$db":"outside"},"indexes":[]}"#,
+        r#"{"collectionName":"records","options":{},"indexes":[{"name":"bad"}]}"#,
+        r#"{"collectionName":"records","type":"timeseries","options":{},"indexes":[]}"#,
+    ] {
+        std::fs::write(source.join("records.metadata.json"), metadata).unwrap();
+        assert!(prepare_mongodb_restore_source(request.clone()).await.is_err());
+    }
+    std::fs::write(source.join("records.metadata.json"), r#"{"collectionName":"records","options":{},"indexes":[]}"#)
+        .unwrap();
+    std::fs::write(
+        source.join("one.metadata.json"),
+        r#"{"collectionName":"one","type":"view","options":{"viewOn":"two","pipeline":[]},"indexes":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("two.metadata.json"),
+        r#"{"collectionName":"two","type":"view","options":{"viewOn":"one","pipeline":[]},"indexes":[]}"#,
+    )
+    .unwrap();
+    let error = prepare_mongodb_restore_source(request).await.unwrap_err();
+    assert!(error.contains("Cyclic"));
+}
+
+#[tokio::test]
+async fn directory_preview_does_not_read_bson_and_source_identity_is_checked_before_restore() {
+    use dbx_core::{connection::AppState, mongodb_dump::*, storage::Storage};
+    let files = tempfile::tempdir().unwrap();
+    let source = files.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    // Preview must succeed without opening/decoding this invalid gzip data.
+    std::fs::write(source.join("records.bson.gz"), b"not gzip or BSON").unwrap();
+    let preview = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+        path: source.to_str().unwrap().into(),
+        format: MongoDumpFormat::Directory,
+        gzip: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(preview.catalog.collections[0].documents, None);
+    assert_eq!(preview.catalog.collections[0].size_bytes, 16);
+    let state = AppState::new(Storage::open(&files.path().join("state.db")).await.unwrap());
+    let request: MongoDatabaseRestoreRequest = serde_json::from_value(serde_json::json!({
+        "taskId":"validation-test", "connectionId":"missing", "database":"target", "sourceDatabase":"source",
+        "sourceRef":preview.source_ref, "dropExisting":true
+    }))
+    .unwrap();
+    let error = restore_mongodb_database(&state, &request, |_| Box::pin(async { false }), |_| {}).await.unwrap_err();
+    assert!(
+        !error.to_lowercase().contains("gzip"),
+        "no pre-scan should run before the missing connection fails: {error}"
+    );
+    assert!(!request.objcheck, "objcheck is opt-in");
+    std::fs::write(source.join("records.bson.gz"), []).unwrap();
+    let error = restore_mongodb_database(&state, &request, |_| Box::pin(async { false }), |_| {}).await.unwrap_err();
+    assert!(error.contains("changed"), "{error}");
+    release_mongodb_restore_source(&preview.source_ref);
+}
+
+#[tokio::test]
+async fn directory_catalog_accepts_large_manifest_without_data_and_binds_only_selected_upload() {
+    use dbx_core::mongodb_dump::*;
+    let owner = tempfile::tempdir().unwrap();
+    let manifest = vec![
+        MongoDumpFile { path: "source/selected.bson".into(), size_bytes: 0 },
+        MongoDumpFile { path: "source/huge.bson".into(), size_bytes: 5 * 1024 * 1024 * 1024 },
+    ];
+    let preview = prepare_mongodb_directory_catalog(owner, manifest, false).await.unwrap();
+    assert_eq!(preview.catalog.collections.len(), 2);
+    assert!(preview.catalog.collections.iter().all(|c| c.documents.is_none()));
+    let request: MongoDatabaseRestoreRequest = serde_json::from_value(serde_json::json!({
+        "taskId":"upload-test", "connectionId":"missing", "database":"target", "sourceDatabase":"source",
+        "sourceRef":preview.source_ref, "collections":["selected"]
+    }))
+    .unwrap();
+    let upload = tempfile::tempdir().unwrap();
+    std::fs::create_dir(upload.path().join("source")).unwrap();
+    std::fs::write(upload.path().join("source/selected.bson"), []).unwrap();
+    let acquired = attach_mongodb_restore_upload(&request, upload).await.unwrap();
+    assert_eq!(acquired.catalog.collections.len(), 1);
+    release_mongodb_restore_source(&acquired.source_ref);
+    let changed = tempfile::tempdir().unwrap();
+    std::fs::create_dir(changed.path().join("source")).unwrap();
+    std::fs::write(changed.path().join("source/selected.bson"), b"changed").unwrap();
+    assert!(attach_mongodb_restore_upload(&request, changed).await.unwrap_err().contains("differ"));
+    release_mongodb_restore_source(&preview.source_ref);
 }

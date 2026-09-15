@@ -559,6 +559,7 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
   } | null>(null);
+  const mongoDatabaseDumpSource = ref<{ connectionId: string; database: string; mode: "dump" | "restore" } | null>(null);
   const mongoImportSource = ref<{
     connectionId: string;
     database: string;
@@ -9409,6 +9410,7 @@ export const useConnectionStore = defineStore("connection", () => {
     diagramSource,
     docsSource,
     tableImportSource,
+    mongoDatabaseDumpSource,
     mongoImportSource,
     mongoImportCompleted,
     tableDataGenerateSource,

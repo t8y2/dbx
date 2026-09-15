@@ -41,6 +41,7 @@ aes-gcm = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["multipart"] }

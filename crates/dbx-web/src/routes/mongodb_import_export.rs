@@ -549,12 +549,12 @@ pub async fn export_download(
     export_file_response(export_file).await
 }
 
-async fn export_file_response(export_file: WebExportFile) -> Result<Response, AppError> {
+pub(crate) async fn export_file_response(export_file: WebExportFile) -> Result<Response, AppError> {
     let file = tokio::fs::File::open(&export_file.file_path).await.map_err(|e| AppError::from(e.to_string()))?;
     let content_type = match export_file.format.as_str() {
         "csv" => "text/csv; charset=utf-8",
         "ndjson" => "application/x-ndjson; charset=utf-8",
-        "bson.gz" => "application/gzip",
+        "bson.gz" | "archive.gz" => "application/gzip",
         "bson" => "application/bson",
         _ => "application/octet-stream",
     };

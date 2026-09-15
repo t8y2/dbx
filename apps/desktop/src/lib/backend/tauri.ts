@@ -1,4 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
+import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import { assertUpdateAllowsCommand } from "@/lib/app/updatePreparation";
 import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 
@@ -5043,6 +5045,36 @@ export async function cancelTableImport(importId: string): Promise<boolean> {
 
 export async function releaseTableImportSource(_sourceRef: string): Promise<boolean> {
   return false;
+}
+
+export function inspectMongodbDatabaseDump(connectionId: string, database: string): Promise<MongoDumpCatalog> {
+  return invoke("inspect_mongodb_database_dump", { connectionId, database });
+}
+export function prepareMongodbRestoreSource(source: MongoDumpSourceInput, format: MongoDumpFormat, gzip: boolean, _options?: MongoSourceReadOptions): Promise<MongoRestoreSourcePreview> {
+  if (typeof source !== "string") throw new Error("Desktop restores require a file or directory path");
+  return invoke("prepare_mongodb_restore_source", { request: { path: source, format, gzip } });
+}
+export function releaseMongodbRestoreSource(sourceRef: string): Promise<boolean> {
+  return invoke("release_mongodb_restore_source", { sourceRef });
+}
+async function runMongodbDatabaseTask(command: string, request: MongoDatabaseDumpRequest | MongoDatabaseRestoreRequest, onProgress: (progress: MongoDatabaseDumpProgress) => void): Promise<MongoDatabaseDumpProgress> {
+  const unlisten = await listen<MongoDatabaseDumpProgress>("mongo-database-dump-progress", (event) => {
+    if (event.payload.taskId === request.taskId) onProgress(event.payload);
+  });
+  try {
+    return await invoke(command, { request });
+  } finally {
+    unlisten();
+  }
+}
+export function dumpMongodbDatabase(request: MongoDatabaseDumpRequest, onProgress: (progress: MongoDatabaseDumpProgress) => void) {
+  return runMongodbDatabaseTask("dump_mongodb_database", request, onProgress);
+}
+export function restoreMongodbDatabase(request: MongoDatabaseRestoreRequest, onProgress: (progress: MongoDatabaseDumpProgress) => void, _upload?: MongoRestoreUpload) {
+  return runMongodbDatabaseTask("restore_mongodb_database", request, onProgress);
+}
+export function cancelMongodbDatabaseDump(taskId: string): Promise<boolean> {
+  return invoke("cancel_mongodb_database_dump", { taskId });
 }
 
 export type MongoImportFormat = "csv" | "json" | "ndjson" | "bson";

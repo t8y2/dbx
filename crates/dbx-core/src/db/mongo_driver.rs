@@ -2532,17 +2532,17 @@ pub struct MongoInsertOutcome {
     pub errors: Vec<MongoBulkWriteError>,
 }
 
-pub async fn insert_bson_documents(
+pub async fn insert_bson_documents<T: serde::Serialize + Send + Sync>(
     client: &Client,
     database: &str,
     collection: &str,
-    documents: Vec<Document>,
+    documents: Vec<T>,
 ) -> Result<MongoInsertOutcome, MongoBulkWriteError> {
     if documents.is_empty() {
         return Ok(MongoInsertOutcome::default());
     }
     let total = documents.len() as u64;
-    let col = client.database(database).collection::<Document>(collection);
+    let col = client.database(database).collection::<T>(collection);
     // Unordered: one rejected document must not abandon the rest of the batch, and the server
     // then reports every rejection instead of stopping at the first.
     match col.insert_many(documents).ordered(false).await {

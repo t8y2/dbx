@@ -410,15 +410,31 @@ const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData,
   acceptedSelectionIds: () => acceptedSelectionIds,
 });
 
-const { openAllDatabasesExport, openDataCompare, openDatabaseExport, openDatabaseSearch, openDiagram, openDocs, openFieldLineage, openMongoImport, openScheduledBackups, openSchemaDiff, openSchemaDiffForRoutine, openSqlFileExecution, openStructureEditor, openTableImport, openTransfer } =
-  useSidebarTreeToolRuntime({
-    activeNode,
-    connectionStore,
-    queryStore,
-    settingsStore,
-    tableChildObjectName: tableChildDropObjectName,
-    acceptedSelectionIds: () => acceptedSelectionIds,
-  });
+const {
+  openAllDatabasesExport,
+  openDataCompare,
+  openDatabaseExport,
+  openDatabaseSearch,
+  openDiagram,
+  openDocs,
+  openFieldLineage,
+  openMongoImport,
+  openMongoDatabaseDump,
+  openScheduledBackups,
+  openSchemaDiff,
+  openSchemaDiffForRoutine,
+  openSqlFileExecution,
+  openStructureEditor,
+  openTableImport,
+  openTransfer,
+} = useSidebarTreeToolRuntime({
+  activeNode,
+  connectionStore,
+  queryStore,
+  settingsStore,
+  tableChildObjectName: tableChildDropObjectName,
+  acceptedSelectionIds: () => acceptedSelectionIds,
+});
 
 const emit = defineEmits<{
   "rename-started": [];
@@ -5857,6 +5873,8 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (node.type === "mongo-db") {
       items.push({ label: "", separator: true });
       items.push({ label: t("transfer.dataTransfer"), action: openTransfer, icon: ArrowRightLeft });
+      items.push({ label: t("mongoDump.menuDump"), action: () => openMongoDatabaseDump("dump"), icon: Upload });
+      items.push({ label: t("mongoDump.menuRestore"), action: () => openMongoDatabaseDump("restore"), icon: Download });
     }
     if (node.type === "redis-db") {
       items.push({ label: "", separator: true });

@@ -2176,8 +2176,13 @@ function scrollToColumnIndex(columnIndex: number) {
 
   nextTick(() => {
     const visibleColIdx = visibleColumnIndexes.value.indexOf(columnIndex);
+    if (visibleColIdx < 0) return;
+    if (isTransposeMode.value) {
+      scrollTransposeFieldIntoView(visibleColIdx);
+      return;
+    }
     const scroller = gridRef.value?.querySelector<HTMLElement>(".data-grid-scroller");
-    if (visibleColIdx < 0 || !scroller) return;
+    if (!scroller) return;
 
     const targetLeft = Math.max(0, columnContentOffsetLeft(visibleColIdx) - scroller.clientWidth / 2 + (renderedColumnWidths.value[visibleColIdx] ?? 0) / 2);
     scroller.scrollLeft = targetLeft;
@@ -4647,21 +4652,23 @@ function scrollToCurrentMatch() {
   if (rowEl) rowEl.scrollIntoView({ block: "center" });
 }
 
-// In transpose view records are columns (horizontal) and fields are rows
-// (vertical). Bring the matched record column into the horizontal viewport and
-// the matched field row into the vertical viewport.
+function scrollTransposeFieldIntoView(visibleFieldIndex: number) {
+  const scroller = transposeScrollRef.value;
+  if (scroller && !(scroller instanceof HTMLElement)) {
+    (scroller as { scrollToItem?: (index: number) => void }).scrollToItem?.(visibleFieldIndex);
+  } else if (scroller instanceof HTMLElement) {
+    scroller.scrollTop = visibleFieldIndex * transposeRowHeight.value;
+  }
+}
+
+// Transpose fields are vertical rows, while records are horizontal columns.
 function scrollTransposeMatchIntoView(match: DataGridSearchMatch) {
   nextTick(() => {
-    const scroller = transposeScrollRef.value;
     // Both match kinds use `col` as the field (transpose row) index: cell
     // matches store the field/value index, column-name matches store the field.
     const fieldIndex = match.col;
-    if (scroller && !(scroller instanceof HTMLElement)) {
-      // RecycleScroller component instance exposes scrollToItem via vue-virtual-scroller.
-      (scroller as { scrollToItem?: (index: number) => void }).scrollToItem?.(fieldIndex);
-    } else if (scroller instanceof HTMLElement) {
-      scroller.scrollTop = fieldIndex * 30;
-    }
+    const visibleFieldIndex = visibleColumnIndexes.value.indexOf(fieldIndex);
+    if (visibleFieldIndex >= 0) scrollTransposeFieldIntoView(visibleFieldIndex);
     if (match.kind === "cell") {
       scrollTransposeRecordIntoView(match.displayRow);
     }
@@ -8430,12 +8437,7 @@ const DOM_DATA_GRID_ROW_HEIGHT = 26;
 function scrollCellIntoView(rowIndex: number, colIndex: number, block: DataGridScrollAlignment = "nearest", previousPageRowIndex?: number) {
   if (isTransposeMode.value) {
     nextTick(() => {
-      const scroller = transposeScrollRef.value;
-      if (scroller && !(scroller instanceof HTMLElement)) {
-        (scroller as { scrollToItem?: (index: number) => void }).scrollToItem?.(colIndex);
-      } else if (scroller instanceof HTMLElement) {
-        scroller.scrollTop = colIndex * 30;
-      }
+      scrollTransposeFieldIntoView(colIndex);
       scrollTransposeRecordIntoView(rowIndex);
     });
     return;
@@ -11917,6 +11919,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         data-native-clipboard
                         class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
                         :class="{
+                          'ring-2 ring-inset ring-primary': highlightedColumnIndex === visibleColumnIndexes[index],
                           'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
                           'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
                         }"

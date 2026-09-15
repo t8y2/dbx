@@ -368,8 +368,19 @@ async fn main() {
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
 
+    let backup_root = std::env::var_os("DBX_BACKUP_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| web_state.data_dir.join("backups"));
+    std::fs::create_dir_all(&backup_root).expect("Failed to create server backup root");
+    let backup_service = routes::scheduled_backup::service(&web_state).expect("Failed to resolve server backup root");
+    let backup_stop = tokio_util::sync::CancellationToken::new();
+    let backup_worker = backup_service.start(backup_stop.clone());
+
     // API routes
     let api = Router::new()
+        .route("/database-backups", post(routes::scheduled_backup::command))
+        .route("/database-backups/{id}/files/{index}", get(routes::scheduled_backup::download))
+        .route("/database-backups/{id}/files/{index}/restore", post(routes::scheduled_backup::prepare_restore))
         // Auth
         .route("/auth/login", post(auth::login))
         .route("/auth/check", get(auth::check))
@@ -1181,13 +1192,20 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::warn!("Failed to listen for shutdown signal: {error}");
+        .with_graceful_shutdown(async move {
+            #[cfg(unix)]
+            {
+                let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to listen for SIGTERM");
+                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
             }
+            #[cfg(not(unix))]
+            let _ = tokio::signal::ctrl_c().await;
+            backup_stop.cancel();
         })
         .await
         .expect("Server error");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(60), backup_worker).await;
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
 }
 

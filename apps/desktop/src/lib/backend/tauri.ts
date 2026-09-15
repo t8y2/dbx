@@ -1,4 +1,21 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+
+export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
+  return invoke("database_backup_command", { command });
+}
+
+export function databaseBackupBackground(enabled?: boolean): Promise<DatabaseBackupBackgroundStatus> {
+  return invoke("database_backup_background", { enabled });
+}
+
+export async function downloadDatabaseBackupFile(_runId: string, _index: number): Promise<void> {
+  throw new Error("Use the file manager to access desktop backup files");
+}
+
+export function prepareDatabaseBackupRestore(id: string, index: number): Promise<string> {
+  return invoke("database_backup_command", { command: { action: "file", id, index } });
+}
 import { assertUpdateAllowsCommand } from "@/lib/app/updatePreparation";
 import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 

@@ -84,6 +84,7 @@ pub mod redis_ops;
 pub mod risk_metrics;
 pub mod runtime_config;
 pub mod saved_sql;
+pub mod scheduled_backup;
 pub mod schema;
 pub mod schema_diff;
 pub mod script_generator;

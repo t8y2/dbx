@@ -1,3 +1,24 @@
+import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+
+export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
+  return post("/api/database-backups", command);
+}
+
+export async function databaseBackupBackground(enabled?: boolean): Promise<DatabaseBackupBackgroundStatus> {
+  if (enabled !== undefined) throw new Error("The server manages background backups");
+  return { enabled: true, platform: "server" };
+}
+
+export async function downloadDatabaseBackupFile(runId: string, index: number): Promise<void> {
+  const anchor = document.createElement("a");
+  anchor.href = apiUrl(`/api/database-backups/${encodeURIComponent(runId)}/files/${index}`);
+  anchor.click();
+}
+
+export function prepareDatabaseBackupRestore(runId: string, index: number): Promise<string> {
+  return post(`/api/database-backups/${encodeURIComponent(runId)}/files/${index}/restore`, {});
+}
+
 import type {
   ConnectionConfig,
   ConnectionTestResult,

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { computed, nextTick, ref, watch, type ComponentPublicInstance } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -136,8 +137,8 @@ watch(
     <div class="space-y-2">
       <Label>{{ t("databaseBackup.destination") }}</Label>
       <div class="backup-destination-field">
-        <Input v-model="draft.destinationDirectory" readonly :title="draft.destinationDirectory" />
-        <Button variant="outline" size="icon" class="backup-destination-picker" :title="t('databaseBackup.selectDestination')" @click="emit('chooseDestination')">
+        <Input v-model="draft.destinationDirectory" :readonly="isTauriRuntime()" :title="draft.destinationDirectory" />
+        <Button v-if="isTauriRuntime()" variant="outline" size="icon" class="backup-destination-picker" :title="t('databaseBackup.selectDestination')" @click="emit('chooseDestination')">
           <FolderOpen class="h-4 w-4" />
         </Button>
       </div>

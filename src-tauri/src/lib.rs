@@ -1,5 +1,7 @@
+mod background_backup;
 mod commands;
 mod data_dir;
+pub use background_backup::run_if_requested as run_backup_worker_if_requested;
 mod db;
 #[cfg(target_os = "macos")]
 mod macos_app_delegate;
@@ -1647,6 +1649,18 @@ pub fn run() {
             let state = Arc::new(state);
             app.manage(state.clone());
             commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
+            let backups = tauri::async_runtime::block_on(async {
+                background_backup::BackgroundBackup::new(state.clone(), data_dir.clone())
+            });
+            match backups {
+                Ok(backups) => {
+                    if let Err(error) = backups.resume() {
+                        log::error!("[database-backup] background registration failed: {error}");
+                    }
+                    app.manage(backups);
+                }
+                Err(error) => log::error!("[database-backup] worker startup failed: {error}"),
+            }
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
             let mcp_http_state = state.clone();
@@ -2283,6 +2297,8 @@ pub fn run() {
             commands::fs_open::reveal_path_in_file_manager,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
+            background_backup::database_backup_command,
+            background_backup::database_backup_background,
             commands::sqlite_backup::backup_sqlite_database,
             commands::sqlite_backup::restore_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
@@ -2639,6 +2655,9 @@ pub fn run() {
                         }
                     }
                     tauri::async_runtime::block_on(async {
+                        if let Some(backups) = app_handle.try_state::<background_backup::BackgroundBackup>() {
+                            backups.shutdown().await;
+                        }
                         if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
                         {
                             server.shutdown(Duration::from_secs(1)).await;

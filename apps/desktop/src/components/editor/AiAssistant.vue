@@ -4774,7 +4774,7 @@ async function openExternalUrl(url: string) {
                           <span class="truncate">{{ mention.kind === "table" ? [mention.schema, mention.table].filter(Boolean).join(".") : mention.name }}</span>
                         </button>
                       </div>
-                      <div v-if="msg.content" class="whitespace-pre-wrap">{{ msg.content }}</div>
+                      <div v-if="msg.content" class="whitespace-pre-wrap [overflow-wrap:anywhere]">{{ msg.content }}</div>
                     </div>
                     <div v-if="canCopyMessage(msg)" class="mt-1 flex justify-end">
                       <button
@@ -4882,7 +4882,7 @@ async function openExternalUrl(url: string) {
                         </button>
                       </div>
                     </div>
-                    <pre class="ai-code-block whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
+                    <pre class="ai-code-block whitespace-pre-wrap break-words [overflow-wrap:anywhere] p-3 text-xs leading-relaxed text-zinc-900 dark:text-zinc-100"><code v-html="seg.html"></code></pre>
                   </div>
                 </template>
                 <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">

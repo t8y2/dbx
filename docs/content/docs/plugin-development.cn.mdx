@@ -101,6 +101,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
     "host.workbench",
     "host.events",
     "host.filesystem",
+    "host.ai",
     "host.binary",
     "host.network:https://s3.example.com:443"
   ],
@@ -116,7 +117,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 ```
 
 - `engines.dbx` 是可选的 DBX 版本范围；`engines.host_api` 是必需的 Host API 版本声明。
-- `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
+- `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口，`host.ai` 允许使用 DBX 当前 AI 配置进行对话。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
@@ -244,6 +245,9 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `readAsset(path)` / `readAssetUrl(path)` | 读取包内资源；路径不能越出插件资源根目录。 |
 | `openWorkbench(id, context)` | 打开本插件的另一个工作台；需要 `host.workbench`。 |
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
+| `ai.capabilities()` | 查询 DBX 是否配置了可用的 AI 模型；需要 `host.ai`。 |
+| `ai.complete(request)` | 使用 DBX 当前 AI 配置生成一次回复。请求只包含消息、系统提示词和输出长度，API Key 不会暴露给插件；需要 `host.ai`。 |
+| `ai.stream(request)` | 流式生成回复，返回 `{ stream, metadata }`，流项包含 `delta`、`reasoningDelta`、`done`；取消流会请求宿主停止生成；需要 `host.ai`。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 
 调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。

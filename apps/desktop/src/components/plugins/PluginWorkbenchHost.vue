@@ -6,6 +6,9 @@ import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type P
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
+import { useSettingsStore } from "@/stores/settingsStore";
+import type { AiCompletionRequest } from "@/lib/backend/tauri";
+import type { PluginAiCapabilities, PluginAiRequest } from "@/lib/plugins/pluginHostBridge";
 
 const props = withDefaults(
   defineProps<{
@@ -26,6 +29,7 @@ const emit = defineEmits<{
 
 const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
+const settings = useSettingsStore();
 const iframe = ref<HTMLIFrameElement>();
 const source = ref("");
 const loading = ref(true);
@@ -57,6 +61,34 @@ function currentBridgeTheme(): PluginBridgeTheme {
   return { appearance: isDark.value ? "dark" : "light", tokens };
 }
 
+async function activePluginAiConfig(configId?: string) {
+  if (!settings.aiConfigs.length) await settings.reloadAiConfigs();
+  const activeId = configId || settings.activeModel?.configId;
+  const item = (activeId ? settings.aiConfigs.find((config) => config.id === activeId) : undefined) || settings.aiConfigs.find((config) => config.isDefault) || settings.aiConfigs[0];
+  if (!item) throw new Error("DBX AI is not configured");
+  const model = activeId === settings.activeModel?.configId ? settings.activeModel?.modelId : item.model;
+  if (!model?.trim()) throw new Error("DBX AI model is not configured");
+  return { ...item, model };
+}
+
+function toAiCompletionRequest(request: PluginAiRequest, config: Awaited<ReturnType<typeof activePluginAiConfig>>): AiCompletionRequest {
+  return {
+    config,
+    systemPrompt: request.systemPrompt?.trim() || "You are a helpful assistant.",
+    messages: request.messages,
+    maxTokens: request.maxTokens,
+    taskContract: {
+      action: "plugin",
+      mode: "ask",
+      userRequest:
+        request.messages
+          .slice()
+          .reverse()
+          .find((message) => message.role === "user")?.content || "",
+    },
+  };
+}
+
 function createBridge() {
   bridge = new PluginHostBridge(
     props.plugin,
@@ -68,6 +100,23 @@ function createBridge() {
       notify: api.notifyPlugin,
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
+      aiCapabilities: async (): Promise<PluginAiCapabilities> => {
+        try {
+          const config = await activePluginAiConfig();
+          return { available: true, streaming: true, provider: config.provider, model: config.model };
+        } catch {
+          return { available: false, streaming: false };
+        }
+      },
+      aiComplete: async (_pluginId, request) => {
+        const config = await activePluginAiConfig(request.configId);
+        return api.aiComplete(toAiCompletionRequest(request, config));
+      },
+      aiStream: async (_pluginId, request, streamId, onChunk) => {
+        const config = await activePluginAiConfig(request.configId);
+        await api.aiStream(streamId, toAiCompletionRequest(request, config), (chunk) => onChunk({ streamId, delta: chunk.delta, reasoningDelta: chunk.reasoning_delta, done: chunk.done, error: chunk.error }));
+      },
+      aiCancel: (_pluginId, streamId) => api.aiCancelStream(streamId),
       openWorkbench: async (pluginId, contributionId, context) => emit("openWorkbench", pluginId, contributionId, context),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       closeTab: () => emit("closeTab"),
@@ -102,7 +151,7 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<stri
     const content = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0)));
     if (resource.tagName === "SCRIPT") {
       const script = document.createElement("script");
-      for (const attribute of [...resource.attributes]) {
+      for (const attribute of resource.attributes) {
         if (attribute.name !== "src") script.setAttribute(attribute.name, attribute.value);
       }
       script.textContent = content;

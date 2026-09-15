@@ -101,6 +101,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.workbench",
     "host.events",
     "host.filesystem",
+    "host.ai",
     "host.binary",
     "host.network:https://s3.example.com:443"
   ],
@@ -116,7 +117,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 ```
 
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
-- `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
+- `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, `host.filesystem` enables filesystem entrypoints, and `host.ai` enables the DBX-configured AI conversation API.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -244,6 +245,9 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
 | `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
+| `ai.capabilities()` | Reports whether DBX has a usable configured AI model; requires `host.ai`. |
+| `ai.complete(request)` | Generates one reply through DBX's active AI configuration. Only messages, system prompt, and output limit cross the boundary; API keys stay in the host; requires `host.ai`. |
+| `ai.stream(request)` | Streams a reply and returns `{ stream, metadata }`; stream items contain `delta`, `reasoningDelta`, and `done`. Cancelling the stream asks the host to stop generation; requires `host.ai`. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.

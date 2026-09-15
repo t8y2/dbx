@@ -301,6 +301,22 @@ class AbstractJdbcAgentTest {
     }
 
     @Test
+    void rejectsOneShotTransactionWhenManualTransactionIsOpen() {
+        TrackingConnection tracking = new TrackingConnection();
+        TestAgent agent = new TestAgent(tracking);
+        agent.connect(new ConnectParams());
+        agent.beginManualTransaction(null);
+
+        IllegalStateException error = assertThrows(
+            IllegalStateException.class,
+            () -> agent.executeTransaction(Collections.singletonList("UPDATE A SET ID = 1"), null)
+        );
+
+        assertEquals("Cannot start a one-shot transaction while a manual transaction is open", error.getMessage());
+        assertEquals(Collections.singletonList("setAutoCommit:false"), tracking.calls);
+    }
+
+    @Test
     void preservesPlSqlBlockTerminatorDuringTransactionExecution() {
         TrackingConnection tracking = new TrackingConnection();
         TestAgent agent = new TestAgent(tracking);

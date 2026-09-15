@@ -556,11 +556,11 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.results).toHaveLength(4);
   });
 
-  it("invalidates only the executing Oracle tab after successful CURRENT_SCHEMA changes", async () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("invalidates only the executing %s tab after successful CURRENT_SCHEMA changes", async (databaseType) => {
     mocks.getConnectionConfig.mockReturnValue({
-      id: "oracle-1",
-      name: "Oracle",
-      db_type: "oracle",
+      id: `${databaseType}-1`,
+      name: databaseType,
+      db_type: databaseType,
       database: "ORCL",
       query_timeout_secs: 30,
     });
@@ -570,8 +570,8 @@ describe("queryStore multi-statement errors", () => {
       .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const tabA = store.createTab("oracle-1", "ORCL", "Tab A");
-    const tabB = store.createTab("oracle-1", "ORCL", "Tab B");
+    const tabA = store.createTab(`${databaseType}-1`, "ORCL", "Tab A");
+    const tabB = store.createTab(`${databaseType}-1`, "ORCL", "Tab B");
     // Exercise the explicit auto-commit execute-multi path.
     store.setAutoCommit(tabA, true);
     store.setAutoCommit(tabB, true);

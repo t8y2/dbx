@@ -193,7 +193,7 @@ pub(super) fn inspect(
         let fallback = metadata::unescape_collection(&basename).unwrap_or_default();
         let metadata = if let Some(path) = &files.metadata {
             let mut json = String::new();
-            reader(&path, gzip)?.take(MAX_DOCUMENT as u64 + 1).read_to_string(&mut json).map_err(|e| e.to_string())?;
+            reader(path, gzip)?.take(MAX_DOCUMENT as u64 + 1).read_to_string(&mut json).map_err(|e| e.to_string())?;
             if json.len() > MAX_DOCUMENT {
                 return Err("Collection metadata exceeds 16 MiB".into());
             }

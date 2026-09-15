@@ -176,15 +176,7 @@ describe("MongoImportDialog", () => {
     const app = createApp(MongoImportDialog, { open: true, connectionId: "c1", database: "shop", collection: "orders" });
     app.mount(document.body);
     await nextTick();
-    (document.querySelector("[role='combobox']") as HTMLButtonElement).dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
-    await nextTick();
-    await vi.advanceTimersByTimeAsync(10);
-    const option = Array.from(document.querySelectorAll<HTMLElement>("[role='option']")).find((option) => option.textContent?.trim() === "BSON dump");
-    expect(option).toBeDefined();
-    option!.focus();
-    option!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-    await vi.advanceTimersByTimeAsync(10);
-    await nextTick();
+    await setLabeledSelect("tableImport.sourceFormat", "bson");
     expect(document.body.textContent).not.toContain("tableImport.encoding");
 
     for (const name of ["orders.bson", "renamed.json"]) {
@@ -252,7 +244,7 @@ describe("MongoImportDialog", () => {
     app.unmount();
   });
 
-  async function mountWithFile(fileName: string, preview: MongoImportPreview) {
+  async function mountWithFile(fileName: string, preview: MongoImportPreview, format: MongoImportPreview["format"] = "csv") {
     api.previewMongodbImportFile.mockResolvedValue(preview);
     const app = createApp(
       defineComponent({
@@ -269,6 +261,7 @@ describe("MongoImportDialog", () => {
     );
     app.mount(document.body);
     await nextTick();
+    if (format !== "csv") await setLabeledSelect("tableImport.sourceFormat", format);
     const input = document.querySelector("input[type='file']") as HTMLInputElement;
     const file = new File(["id\n1"], fileName, { type: "text/csv" });
     Object.defineProperty(input, "files", { configurable: true, value: [file] });
@@ -375,6 +368,7 @@ describe("MongoImportDialog", () => {
         fileName: "orders.json",
         columns: [{ name: "id", inferredType: "string" }],
       }),
+      "json",
     );
     expect(columnTypeTrigger()).toBeNull();
     expect(document.body.textContent).toContain("(string)");

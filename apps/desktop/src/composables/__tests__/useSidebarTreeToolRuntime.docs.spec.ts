@@ -11,6 +11,7 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
     diagramSource: null as unknown,
     databaseExportSource: null as unknown,
     mongoImportSource: undefined as unknown,
+    mongoDatabaseDumpSource: null as unknown,
     schemaDiffSource: null as unknown,
     treeNodes: options.treeNodes ?? [],
     selectedTreeNodeIds: options.selectedTreeNodeIds ?? [],
@@ -126,6 +127,29 @@ describe("useSidebarTreeToolRuntime mongo import", () => {
       database: "shop",
       collection: "orders",
     });
+  });
+});
+
+describe("useSidebarTreeToolRuntime MongoDB dump and restore", () => {
+  it.each(["dump", "restore"] as const)("opens %s for the selected MongoDB database", (mode) => {
+    const { connectionStore, runtime } = setup({ type: "mongo-db", connectionId: "conn-1", database: "shop" });
+
+    runtime.openMongoDatabaseDump(mode);
+
+    expect(connectionStore.mongoDatabaseDumpSource).toEqual({ connectionId: "conn-1", database: "shop", mode });
+  });
+
+  it.each<Partial<TreeNode>>([
+    { type: "table", connectionId: "conn-1", database: "shop" },
+    { type: "mongo-collection", connectionId: "conn-1", database: "shop" },
+    { type: "mongo-db", database: "shop" },
+    { type: "mongo-db", connectionId: "conn-1" },
+  ])("does not open a database restore from an invalid context: %j", (node) => {
+    const { connectionStore, runtime } = setup(node);
+
+    runtime.openMongoDatabaseDump("restore");
+
+    expect(connectionStore.mongoDatabaseDumpSource).toBeNull();
   });
 });
 

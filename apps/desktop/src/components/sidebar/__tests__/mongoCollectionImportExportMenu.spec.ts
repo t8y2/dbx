@@ -10,12 +10,6 @@ function read(relativePath: string) {
 }
 
 describe("mongo collection import/export UI", () => {
-  it("adds database dump and restore on mongo-db nodes", () => {
-    const menu = read("../SidebarTreeRuntimeHost.vue");
-    expect(menu).toContain('openMongoDatabaseDump("dump")');
-    expect(menu).toContain('openMongoDatabaseDump("restore")');
-    expect(read("../../layout/AppDialogs.vue")).toContain("MongoDatabaseDumpDialog");
-  });
   it("adds table-style import/export to the original mongo-collection menu", () => {
     const menu = read("../SidebarTreeRuntimeHost.vue");
     const start = menu.indexOf('if (node.type === "mongo-collection") {\n    items.push({ label: t("contextMenu.copyName")');
@@ -29,8 +23,6 @@ describe("mongo collection import/export UI", () => {
     expect(block).toContain('t("contextMenu.exportData")');
     expect(block).toContain('exportMongoCollection("csv")');
     expect(block).toContain('exportMongoCollection("ndjson")');
-    expect(block).toContain('exportMongoCollection("bson")');
-    expect(block).toContain('exportMongoCollection("bsonGzip")');
     expect(block).not.toContain("openMongoExport");
   });
 

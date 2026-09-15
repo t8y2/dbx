@@ -158,7 +158,7 @@ describe("useSidebarTreeExportRuntime", () => {
     expect(toastMock).toHaveBeenCalledWith("grid.exported");
   });
 
-  it("exports an official-compatible gzip BSON collection dump", async () => {
+  it.each(["bson", "bsonGzip"] as const)("exports an official-compatible %s collection dump", async (mode) => {
     apiMock.exportMongodbQuery.mockImplementation(async (_request, onProgress) => {
       onProgress({ exportId: "export-1", status: "done", documentsRead: 2, bytesWritten: 64, elapsedMs: 4 });
       return { exportId: "export-1", documentsExported: 2, filePath: "orders.bson.gz", elapsedMs: 4 };
@@ -177,15 +177,15 @@ describe("useSidebarTreeExportRuntime", () => {
       acceptedSelectionIds: () => null,
     });
 
-    await runtime.exportMongoCollection("bsonGzip");
+    await runtime.exportMongoCollection(mode);
 
     expect(apiMock.exportMongodbQuery).toHaveBeenCalledWith(
       expect.objectContaining({
         database: "shop",
         collection: "orders",
         format: "bson",
-        gzip: true,
-        filePath: "orders.bson.gz",
+        gzip: mode === "bsonGzip",
+        filePath: mode === "bsonGzip" ? "orders.bson.gz" : "orders.bson",
       }),
       expect.any(Function),
     );

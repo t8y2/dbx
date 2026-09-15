@@ -3219,9 +3219,11 @@ async function handleKeydown(e: KeyboardEvent) {
     return;
   }
   if (isFocusSearchShortcut(e, shortcuts)) {
-    // Route by the event target so focus inside the shared result grid (or a
-    // Teleported cell-detail dialog) lands on the result search, not the editor.
-    const focused = contentAreaRef.value?.focusSearch(e.target instanceof Element ? e.target : null) || appSidebarRef.value?.focusSearch();
+    // Keep the focused navigation surface ahead of the active content tab.
+    // Otherwise Ctrl+F from empty space in the sidebar incorrectly opens the
+    // search belonging to the active table/query tab.
+    const target = e.target instanceof Element ? e.target : null;
+    const focused = target?.closest("[data-app-sidebar]") ? appSidebarRef.value?.focusSearch(target) : contentAreaRef.value?.focusSearch(target) || appSidebarRef.value?.focusSearch(target);
     if (focused) {
       e.preventDefault();
       e.stopPropagation();

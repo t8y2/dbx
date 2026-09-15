@@ -2292,7 +2292,16 @@ watch(
   { flush: "post" },
 );
 
-function focusSearch(): boolean {
+function focusSearch(target: Element | null = null): boolean {
+  const tableSearchControl = target?.closest<HTMLElement>("[data-sidebar-table-search-control]");
+  if (tableSearchControl) {
+    const input = tableSearchControl.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
+    if (input) {
+      input.focus();
+      input.select();
+      return true;
+    }
+  }
   const input = searchInputRef.value;
   if (!input) return false;
   input.focus();

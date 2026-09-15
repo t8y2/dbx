@@ -39,6 +39,7 @@ describe("search shortcut focus routing", () => {
     expect(appSource).toMatch(/function focusSearchInAuxiliarySurface\(target: Element \| null\)[\s\S]*data-connection-db-search[\s\S]*data-settings-global-search[\s\S]*data-driver-store-agent-search[\s\S]*data-plugin-marketplace-search[\s\S]*data-history-panel[\s\S]*data-sql-library-panel/);
     expect(appSource).toMatch(/lastFocusedAuxiliarySurface[\s\S]*rememberAuxiliarySearchSurface[\s\S]*data-sql-library-panel/);
     expect(appSource).toMatch(/const targetIsDocument = !target \|\| target === document\.body \|\| target === document\.documentElement;[\s\S]*if \(!targetIsDocument\) return false;/);
+    expect(appSource).toMatch(/lastFocusedSidebarSurface[\s\S]*rememberSidebarSearchSurface[\s\S]*data-app-sidebar/);
     expect(appSource).toMatch(/function handleAuxiliarySearchKeydownCapture\(e: KeyboardEvent\)[\s\S]*focusSearchInAuxiliarySurface\(target\)[\s\S]*addEventListener\("keydown", handleAuxiliarySearchKeydownCapture, true\)/);
     expect(appSource).toContain("aiAssistantRef.value.focusSearch()");
     expect(aiAssistantSource).toMatch(/function focusSearch\(\): boolean[\s\S]*setConversationListOpen\(true\)/);

@@ -239,6 +239,7 @@ import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, normalizeCustomF
 import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
+import { useMeasuredWidth } from "@/composables/useMeasuredWidth";
 import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
 import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
@@ -2179,7 +2180,21 @@ function formatShortcutPill(shortcut: string): string {
 }
 
 const shortcutPressShortcutLabel = computed(() => t("settings.shortcutPressShortcut"));
-const shortcutPressShortcutInputWidth = computed(() => `${shortcutPressShortcutLabel.value.length + 2}em`);
+// #9144: `label.length + 2em` under-sizes CJK placeholders wherever the
+// environment's fallback font advances wider than 1em (user report: 15px/char
+// at a 13px font → the last glyph clipped mid-stroke). Measure a hidden mirror
+// span carrying the same box + typography classes as the capture inputs
+// instead; the char-count formula only survives as the pre-measurement
+// fallback. The +2px cushion absorbs sub-pixel rounding differences between
+// the mirror span and the real input.
+const shortcutPressShortcutInputWidth = ref(`${shortcutPressShortcutLabel.value.length + 2}em`);
+const shortcutPlaceholderMirrorRef = ref<HTMLElement | null>(null);
+const shortcutPlaceholderMirrorWidth = useMeasuredWidth(shortcutPlaceholderMirrorRef, 0, [shortcutPressShortcutLabel]);
+watch(shortcutPlaceholderMirrorWidth, (width) => {
+  if (width > 0) {
+    shortcutPressShortcutInputWidth.value = `${Math.ceil(width) + 2}px`;
+  }
+});
 
 function focusShortcutInput(actionId: ShortcutActionId) {
   editingShortcutId.value = actionId;
@@ -9716,6 +9731,13 @@ LIMIT 100;</pre
       :confirm-label="t('common.delete')"
       @confirm="templateDeleteConfirm && confirmDeleteTemplate(templateDeleteConfirm)"
     />
+
+    <!-- Hidden mirror of the shortcut-capture placeholder: measured to size
+         the capture inputs (#9144). Carries the same box + typography classes
+         as those inputs (font-mono text-[13px] font-semibold px-2.5 border) so
+         its border-box width is exactly what they need, including font-fallback
+         advances and letter-spacing that char-count arithmetic cannot predict. -->
+    <span ref="shortcutPlaceholderMirrorRef" aria-hidden="true" class="invisible pointer-events-none absolute top-0 left-0 h-0 max-w-64 overflow-hidden whitespace-pre rounded-[6px] border px-2.5 font-mono text-[13px] font-semibold">{{ shortcutPressShortcutLabel }}</span>
   </component>
 </template>
 

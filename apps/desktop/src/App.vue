@@ -3171,7 +3171,12 @@ function focusSearchInput(selector: string): boolean {
 }
 
 function focusSearchInAuxiliarySurface(target: Element | null): boolean {
-  if (showConnectionDialog.value) return focusSearchInput("[data-connection-db-search]");
+  if (showConnectionDialog.value) {
+    // The dialog is modal: keep the shortcut inside it and never focus a
+    // surface hidden behind the overlay, even when its search input is absent.
+    focusSearchInput("[data-connection-db-search]");
+    return true;
+  }
   if (showSettingsPage.value) return focusSearchInput("[data-settings-global-search]");
   if (showDriverStore.value) {
     const selector = driverStoreActiveTab.value === "jdbc" ? "[data-driver-store-jdbc-search]" : "[data-driver-store-agent-search]";

@@ -49,4 +49,8 @@ describe("search shortcut focus routing", () => {
     expect(pluginCenterSource).toContain("data-plugin-marketplace-search");
     expect(connectionDialogSource).toContain("data-connection-db-search");
   });
+
+  it("keeps the search shortcut inside the modal connection dialog", () => {
+    expect(appSource).toMatch(/if \(showConnectionDialog\.value\) \{[\s\S]*?data-connection-db-search[\s\S]*?return true;\s*\}/);
+  });
 });

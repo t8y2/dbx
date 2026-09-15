@@ -6391,6 +6391,7 @@ export default withEnglishFallback({
     rowCounts: "Sorgente {source} righe, destinazione {target} righe; confronto completo completato",
     previewLimitOption: "Anteprima {count}",
     compare: "Confronta Dati",
+    recompare: "Confronta di nuovo",
     summary: "Aggiunte {added}, rimosse {removed}, modificate {modified}",
     batchSummary: "Confrontate {tables} tabelle: {different} diverse, {same} identiche, {failed} non riuscite; aggiunte {added}, rimosse {removed}, modificate {modified}",
     comparingTable: "Confronto di {current}/{total}: {table}",

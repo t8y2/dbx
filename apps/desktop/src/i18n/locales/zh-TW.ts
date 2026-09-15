@@ -5711,6 +5711,7 @@ export default withEnglishFallback({
     rowCounts: "來源 {source} 列，目標 {target} 列；已完成完整比較",
     previewLimitOption: "預覽 {count}",
     compare: "開始比較資料",
+    recompare: "重新比較",
     summary: "新增 {added} 列，刪除 {removed} 列，修改 {modified} 列",
     batchSummary: "已比較 {tables} 張資料表：{different} 張有差異，{same} 張一致，{failed} 張失敗；新增 {added} 列，刪除 {removed} 列，修改 {modified} 列",
     comparingTable: "正在比較 {current}/{total}：{table}",

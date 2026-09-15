@@ -6633,6 +6633,7 @@ export default withEnglishFallback({
     rowCounts: "Mənbədə {source} sətir, hədəfdə {target} sətir; tam müqayisə tamamlandı",
     previewLimitOption: "Önbaxış: {count}",
     compare: "Verilənləri müqayisə et",
+    recompare: "Yenidən müqayisə et",
     summary: "Əlavə edilib: {added}, çıxarılıb: {removed}, dəyişdirilib: {modified}",
     batchSummary: "{tables} cədvəl müqayisə edilib: {different} fərqli, {same} eyni, {failed} uğursuz; əlavə edilib: {added}, çıxarılıb: {removed}, dəyişdirilib: {modified}",
     comparingTable: "Müqayisə edilir {current}/{total}: {table}",

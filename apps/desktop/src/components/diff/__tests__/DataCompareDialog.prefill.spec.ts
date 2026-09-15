@@ -259,6 +259,23 @@ describe("DataCompareDialog session restore", () => {
     expect(document.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe("INSERT 1;\nINSERT 2;");
   });
 
+  it("starts another comparison and distinguishes source and target panels after results", async () => {
+    mountSessionDialog(completedSession());
+
+    await flushAsyncSetup();
+
+    const recompareButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes(i18n.global.t("dataCompare.recompare")));
+    expect(recompareButton).toBeDefined();
+    expect([...document.querySelectorAll("div")].filter((element) => element.classList.contains("border-blue-500/35"))).toHaveLength(1);
+    expect([...document.querySelectorAll("div")].filter((element) => element.classList.contains("border-emerald-500/35"))).toHaveLength(1);
+
+    recompareButton?.click();
+    await flushAsyncSetup();
+
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("oracle-11g");
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("oracle-jdbc-11g");
+  });
+
   it("persists the latest selection plan when the dialog closes during planning", async () => {
     const session = completedSession();
     let resolvePlan!: (plan: DataCompareSession["syncPlan"]) => void;

@@ -6792,6 +6792,7 @@ export default withEnglishFallback({
     rowCounts: "源表 {source} 行，目标表 {target} 行；已完成全量比较",
     previewLimitOption: "预览 {count}",
     compare: "开始比较数据",
+    recompare: "重新比较",
     summary: "新增 {added} 行，删除 {removed} 行，修改 {modified} 行",
     batchSummary: "已比较 {tables} 张表：存在差异 {different} 张，一致 {same} 张，失败 {failed} 张；累计新增 {added} 行，删除 {removed} 行，修改 {modified} 行",
     comparingTable: "正在比较 {current}/{total}：{table}",

@@ -6429,6 +6429,7 @@ export default withEnglishFallback({
     rowCounts: "ソース {source}行、ターゲット {target}行、完全比較が完了しました",
     previewLimitOption: "{count}件プレビュー",
     compare: "データを比較",
+    recompare: "再比較",
     summary: "追加 {added}、削除 {removed}、変更 {modified}",
     batchSummary: "{tables}テーブルを比較: {different}不一致、{same}一致、{failed}失敗; 追加 {added}、削除 {removed}、変更 {modified}",
     comparingTable: "比較中 {current}/{total}: {table}",

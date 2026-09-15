@@ -6515,6 +6515,7 @@ export default withEnglishFallback({
     rowCounts: "Kaynak {source} satır, hedef {target} satır; tam karşılaştırma tamamlandı",
     previewLimitOption: "Önizleme {count}",
     compare: "Verileri Karşılaştır",
+    recompare: "Tekrar karşılaştır",
     summary: "{added} eklendi, {removed} kaldırıldı, {modified} değiştirildi",
     batchSummary: "{tables} tablo karşılaştırıldı: {different} farklı, {same} aynı, {failed} başarısız; {added} eklendi, {removed} kaldırıldı, {modified} değiştirildi",
     comparingTable: "Karşılaştırılıyor {current}/{total}: {table}",

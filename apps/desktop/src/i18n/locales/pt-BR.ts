@@ -6393,6 +6393,7 @@ export default withEnglishFallback({
     rowCounts: "Origem com {source} linhas, destino com {target} linhas; comparação completa concluída",
     previewLimitOption: "Pré-visualizar {count}",
     compare: "Comparar Dados",
+    recompare: "Comparar novamente",
     summary: "{added} adicionados, {removed} removidos, {modified} modificados",
     batchSummary: "{tables} tabelas comparadas: {different} diferentes, {same} idênticas, {failed} com falha; {added} adicionados, {removed} removidos, {modified} modificados",
     comparingTable: "Comparando {current}/{total}: {table}",

@@ -6141,6 +6141,7 @@ export default withEnglishFallback({
     rowCounts: "소스 {source}행, 대상 {target}행; 전체 비교 완료",
     previewLimitOption: "미리보기 {count}",
     compare: "데이터 비교",
+    recompare: "다시 비교",
     summary: "추가 {added}, 제거 {removed}, 수정 {modified}",
     batchSummary: "테이블 {tables}개 비교: {different}개 차이, {same}개 동일, {failed}개 실패; 추가 {added}, 제거 {removed}, 수정 {modified}",
     comparingTable: "{current}/{total} 비교 중: {table}",

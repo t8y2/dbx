@@ -178,6 +178,8 @@ type AiAssistantHandle = {
   selectConversationById: (conversationId: string) => void;
 };
 
+type AuxiliarySearchSurface = "ai" | "history" | "sqlLibrary" | null;
+
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -365,6 +367,7 @@ const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof SqlEditorWorkspace> | null>(null);
+const lastFocusedAuxiliarySurface = ref<AuxiliarySearchSurface>(null);
 
 const selectedSql = ref("");
 const cursorPos = ref(0);
@@ -3166,6 +3169,13 @@ function focusSearchInput(selector: string): boolean {
 
 function focusSearchInAuxiliarySurface(target: Element | null): boolean {
   if (showConnectionDialog.value) return focusSearchInput("[data-connection-db-search]");
+  if (showSettingsPage.value) return focusSearchInput("[data-settings-global-search]");
+  if (showDriverStore.value) {
+    const selector = driverStoreActiveTab.value === "jdbc" ? "[data-driver-store-jdbc-search]" : "[data-driver-store-agent-search]";
+    return focusSearchInput(selector);
+  }
+  if (showPluginCenter.value) return focusSearchInput("[data-plugin-marketplace-search]");
+
   if (showAiPanel.value && target?.closest("[data-ai-assistant-root], [data-ai-conversation-search]")) {
     if (aiAssistantRef.value) return aiAssistantRef.value.focusSearch();
     invokeWhenAiReady((handle) => handle.focusSearch());
@@ -3173,13 +3183,19 @@ function focusSearchInAuxiliarySurface(target: Element | null): boolean {
   }
   if (showHistory.value && target?.closest("[data-history-panel], [data-history-search]")) return focusSearchInput("[data-history-search]");
   if (showSqlLibraryPanel.value && target?.closest("[data-sql-library-panel], [data-sql-library-search]")) return focusSearchInput("[data-sql-library-search]");
-  if (showSettingsPage.value) return focusSearchInput("[data-settings-global-search]");
-  if (showDriverStore.value) {
-    const selector = driverStoreActiveTab.value === "jdbc" ? "[data-driver-store-jdbc-search]" : "[data-driver-store-agent-search]";
-    return focusSearchInput(selector);
+
+  if (lastFocusedAuxiliarySurface.value === "ai" && showAiPanel.value) {
+    if (aiAssistantRef.value) return aiAssistantRef.value.focusSearch();
+    invokeWhenAiReady((handle) => handle.focusSearch());
+    return true;
   }
-  if (showPluginCenter.value) return focusSearchInput("[data-plugin-marketplace-search]");
+  if (lastFocusedAuxiliarySurface.value === "history" && showHistory.value) return focusSearchInput("[data-history-search]");
+  if (lastFocusedAuxiliarySurface.value === "sqlLibrary" && showSqlLibraryPanel.value) return focusSearchInput("[data-sql-library-search]");
   return false;
+}
+
+function rememberAuxiliarySearchSurface(surface: Exclude<AuxiliarySearchSurface, null>) {
+  lastFocusedAuxiliarySurface.value = surface;
 }
 
 function setPluginWorkbenchTabRef(tabId: string, element: unknown) {
@@ -3963,7 +3979,7 @@ onUnmounted(() => {
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
           >
             <div v-if="!isAiPanelMaximized" class="panel-resize-handle panel-resize-handle--left" @pointerdown="startAiPanelResize" />
-            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('ai')">
               <AiAssistant
                 v-if="aiPanelReady"
                 ref="aiAssistantRef"
@@ -3990,7 +4006,7 @@ onUnmounted(() => {
             :style="{ width: historyWidth + 'px' }"
           >
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
-            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('history')">
               <div data-history-panel class="h-full min-h-0">
                 <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
               </div>
@@ -4004,7 +4020,7 @@ onUnmounted(() => {
             :style="{ width: sqlLibraryWidth + 'px' }"
           >
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlLibraryResize" />
-            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]" @mousedown="rememberAuxiliarySearchSurface('sqlLibrary')">
               <div data-sql-library-panel class="h-full min-h-0">
                 <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
               </div>

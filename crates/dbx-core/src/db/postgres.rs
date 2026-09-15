@@ -7168,7 +7168,7 @@ pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<C
         .await
 }
 
-fn pg_quote_literal(value: &str) -> String {
+pub(crate) fn pg_quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 

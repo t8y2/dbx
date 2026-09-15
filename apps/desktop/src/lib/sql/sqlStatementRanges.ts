@@ -1075,7 +1075,7 @@ function isMysqlAlterTableTruncatePartitionContinuation(sql: string, statementFr
 function isMergeActionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
   if (keyword !== "INSERT" || !startsWithSqlWords(sql, statementFrom, ["MERGE"], databaseType, parameterOptions)) return false;
   const words = topLevelWordsBefore(sql, statementFrom, lineStartFrom, 5, databaseType, parameterOptions);
-  return words.at(-1) === "THEN" && words.includes("WHEN") && words.includes("MATCHED");
+  return words[words.length - 1] === "THEN" && words.includes("WHEN") && words.includes("MATCHED");
 }
 
 function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {

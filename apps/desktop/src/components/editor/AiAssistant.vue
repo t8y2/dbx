@@ -156,7 +156,7 @@ import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAge
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiStream, aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -183,6 +183,7 @@ import { buildAiConversationExport, type AiConversationExportFormat } from "@/li
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
+import { buildPluginAiRequest, pluginContextFromMessages, pluginContextText, streamPluginAiConversation, type AiPluginContext, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
 const { t } = useI18n();
 const AiChartRenderer = defineAsyncComponent({
@@ -248,6 +249,7 @@ type AiReferenceMessageMention = Extract<AiMessageMention, { kind: "table" | "sq
 type AiAttachmentMessageMention = Extract<AiMessageMention, { kind: "csvFile" | "file" | "image" }>;
 
 interface ChatMessage {
+  pluginContext?: AiPluginContext;
   role: "user" | "assistant";
   content: string;
   /** Connection that produced this assistant response; ephemeral export metadata. */
@@ -300,6 +302,8 @@ const emit = defineEmits<{
 
 const prompt = ref("");
 const messages = ref<ChatMessage[]>([]);
+const draftPluginContext = ref<AiPluginContext>();
+const pluginContext = computed(() => pluginContextFromMessages(messages.value) ?? draftPluginContext.value);
 const isGenerating = ref(false);
 const scrollRef = ref<InstanceType<typeof ScrollArea> | null>(null);
 // Stays a concrete action until the AI config loads: whether new conversations
@@ -378,7 +382,7 @@ const queuedInputs = reactive(new Map<string, QueuedConversationInput>());
  * one background run can settle in the same event turn; this must be FIFO, not
  * a single "next send" slot, or the later completion silently drops the first
  * conversation's queued input. */
-type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiActionSelection };
+type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiActionSelection; pluginContext?: AiPluginContext };
 const pendingAutoSends: PendingAutoSend[] = [];
 
 /** Highest event `seq` the user has read per conversation (parent PRD §8). Set
@@ -593,7 +597,7 @@ watch(showTemplateSelector, (open) => {
 // inferred dialect) so resolution matches the dialect the AI pipeline and
 // prompt selection actually use — the same axis aiDatabaseTypeForConnection
 // established for schema selection.
-const templateDbType = computed(() => (props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));
+const templateDbType = computed(() => (!pluginContext.value && props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));
 const aiTemplateNamespaceKey = computed(() => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`);
 let autoTemplatesInitialized = false;
 function applyResolvedTemplateIds(ids: string[]) {
@@ -848,7 +852,7 @@ function submitEdit(visibleIndex: number) {
   if (!content && !editingMentions.value.length && !editingCsvAttachments.value.length && !editingImageAttachments.value.length) return;
   const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
   if (actualIndex < 0) return;
-  if (!props.connection || !props.tab) return;
+  if (!pluginContext.value && (!props.connection || !props.tab)) return;
   if (!activeFullConfig.value) {
     toast(t("ai.noConfig"));
     return;
@@ -858,6 +862,7 @@ function submitEdit(visibleIndex: number) {
     toast(imageAttachmentSupportErrorMessage(imageError), 5000);
     return;
   }
+  draftPluginContext.value = pluginContext.value;
   messages.value = messages.value.slice(0, actualIndex);
   editingMessageIndex.value = null;
   editingContent.value = "";
@@ -1180,8 +1185,8 @@ const canSubmitPrompt = computed(() =>
     prompt: prompt.value,
     contextItemCount: selectedMentions.value.length + selectedSqlFileMentions.value.length + selectedCsvAttachments.value.length + selectedImageAttachments.value.length,
     isAttachmentProcessing: isAttachmentProcessing.value,
-    hasTab: !!props.tab,
-    hasConnection: !!props.connection,
+    hasTab: !!pluginContext.value || !!props.tab,
+    hasConnection: !!pluginContext.value || !!props.connection,
   }),
 );
 let browserAttachmentDragDepth = 0;
@@ -1394,7 +1399,7 @@ function messagesForAgentHistory(historyMessages: ChatMessage[]): AiMessage[] {
 
 const chatTitle = computed(() => {
   const first = messages.value.find((m) => m.role === "user" && m.kind !== "contextSummary");
-  return first ? messageTitle(first).slice(0, 30) : t("ai.newChat");
+  return pluginContext.value?.title || (first ? messageTitle(first).slice(0, 30) : t("ai.newChat"));
 });
 
 const promptMentionChips = computed<AiPromptMentionChip[]>(() => [...selectedMentions.value.map((mention) => ({ ...mention, kind: "table" as const })), ...selectedSqlFileMentions.value]);
@@ -1444,7 +1449,7 @@ function messageTitle(message: ChatMessage): string {
  * still generating or when no such message exists.
  */
 const proposalConfirmMessage = computed<ChatMessage | null>(() => {
-  if (isGenerating.value) return null;
+  if (pluginContext.value || isGenerating.value) return null;
   for (let i = messages.value.length - 1; i >= 0; i--) {
     const msg = messages.value[i];
     if (msg.kind === "contextSummary") continue;
@@ -1529,7 +1534,7 @@ function sendProposalReply(positive: boolean) {
 }
 
 // `auto` has no per-action placeholder of its own, so it reuses the general one.
-const activePlaceholder = computed(() => `${t(`ai.placeholders.${isAutoActionSelection(activeAction.value) ? "general" : activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`);
+const activePlaceholder = computed(() => (pluginContext.value ? t("ai.pluginFollowUp") : `${t(`ai.placeholders.${isAutoActionSelection(activeAction.value) ? "general" : activeAction.value}`)} ${t("ai.tableMentionPlaceholderHint")}`));
 const aiCodeAppearance = computed(() => (isDark.value ? "dark" : "light"));
 
 const codeSnapshotOpen = ref(false);
@@ -2186,7 +2191,7 @@ function mentionTargetDatabase(): string {
 
 async function loadMentionCandidates(query: string) {
   const mentionDatabase = mentionTargetDatabase();
-  if (!props.connection || !props.tab?.connectionId || !mentionDatabase) return;
+  if (pluginContext.value || !props.connection || !props.tab?.connectionId || !mentionDatabase) return;
 
   const key = mentionCacheKey(props.tab.connectionId, mentionDatabase, query);
   if (mentionCache.value[key]) {
@@ -2993,6 +2998,7 @@ function onTauriFileDrop(event: Event) {
 }
 
 function onTableReferenceDropEvent(event: Event) {
+  if (pluginContext.value) return;
   handleAiTableReferenceDropEvent(event, {
     context: {
       connectionId: props.tab?.connectionId || props.connection?.id,
@@ -3027,19 +3033,25 @@ async function send() {
 
   // Snapshot the target connection/database before any async work so that
   // suspension points during context loading cannot cause a TOCTOU target switch.
-  const connection = props.connection;
-  const tab = props.tab;
-  if (!connection || !tab) {
+  const runPluginContext = auto ? (pluginContextFromMessages(auto.messages) ?? auto.pluginContext) : pluginContext.value;
+  const connection = runPluginContext ? undefined : props.connection;
+  const tab = runPluginContext ? undefined : props.tab;
+  const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
+  if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
     return;
   }
   // Capture the selection before context loading or queued run scheduling can
   // yield to another conversation. Dameng's top-level selector is a schema.
-  const runDatabases = resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
+  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
   const activeConfig = activeFullConfig.value;
   if (!activeConfig) {
     clearPendingWriteGrant();
     toast(t("ai.noConfig"));
+    return;
+  }
+  if (runPluginContext && activeConfig.provider.endsWith("-cli")) {
+    toast(t("ai.pluginHttpModelOnly"));
     return;
   }
   const imageError = imageAttachmentSupportError(activeConfig.provider, auto ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
@@ -3097,10 +3109,10 @@ async function send() {
       status: "preparing",
       messages: runMessages,
       assistantMessageIndex: -1,
-      connectionId: connection.id,
-      connectionName: connection.name,
-      database: tab.database || "",
-      schema: resolveAiDatabaseTarget(tab, connection).schema,
+      connectionId: connection?.id ?? "",
+      connectionName: runSourceName,
+      database: tab?.database || "",
+      schema: connection && tab ? resolveAiDatabaseTarget(tab, connection).schema : undefined,
       createdAt: resumingConfirmedWrite ? resumableRun!.createdAt : runCreatedAt,
       updatedAt: runCreatedAt,
       // Carry the proposal snapshot across a confirmed-write resume so a queued
@@ -3194,7 +3206,7 @@ async function send() {
   // cannot change the instructions for an already-submitted request.
   const customPromptContext: CustomPromptContext = {
     globalInstructions: promptTemplateStore.globalInstructions,
-    activeTemplates: [...activeTemplates.value],
+    activeTemplates: runPluginContext ? [] : [...activeTemplates.value],
     ...(sendSkillSnapshot?.length ? { selectedSkills: sendSkillSnapshot } : {}),
   };
   // Remember what was actually sent for this db_type so panels opened later can
@@ -3205,8 +3217,8 @@ async function send() {
     settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);
   }
 
-  const selectedTableMentions = auto ? [] : [...selectedMentions.value];
-  const selectedSqlFiles = auto ? [] : [...selectedSqlFileMentions.value];
+  const selectedTableMentions = auto || runPluginContext ? [] : [...selectedMentions.value];
+  const selectedSqlFiles = auto || runPluginContext ? [] : [...selectedSqlFileMentions.value];
   const csvAttachments = auto ? [] : [...selectedCsvAttachments.value];
   const imageAttachments = auto ? [] : [...selectedImageAttachments.value];
   const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
@@ -3216,7 +3228,14 @@ async function send() {
     userText: text,
   });
 
-  const userMessage: ChatMessage = { role: "user", content: text, mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles, csvAttachments, imageAttachments), csvAttachments, imageAttachments };
+  const userMessage: ChatMessage = {
+    role: "user",
+    content: text,
+    ...(runPluginContext && !pluginContextFromMessages(runMessages) ? { pluginContext: runPluginContext } : {}),
+    mentions: selectedMessageMentions(selectedTableMentions, selectedSqlFiles, csvAttachments, imageAttachments),
+    csvAttachments,
+    imageAttachments,
+  };
   runMessages.push(userMessage);
   if (!auto) {
     // Save to prompt history (deduplicate consecutive duplicates)
@@ -3235,7 +3254,7 @@ async function send() {
   if (autoSendVisible) scrollToBottom({ force: true });
 
   const requestedSelection: AiActionSelection = auto ? auto.action : activeAction.value;
-  const requestedMode = auto ? auto.mode : assistantMode.value;
+  const requestedMode: AiAssistantMode = runPluginContext ? "ask" : auto ? auto.mode : assistantMode.value;
   // A confirmed-write turn (the ✅ reply, or the segment that resumes an
   // `awaiting_write_confirmation` run) is a continuation of the pending proposal,
   // not a new user request: its reply text is component copy, so the Auto router
@@ -3249,7 +3268,11 @@ async function send() {
   // `aiSkillForAction` throws on unknown actions. Explicit selections skip the
   // router entirely, so their behavior is unchanged (#9118).
   let requestedAction: AiAction;
-  if (!isAutoActionSelection(requestedSelection)) {
+  if (runPluginContext) {
+    // A plugin conversation carries its own data snapshot: the Auto router must
+    // not classify the prompt, and the task contract stays host-owned.
+    requestedAction = "general";
+  } else if (!isAutoActionSelection(requestedSelection)) {
     requestedAction = requestedSelection;
   } else if (confirmationContinuation) {
     // Nothing was routed here, so no "Auto · …" chip either (the proposal card
@@ -3272,7 +3295,7 @@ async function send() {
   // Detect user-typed short confirmation (e.g. "可以"/"go ahead") as an alternative
   // path to the proposal ✅ button. Delegates to the shared pure function so the
   // component and its unit tests share the same gating logic.
-  if (!allowWriteSqlForNextRun) {
+  if (!runPluginContext && connection && tab && !allowWriteSqlForNextRun) {
     allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
       mode: requestedMode,
       alreadyGranted: false,
@@ -3306,7 +3329,7 @@ async function send() {
   // Verify the connection/database/schema haven't changed since the user confirmed
   // the write operation. If the user switched connections or namespaces between
   // confirmation and execution, the grant is void.
-  if (allowWriteSqlForNextRun && confirmedWriteSqlText) {
+  if (connection && tab && allowWriteSqlForNextRun && confirmedWriteSqlText) {
     const target = resolveAiDatabaseTarget(tab, connection);
     if (confirmedConnectionId !== connection.id || confirmedDatabase !== target.database || confirmedSchema !== target.schema) {
       allowWriteSqlForNextRun = false;
@@ -3355,7 +3378,7 @@ async function send() {
       return;
     }
   }
-  runMessages.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
+  runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName });
   const assistantIdx = runMessages.length - 1;
   if (requestedMode === "agent" && sendSkillSnapshot?.length) {
     runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
@@ -3391,151 +3414,163 @@ async function send() {
     // must not be undone by this snapshot either.
     if (!detachedRun.discardOnFinish) void runSnapshotScheduler.save(detachedRun);
   } else {
-    void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+    void persistConversationSnapshot(runConversationId, runMessages, runSourceName, tab?.database || "", runCreatedAt);
   }
   try {
-    const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
-    // Superseded while awaiting loadReferencedSqlFiles() above — bail before
-    // paying for buildAiContext() too; it can do real backend/schema work that
-    // would be entirely wasted on an already-abandoned request.
-    if (!generationCanContinue()) return;
-    const requestDatabase = runDatabases[0] ?? tab.database;
-    const context = await buildAiContext(
-      {
-        ...tab,
-        database: requestDatabase,
-        schema: runDatabases.length > 1 || requestDatabase !== tab.database ? undefined : tab.schema,
-      },
-      connection,
-      {
-        mentionedTables,
-        sqlFiles,
-        csvFiles: csvAttachments,
-      },
-    );
-    context.selectedDatabases = runDatabases;
-    // Superseded while awaiting buildAiContext() above — must bail before ever
-    // calling runAgentStream(), not just before writing its results. Without
-    // this recheck, a clear/switch/unmount that fires during context
-    // preparation invalidates the generation but the request still gets sent to
-    // the backend and starts executing tools/SQL; the best-effort cancel RPC
-    // fired by abandonInFlightRequest() is a no-op here since no session has
-    // been registered with the backend yet (registration happens inside
-    // runAgentStream() itself).
-    if (!generationCanContinue()) return;
-    // The stream is about to reach the backend — transition the status line from
-    // `preparing` to `waiting_model` so it reads "等待模型响应" while no events have
-    // arrived yet (slow CLI first token included).
-    if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
     const history: AiMessage[] = messagesForAgentHistory(runMessages.slice(0, -2));
-    await runAgentStream(
-      {
-        config: activeConfig,
-        action: requestedAction,
-        mode: requestedMode,
-        instruction: modelInstruction,
-        taskContractUserRequest: text,
-        context,
-        inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
-        allowWriteSql,
-        confirmedWriteSql,
-        confirmedConnectionId: confirmedTargetConnId,
-        confirmedDatabase: confirmedTargetDb,
-        confirmedSchema: confirmedTargetSchema,
-        promptCacheKey: conversationId.value || undefined,
-      },
-      history,
-      (event: AgentEvent) => {
-        // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
-        // stream may still be running, but this generation no longer owns any
-        // shared state to write into.
-        if (!generationCanContinue()) return;
-        agentEvents.push(event);
-        // Every desktop agent event takes the next seq for its run (parent PRD
-        // §8: strictly increasing from 1, across all sessions). Mark the
-        // conversation unread when a new event arrives beyond the user's read
-        // baseline while they are looking elsewhere.
+    const onEvent = (event: AgentEvent) => {
+      // Superseded by a clear/switch/new-chat (or a newer send()) — the backend
+      // stream may still be running, but this generation no longer owns any
+      // shared state to write into.
+      if (!generationCanContinue()) return;
+      agentEvents.push(event);
+      // Every desktop agent event takes the next seq for its run (parent PRD
+      // §8: strictly increasing from 1, across all sessions). Mark the
+      // conversation unread when a new event arrives beyond the user's read
+      // baseline while they are looking elsewhere.
+      if (detachedRun) {
+        const seq = bumpDesktopAiRunSeq(detachedRun);
+        if (!runIsVisible() && seq > (conversationReadSeq.get(runConversationId) ?? 0)) unreadConversations.add(runConversationId);
+      }
+      // Feed every agent event into the generation-status state machine (Issue
+      // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
+      // active tool / turn, and derives the phase purely from the event stream.
+      if (runIsVisible()) generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
+      // Terminal event (agent_end / error) hides the status line immediately —
+      // the backend promise may still be settling (CLI teardown / SSE close), so
+      // stop the ticker now instead of letting it idle through that gap. The
+      // non-terminal `response_complete` (phase=finalizing) hides the line the
+      // same way, but the listener stays alive for the real agent_end/error.
+      if (runIsVisible() && (generationStatus.value.phase === "finished" || generationStatus.value.phase === "finalizing")) {
+        stopStatusTimer();
+      }
+      if (event.type === "text_delta" && event.delta) {
+        if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, event.delta);
+        else appendAssistantDelta(assistantIdx, event.delta);
+      }
+      if (event.type === "write_sql_confirmation_required") {
+        writeConfirmationRequired = true;
         if (detachedRun) {
-          const seq = bumpDesktopAiRunSeq(detachedRun);
-          if (!runIsVisible() && seq > (conversationReadSeq.get(runConversationId) ?? 0)) unreadConversations.add(runConversationId);
+          updateDesktopAiRun(detachedRun, {
+            pendingConfirmation: {
+              sql: event.sql,
+              connectionId: detachedRun.connectionId,
+              database: detachedRun.database,
+              schema: detachedRun.schema,
+            },
+          });
         }
-        // Feed every agent event into the generation-status state machine (Issue
-        // #6743 feature 1). `applyStatusEvent` refreshes lastEventAt, tracks the
-        // active tool / turn, and derives the phase purely from the event stream.
-        if (runIsVisible()) generationStatus.value = applyStatusEvent(generationStatus.value, event, Date.now());
-        // Terminal event (agent_end / error) hides the status line immediately —
-        // the backend promise may still be settling (CLI teardown / SSE close), so
-        // stop the ticker now instead of letting it idle through that gap. The
-        // non-terminal `response_complete` (phase=finalizing) hides the line the
-        // same way, but the listener stays alive for the real agent_end/error.
-        if (runIsVisible() && (generationStatus.value.phase === "finished" || generationStatus.value.phase === "finalizing")) {
-          stopStatusTimer();
+        if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, writeSqlConfirmationText(event.sql));
+        else replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.kind = "writeSqlConfirmation";
+      }
+      if (event.type === "production_write_blocked") {
+        if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, productionWriteBlockedText(event.sql));
+        else replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.kind = "productionWriteBlocked";
+      }
+      if (event.type === "reasoning_delta" && event.delta) {
+        if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
+        else appendAssistantReasoning(assistantIdx, event.delta);
+      }
+      if (event.type === "agent_end") {
+        // End the card's "思考过程" spinner at the terminal event rather than
+        // waiting for send()'s finally (which can lag behind CLI teardown).
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.isThinking = false;
+        if (event.input_tokens || event.output_tokens) {
+          if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
         }
-        if (event.type === "text_delta" && event.delta) {
-          if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, event.delta);
-          else appendAssistantDelta(assistantIdx, event.delta);
+      }
+      if (event.type === "context_compacted") {
+        const msg = runMessages[assistantIdx];
+        if (msg) {
+          if (!msg.agentSteps) msg.agentSteps = [];
+          const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
+          if (step) upsertAgentStep(msg.agentSteps, step);
         }
-        if (event.type === "write_sql_confirmation_required") {
-          writeConfirmationRequired = true;
-          if (detachedRun) {
-            updateDesktopAiRun(detachedRun, {
-              pendingConfirmation: {
-                sql: event.sql,
-                connectionId: detachedRun.connectionId,
-                database: detachedRun.database,
-                schema: detachedRun.schema,
-              },
-            });
-          }
-          if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, writeSqlConfirmationText(event.sql));
-          else replaceAssistantText(assistantIdx, writeSqlConfirmationText(event.sql));
-          const msg = runMessages[assistantIdx];
-          if (msg) msg.kind = "writeSqlConfirmation";
+        const compaction = { summary: event.summary, compactedMessages: event.compacted_messages };
+        if (detachedRun) detachedCompaction = compaction;
+        else pendingCompaction.value = compaction;
+      }
+      // Real-time agent step rendering
+      if (event.type === "tool_call_start" || event.type === "tool_call_end") {
+        const msg = runMessages[assistantIdx];
+        if (msg) {
+          if (!msg.agentSteps) msg.agentSteps = [];
+          const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
+          if (step) upsertAgentStep(msg.agentSteps, step);
         }
-        if (event.type === "production_write_blocked") {
-          if (detachedDeltaBuffer) detachedDeltaBuffer.replaceText(assistantIdx, productionWriteBlockedText(event.sql));
-          else replaceAssistantText(assistantIdx, productionWriteBlockedText(event.sql));
-          const msg = runMessages[assistantIdx];
-          if (msg) msg.kind = "productionWriteBlocked";
-        }
-        if (event.type === "reasoning_delta" && event.delta) {
-          if (detachedDeltaBuffer) detachedDeltaBuffer.appendReasoning(assistantIdx, event.delta);
-          else appendAssistantReasoning(assistantIdx, event.delta);
-        }
-        if (event.type === "agent_end") {
-          // End the card's "思考过程" spinner at the terminal event rather than
-          // waiting for send()'s finally (which can lag behind CLI teardown).
-          const msg = runMessages[assistantIdx];
-          if (msg) msg.isThinking = false;
-          if (event.input_tokens || event.output_tokens) {
-            if (msg) msg.tokens = { input: event.input_tokens ?? 0, output: event.output_tokens ?? 0 };
-          }
-        }
-        if (event.type === "context_compacted") {
-          const msg = runMessages[assistantIdx];
-          if (msg) {
-            if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
-            if (step) upsertAgentStep(msg.agentSteps, step);
-          }
-          const compaction = { summary: event.summary, compactedMessages: event.compacted_messages };
-          if (detachedRun) detachedCompaction = compaction;
-          else pendingCompaction.value = compaction;
-        }
-        // Real-time agent step rendering
-        if (event.type === "tool_call_start" || event.type === "tool_call_end") {
-          const msg = runMessages[assistantIdx];
-          if (msg) {
-            if (!msg.agentSteps) msg.agentSteps = [];
-            const step = agentEventToStep(event, agentEvents.length - 1, Date.now());
-            if (step) upsertAgentStep(msg.agentSteps, step);
-          }
-        }
-        if (runIsVisible()) scrollToBottom();
-      },
-      sessionId,
-      customPromptContext,
-    );
+      }
+      if (runIsVisible()) scrollToBottom();
+    };
+    if (runPluginContext) {
+      if (!generationCanContinue()) return;
+      if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
+      const request = buildPluginAiRequest(
+        activeConfig,
+        runPluginContext,
+        [...history, { role: "user", content: [text, ...csvAttachments.map((file) => `${file.name}\n${file.content}`)].join("\n\n"), images: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })) }],
+        [customPromptContext.globalInstructions || "", ...(customPromptContext.activeTemplates || []).map((template) => template.content)],
+      );
+      await streamPluginAiConversation(aiStream, sessionId, request, onEvent);
+    } else if (connection && tab) {
+      const sqlFiles = await loadReferencedSqlFiles(selectedSqlFiles);
+      // Superseded while awaiting loadReferencedSqlFiles() above — bail before
+      // paying for buildAiContext() too; it can do real backend/schema work that
+      // would be entirely wasted on an already-abandoned request.
+      if (!generationCanContinue()) return;
+      const requestDatabase = runDatabases[0] ?? tab.database;
+      const context = await buildAiContext(
+        {
+          ...tab,
+          database: requestDatabase,
+          schema: runDatabases.length > 1 || requestDatabase !== tab.database ? undefined : tab.schema,
+        },
+        connection,
+        {
+          mentionedTables,
+          sqlFiles,
+          csvFiles: csvAttachments,
+        },
+      );
+      context.selectedDatabases = runDatabases;
+      // Superseded while awaiting buildAiContext() above — must bail before ever
+      // calling runAgentStream(), not just before writing its results. Without
+      // this recheck, a clear/switch/unmount that fires during context
+      // preparation invalidates the generation but the request still gets sent to
+      // the backend and starts executing tools/SQL; the best-effort cancel RPC
+      // fired by abandonInFlightRequest() is a no-op here since no session has
+      // been registered with the backend yet (registration happens inside
+      // runAgentStream() itself).
+      if (!generationCanContinue()) return;
+      // The stream is about to reach the backend — transition the status line from
+      // `preparing` to `waiting_model` so it reads "等待模型响应" while no events have
+      // arrived yet (slow CLI first token included).
+      if (runIsVisible()) generationStatus.value = { ...generationStatus.value, phase: "waiting_model" };
+      await runAgentStream(
+        {
+          config: activeConfig,
+          action: requestedAction,
+          mode: requestedMode,
+          instruction: modelInstruction,
+          taskContractUserRequest: text,
+          context,
+          inlineImages: imageAttachments.map(({ mediaType, data }) => ({ mediaType, data })),
+          allowWriteSql,
+          confirmedWriteSql,
+          confirmedConnectionId: confirmedTargetConnId,
+          confirmedDatabase: confirmedTargetDb,
+          confirmedSchema: confirmedTargetSchema,
+        },
+        history,
+        onEvent,
+        sessionId,
+        customPromptContext,
+      );
+    }
   } catch (e: unknown) {
     // A superseded generation's error (including one caused by an
     // abandonInFlightRequest()-triggered cancellation) must not overwrite a
@@ -3589,7 +3624,7 @@ async function send() {
         if (steps.length) msg.agentSteps = steps;
       }
       // Fallback: use aiAgentPlan for backward compatibility
-      if (msg && !hasRuntimeSteps) {
+      if (msg && !hasRuntimeSteps && connection && tab) {
         const agentPlan = buildAiAgentPlan({
           mode: requestedMode,
           action: requestedAction,
@@ -3679,7 +3714,7 @@ async function send() {
           });
         }
       } else if (!detachedRun) {
-        void persistConversationSnapshot(runConversationId, runMessages, connection.name, tab.database || "", runCreatedAt);
+        void persistConversationSnapshot(runConversationId, runMessages, runSourceName, tab?.database || "", runCreatedAt);
       }
       if (runIsVisible()) scrollToBottom();
       // Wake any stop request waiting for this pipeline's real terminal state.
@@ -3692,8 +3727,8 @@ async function send() {
  *  in the background when the conversation is not the visible one. The queued
  *  input is consumed by the send pipeline once it actually starts, so a failed
  *  early bail (no config, superseded) does not silently drop it. */
-function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[]) {
-  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action });
+function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[], context = pluginContextFromMessages(messages)) {
+  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action, pluginContext: context });
   void send();
 }
 
@@ -4071,11 +4106,11 @@ async function exportConversationAs(format: AiConversationExportFormat) {
       }
     }
     const result = buildAiConversationExport({
-      connectionName: props.connection?.name,
+      connectionName: pluginContext.value?.pluginName ?? props.connection?.name,
       dateLabel: new Date().toLocaleString(),
       messages: visibleMessages.value.map((msg) => ({
         role: msg.role,
-        content: msg.content,
+        content: msg.pluginContext ? `${msg.content}\n\n${pluginContextText(msg.pluginContext)}` : msg.content,
         kind: msg.kind,
         failed: msg.failed === true || (runFailed && msg === failedTurnAssistant),
       })),
@@ -4115,6 +4150,9 @@ function clearMessages() {
   // the transcript, so returning to this conversation shows what changed.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   messages.value = [];
+  draftPluginContext.value = undefined;
+  clearContextReferences();
+  clearPendingWriteGrant();
   cancelEdit();
   clearAttachmentDraftState();
   conversationId.value = "";
@@ -4146,7 +4184,8 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
   const existingConversation = conversations.value.find((conversation) => conversation.id === targetConversationId);
   return {
     id: targetConversationId,
-    title: renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
+    title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
+    pluginContext: pluginContextFromMessages(targetMessages),
     connectionName,
     database,
     messages: targetMessages.map((m) => ({
@@ -4263,7 +4302,8 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
   const first = messages.find((m) => m.role === "user" && m.kind !== "contextSummary");
   const snapshot: AiConversation = {
     id: conversation.id,
-    title: first ? messageTitle(first).slice(0, 50) : conversation.title || "Untitled",
+    title: conversation.pluginContext?.title || (first ? messageTitle(first).slice(0, 50) : conversation.title || "Untitled"),
+    pluginContext: conversation.pluginContext,
     connectionName: conversation.connectionName,
     database: conversation.database,
     messages: messages.map((m) => ({
@@ -4286,9 +4326,9 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
 }
 
 async function persistConversation() {
-  if (!messages.value.length || !props.connection) return;
+  if (!messages.value.length || (!pluginContext.value && !props.connection)) return;
   if (!conversationId.value) conversationId.value = uuid();
-  await persistConversationSnapshot(conversationId.value, messages.value, props.connection.name, props.tab?.database || "");
+  await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? props.connection?.name ?? "", pluginContext.value ? "" : props.tab?.database || "");
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -4334,10 +4374,11 @@ async function commitRenameConversation(conv: AiConversation) {
 }
 
 function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
-  return conv.messages.map((m) => ({
+  return conv.messages.map((m, index) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
     sourceConnectionName: m.role === "assistant" ? conv.connectionName : undefined,
+    pluginContext: index === 0 ? conv.pluginContext : undefined,
     mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,
@@ -4357,12 +4398,19 @@ function selectConversation(conv: AiConversation) {
   // summaries are filtered out of rendering) so the anchor matches row indices.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   conversationId.value = conv.id;
+  draftPluginContext.value = conv.pluginContext;
+  clearContextReferences();
+  clearPendingWriteGrant();
   cancelEdit();
   clearAttachmentDraftState();
   // Drop the previous conversation's rendered Markdown instead of keeping it until the LRU evicts it.
   messageRenderer.value.clear();
   const activeRun = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conv.id) : undefined;
   messages.value = activeRun?.messages ?? chatMessagesFromConversation(conv);
+  if (pluginContext.value) {
+    assistantMode.value = "ask";
+    activeAction.value = "general";
+  }
   unreadConversations.delete(conv.id);
   isGenerating.value = activeRun?.status === "preparing" || activeRun?.status === "queued" || activeRun?.status === "running";
   currentSessionId.value = activeRun?.currentSessionId ?? "";
@@ -4584,7 +4632,7 @@ function retryConversationRun(convId: string) {
     run.cancelRequested = true;
     finishDesktopAiRun(run, "cancelled");
   }
-  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx));
+  scheduleAutoSend(convId, { text, mode: assistantMode.value, action: activeAction.value }, history.slice(0, lastUserIdx), pluginContextFromMessages(history));
 }
 
 /** Dismisses the "updates while you were away" separator and jumps to the end. */
@@ -4791,6 +4839,7 @@ onUnmounted(() => {
 });
 
 function triggerAction(action: AiAction, instruction?: string) {
+  if (pluginContext.value) startNewChat();
   // External Ask-style entry points (Fix with AI, Explain history) produce/analyze SQL text.
   // If the assistant is currently in Agent mode where those actions aren't offered, switch to
   // Ask mode so the action is valid and the menu reflects what actually runs.
@@ -4805,12 +4854,25 @@ function triggerAction(action: AiAction, instruction?: string) {
   send();
 }
 
-function setPrompt(text: string) {
+function openPluginConversation(request: AiPluginConversationRequest) {
+  initialConversationRestored = true;
+  defaultModeInitialized = true;
+  startNewChat();
+  draftPluginContext.value = request.context;
+  assistantMode.value = "ask";
+  activeAction.value = "general";
+  setPrompt(request.prompt, true);
+  if (request.send) void send();
+}
+
+function setPrompt(text: string, fromPlugin = false) {
+  if (!fromPlugin && pluginContext.value) startNewChat();
   prompt.value = text;
   nextTick(() => promptTextareaRef.value?.focus());
 }
 
 function addTableMention(target: { schema?: string; table: string }) {
+  if (pluginContext.value) startNewChat();
   const table = target.table.trim();
   if (!table) return;
   addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
@@ -4831,7 +4893,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -4870,7 +4932,7 @@ async function openExternalUrl(url: string) {
       <span class="flex flex-1 self-stretch items-center truncate text-xs font-medium" data-tauri-drag-region>
         {{ chatTitle }}
       </span>
-      <ProductionContextBadge v-if="productionContext.active" compact />
+      <ProductionContextBadge v-if="!pluginContext && productionContext.active" compact />
       <DropdownMenu>
         <DropdownMenuTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('ai.exportConversation')" :aria-label="t('ai.exportConversation')">
@@ -4998,7 +5060,7 @@ async function openExternalUrl(url: string) {
 
     <div v-if="messages.length === 0" class="flex-1 min-h-0 flex flex-col items-center justify-center text-center text-muted-foreground">
       <Bot class="h-10 w-10 mb-3 opacity-30" />
-      <p class="text-sm">{{ t("ai.welcome") }}</p>
+      <p class="text-sm">{{ t(pluginContext ? "ai.pluginWelcome" : "ai.welcome") }}</p>
     </div>
     <div v-else class="relative min-h-0 flex-1">
       <ScrollArea ref="scrollRef" class="ai-message-scroll h-full overflow-hidden">
@@ -5238,13 +5300,28 @@ async function openExternalUrl(url: string) {
                       <!-- `pending` means the closing fence is still missing, so the code is truncated: never offer to run or apply it. -->
                       <Loader2 v-if="seg.pending && isGenerating" class="h-3 w-3 animate-spin text-zinc-400" />
                       <div class="flex items-center gap-1.5">
-                        <button v-if="!seg.pending && seg.isSql && !isRedisConnection" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.tempRunSql')" @click="tempRunSql(seg.content)">
+                        <button
+                          v-if="!pluginContext && !seg.pending && seg.isSql && !isRedisConnection"
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="t('ai.tempRunSql')"
+                          @click="tempRunSql(seg.content)"
+                        >
                           <FlaskConical class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.executeSql')" @click="executeSql(seg.content)">
+                        <button
+                          v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="t('ai.executeSql')"
+                          @click="executeSql(seg.content)"
+                        >
                           <Play class="h-3.5 w-3.5" />
                         </button>
-                        <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
+                        <button
+                          v-if="!pluginContext && !seg.pending && (seg.isSql || isRedisConnection)"
+                          class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+                          :title="t('ai.apply')"
+                          @click="applySql(seg.content)"
+                        >
                           <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
                         <button
@@ -5375,7 +5452,11 @@ async function openExternalUrl(url: string) {
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
           <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema']">
-            <template v-if="connectionStore.connections.length">
+            <details v-if="pluginContext" class="min-w-0 flex-1" data-ai-plugin-context>
+              <summary class="cursor-pointer truncate">{{ pluginContext.pluginName }} · {{ pluginContext.title }}</summary>
+              <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
+            </details>
+            <template v-else-if="connectionStore.connections.length">
               <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
@@ -5445,7 +5526,7 @@ async function openExternalUrl(url: string) {
             </template>
             <span class="ai-prompt-context-spacer min-w-0 flex-1" />
             <!-- Template selector -->
-            <Popover v-model:open="showTemplateSelector">
+            <Popover v-if="!pluginContext" v-model:open="showTemplateSelector">
               <PopoverTrigger as-child>
                 <button
                   type="button"
@@ -5737,7 +5818,8 @@ async function openExternalUrl(url: string) {
               </TooltipContent>
             </Tooltip>
             <!-- Combined mode + action selector -->
-            <Popover v-model:open="modeActionOpen">
+            <span v-if="pluginContext" class="shrink-0 text-xs text-muted-foreground">{{ t("ai.modes.ask") }}</span>
+            <Popover v-else v-model:open="modeActionOpen">
               <PopoverTrigger as-child>
                 <button type="button" class="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="modeActionTriggerLabel">
                   <component :is="modeIcon" class="h-3 w-3" />

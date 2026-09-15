@@ -108,5 +108,5 @@ test("send() snapshots custom prompts before deferred AI context loading", () =>
   assert.ok(ensureLoadedAwait < snapshot, "the snapshot must be taken after templates finish loading");
   assert.ok(snapshot < sqlFileLoad, "SQL file loading must not delay the custom prompt snapshot");
   assert.ok(snapshot < aiContextLoad, "AI context loading must not delay the custom prompt snapshot");
-  assert.match(body.slice(snapshot, sqlFileLoad), /activeTemplates:\s*\[\.\.\.activeTemplates\.value\]/);
+  assert.match(body.slice(snapshot, sqlFileLoad), /activeTemplates:\s*runPluginContext \? \[\] : \[\.\.\.activeTemplates\.value\]/);
 });

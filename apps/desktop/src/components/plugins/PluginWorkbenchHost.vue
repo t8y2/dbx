@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -24,8 +24,7 @@ import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import type { AiCompletionRequest } from "@/lib/backend/tauri";
-import type { PluginAiCapabilities, PluginAiRequest } from "@/lib/plugins/pluginHostBridge";
+import { OPEN_PLUGIN_AI_CONVERSATION } from "@/lib/ai/aiPluginConversation";
 
 const props = withDefaults(
   defineProps<{
@@ -47,6 +46,7 @@ const emit = defineEmits<{
 const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
+const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
 const iframe = ref<HTMLIFrameElement>();
 const source = ref("");
 const loading = ref(true);
@@ -361,34 +361,6 @@ function currentBridgeTheme(): PluginBridgeTheme {
   };
 }
 
-async function activePluginAiConfig(configId?: string) {
-  if (!settingsStore.aiConfigs.length) await settingsStore.reloadAiConfigs();
-  const activeId = configId || settingsStore.activeModel?.configId;
-  const item = (activeId ? settingsStore.aiConfigs.find((config) => config.id === activeId) : undefined) || settingsStore.aiConfigs.find((config) => config.isDefault) || settingsStore.aiConfigs[0];
-  if (!item) throw new Error("DBX AI is not configured");
-  const model = activeId === settingsStore.activeModel?.configId ? settingsStore.activeModel?.modelId : item.model;
-  if (!model?.trim()) throw new Error("DBX AI model is not configured");
-  return { ...item, model };
-}
-
-function toAiCompletionRequest(request: PluginAiRequest, config: Awaited<ReturnType<typeof activePluginAiConfig>>): AiCompletionRequest {
-  return {
-    config,
-    systemPrompt: request.systemPrompt?.trim() || "You are a helpful assistant.",
-    messages: request.messages,
-    maxTokens: request.maxTokens,
-    taskContract: {
-      action: "plugin",
-      mode: "ask",
-      userRequest:
-        request.messages
-          .slice()
-          .reverse()
-          .find((message) => message.role === "user")?.content || "",
-    },
-  };
-}
-
 function createBridge() {
   bridge?.dispose();
   bridge = new PluginHostBridge(
@@ -401,23 +373,7 @@ function createBridge() {
       notify: api.notifyPlugin,
       sendBinary: api.sendPluginBinary,
       readAsset: api.readPluginUiAsset,
-      aiCapabilities: async (): Promise<PluginAiCapabilities> => {
-        try {
-          const config = await activePluginAiConfig();
-          return { available: true, streaming: true, provider: config.provider, model: config.model };
-        } catch {
-          return { available: false, streaming: false };
-        }
-      },
-      aiComplete: async (_pluginId, request) => {
-        const config = await activePluginAiConfig(request.configId);
-        return api.aiComplete(toAiCompletionRequest(request, config));
-      },
-      aiStream: async (_pluginId, request, streamId, onChunk) => {
-        const config = await activePluginAiConfig(request.configId);
-        await api.aiStream(streamId, toAiCompletionRequest(request, config), (chunk) => onChunk({ streamId, delta: chunk.delta, reasoningDelta: chunk.reasoning_delta, done: chunk.done, error: chunk.error }));
-      },
-      aiCancel: (_pluginId, streamId) => api.aiCancelStream(streamId),
+      openAiConversation,
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
@@ -524,7 +480,7 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ ht
     const content = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0)));
     if (resource.tagName === "SCRIPT") {
       const script = document.createElement("script");
-      for (const attribute of resource.attributes) {
+      for (const attribute of [...resource.attributes]) {
         if (attribute.name !== "src") script.setAttribute(attribute.name, attribute.value);
       }
       script.textContent = content;

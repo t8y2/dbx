@@ -758,6 +758,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         database TEXT NOT NULL DEFAULT '',
         messages_json TEXT NOT NULL DEFAULT '[]',
         queued_input TEXT,
+        plugin_context_json TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -1223,10 +1224,9 @@ fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Adds the queued-input column to `ai_conversations` for databases created
-/// by earlier iterations of the uncommitted WIP, where the table predates it.
+/// Adds conversation metadata columns to databases created before these fields.
 fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String> {
-    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT")];
+    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT"), ("plugin_context_json", "TEXT")];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
 }
@@ -2883,8 +2883,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
@@ -2892,7 +2892,7 @@ impl Storage {
                    messages_json = excluded.messages_json, \
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
                 params![
                     conv.id,
                     conv.title,
@@ -2901,7 +2901,8 @@ impl Storage {
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
-                    conv.updated_at
+                    conv.updated_at,
+                    conv.plugin_context.map(|value| value.to_string())
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -2916,7 +2917,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2934,6 +2935,7 @@ impl Storage {
                         queued_input: row.get(5)?,
                         created_at: row.get(6)?,
                         updated_at: row.get(7)?,
+                        plugin_context: row.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json)).transpose().map_err(map_from_sql_err)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -3000,8 +3002,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
@@ -3009,7 +3011,7 @@ impl Storage {
                    messages_json = excluded.messages_json,
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
                 params![
                     conv.id,
                     conv.title,
@@ -3018,7 +3020,8 @@ impl Storage {
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
-                    conv.updated_at
+                    conv.updated_at,
+                    conv.plugin_context.map(|value| value.to_string())
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -5210,8 +5213,8 @@ impl Storage {
             self.with_conn(move |conn| {
                 conn.execute(
                     "INSERT OR IGNORE INTO ai_conversations \
-                     (id, title, connection_name, database, messages_json, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (id, title, connection_name, database, messages_json, created_at, updated_at, plugin_context_json) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         conv.id,
                         conv.title,
@@ -5219,7 +5222,8 @@ impl Storage {
                         conv.database,
                         messages_json,
                         conv.created_at,
-                        conv.updated_at
+                        conv.updated_at,
+                    conv.plugin_context.map(|value| value.to_string())
                     ],
                 )
                 .map(|_| ())
@@ -5725,6 +5729,7 @@ mod tests {
 
     fn ai_conversation(id: &str, updated_at: &str) -> AiConversation {
         AiConversation {
+            plugin_context: None,
             id: id.to_string(),
             title: id.to_string(),
             connection_name: "local".to_string(),
@@ -5931,6 +5936,60 @@ mod tests {
         assert!(terminal.iter().any(|run| run.run_id == "terminal-4"), "the newest terminal run is retained");
         assert!(!runs.iter().any(|run| run.run_id == "terminal-0"), "the oldest terminal runs are pruned");
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_upgrades_legacy_schema_for_plugin_context() {
+        let path = temp_db_path("ai-plugin-legacy-schema");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+            database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+        ); INSERT INTO ai_conversations (id, title) VALUES ('legacy', 'SQL conversation');",
+        )
+        .unwrap();
+        drop(conn);
+        let storage = Storage::open(&path).await.unwrap();
+        let mut loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].title, "SQL conversation");
+        assert!(loaded[0].plugin_context.is_none());
+        loaded[0].plugin_context = Some(serde_json::json!({"data": {"snapshotId": "s1"}}));
+        storage.save_ai_conversation(&loaded[0]).await.unwrap();
+        assert_eq!(storage.load_ai_conversations().await.unwrap()[0].plugin_context, loaded[0].plugin_context);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_retains_plugin_snapshot_without_a_database() {
+        let path = temp_db_path("ai-plugin-conversation");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut conversation = ai_conversation("market-analysis", "0000");
+        conversation.database.clear();
+        let snapshot = serde_json::json!({
+            "pluginId": "market-watch", "pluginName": "Market Watch", "title": "AAPL",
+            "capturedAt": "2026-09-15T08:00:00Z", "data": { "price": 100, "currency": "USD" }
+        });
+        conversation.plugin_context = Some(snapshot.clone());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].plugin_context, Some(snapshot.clone()));
+        assert!(loaded[0].database.is_empty());
+        // Existing database conversations remain compatible with the optional field.
+        let mut legacy_json = serde_json::to_value(&conversation).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("pluginContext");
+        let legacy: AiConversation = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.plugin_context.is_none());
+        // A first turn recovered from the desktop FIFO has no sent messages yet.
+        conversation.messages.clear();
+        let mut run = ai_run("queued-plugin", &conversation.id, AiRunStatus::PendingRecoverable, "0001");
+        run.pending_input = Some("analyse this snapshot".to_string());
+        storage.save_ai_run_state(&conversation, &run).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert!(loaded[0].messages.is_empty());
+        assert_eq!(loaded[0].plugin_context, Some(snapshot));
         let _ = std::fs::remove_file(path);
     }
 

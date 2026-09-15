@@ -170,6 +170,7 @@ import { useBackgroundImage } from "@/composables/useBackgroundImage";
 import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
 import { resolveWindowContext } from "@/lib/app/windowContext";
 import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
+import { OPEN_PLUGIN_AI_CONVERSATION, type AiPluginConversationRequest } from "@/lib/ai/aiPluginConversation";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
@@ -189,6 +190,7 @@ const QueryEditorDdlViewDialog = defineAsyncComponent(() => import("@/components
 const QueryEditorObjectSourceDialog = defineAsyncComponent(() => import("@/components/objects/ObjectSourceDialog.vue"));
 
 type AiAssistantHandle = {
+  openPluginConversation: (request: AiPluginConversationRequest) => void;
   triggerAction: (action: AiAction, instruction?: string) => void;
   setPrompt: (text: string) => void;
   addTableMention: (target: { schema?: string; table: string }) => void;
@@ -391,6 +393,15 @@ void loadUiTuning();
 const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, tabBarWidth, tabBarCollapsed, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize, startLeftTabBarResize, startRightTabBarResize, setTabBarCollapsed } =
   usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
+provide(OPEN_PLUGIN_AI_CONVERSATION, (request) => {
+  openAiPanel();
+  return new Promise<void>((resolve) => {
+    invokeWhenAiReady((handle) => {
+      handle.openPluginConversation(request);
+      resolve();
+    });
+  });
+});
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
 const contentAreaRef = ref<InstanceType<typeof SqlEditorWorkspace> | null>(null);

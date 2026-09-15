@@ -1160,6 +1160,7 @@ export interface AiChatMessage {
 }
 
 export interface AiConversation {
+  pluginContext?: import("@/lib/ai/aiPluginConversation").AiPluginContext;
   id: string;
   title: string;
   connectionName: string;

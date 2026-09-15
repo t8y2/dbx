@@ -101,7 +101,6 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
     "host.workbench",
     "host.events",
     "host.filesystem",
-    "host.ai",
     "host.binary",
     "host.plans:read",
     "host.storage",
@@ -122,7 +121,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
 - `host.plans:read` 允许针对 DBX 自己的连接读取估算执行计划（见 [估算执行计划](#估算执行计划)）。它是只读权限：不授予普通 SQL 执行、写操作、DDL 或真实执行计划，且这是唯一存在的计划类权限。
 - `host.storage` 为工作台 UI 提供本插件独享的持久化键值存储（见 [持久化 UI 状态](#持久化-ui-状态)）；数据只落在插件自己的数据目录里。
-- `host.ai` 允许使用 DBX 当前 AI 配置进行对话（详见 [前端 Host API](#前端-host-api) 中的 `ai.capabilities` / `ai.complete` / `ai.stream`）。
+- `host.ai` 允许插件在 DBX 内置 AI 面板中新建带数据快照的对话，沿用宿主的模型选择、历史、追问、停止和导出功能。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
@@ -299,10 +298,8 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
 | `getPlanCapabilities(connectionId)` | 读取宿主与该连接能提供什么计划能力；需要 `host.plans:read`。 |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
-| `ai.capabilities()` | 查询 DBX 是否配置了可用的 AI 模型；需要 `host.ai`。 |
-| `ai.complete(request)` | 使用 DBX 当前 AI 配置生成一次回复。请求只包含消息、系统提示词和输出长度，API Key 不会暴露给插件；需要 `host.ai`。 |
-| `ai.stream(request)` | 流式生成回复，返回 `{ stream, metadata }`，流项包含 `delta`、`reasoningDelta`、`done`；取消流会请求宿主停止生成；需要 `host.ai`。 |
 | `capabilities` | 来自 init 消息的 `{ downloadFile, planApi, storage }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
+| `ai.openConversation({ title, prompt, context, send? })` | 在内置 AI 面板新建插件对话；`send` 默认 `false`，为 `true` 时立即分析；需要 `host.ai`。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
 | `storage` | 本插件独享的持久化键值状态；需要 `host.storage`；见下文。 |
 | `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
@@ -420,6 +417,23 @@ if (window.dbxPlugin.capabilities.storage) {
 | `delete(key)` | 删除一个键；删除不存在的键同样成功。 |
 
 键为不超过 256 字符的字符串；单个值序列化后上限 256 KiB，整库上限 1 MiB——这是 UI 状态存储，不是数据落盘通道。数据保存在插件自己的 `plugin-data/<id>` 目录里，按插件隔离，版本升级和卸载后都保留。大批量数据、缓存以及 Sidecar 产生的任何文件请放进 Sidecar 的数据目录（见 [原生 Sidecar 和 RPC](#原生-sidecar-和-rpc)）。Web 宿主上同一 API 由浏览器本地存储支撑，两端代码完全一致。
+
+### 在 DBX AI 中分析插件数据
+
+在 manifest 中声明 `"permissions": ["host.ai"]`，然后从插件的分析按钮调用：
+
+```js
+await dbxPlugin.ai.openConversation({
+  title: "Watchlist analysis",
+  prompt: "Compare the supplied quotes and explain risks and missing data.",
+  context: { snapshotId: "watchlist-1", quotes, source, dataTimestamp },
+  send: true,
+});
+```
+
+`title` 最多 200 字符，`prompt` 最多 32000 字符，`context` 必须是纯 JSON 对象，整个请求上限 2 MiB。宿主绑定真实插件身份，并复制快照；后续行情刷新或切换数据库不会替换该会话的数据。快照作为会话数据保存，在历史恢复及导出时保留。插件应提供来源、数据时间、延迟及缺失字段，AI 不会自动拉取行情。
+
+该接口只打开内置对话，不向插件返回模型回复或 AI 配置。首版使用纯文本 Ask 通道，支持 DBX 的 HTTP 模型供应商和 Ollama；不提供数据库工具或 CLI Agent。选择未配置的模型时会保留待发送问题，用户可在 DBX 面板中选择模型后继续。
 
 ### 主题、布局和静态资源
 

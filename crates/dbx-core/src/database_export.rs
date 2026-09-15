@@ -3797,7 +3797,7 @@ fn filter_export_table_infos(
 }
 
 fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseType) -> String {
-    let cascade = (db_type == &DatabaseType::Postgres).then_some(" CASCADE").unwrap_or_default();
+    let cascade = if db_type == &DatabaseType::Postgres { " CASCADE" } else { "" };
     format!("DROP TABLE IF EXISTS {}{};", crate::transfer::qualified_table(table_name, schema, db_type, None), cascade)
 }
 

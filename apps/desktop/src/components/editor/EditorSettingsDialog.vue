@@ -5222,6 +5222,7 @@ onUnmounted(() => {
             <div ref="settingsSearchInputContainerRef" class="relative">
               <Search class="pointer-events-none absolute top-1/2 left-4 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
+                data-settings-global-search
                 v-model="settingsSearchQuery"
                 type="text"
                 autocomplete="off"

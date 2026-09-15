@@ -173,6 +173,7 @@ type AiAssistantHandle = {
   setPrompt: (text: string) => void;
   addTableMention: (target: { schema?: string; table: string }) => void;
   clearContextReferences: () => void;
+  focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */
   selectConversationById: (conversationId: string) => void;
 };
@@ -3147,6 +3148,32 @@ function handleNativeSelectAll(e: KeyboardEvent) {
   if (shouldBlockAppNativeSelectAll(e)) e.preventDefault();
 }
 
+function focusSearchInput(selector: string): boolean {
+  const input = Array.from(document.querySelectorAll<HTMLInputElement>(selector)).find((candidate) => candidate.getClientRects().length > 0);
+  if (!input) return false;
+  input.focus();
+  input.select();
+  return true;
+}
+
+function focusSearchInAuxiliarySurface(target: Element | null): boolean {
+  if (showConnectionDialog.value) return focusSearchInput("[data-connection-db-search]");
+  if (showAiPanel.value && target?.closest("[data-ai-assistant-root], [data-ai-conversation-search]")) {
+    if (aiAssistantRef.value) return aiAssistantRef.value.focusSearch();
+    invokeWhenAiReady((handle) => handle.focusSearch());
+    return true;
+  }
+  if (showHistory.value && target?.closest("[data-history-panel], [data-history-search]")) return focusSearchInput("[data-history-search]");
+  if (showSqlLibraryPanel.value && target?.closest("[data-sql-library-panel], [data-sql-library-search]")) return focusSearchInput("[data-sql-library-search]");
+  if (showSettingsPage.value) return focusSearchInput("[data-settings-global-search]");
+  if (showDriverStore.value) {
+    const selector = driverStoreActiveTab.value === "jdbc" ? "[data-driver-store-jdbc-search]" : "[data-driver-store-agent-search]";
+    return focusSearchInput(selector);
+  }
+  if (showPluginCenter.value) return focusSearchInput("[data-plugin-marketplace-search]");
+  return false;
+}
+
 function setPluginWorkbenchTabRef(tabId: string, element: unknown) {
   if (element && typeof element === "object" && "refresh" in element && typeof element.refresh === "function") {
     pluginWorkbenchTabRefs.set(tabId, element as PluginWorkbenchTabHandle);
@@ -3223,7 +3250,7 @@ async function handleKeydown(e: KeyboardEvent) {
     // Otherwise Ctrl+F from empty space in the sidebar incorrectly opens the
     // search belonging to the active table/query tab.
     const target = e.target instanceof Element ? e.target : null;
-    const focused = target?.closest("[data-app-sidebar]") ? appSidebarRef.value?.focusSearch(target) : contentAreaRef.value?.focusSearch(target) || appSidebarRef.value?.focusSearch(target);
+    const focused = target?.closest("[data-app-sidebar]") ? appSidebarRef.value?.focusSearch(target) : focusSearchInAuxiliarySurface(target) || contentAreaRef.value?.focusSearch(target) || appSidebarRef.value?.focusSearch(target);
     if (focused) {
       e.preventDefault();
       e.stopPropagation();
@@ -3954,7 +3981,9 @@ onUnmounted(() => {
           >
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+              <div data-history-panel class="h-full min-h-0">
+                <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
+              </div>
             </div>
           </div>
 
@@ -3966,7 +3995,9 @@ onUnmounted(() => {
           >
             <div class="panel-resize-handle panel-resize-handle--left" @pointerdown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
-              <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
+              <div data-sql-library-panel class="h-full min-h-0">
+                <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
+              </div>
             </div>
           </div>
 

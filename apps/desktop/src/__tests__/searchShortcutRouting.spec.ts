@@ -8,6 +8,13 @@ const treeItemSource = readFileSync(new URL("../components/sidebar/TreeItem.vue"
 const contentAreaSource = readFileSync(new URL("../components/layout/ContentArea.vue", import.meta.url), "utf8");
 const dataGridSource = readFileSync(new URL("../components/grid/DataGrid.vue", import.meta.url), "utf8");
 const objectBrowserSource = readFileSync(new URL("../components/objects/ObjectBrowser.vue", import.meta.url), "utf8");
+const aiAssistantSource = readFileSync(new URL("../components/editor/AiAssistant.vue", import.meta.url), "utf8");
+const settingsSource = readFileSync(new URL("../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
+const sqlLibrarySource = readFileSync(new URL("../components/layout/SqlLibraryPanel.vue", import.meta.url), "utf8");
+const historySource = readFileSync(new URL("../components/editor/QueryHistory.vue", import.meta.url), "utf8");
+const driverStoreSource = readFileSync(new URL("../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
+const pluginCenterSource = readFileSync(new URL("../components/plugins/PluginContributionsPanel.vue", import.meta.url), "utf8");
+const connectionDialogSource = readFileSync(new URL("../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 
 describe("search shortcut focus routing", () => {
   it("prioritizes the sidebar when Ctrl+F originates in the navigation area", () => {
@@ -26,5 +33,18 @@ describe("search shortcut focus routing", () => {
     expect(dataGridSource).toMatch(/function focusSearch\(target: Element \| null = null\)[\s\S]*data-table-info-drawer[\s\S]*data-table-info-search/);
     expect(dataGridSource).toMatch(/focusSearch\(event\.target instanceof Element \? event\.target : document\.activeElement instanceof Element \? document\.activeElement : null\);/);
     expect(objectBrowserSource).toMatch(/function focusSearch\(target: Element \| null = null\)[\s\S]*data-object-table-info-panel[\s\S]*data-table-info-search/);
+  });
+
+  it("routes auxiliary page and panel searches before the query surface", () => {
+    expect(appSource).toMatch(/function focusSearchInAuxiliarySurface\(target: Element \| null\)[\s\S]*data-connection-db-search[\s\S]*data-settings-global-search[\s\S]*data-driver-store-agent-search[\s\S]*data-plugin-marketplace-search[\s\S]*data-history-panel[\s\S]*data-sql-library-panel/);
+    expect(appSource).toContain("aiAssistantRef.value.focusSearch()");
+    expect(aiAssistantSource).toMatch(/function focusSearch\(\): boolean[\s\S]*setConversationListOpen\(true\)/);
+    expect(aiAssistantSource).toContain("data-ai-conversation-search");
+    expect(settingsSource).toContain("data-settings-global-search");
+    expect(sqlLibrarySource).toContain("data-sql-library-search");
+    expect(historySource).toContain("data-history-search");
+    expect(driverStoreSource).toContain("data-driver-store-agent-search");
+    expect(pluginCenterSource).toContain("data-plugin-marketplace-search");
+    expect(connectionDialogSource).toContain("data-connection-db-search");
   });
 });

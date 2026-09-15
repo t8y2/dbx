@@ -4484,7 +4484,12 @@ function clearContextReferences() {
   mentionError.value = "";
 }
 
-defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById });
+function focusSearch(): boolean {
+  void setConversationListOpen(true);
+  return true;
+}
+
+defineExpose({ triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -4555,6 +4560,7 @@ async function openExternalUrl(url: string) {
             <Search class="pointer-events-none absolute left-3 h-3 w-3 text-muted-foreground" />
             <input
               ref="conversationSearchInput"
+              data-ai-conversation-search
               v-model="conversationSearchQuery"
               type="search"
               :aria-label="t('history.conversationSearch')"

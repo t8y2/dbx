@@ -574,7 +574,7 @@ onBeforeUnmount(() => {
           <div class="flex w-full flex-col gap-2 rounded-xl border bg-card/70 p-3 sm:flex-row sm:items-center">
             <div class="relative">
               <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
-              <Input v-model="marketplaceQuery" class="h-8 min-w-0 pl-8 text-xs sm:w-[min(100%,28rem)]" :placeholder="t('pluginPlatform.searchMarketplace')" />
+              <Input data-plugin-marketplace-search v-model="marketplaceQuery" class="h-8 min-w-0 pl-8 text-xs sm:w-[min(100%,28rem)]" :placeholder="t('pluginPlatform.searchMarketplace')" />
             </div>
             <div class="flex min-w-0 items-center gap-2 sm:ml-auto">
               <Select v-model="marketplaceRepositoryId">

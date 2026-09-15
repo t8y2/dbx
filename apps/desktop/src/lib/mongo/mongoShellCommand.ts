@@ -40,6 +40,7 @@ const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   findOne: { expects: "an optional filter, an optional projection, and optional options", roles: ["filter", "projection", "options"] },
   count: { expects: "an optional filter", roles: ["filter"] },
   countDocuments: { expects: "an optional filter", roles: ["filter"] },
+  estimatedDocumentCount: { expects: "no arguments", roles: [] },
   distinct: { expects: "a field name and an optional filter", roles: ["field", "filter"] },
   insert: { expects: "one document or an array of documents", roles: ["document"] },
   insertOne: { expects: "one document", roles: ["document"] },
@@ -69,6 +70,7 @@ const SUPPORTED_COLLECTION_METHODS = [
   "aggregate",
   "count",
   "countDocuments",
+  "estimatedDocumentCount",
   "distinct",
   "insertOne",
   "insertMany",
@@ -90,8 +92,6 @@ const SUPPORTED_COLLECTION_METHODS = [
 /** Database-level methods with a supported equivalent worth pointing at. */
 const DATABASE_METHOD_HINTS: Record<string, string> = {
   getSiblingDB: "switch databases with `use <database>` and then run the command against db.<collection>",
-  stats: "use db.runCommand({ dbStats: 1 })",
-  serverStatus: "use db.runCommand({ serverStatus: 1 })",
   adminCommand: "use db.runCommand({ ... })",
   getCollectionNames: "collections are listed in the sidebar",
   createCollection: 'collections are created on first insert, or use db.runCommand({ create: "name" })',
@@ -99,11 +99,13 @@ const DATABASE_METHOD_HINTS: Record<string, string> = {
 
 const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   version: { expects: "no arguments", roles: [] },
+  stats: { expects: "no arguments", roles: [] },
+  serverStatus: { expects: "no arguments", roles: [] },
   createUser: { expects: "a user document and optional write concern", roles: ["user", "writeConcern"] },
   runCommand: { expects: "one command document", roles: ["command"] },
 };
 
-const SUPPORTED_DATABASE_METHODS = ["version", "createUser", "runCommand", "getCollection"];
+const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createUser", "runCommand", "getCollection"];
 
 const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
 
@@ -524,7 +526,23 @@ export function applyMongoFindSort(input: string, column: string, direction: "as
 
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseFindCountCommand(source);
+  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseEstimatedDocumentCountCommand(source) ?? parseFindCountCommand(source);
+}
+
+/**
+ * estimatedDocumentCount() takes no filter and is metadata-backed, which is exactly
+ * the legacy count() fast path the driver already uses for a filterless count.
+ */
+function parseEstimatedDocumentCountCommand(source: string): MongoCountDocumentsCommand | null {
+  const target = parseCollectionMethodTarget(source, "estimatedDocumentCount");
+  if (!target) return null;
+
+  const openIndex = source.indexOf("(", target.methodCallIndex);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  if (source.slice(openIndex + 1, closeIndex).trim()) return null;
+
+  return { collection: target.collection, filter: "{}", mode: "legacy" };
 }
 
 function parseCollectionCountCommand(source: string, method: "countDocuments" | "count"): MongoCountDocumentsCommand | null {
@@ -674,8 +692,16 @@ export function parseMongoCreateUserCommand(input: string): MongoCreateUserComma
   };
 }
 
+/** The shell's shorthand for the matching runCommand, so they share its execution path. */
+const DATABASE_STATUS_COMMANDS: Record<string, string> = { stats: "dbStats", serverStatus: "serverStatus" };
+
 export function parseMongoRunCommand(input: string): MongoRunCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
+  for (const [method, command] of Object.entries(DATABASE_STATUS_COMMANDS)) {
+    if (new RegExp(`^db\\s*\\.\\s*${method}\\s*\\(\\s*\\)$`, "i").test(source)) {
+      return { commandJson: JSON.stringify({ [command]: 1 }) };
+    }
+  }
   const match = /^db\s*\.\s*runCommand\s*\(/i.exec(source);
   if (!match) return null;
   const openIndex = source.indexOf("(", match.index);

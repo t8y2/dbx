@@ -371,6 +371,16 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
     }
+    // `db.stats()` and `db.serverStatus()` are the shell's shorthand for the
+    // matching runCommand, so they execute through the same supported path.
+    for (method, command) in [("stats", "dbStats"), ("serverStatus", "serverStatus")] {
+        if let Some((args, tail)) = database_method_call(source, method) {
+            if !tail.is_empty() || !args.iter().all(|arg| arg.trim().is_empty()) {
+                return Err(format!("MongoDB db.{method}() takes no arguments."));
+            }
+            return Ok(MongoCommand::RunCommand { command_json: format!(r#"{{"{command}":1}}"#) });
+        }
+    }
     if let Some((args, tail)) = database_method_call(source, "runCommand") {
         if !tail.is_empty() || args.len() != 1 {
             return Err("MongoDB runCommand() requires exactly one command document.".to_string());
@@ -488,6 +498,18 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             filter: normalized_json(&args[0])?,
             options: optional_json_argument(args.get(1))?,
         });
+    }
+
+    // estimatedDocumentCount() takes no filter and is metadata-backed, which is
+    // exactly the legacy count() fast path the driver already uses.
+    if let Some((args, tail)) = method_call(source, prefix_end, "estimatedDocumentCount") {
+        if !args.iter().all(|arg| arg.trim().is_empty()) {
+            return Err("MongoDB estimatedDocumentCount() takes no filter.".to_string());
+        }
+        if !tail.is_empty() {
+            return Err("MongoDB estimatedDocumentCount() does not support chained methods.".to_string());
+        }
+        return Ok(MongoCommand::Count { collection, filter: "{}".to_string(), accurate: false });
     }
 
     for (method, accurate) in [("countDocuments", true), ("count", false)] {
@@ -1803,6 +1825,44 @@ mod tests {
             assert!(error.contains("aggregate() chain"), "{source} => {error}");
         }
         assert!(parse("db.orders.find({}).toArray(1)").unwrap_err().contains("find() chain"));
+    }
+
+    #[test]
+    fn parses_estimated_document_count_as_a_metadata_backed_count() {
+        // The driver already takes the metadata fast path for a filterless legacy
+        // count(), which is exactly what estimatedDocumentCount() asks for.
+        let expected =
+            MongoCommand::Count { collection: "orders".to_string(), filter: "{}".to_string(), accurate: false };
+        for source in [
+            "db.orders.estimatedDocumentCount()",
+            r#"db["orders"].estimatedDocumentCount()"#,
+            "db.getCollection('orders').estimatedDocumentCount();",
+        ] {
+            assert_eq!(parse(source).unwrap(), expected, "{source}");
+        }
+        assert!(!parse("db.orders.estimatedDocumentCount()").unwrap().is_mutating());
+
+        assert!(parse("db.orders.estimatedDocumentCount({a: 1})").unwrap_err().contains("no filter"));
+        assert!(parse("db.orders.estimatedDocumentCount().limit(5)").unwrap_err().contains("chained"));
+    }
+
+    #[test]
+    fn parses_db_stats_and_server_status_as_run_commands() {
+        assert_eq!(
+            parse("db.stats()").unwrap(),
+            MongoCommand::RunCommand { command_json: r#"{"dbStats":1}"#.to_string() }
+        );
+        assert_eq!(
+            parse("db . serverStatus ( ) ;").unwrap(),
+            MongoCommand::RunCommand { command_json: r#"{"serverStatus":1}"#.to_string() }
+        );
+
+        for source in ["db.stats(1)", "db.serverStatus({})"] {
+            assert!(parse(source).unwrap_err().contains("takes no arguments"), "{source}");
+        }
+
+        // db.collection.stats() still parses as collection stats, not a run command.
+        assert!(matches!(parse("db.orders.stats()").unwrap(), MongoCommand::CollectionStats { .. }));
     }
 
     #[test]

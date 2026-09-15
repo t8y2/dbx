@@ -1161,6 +1161,35 @@ test("parseMongoAggregateCommand rejects non-array pipelines and invalid options
   assert.equal(parseMongoAggregateCommand("db.products.aggregate([], {}, true)"), null);
 });
 
+test("parseMongoCountDocumentsCommand reads estimatedDocumentCount as a metadata-backed count", () => {
+  // The driver already takes the metadata fast path for a filterless legacy count().
+  const expected = { collection: "orders", filter: "{}", mode: "legacy" };
+  for (const source of ["db.orders.estimatedDocumentCount()", 'db["orders"].estimatedDocumentCount()', "db.getCollection('orders').estimatedDocumentCount();"]) {
+    assert.deepEqual(parseMongoCountDocumentsCommand(source), expected, source);
+  }
+
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.estimatedDocumentCount({a: 1})"), null);
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.estimatedDocumentCount().limit(5)"), null);
+  // count() and countDocuments() keep their own modes.
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.countDocuments({})")?.mode, "accurate");
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.count()")?.mode, "legacy");
+});
+
+test("parseMongoRunCommand reads db.stats() and db.serverStatus() as run commands", () => {
+  assert.deepEqual(parseMongoRunCommand("db.stats()"), { commandJson: '{"dbStats":1}' });
+  assert.deepEqual(parseMongoRunCommand("db . serverStatus ( ) ;"), { commandJson: '{"serverStatus":1}' });
+  assert.deepEqual(parseMongoRunCommand("DB.STATS()"), { commandJson: '{"dbStats":1}' });
+
+  for (const source of ["db.stats(1)", "db.serverStatus({})"]) {
+    assert.equal(parseMongoRunCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), /takes no arguments|expects no arguments/, source);
+  }
+
+  // db.collection.stats() is still collection stats, not a run command.
+  assert.equal(parseMongoRunCommand("db.orders.stats()"), null);
+  assert.equal(parseMongoCommand("db.orders.stats()")?.command.kind, "collectionStats");
+});
+
 test("describeMongoCommandParseFailure names an unsupported value constructor and where it is", () => {
   const message = describeMongoCommandParseFailure('db.reports.updateOne({a: 1}, {$set: {t: Foo("x")}}, {upsert: true})');
   assert.match(message, /Unsupported value Foo\(\.\.\.\) in the update argument of updateOne\(\)/);
@@ -1187,7 +1216,7 @@ test("describeMongoCommandParseFailure names unsupported methods and points at a
   assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
 
-  assert.match(describeMongoCommandParseFailure("db.stats()"), /db\.stats\(\) is not supported; use db\.runCommand\(\{ dbStats: 1 \}\)/);
+  assert.match(describeMongoCommandParseFailure('db.createCollection("c")'), /db\.createCollection\(\) is not supported; collections are created on first insert/);
   assert.match(describeMongoCommandParseFailure('db.getSiblingDB("other").c.find({})'), /use <database>/);
   assert.match(describeMongoCommandParseFailure("db.adminCommand({ping: 1})"), /use db\.runCommand/);
   assert.match(describeMongoCommandParseFailure("show collections"), /listed in the sidebar/);

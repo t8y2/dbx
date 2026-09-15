@@ -680,6 +680,17 @@ pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
         .is_some_and(|profile| profile.eq_ignore_ascii_case(db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE))
 }
 
+fn metadata_pool_database<'a>(config: Option<&ConnectionConfig>, database: Option<&'a str>) -> Option<&'a str> {
+    if config.is_some_and(sqlserver_uses_legacy_driver) {
+        // The legacy SQL Server Agent switches catalogs on the borrowed JDBC connection for
+        // each metadata request. Reuse the connection-level pool so expanding a database does
+        // not create another physical login session on SQL Server 2000.
+        None
+    } else {
+        database
+    }
+}
+
 pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
     // This mapper handles both AgentManager launch strings and Agent call errors, so context
     // must remain before any structured-error compatibility marker.
@@ -1618,9 +1629,14 @@ impl AppState {
         database: Option<&str>,
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
+        let config = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).cloned()
+        };
+        let pool_database = metadata_pool_database(config.as_ref(), database);
         self.get_or_create_pool_for_session_inner(
             connection_id,
-            database,
+            pool_database,
             None,
             client_session_id,
             AgentSessionRole::Metadata,
@@ -3012,7 +3028,12 @@ impl AppState {
         };
         let db_type = config.as_ref().map(|config| config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
-        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, database, catalog, true);
+        let pool_database = if session_role == AgentSessionRole::Metadata {
+            metadata_pool_database(config.as_ref(), database)
+        } else {
+            database
+        };
+        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, pool_database, catalog, true);
         let pool_key = pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, session_role);
         if self.uses_forwarded_transport(connection_id).await {
             self.remove_connection_pools(connection_id).await;
@@ -3032,7 +3053,7 @@ impl AppState {
         }
         self.get_or_create_pool_for_session_inner(
             connection_id,
-            database,
+            pool_database,
             catalog,
             client_session_id,
             session_role,
@@ -3063,8 +3084,13 @@ impl AppState {
         database: Option<&str>,
         client_session_id: &str,
     ) -> Result<bool, String> {
+        let config = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).cloned()
+        };
+        let pool_database = metadata_pool_database(config.as_ref(), database);
         let Some((pool_key, pool)) = self
-            .take_client_session_pool(connection_id, database, client_session_id, AgentSessionRole::Metadata)
+            .take_client_session_pool(connection_id, pool_database, client_session_id, AgentSessionRole::Metadata)
             .await?
         else {
             return Ok(false);
@@ -3100,7 +3126,12 @@ impl AppState {
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_database = if session_role == AgentSessionRole::Metadata {
+            metadata_pool_database(config.as_ref(), database)
+        } else {
+            database
+        };
+        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key.clone(), Some(client_session_id), session_role);
         if pool_key == base_pool_key {
@@ -3139,7 +3170,8 @@ impl AppState {
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_database = metadata_pool_database(config.as_ref(), database);
+        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
         self.detach_pool_by_key(&pool_key, true).await
@@ -3158,7 +3190,8 @@ impl AppState {
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_database = metadata_pool_database(config.as_ref(), database);
+        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
         if let Some(session_id) = agent_session_id {
@@ -4728,13 +4761,13 @@ mod tests {
         agent_connect_timeout, connection_remote_endpoint, connection_url_for_endpoint, database_connection_config,
         database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
         gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, metadata_connection_config,
-        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_query_timeout_sql,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint,
-        redis_sentinel_transport_id, redis_sentinel_transport_prefix, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, task_client_session_id,
-        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
-        validate_h2_database_path, AppState, MysqlMode, PoolKind, GAUSSDB_M_JDBC_DRIVER_CLASS,
-        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries,
+        oceanbase_mysql_query_timeout_sql, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
+        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
+        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
+        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -4977,6 +5010,16 @@ mod tests {
         assert_eq!(legacy.driver_profile.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE));
         assert_eq!(legacy.driver_label.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_LABEL));
         assert!(sqlserver_uses_legacy_driver(&legacy));
+    }
+
+    #[test]
+    fn legacy_sqlserver_metadata_reuses_connection_pool_across_databases() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        let legacy = sqlserver_legacy_agent_config(&config);
+
+        assert_eq!(metadata_pool_database(Some(&legacy), Some("app")), None);
+        assert_eq!(metadata_pool_database(Some(&config), Some("app")), Some("app"));
     }
 
     #[test]

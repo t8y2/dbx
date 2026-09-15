@@ -1529,7 +1529,14 @@ fn postgres_create_table_relation(sql: &str) -> Option<(Option<String>, String)>
     if table.temporary {
         return None;
     }
-    let mut parts = table.name.0.iter().filter_map(|part| part.as_ident().map(|ident| ident.value.clone()));
+    // PostgreSQL stores unquoted identifiers lower-cased, so the existence
+    // probe must compare the folded spelling; quoted names keep their case.
+    let mut parts = table.name.0.iter().filter_map(|part| {
+        part.as_ident().map(|ident| match ident.quote_style {
+            Some(_) => ident.value.clone(),
+            None => ident.value.to_lowercase(),
+        })
+    });
     let table_name = parts.next_back()?;
     Some((parts.next_back(), table_name))
 }
@@ -2891,7 +2898,9 @@ async fn recover_postgres_create_table_after_connection_error(
     db_type: Option<DatabaseType>,
     initial_error: &QueryExecutionError,
 ) -> Option<Result<db::QueryResult, QueryExecutionError>> {
-    if !should_verify_postgres_create_table_after_connection_error(db_type, sql, &initial_error.to_string()) {
+    if is_canceled(&cancel_token)
+        || !should_verify_postgres_create_table_after_connection_error(db_type, sql, &initial_error.to_string())
+    {
         return None;
     }
 
@@ -9767,6 +9776,22 @@ for line in sys.stdin:
         );
         assert_eq!(postgres_create_table_relation("CREATE TEMP TABLE events (id bigint)"), None);
         assert_eq!(postgres_create_table_relation("ALTER TABLE events ADD COLUMN note text"), None);
+    }
+
+    #[test]
+    fn postgres_create_table_recovery_folds_unquoted_identifiers() {
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE MyTable (id bigint)"),
+            Some((None, "mytable".to_string()))
+        );
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE Core.Orders (id bigint)"),
+            Some((Some("core".to_string()), "orders".to_string()))
+        );
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE \"Core\".\"Orders\" (id bigint)"),
+            Some((Some("Core".to_string()), "Orders".to_string()))
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   deleteSchedule: vi.fn(),
   deleteRun: vi.fn(),
   deleteRuns: vi.fn(),
+  renameRun: vi.fn(),
   runSchedule: vi.fn(),
   runOneShot: vi.fn(),
   cancelRun: vi.fn(),
@@ -39,6 +40,7 @@ vi.mock("@/stores/connectionStore", () => ({
     sqlFileSource: null,
   }),
 }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 
 vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
   useScheduledDatabaseBackups: () => ({
@@ -48,11 +50,15 @@ vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
     activeRunIds: mocks.activeRunIds,
     cancellingRunIds: mocks.cancellingRunIds,
     activeRuns: { __v_isRef: true, value: mocks.activeRuns },
+    heartbeat: { __v_isRef: true, value: null },
+    destinationRoot: { __v_isRef: true, value: null },
+    error: { __v_isRef: true, value: "" },
     saveSchedule: mocks.saveSchedule,
     setScheduleEnabled: mocks.setScheduleEnabled,
     deleteSchedule: mocks.deleteSchedule,
     deleteRun: mocks.deleteRun,
     deleteRuns: mocks.deleteRuns,
+    renameRun: mocks.renameRun,
     runSchedule: mocks.runSchedule,
     runOneShot: mocks.runOneShot,
     cancelRun: mocks.cancelRun,
@@ -78,6 +84,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
+  databaseBackupBackground: vi.fn(async () => ({ enabled: false, platform: "windows" })),
+  databaseBackupCommand: vi.fn(async () => "2026-09-13T02:00:00Z"),
   listDatabases: mocks.listDatabases,
   deleteDatabaseBackupFiles: vi.fn(),
   revealPathInFileManager: vi.fn(),
@@ -278,6 +286,7 @@ afterEach(() => {
   mocks.saveSchedule.mockClear();
   mocks.deleteRun.mockClear();
   mocks.deleteRuns.mockClear();
+  mocks.renameRun.mockReset();
   mocks.cancelRun.mockClear();
   mocks.runSchedule.mockReset();
   mocks.runSchedule.mockResolvedValue(null);
@@ -286,6 +295,37 @@ afterEach(() => {
 });
 
 describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
+  it("shows a backup display name and saves edits through the rename dialog", async () => {
+    mocks.runs.push({
+      id: "renamed-run",
+      scheduleName: "Nightly backup",
+      displayName: "Before migration",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "manual",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      files: [],
+    });
+    mocks.renameRun.mockResolvedValue(true);
+    await mountSettings();
+
+    expect(document.body.textContent).toContain("Before migration");
+    buttonWithTitle(String(i18n.global.t("databaseBackup.renameBackup"))).click();
+    await flush();
+    const input = currentDialog().querySelector<HTMLInputElement>("input")!;
+    expect(input.value).toBe("Before migration");
+    input.value = "After migration";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    saveScheduleButton().click();
+    await flush();
+
+    expect(mocks.renameRun).toHaveBeenCalledWith("renamed-run", "After migration");
+    expect(document.body.querySelector('[data-slot="dialog-content"]')).toBeNull();
+  });
+
   it("reconnects once when loading databases finds a closed connection", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
     mocks.listDatabases.mockRejectedValueOnce(new Error("MySQL connection failed: Input/output error: connection closed")).mockResolvedValueOnce([{ name: "app" }]);
@@ -616,6 +656,11 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     mocks.runOneShot.mockReturnValueOnce(pendingRun.promise);
     await mountSettings();
 
+    const progress = document.body.querySelector('[role="progressbar"]');
+    expect(progress?.getAttribute("aria-valuenow")).toBe("25");
+    expect(document.body.textContent).toContain("25%");
+    expect(buttonWithTitle(String(i18n.global.t("databaseBackup.renameBackup"))).disabled).toBe(true);
+
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
     await flush();
     buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
@@ -674,7 +719,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.databaseExportDestinationNeedsConfirmation).toHaveBeenCalledWith("/backups");
     expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/backups" }));
     expect(mocks.recordDatabaseExportDestination).toHaveBeenCalledWith("/backups");
-    expect(mocks.runSchedule).toHaveBeenCalledWith("schedule-1", "manual");
+    expect(mocks.runSchedule).toHaveBeenCalledWith("schedule-1");
   });
 
   it("does not run a legacy schedule when destination confirmation is cancelled", async () => {

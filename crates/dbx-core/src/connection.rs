@@ -5715,8 +5715,13 @@ fn pool_key_for_session_role(
 ) -> String {
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
     if session_role == AgentSessionRole::Metadata
-        && config.is_some_and(|config| database_capabilities::is_agent_type(&config.db_type))
+        && config.is_some_and(|config| {
+            database_capabilities::is_agent_type(&config.db_type) || sqlserver_uses_legacy_driver(config)
+        })
     {
+        // The legacy SQL Server Agent borrows one connection-level pool for metadata across
+        // databases and switches catalogs per request. The role suffix keeps that shared
+        // pool from colliding with workload pools on the bare connection id.
         format!("{pool_key}:role:metadata")
     } else {
         pool_key
@@ -7933,6 +7938,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_sqlserver_metadata_pool_keys_share_role_isolated_key() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        let legacy = sqlserver_legacy_agent_config(&config);
+
+        let metadata_key = |database: Option<&str>, client_session_id: Option<&str>| {
+            let pool_database = super::metadata_pool_database(Some(&legacy), database);
+            let base_pool_key = super::base_pool_key_for(Some(legacy.db_type), "conn", pool_database, false);
+            super::pool_key_for_session_role(
+                Some(&legacy),
+                base_pool_key,
+                client_session_id,
+                crate::agent_connection::AgentSessionRole::Metadata,
+            )
+        };
+
+        // Every database resolves to one shared, role-isolated metadata pool key that never
+        // collides with the bare connection-level workload pool.
+        assert_eq!(metadata_key(Some("a"), Some("task:1")), "conn:session:task_1:role:metadata");
+        assert_eq!(metadata_key(Some("b"), Some("task:1")), "conn:session:task_1:role:metadata");
+        assert_eq!(metadata_key(Some("a"), None), "conn:role:metadata");
+        assert_ne!(metadata_key(Some("a"), None), "conn");
+
+        let workload = super::pool_key_for_session_role(
+            Some(&legacy),
+            "conn".to_string(),
+            Some("task:1"),
+            crate::agent_connection::AgentSessionRole::Workload,
+        );
+        assert_eq!(workload, "conn:session:task_1");
+        assert_ne!(metadata_key(Some("a"), Some("task:1")), workload);
+
+        // Without the legacy driver profile the metadata role keeps sharing workload keys.
+        let shared = super::pool_key_for_session_role(
+            Some(&config),
+            "conn".to_string(),
+            Some("task:1"),
+            crate::agent_connection::AgentSessionRole::Metadata,
+        );
+        assert_eq!(shared, "conn:session:task_1");
+    }
+
+    #[test]
     fn redis_sentinel_transport_ids_are_connection_scoped_by_role_and_endpoint() {
         let endpoint = db::redis_driver::RedisNodeEndpoint { host: "10.0.0.8".to_string(), port: 6379 };
 
@@ -8732,6 +8780,51 @@ for line in sys.stdin:
         assert!(state.connections.read().await.contains_key(manual_txn_pool_key));
         assert!(state.pool_activity.read().await.contains_key(manual_txn_pool_key));
         assert!(!runtime.is_failed());
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_sqlserver_metadata_close_finds_role_isolated_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("master"));
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::SqlServer;
+        let legacy = sqlserver_legacy_agent_config(&config);
+        state.configs.write().await.insert(legacy.id.clone(), legacy.clone());
+
+        let metadata_pool_key = {
+            let pool_database = super::metadata_pool_database(Some(&legacy), Some("a"));
+            let base_pool_key = super::base_pool_key_for(Some(legacy.db_type), "conn", pool_database, false);
+            super::pool_key_for_session_role(
+                Some(&legacy),
+                base_pool_key,
+                Some("metadata-session"),
+                crate::agent_connection::AgentSessionRole::Metadata,
+            )
+        };
+        assert_eq!(metadata_pool_key, "conn:session:metadata-session:role:metadata");
+        let workload_pool_key = "conn".to_string();
+        {
+            let mut connections = state.connections.write().await;
+            connections.insert(metadata_pool_key.clone(), agent_pool_stub());
+            connections.insert(workload_pool_key.clone(), agent_pool_stub());
+        }
+        {
+            let mut activity = state.pool_activity.write().await;
+            activity.insert(metadata_pool_key.clone(), super::PoolActivity::now());
+            activity.insert(workload_pool_key.clone(), super::PoolActivity::now());
+        }
+
+        // Closing through any database resolves the same shared metadata pool and leaves the
+        // connection-level workload pool untouched.
+        assert!(state.close_metadata_session_pool("conn", Some("b"), "metadata-session").await.unwrap());
+
+        assert!(!state.connections.read().await.contains_key(&metadata_pool_key));
+        assert!(!state.pool_activity.read().await.contains_key(&metadata_pool_key));
+        assert!(state.connections.read().await.contains_key(&workload_pool_key));
+        assert!(state.pool_activity.read().await.contains_key(&workload_pool_key));
 
         state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);

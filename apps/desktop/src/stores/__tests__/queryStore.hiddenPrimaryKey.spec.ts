@@ -1174,15 +1174,11 @@ describe("queryStore hidden primary key editing", () => {
     // MySQL is a sticky proven-read-only dialect (#9018): the call now ends
     // with the user-facing classification SQL, but still opts out of
     // table-data preview.
-    // MySQL is a sticky proven-read-only dialect (#9018): the call ends with
-    // the user-facing classification SQL, but still opts out of table-data
-    // preview. Schema/page-size slots are intentionally unasserted (they
-    // differ between environments without affecting the contract).
-    const [txnCall] = executeInManualTransaction.mock.calls;
-    expect(txnCall?.[0]).toBe("txn-1");
-    expect(txnCall?.[1]).toBe("SELECT name, `id` AS `__DBX_PK_0` FROM users");
-    expect(txnCall?.[5]).toBe(false);
-    expect(txnCall?.at(-1)).toBe("SELECT name FROM users");
+    // MySQL is a sticky proven-read-only dialect (#9018): the call now ends
+    // with the user-facing classification SQL (9th argument), but still opts
+    // out of table-data preview. Every slot stays asserted — the spec's mocks
+    // are fixed, so database/schema/row-limit/cursor args must not drift.
+    expect(executeInManualTransaction).toHaveBeenCalledWith("txn-1", "SELECT name, `id` AS `__DBX_PK_0` FROM users", "app", undefined, 100000, false, undefined, undefined, "SELECT name FROM users");
   });
 
   it("keeps a keyless Oracle query editable when its WHERE clause reads another table", async () => {

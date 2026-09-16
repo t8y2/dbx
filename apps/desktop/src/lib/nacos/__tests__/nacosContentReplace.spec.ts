@@ -93,6 +93,19 @@ describe("applyNacosContentReplacePlan", () => {
     expect(report.failed).toBe(1);
     expect(report.items[0].message).toMatch(/verification/i);
   });
+
+  it("reports a CAS rejection as a conflict instead of a generic failure", async () => {
+    const plan = buildNacosContentReplacePlan([config()], "mysql-old", "mysql-new");
+
+    const report = await applyNacosContentReplacePlan(plan, {
+      getConfig: async () => config(),
+      publishConfig: vi.fn().mockRejectedValue(new Error("Nacos publish rejected by CAS validation")),
+    });
+
+    expect(report.conflicts).toBe(1);
+    expect(report.failed).toBe(0);
+    expect(report.items[0].status).toBe("conflict");
+  });
 });
 
 describe("rollbackNacosContentReplace", () => {

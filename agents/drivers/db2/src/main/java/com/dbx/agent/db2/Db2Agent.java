@@ -402,6 +402,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
                 String value = rs.getString(index);
                 return rs.wasNull() ? null : value;
             }
+            if (sqlType == Types.BLOB || sqlType == Types.BINARY || sqlType == Types.VARBINARY || sqlType == Types.LONGVARBINARY) {
+                byte[] value = rs.getBytes(index);
+                return rs.wasNull() ? null : JdbcExecutor.bytesToHex(value);
+            }
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();
         });

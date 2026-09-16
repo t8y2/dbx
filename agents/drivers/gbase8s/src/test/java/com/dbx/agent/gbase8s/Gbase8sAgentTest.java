@@ -189,6 +189,24 @@ class Gbase8sAgentTest {
     }
 
     @Test
+    void overrideLocaleParamsRejectsUnsafeCollate() {
+        // A server-reported collation is concatenated into the JDBC URL, so anything outside the
+        // ordinary-locale whitelist must be ignored rather than injected.
+        Assertions.assertEquals(
+            "DB_LOCALE=zh_CN.utf8",
+            Gbase8sAgent.overrideLocaleParams("DB_LOCALE=zh_CN.utf8", "en_US.819;NEWCODESET=x")
+        );
+        Assertions.assertEquals(
+            "DB_LOCALE=zh_CN.utf8",
+            Gbase8sAgent.overrideLocaleParams("DB_LOCALE=zh_CN.utf8", "bad locale")
+        );
+        Assertions.assertEquals(
+            "DB_LOCALE=zh_CN.utf8",
+            Gbase8sAgent.overrideLocaleParams("DB_LOCALE=zh_CN.utf8", "a".repeat(200))
+        );
+    }
+
+    @Test
     void rewritesLocaleToTargetDatabaseCollateSoCrossLocaleDatabaseOpens() {
         // The reported connection pins DB_LOCALE=zh_CN.utf8 for `dcss`; opening the differently
         // locale `gbase8s` database (real collate en_US.819) must rewrite the locale to en_US.819.

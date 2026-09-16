@@ -26,9 +26,17 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private static final long METADATA_CACHE_TTL_MILLIS = 10_000L;
+
+    // Whitelist for a JDBC locale value (language_territory.codeset). The value is concatenated
+    // into the connection URL, so reject anything outside ordinary identifier characters to guard
+    // against a malformed or hostile server-reported collation.
+    private static final Pattern SAFE_DATABASE_LOCALE = Pattern.compile("[A-Za-z0-9_.\\-]{1,64}");
+    // Upper bound on the sysmaster locale-probe connection so a hung probe cannot stall connect.
+    private static final int LOCALE_PROBE_LOGIN_TIMEOUT_SECS = 10;
 
     public static final JdbcAgentProfile GBASE8S_PROFILE = new JdbcAgentProfile(
         "com.gbasedbt.jdbc.Driver",
@@ -167,7 +175,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             return cached;
         }
         String collate = "";
-        try (Connection connection = super.openConnection(paramsForDatabase(params, "sysmaster"));
+        try (Connection connection = super.openConnection(withProbeLoginTimeout(paramsForDatabase(params, "sysmaster")));
              PreparedStatement stmt = connection.prepareStatement(
                  "SELECT dbs_collate FROM sysmaster:sysdbslocale WHERE LOWER(dbs_dbsname) = ?")) {
             stmt.setString(1, database.toLowerCase(Locale.ROOT));
@@ -179,8 +187,42 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         } catch (Exception ignored) {
             // Keep the configured locale when the collation catalog is unreachable.
         }
-        collateByDatabase.put(key, collate);
+        // Only cache a successful lookup. Caching an empty result would pin a transient failure —
+        // or a database that was just created and is not yet listed in sysdbslocale — to the stale
+        // fallback until disconnect, so leave failures uncached to retry on the next connect.
+        if (!collate.isEmpty()) {
+            collateByDatabase.put(key, collate);
+        }
         return collate;
+    }
+
+    /**
+     * Return a copy of {@code params} with a bounded {@code LOGIN_TIMEOUT} appended to its JDBC
+     * parameters (unless one is already configured), so the sysmaster locale probe can never hang
+     * the connect path.
+     */
+    private static ConnectParams withProbeLoginTimeout(ConnectParams params) {
+        String urlParams = params.getUrl_params() == null ? "" : params.getUrl_params();
+        if (containsIgnoreCase(urlParams, "LOGIN_TIMEOUT=")) {
+            return params;
+        }
+        String joined = urlParams.isEmpty()
+            ? "LOGIN_TIMEOUT=" + LOCALE_PROBE_LOGIN_TIMEOUT_SECS
+            : urlParams + ";LOGIN_TIMEOUT=" + LOCALE_PROBE_LOGIN_TIMEOUT_SECS;
+        ConnectParams copy = new ConnectParams(
+            params.getHost(),
+            params.getPort(),
+            params.getDatabase(),
+            params.getUsername(),
+            params.getPassword(),
+            joined,
+            params.getConnection_string(),
+            params.isMysql_compat_mode(),
+            params.getJdbc_driver_class(),
+            params.getJdbc_driver_paths()
+        );
+        copy.setGbase_server(params.getGbase_server());
+        return copy;
     }
 
     private static String currentLocaleOf(ConnectParams params) {
@@ -553,6 +595,11 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             return jdbcParams;
         }
         String value = collate.trim();
+        // The value is concatenated into the JDBC URL; only accept an ordinary locale token so a
+        // malformed or hostile server-reported collation cannot inject extra parameters.
+        if (!SAFE_DATABASE_LOCALE.matcher(value).matches()) {
+            return jdbcParams;
+        }
         List<String> segments = new ArrayList<>();
         if (jdbcParams != null && !jdbcParams.isEmpty()) {
             for (String segment : jdbcParams.split(";")) {

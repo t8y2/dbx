@@ -4551,6 +4551,8 @@ function aiSelectProvider(presetId: string) {
   if (isWeb && CLI_AI_PROVIDERS.has(provider)) return;
   if (presetId === aiEditProviderPresetId.value) return;
 
+  syncAiEditState();
+
   // Apply new provider's preset defaults to edit state
   aiEditProviderPresetId.value = presetId;
   aiEditProvider.value = provider;
@@ -4580,6 +4582,7 @@ function aiEnterListMode() {
 }
 
 function aiEnterEditMode(configId?: string) {
+  syncAiEditState();
   aiConfigListMode.value = "edit";
   aiEditConfigId.value = configId || null;
 

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { createApp, defineComponent, h, nextTick, type App } from "vue";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import NacosContentReplaceDialog from "@/components/nacos/NacosContentReplaceDialog.vue";
 
@@ -10,6 +10,22 @@ const api = vi.hoisted(() => ({
   nacosCancelConfigContentSearch: vi.fn(),
   nacosGetConfig: vi.fn(),
   nacosPublishConfig: vi.fn(),
+  loadConnections: vi.fn(),
+}));
+
+const history = vi.hoisted(() => new Map<string, unknown>());
+vi.mock("@/lib/nacos/nacosReplaceHistoryStorage", () => ({
+  saveNacosReplaceHistory: vi.fn(async (entry) => {
+    history.set(entry.id, structuredClone(entry));
+  }),
+  listNacosReplaceHistory: vi.fn(async () => [...history.values()]),
+  getNacosReplaceHistory: vi.fn(async (id) => structuredClone(history.get(id))),
+  deleteNacosReplaceHistory: vi.fn(async (id) => {
+    history.delete(id);
+  }),
+}));
+vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({
+  default: defineComponent({ props: { open: Boolean }, emits: ["confirm"], template: '<button v-if="open" data-testid="history-confirm" @click="$emit(\'confirm\')">Confirm</button>' }),
 }));
 
 vi.mock("@/lib/backend/api", () => api);
@@ -22,6 +38,11 @@ vi.mock("@/components/nacos/NacosConfigDiffDialog.vue", () => ({
 }));
 
 const mountedApps: App[] = [];
+beforeEach(() => {
+  history.clear();
+  api.loadConnections.mockResolvedValue([{ id: "nacos-main", host: "localhost", port: 8848, external_config: { serverAddr: "http://localhost:8848" } }]);
+  Object.defineProperty(navigator, "locks", { configurable: true, value: { request: async (_name: string, _options: unknown, cb: (lock: object) => unknown) => cb({}) } });
+});
 
 async function mountDialog() {
   const container = document.createElement("div");
@@ -103,6 +124,19 @@ describe("NacosContentReplaceDialog", () => {
     expect(api.nacosPublishConfig).toHaveBeenCalledWith("nacos-main", expect.objectContaining({ dataId: "application.yaml", content: "url: mysql-new:3306\nreplica: mysql-new:3306", casMd5: "app-before" }));
     expect(api.nacosPublishConfig).toHaveBeenCalledWith("nacos-main", expect.objectContaining({ dataId: "orders.yaml", content: "dsn=mysql-new:3306/orders", casMd5: "orders-before" }));
     expect(document.body.textContent).toContain("2 replaced");
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog();
+    await click("nacos-replace-history-tab");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("2 replaced"));
+    await click("nacos-replace-history-details");
+    expect(document.body.textContent).toContain("application.yaml");
+    await click("nacos-replace-history-rollback");
+    expect(api.nacosPublishConfig).toHaveBeenCalledTimes(2);
+    await click("history-confirm");
+    await vi.waitFor(() => expect(api.nacosPublishConfig).toHaveBeenCalledTimes(4));
+    expect(configs.get("public/DEFAULT_GROUP/application.yaml")?.content).toContain("mysql-old:3306");
   });
 
   it("blocks apply when the global search result is incomplete", async () => {

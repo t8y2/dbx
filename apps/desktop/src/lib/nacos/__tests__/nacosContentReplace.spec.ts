@@ -43,6 +43,38 @@ describe("buildNacosContentReplacePlan", () => {
 });
 
 describe("applyNacosContentReplacePlan", () => {
+  it("awaits durable checkpoints and stops further publishing if a checkpoint fails", async () => {
+    const plan = buildNacosContentReplacePlan([config(), config({ dataId: "other.yaml" })], "mysql-old", "mysql-new");
+    const publish = vi.fn();
+    const onBeforeItem = vi.fn().mockResolvedValue(undefined);
+    const onItemResult = vi.fn().mockRejectedValue(new Error("history write failed"));
+    let reads = 0;
+    await expect(
+      applyNacosContentReplacePlan(plan, {
+        getConfig: async () => config({ content: ++reads === 1 ? plan.items[0].beforeContent : plan.items[0].afterContent }),
+        publishConfig: publish,
+        onBeforeItem,
+        onItemResult,
+      }),
+    ).rejects.toThrow("history write failed");
+    expect(onBeforeItem).toHaveBeenCalledTimes(1);
+    expect(onItemResult).toHaveBeenCalledWith(expect.objectContaining({ status: "replaced" }));
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not publish when the pre-item checkpoint cannot be saved", async () => {
+    const publish = vi.fn();
+    await expect(
+      applyNacosContentReplacePlan(buildNacosContentReplacePlan([config()], "mysql-old", "mysql-new"), {
+        getConfig: async () => config(),
+        publishConfig: publish,
+        onBeforeItem: async () => {
+          throw new Error("storage unavailable");
+        },
+      }),
+    ).rejects.toThrow("storage unavailable");
+    expect(publish).not.toHaveBeenCalled();
+  });
   it("publishes every current item with CAS metadata and verifies the result", async () => {
     const plan = buildNacosContentReplacePlan([config(), config({ namespace: "tenant-a", dataId: "orders.yaml", content: "mysql-old", md5: "orders-before" })], "mysql-old", "mysql-new");
     const current = new Map(plan.items.map((item) => [item.key, config({ namespace: item.namespace, group: item.group, dataId: item.dataId, content: item.beforeContent, md5: item.expectedMd5 })]));

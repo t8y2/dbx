@@ -4869,7 +4869,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
 
 async fn exec_tx_pg_inner(
     pool: deadpool_postgres::Pool,
-    db_type: DatabaseType,
+    db_type: Option<DatabaseType>,
     statements: &[String],
     schema: Option<&str>,
     start: std::time::Instant,
@@ -4893,7 +4893,7 @@ async fn exec_tx_pg_inner(
     let tx_result = exec_tx_pg_statements(&mut client, statements, &budget, cancel_context).await;
 
     // GaussDB/openGauss reject PostgreSQL's RESET search_path syntax.
-    let reset_search_path_sql = if matches!(db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss) {
+    let reset_search_path_sql = if matches!(db_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss)) {
         "SET search_path TO DEFAULT"
     } else {
         "RESET search_path"

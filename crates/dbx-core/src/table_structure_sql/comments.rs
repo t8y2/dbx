@@ -126,17 +126,6 @@ pub(super) fn build_sqlserver_index_comment_sql_for_profile(
     new_comment: &str,
     driver_profile: Option<&str>,
 ) -> Vec<String> {
-    build_sqlserver_index_comment_sql_for_profile(qualified_table, schema, table_name, index_name, new_comment, None)
-}
-
-pub(super) fn build_sqlserver_index_comment_sql_for_profile(
-    qualified_table: &str,
-    schema: Option<&str>,
-    table_name: &str,
-    index_name: &str,
-    new_comment: &str,
-    driver_profile: Option<&str>,
-) -> Vec<String> {
     let schema_name = sqlserver_schema_name(schema);
     let escaped_qualified = qualified_table.replace('\'', "''");
     let escaped_schema = schema_name.replace('\'', "''");

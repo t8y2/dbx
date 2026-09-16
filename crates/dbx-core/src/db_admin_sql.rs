@@ -284,7 +284,14 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
         // them with the Informix rule (unquoted for simple identifiers) rather than the
         // default double-quote path that `DatabaseType::Gbase` would otherwise take.
         let name = quote_table_identifier(Some(DatabaseType::Informix), &options.name);
-        return Ok(format!("CREATE DATABASE {name};"));
+        let locale = clean_sql_option(options.charset.as_deref());
+        if locale.is_empty() {
+            return Ok(format!("CREATE DATABASE {name};"));
+        }
+        // Informix has no charset clause in `CREATE DATABASE`; the new database inherits the
+        // creating session's DB_LOCALE. Carry the chosen locale as a directive the GBase 8s agent
+        // honors by running the statement on a sysmaster session pinned to that DB_LOCALE.
+        return Ok(format!("-- DBX_DB_LOCALE={locale}\nCREATE DATABASE {name};"));
     }
     let name = quote_table_identifier(options.database_type, &options.name);
     let charset = clean_sql_option(options.charset.as_deref());
@@ -1435,7 +1442,7 @@ mod tests {
     #[test]
     fn builds_informix_family_create_database_without_mysql_clause() {
         // GBase 8s shares DatabaseType::Gbase with GBase 8a and is only identified by the
-        // gbase8s driver profile; it must emit a bare, unquoted CREATE DATABASE.
+        // gbase8s driver profile; with no locale chosen it emits a bare, unquoted CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
                 database_type: Some(DatabaseType::Gbase),
@@ -1443,8 +1450,8 @@ mod tests {
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
-                charset: Some("utf8mb4".to_string()),
-                collation: Some("utf8mb4_unicode_ci".to_string()),
+                charset: None,
+                collation: None,
             })
             .unwrap(),
             "CREATE DATABASE app_db;"
@@ -1462,6 +1469,25 @@ mod tests {
             })
             .unwrap(),
             "CREATE DATABASE app_db;"
+        );
+    }
+
+    #[test]
+    fn informix_family_create_database_carries_locale_directive() {
+        // A chosen charset becomes the new database's DB_LOCALE via a directive the agent honors,
+        // because Informix cannot express a codeset in CREATE DATABASE.
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Gbase),
+                driver_profile: Some("gbase8s".to_string()),
+                target: None,
+                parent: None,
+                name: "app_db".to_string(),
+                charset: Some("zh_CN.utf8".to_string()),
+                collation: None,
+            })
+            .unwrap(),
+            "-- DBX_DB_LOCALE=zh_CN.utf8\nCREATE DATABASE app_db;"
         );
     }
 

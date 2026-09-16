@@ -13,8 +13,10 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -26,6 +28,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class Gbase8sAgent extends ConfiguredJdbcAgent {
@@ -37,6 +40,17 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private static final Pattern SAFE_DATABASE_LOCALE = Pattern.compile("[A-Za-z0-9_.\\-]{1,64}");
     // Upper bound on the sysmaster locale-probe connection so a hung probe cannot stall connect.
     private static final int LOCALE_PROBE_LOGIN_TIMEOUT_SECS = 10;
+
+    /**
+     * Leading directive comment emitted by the Rust admin-SQL layer for GBase 8s / Informix
+     * "Create Database" when the user picks a character set, e.g.
+     * {@code -- DBX_DB_LOCALE=zh_CN.utf8\nCREATE DATABASE mydb;}. Informix cannot express a new
+     * database's codeset in {@code CREATE DATABASE} — it inherits the creating session's DB_LOCALE —
+     * so the chosen locale is carried out-of-band and honored here by opening a sysmaster session
+     * pinned to that DB_LOCALE.
+     */
+    private static final Pattern CREATE_DATABASE_LOCALE_DIRECTIVE = Pattern.compile(
+        "^\\s*--\\s*DBX_DB_LOCALE\\s*=\\s*(\\S+)\\s*\\r?\\n(.*)$", Pattern.DOTALL);
 
     public static final JdbcAgentProfile GBASE8S_PROFILE = new JdbcAgentProfile(
         "com.gbasedbt.jdbc.Driver",
@@ -254,11 +268,62 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        Matcher directive = sql == null ? null : CREATE_DATABASE_LOCALE_DIRECTIVE.matcher(sql);
+        if (directive != null && directive.matches()) {
+            String locale = directive.group(1).trim();
+            String statement = directive.group(2).trim();
+            if (statement.regionMatches(true, 0, "CREATE DATABASE", 0, "CREATE DATABASE".length())) {
+                runCreateDatabaseWithLocale(statement, locale);
+                clearMetadataCache();
+                return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
+            }
+        }
         QueryResult result = super.executeQuery(sql, schema, options);
         if (mayChangeMetadata(sql)) {
             clearMetadataCache();
         }
         return result;
+    }
+
+    /**
+     * Run a {@code CREATE DATABASE} statement on a sysmaster session whose {@code DB_LOCALE} is
+     * pinned to {@code locale}, so the freshly created database inherits that codeset (Informix has
+     * no charset clause in {@code CREATE DATABASE}). Falls back to the configured locale when
+     * {@code locale} is blank or unsafe.
+     */
+    private void runCreateDatabaseWithLocale(String statement, String locale) {
+        ConnectParams base = databaseListParams;
+        if (base == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        ConnectParams pinned = base;
+        if (locale != null && SAFE_DATABASE_LOCALE.matcher(locale).matches()) {
+            pinned = new ConnectParams(
+                base.getHost(),
+                base.getPort(),
+                base.getDatabase(),
+                base.getUsername(),
+                base.getPassword(),
+                overrideLocaleParams(base.getUrl_params(), locale),
+                base.getConnection_string(),
+                base.isMysql_compat_mode(),
+                base.getJdbc_driver_class(),
+                base.getJdbc_driver_paths()
+            );
+            pinned.setGbase_server(base.getGbase_server());
+        }
+        try (Connection connection = DriverManager.getConnection(
+                 buildUrl(pinned), pinned.getUsername(), pinned.getPassword());
+             Statement stmt = connection.createStatement()) {
+            stmt.execute(stripTrailingSemicolon(statement));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static String stripTrailingSemicolon(String sql) {
+        String trimmed = sql.trim();
+        return trimmed.endsWith(";") ? trimmed.substring(0, trimmed.length() - 1).trim() : trimmed;
     }
 
     @Override

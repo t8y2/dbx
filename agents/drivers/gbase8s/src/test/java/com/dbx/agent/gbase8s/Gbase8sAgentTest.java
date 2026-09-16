@@ -241,6 +241,22 @@ class Gbase8sAgentTest {
     }
 
     @Test
+    void createDatabaseLocaleDirectiveIsRoutedToLocaleSession() {
+        Gbase8sAgent agent = new Gbase8sAgent();
+        // Unconnected: the directive branch attempts the locale-pinned create and reports "Not
+        // connected". A plain (non-directive) statement would instead fall through to the normal
+        // query path, so this proves the directive is recognized and routed.
+        Assertions.assertThrows(
+            IllegalStateException.class,
+            () -> agent.executeQuery(
+                "-- DBX_DB_LOCALE=zh_CN.utf8\nCREATE DATABASE app_db;",
+                "",
+                new com.dbx.agent.ExecuteQueryOptions(10, null, 30)
+            )
+        );
+    }
+
+    @Test
     void omitsOwnerSchemasWhenTheDatabaseCannotUseThemInDml() {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();

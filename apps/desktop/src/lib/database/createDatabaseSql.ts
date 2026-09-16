@@ -18,6 +18,14 @@ export function supportsCreateDatabaseCharset(databaseType?: DatabaseType, drive
   return MYSQL_COMPATIBLE_TYPES.has(databaseType as DatabaseType) || (!!driverProfile && MYSQL_COMPATIBLE_PROFILES.has(driverProfile.toLowerCase()));
 }
 
+// GBase 8s / Informix create a database whose codeset follows the creating session's DB_LOCALE;
+// there is no charset clause in the SQL. The create dialog still offers a locale picker, and the
+// chosen value is applied by the agent opening the CREATE DATABASE session with that DB_LOCALE.
+export function supportsCreateDatabaseLocale(databaseType?: DatabaseType, driverProfile?: string | null): boolean {
+  if (databaseType === "informix") return true;
+  return databaseType === "gbase" && driverProfile === "gbase8s";
+}
+
 export function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions): Promise<string> {
   return api.buildCreateDatabaseSql(options);
 }

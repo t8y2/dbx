@@ -127,7 +127,7 @@ import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sideba
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isModRShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
-import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
+import { attachedDatabaseNameFromPath, buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, buildSqliteAttachDatabaseSql, supportsCreateDatabaseCharset, supportsCreateDatabaseLocale, uniqueAttachedDatabaseName } from "@/lib/database/createDatabaseSql";
 import { appendCreateDatabaseErrorHint } from "@/lib/database/createDatabaseErrorHints";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import {
@@ -202,7 +202,7 @@ import { savedSqlClipboardFileIds, savedSqlPasteTargetForNode } from "@/lib/save
 import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
-import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { createDatabaseCollationOptionsForCharset, DEFAULT_GBASE8S_DATABASE_LOCALE, GBASE8S_DATABASE_LOCALES, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
@@ -3499,6 +3499,11 @@ const canSetCreateDatabaseCharset = computed(() => {
   return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseCharset(config?.db_type, config?.driver_profile);
 });
 
+const canSetCreateDatabaseLocale = computed(() => {
+  const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
+  return connectionNamespaceCreationTarget(config) === "database" && supportsCreateDatabaseLocale(config?.db_type, config?.driver_profile);
+});
+
 const canDropDatabase = computed(() => {
   const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
   return activeNode.value.type === "database" && !isSqlServerLinkedNode(activeNode.value) && supportsDatabaseCreation(config?.db_type);
@@ -3805,7 +3810,15 @@ function openCreateDatabaseDialog() {
   createDatabaseCharsetOptions.value = fallbackCreateDatabaseCharset.charsets;
   createDatabaseCollationsByCharset.value = fallbackCreateDatabaseCharset.collationsByCharset;
   showCreateDatabaseDialog.value = true;
-  if (canSetCreateDatabaseCharset.value) {
+  if (canSetCreateDatabaseLocale.value) {
+    // GBase 8s / Informix: the "charset" control selects the new database's DB_LOCALE, which the
+    // agent applies by opening the CREATE DATABASE session with it. Default to UTF-8 so new
+    // databases can store Chinese; no server charset catalog query is needed.
+    createDatabaseCharsetOptions.value = [...GBASE8S_DATABASE_LOCALES];
+    createDatabaseCollationsByCharset.value = {};
+    createDatabaseCharset.value = DEFAULT_GBASE8S_DATABASE_LOCALE;
+    createDatabaseCollation.value = "";
+  } else if (canSetCreateDatabaseCharset.value) {
     void loadCreateDatabaseCharsetMetadata();
   }
   void loadCreateDatabaseUsers();
@@ -5130,7 +5143,7 @@ function databaseDialogCapabilities() {
   return {
     showCreateDatabaseDialog,
     createDatabaseName,
-    canSetCreateDatabaseCharset: canSetCreateDatabaseCharset.value,
+    canSetCreateDatabaseCharset: canSetCreateDatabaseCharset.value || canSetCreateDatabaseLocale.value,
     createDatabaseCharset,
     createDatabaseCharsetOptions,
     createDatabaseCharsetLoading,

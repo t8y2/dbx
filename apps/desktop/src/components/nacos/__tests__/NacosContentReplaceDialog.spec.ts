@@ -12,7 +12,7 @@ const api = vi.hoisted(() => ({
   nacosPublishConfig: vi.fn(),
 }));
 
-vi.mock("@/lib/backend", () => ({ api }));
+vi.mock("@/lib/backend/api", () => api);
 
 vi.mock("@/components/nacos/NacosConfigDiffDialog.vue", () => ({
   default: defineComponent({
@@ -45,6 +45,7 @@ function input(testId: string, value: string) {
 }
 
 async function click(testId: string) {
+  await nextTick();
   (document.body.querySelector(`[data-testid=${testId}]`) as HTMLButtonElement).click();
   await nextTick();
   await nextTick();
@@ -89,6 +90,7 @@ describe("NacosContentReplaceDialog", () => {
     await click("nacos-replace-preview");
 
     expect(api.nacosSearchConfigContent).toHaveBeenCalledWith("nacos-main", expect.objectContaining({ scope: "allNamespaces", query: "mysql-old:3306", maxResults: 10_000 }), expect.any(Function));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("2 configs"));
     expect(document.body.textContent).toContain("2 configs");
     expect(document.body.textContent).toContain("3 replacements");
     expect(document.body.textContent).toContain("application.yaml");
@@ -96,6 +98,7 @@ describe("NacosContentReplaceDialog", () => {
 
     await click("nacos-replace-apply");
 
+    await vi.waitFor(() => expect(api.nacosPublishConfig).toHaveBeenCalledTimes(2));
     expect(api.nacosPublishConfig).toHaveBeenCalledTimes(2);
     expect(api.nacosPublishConfig).toHaveBeenCalledWith("nacos-main", expect.objectContaining({ dataId: "application.yaml", content: "url: mysql-new:3306\nreplica: mysql-new:3306", casMd5: "app-before" }));
     expect(api.nacosPublishConfig).toHaveBeenCalledWith("nacos-main", expect.objectContaining({ dataId: "orders.yaml", content: "dsn=mysql-new:3306/orders", casMd5: "orders-before" }));
@@ -110,7 +113,32 @@ describe("NacosContentReplaceDialog", () => {
     input("nacos-replace-value", "mysql-new");
     await click("nacos-replace-preview");
 
+    await vi.waitFor(() => expect(document.body.textContent).toContain("incomplete"));
     expect(document.body.textContent).toContain("incomplete");
+    expect(document.body.querySelector("[data-testid=nacos-replace-apply]")).toBeNull();
+  });
+
+  it("invalidates the preview when a replacement condition changes", async () => {
+    api.nacosSearchConfigContent.mockResolvedValue({
+      operationId: "replace-search",
+      scanned: 1,
+      matches: [{ namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml", lineNumber: 1, snippet: "mysql-old" }],
+      failures: [],
+      truncated: false,
+      cancelled: false,
+      incomplete: false,
+    });
+    api.nacosGetConfig.mockResolvedValue({ namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml", content: "host=mysql-old", md5: "before" });
+
+    await mountDialog();
+    input("nacos-replace-search", "mysql-old");
+    input("nacos-replace-value", "mysql-new");
+    await click("nacos-replace-preview");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-apply]")).not.toBeNull());
+
+    input("nacos-replace-value", "mysql-newer");
+    await nextTick();
+
     expect(document.body.querySelector("[data-testid=nacos-replace-apply]")).toBeNull();
   });
 });

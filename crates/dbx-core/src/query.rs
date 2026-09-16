@@ -10561,7 +10561,6 @@ for line in sys.stdin:
     /// the app state so `execute_in_manual_transaction_with_options` can run
     /// end to end without a live database.
     #[cfg(unix)]
-    #[tokio::test]
     async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
         use std::io::Write;
 

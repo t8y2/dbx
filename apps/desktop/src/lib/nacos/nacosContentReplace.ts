@@ -116,7 +116,7 @@ export function buildNacosContentReplacePlan(configs: readonly NacosConfigItem[]
   return { search, replacement, totalReplacements, items };
 }
 
-function configKey(item: NacosContentReplacePlanItem): NacosConfigKey {
+function configKey(item: NacosContentReplacePlanItem): NacosConfigKey & { namespace: string } {
   return { namespace: item.namespace, group: item.group, dataId: item.dataId };
 }
 
@@ -187,8 +187,14 @@ export async function applyNacosContentReplacePlan(plan: NacosContentReplacePlan
       replaced += 1;
       resultItems.push({ ...item, status: "replaced", appliedMd5: verified.md5 });
     } catch (error) {
-      failed += 1;
-      resultItems.push({ ...item, status: "failed", message: errorMessage(error) });
+      const message = errorMessage(error);
+      if (/\bcas\b|casmd5/i.test(message)) {
+        conflicts += 1;
+        resultItems.push({ ...item, status: "conflict", message });
+      } else {
+        failed += 1;
+        resultItems.push({ ...item, status: "failed", message });
+      }
     } finally {
       options.onProgress?.(resultItems.length, plan.items.length);
     }

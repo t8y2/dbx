@@ -4,6 +4,9 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import NacosContentReplaceDialog from "@/components/nacos/NacosContentReplaceDialog.vue";
+import * as historyStorage from "@/lib/nacos/nacosReplaceHistoryStorage";
+import { buildNacosContentReplacePlan } from "@/lib/nacos/nacosContentReplace";
+import { nacosHistoryTarget, type NacosReplaceHistoryEntry } from "@/lib/nacos/nacosReplaceHistory";
 
 const api = vi.hoisted(() => ({
   nacosSearchConfigContent: vi.fn(),
@@ -44,12 +47,12 @@ beforeEach(() => {
   Object.defineProperty(navigator, "locks", { configurable: true, value: { request: async (_name: string, _options: unknown, cb: (lock: object) => unknown) => cb({}) } });
 });
 
-async function mountDialog() {
+async function mountDialog(readOnly = false) {
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
     defineComponent({
-      setup: () => () => h(NacosContentReplaceDialog, { open: true, connectionId: "nacos-main", currentNamespace: "public", readOnly: false }),
+      setup: () => () => h(NacosContentReplaceDialog, { open: true, connectionId: "nacos-main", currentNamespace: "public", readOnly }),
     }),
   );
   mountedApps.push(app);
@@ -81,6 +84,99 @@ afterEach(() => {
 });
 
 describe("NacosContentReplaceDialog", () => {
+  function historicalEntry(): NacosReplaceHistoryEntry {
+    const plan = buildNacosContentReplacePlan([{ namespace: "public", group: "test", dataId: "historical.yaml", content: "mysql-old" }], "mysql-old", "mysql-new");
+    return {
+      version: 1,
+      id: "batch",
+      connectionId: "nacos-main",
+      target: nacosHistoryTarget({ id: "nacos-main", host: "localhost", port: 8848, external_config: { serverAddr: "http://localhost:8848" } }),
+      createdAt: 1,
+      updatedAt: 1,
+      scope: { scope: "currentNamespace", namespace: "public", group: "test", dataId: "historical" },
+      state: "completed",
+      plan,
+      report: { ...plan, items: [{ ...plan.items[0], status: "replaced", appliedMd5: "after" }], replaced: 1, conflicts: 0, failed: 0, cancelled: false },
+    };
+  }
+
+  it("requires confirmation to delete only a local record without publishing configs", async () => {
+    history.set("batch", historicalEntry());
+    await mountDialog();
+    await click("nacos-replace-history-tab");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("1 replaced"));
+    (document.body.querySelector('[aria-label="Delete record"]') as HTMLButtonElement).click();
+    await nextTick();
+    expect(history.has("batch")).toBe(true);
+    await click("history-confirm");
+    await vi.waitFor(() => expect(history.has("batch")).toBe(false));
+    expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+  });
+
+  it("allows read-only history and diff inspection but blocks historical rollback", async () => {
+    history.set("batch", historicalEntry());
+    await mountDialog(true);
+    await click("nacos-replace-history-tab");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-history-details]")).not.toBeNull());
+    await click("nacos-replace-history-details");
+    expect((document.body.querySelector("[data-testid=nacos-replace-history-rollback]") as HTMLButtonElement).disabled).toBe(true);
+    (document.body.querySelector('[aria-label="View replacement diff"]') as HTMLButtonElement).click();
+    await nextTick();
+    expect(document.body.querySelector("[data-testid=nacos-replace-diff]")?.getAttribute("data-before")).toBe("mysql-old");
+    expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+  });
+
+  it("renders unfinished batches, uncertain items, pending items and individual error messages", async () => {
+    const entry = historicalEntry();
+    entry.state = "applying";
+    entry.inFlight = { key: entry.plan.items[0].key, phase: "apply" };
+    entry.plan.items.push({ ...entry.plan.items[0], key: "pending", dataId: "pending.yaml" });
+    entry.report.items[0].message = "individual verification error";
+    history.set("batch", entry);
+    await mountDialog();
+    await click("nacos-replace-history-tab");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-history-details]")).not.toBeNull());
+    await click("nacos-replace-history-details");
+    expect(document.body.textContent).toContain("Uncertain");
+    expect(document.body.textContent).toContain("Not executed");
+    expect(document.body.textContent).toContain("individual verification error");
+    expect((document.body.querySelector("[data-testid=nacos-replace-history-rollback]") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows secure-storage read failures instead of silently pretending history is empty", async () => {
+    vi.mocked(historyStorage.listNacosReplaceHistory).mockRejectedValueOnce(new Error("nacos-history-storage-failed"));
+    await mountDialog();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Could not save or read batch history"));
+    expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+  });
+
+  it("blocks a historical rollback after the saved connection target changes", async () => {
+    history.set("batch", historicalEntry());
+    await mountDialog();
+    await click("nacos-replace-history-tab");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-history-details]")).not.toBeNull());
+    await click("nacos-replace-history-details");
+    api.loadConnections.mockResolvedValue([{ id: "nacos-main", host: "other", port: 8848 }]);
+    await click("nacos-replace-history-rollback");
+    await click("history-confirm");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("different Nacos server"));
+    expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not publish or keep an applicable stale preview after a backup-save error", async () => {
+    api.nacosSearchConfigContent.mockResolvedValue({ matches: [{ namespace: "public", group: "test", dataId: "historical.yaml" }], failures: [] });
+    api.nacosGetConfig.mockResolvedValue({ namespace: "public", group: "test", dataId: "historical.yaml", content: "mysql-old" });
+    await mountDialog();
+    input("nacos-replace-search", "mysql-old");
+    input("nacos-replace-value", "mysql-new");
+    await click("nacos-replace-preview");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-apply]")).not.toBeNull());
+    vi.mocked(historyStorage.saveNacosReplaceHistory).mockRejectedValueOnce(new Error("nacos-history-storage-failed"));
+    await click("nacos-replace-apply");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Could not save or read batch history"));
+    expect(document.body.querySelector("[data-testid=nacos-replace-apply]")).toBeNull();
+    expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+  });
   it("previews and applies one literal replacement across every matching Data ID and namespace", async () => {
     const configs = new Map([
       ["public/DEFAULT_GROUP/application.yaml", { namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml", content: "url: mysql-old:3306\nreplica: mysql-old:3306", configType: "yaml", md5: "app-before" }],

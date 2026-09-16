@@ -32,7 +32,7 @@ import {
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
-import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
+import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, RotateCcw, Square } from "@lucide/vue";
 
 const PREVIEW_LIMIT_OPTIONS = [50, 100, 200, 500];
 const SYNC_EXECUTE_BATCH_SIZE = 500;
@@ -510,7 +510,7 @@ async function rebuildSyncPlan() {
 }
 
 function startCompare(): void {
-  if (!canCompare.value || comparing.value) return;
+  if (!canCompare.value || comparing.value || executing.value) return;
   const tasks = buildCompareTasks();
   if (tasks.length === 0) {
     toast(t("dataCompare.noComparableTables"), 5000);
@@ -785,8 +785,11 @@ onBeforeUnmount(() => {
 
       <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
-          <div class="space-y-2">
-            <Label class="text-xs font-medium">{{ t("diff.source") }}</Label>
+          <div class="space-y-2 rounded-lg border border-blue-500/35 bg-blue-500/5 p-3">
+            <div class="flex items-center gap-2 text-sm font-medium text-blue-600 dark:text-blue-400">
+              <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/15 text-[11px] font-semibold">S</span>
+              {{ t("diff.source") }}
+            </div>
             <ConnectionTreeSelect
               v-model="sourceConnectionId"
               :disabled="comparing"
@@ -838,8 +841,11 @@ onBeforeUnmount(() => {
             </Button>
           </div>
 
-          <div class="space-y-2">
-            <Label class="text-xs font-medium">{{ t("diff.target") }}</Label>
+          <div class="space-y-2 rounded-lg border border-emerald-500/35 bg-emerald-500/5 p-3">
+            <div class="flex items-center gap-2 text-sm font-medium text-emerald-600 dark:text-emerald-400">
+              <span class="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/15 text-[11px] font-semibold">T</span>
+              {{ t("diff.target") }}
+            </div>
             <ConnectionTreeSelect
               v-model="targetConnectionId"
               :disabled="comparing"
@@ -1110,6 +1116,11 @@ onBeforeUnmount(() => {
 
       <DialogFooter v-else class="flex items-center gap-2">
         <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
+        <Button variant="outline" size="sm" :disabled="comparing || executing || !canCompare" @click="startCompare">
+          <Loader2 v-if="comparing" class="w-3 h-3 animate-spin mr-1" />
+          <RotateCcw v-else class="w-3 h-3 mr-1" />
+          {{ t("dataCompare.recompare") }}
+        </Button>
         <span v-if="comparing" class="text-xs text-muted-foreground mr-auto">{{ compareProgressLabel || t("diff.progress.comparing") }}</span>
         <span v-else-if="executing" class="text-xs text-muted-foreground mr-auto">
           {{ t("diff.syncProgress", { current: executedCount, total: executeTotal }) }}

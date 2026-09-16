@@ -216,6 +216,20 @@ describe("editable query hidden primary keys", () => {
     expect(analyzeEditableQueryEditability("select id from jobs union select id from archived_jobs")).toEqual({ editable: false, reason: "set-operation" });
   });
 
+  it("keeps Oracle NUM columns and aliases mapped when result labels disagree", () => {
+    const named = analyzeEditableQueryEditability("select id, num from users");
+    expect(named.editable).toBe(true);
+    if (!named.editable) return;
+    expect(sourceColumnsForResult(named.analysis, ["ID", "NUM"], undefined, "oracle")).toEqual(["id", "num"]);
+    expect(sourceColumnsForResult(named.analysis, ["ID", "ROWNUM"], undefined, "oracle")).toEqual(["id", undefined]);
+
+    const aliased = analyzeEditableQueryEditability("select id, amount as num from users");
+    expect(aliased.editable).toBe(true);
+    if (!aliased.editable) return;
+    expect(sourceColumnsForResult(aliased.analysis, ["ID", "AMOUNT"], undefined, "oracle")).toEqual(["id", "amount"]);
+    expect(sourceColumnsForResult(aliased.analysis, ["ID", "NUM", "ROWNUM"], undefined, "oracle")).toEqual(["id", "amount", undefined]);
+  });
+
   it("maps a qualified Oracle ROWID projection to the synthetic row key", () => {
     const analysis: EditableQueryInfo = {
       schema: "APP",

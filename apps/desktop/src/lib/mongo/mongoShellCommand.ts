@@ -2,7 +2,7 @@ import type { QueryResult } from "@/types/database";
 import { mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
   chainedMethodCallPattern,
-  describeMongoCommandParseFailure,
+  describeMongoCommandParseFailure as describeMongoCommandParseFailureBasic,
   findChainedMethodCallIndex,
   findMatchingParen,
   MONGO_SHELL_COMMAND_HINT,
@@ -16,7 +16,181 @@ import {
 } from "@dbx-app/mongo-shell";
 
 export type { MongoAggregateCommand };
-export { describeMongoCommandParseFailure, MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
+export { MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
+
+/* ------------------------------------------------------------------ *
+ * Parse-failure diagnostics
+ *
+ * When no parser accepts a command, say what was wrong with it rather than
+ * repeating the generic list of supported commands. The shared package only
+ * diagnoses aggregate-shaped input; this layer knows every method the editor
+ * supports, so it can name an unsupported method, an unsupported value
+ * constructor, or the argument shape a known method expects.
+ * ------------------------------------------------------------------ */
+
+interface MongoMethodShape {
+  /** What the method takes, in prose, for "expects ..." messages. */
+  expects: string;
+  /** Argument roles by position, for "the filter argument" wording. */
+  roles: string[];
+}
+
+const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
+  find: { expects: "an optional filter and an optional projection", roles: ["filter", "projection"] },
+  findOne: { expects: "an optional filter, an optional projection, and optional options", roles: ["filter", "projection", "options"] },
+  count: { expects: "an optional filter", roles: ["filter"] },
+  countDocuments: { expects: "an optional filter", roles: ["filter"] },
+  estimatedDocumentCount: { expects: "no arguments", roles: [] },
+  distinct: { expects: "a field name and an optional filter", roles: ["field", "filter"] },
+  insert: { expects: "one document or an array of documents", roles: ["document"] },
+  insertOne: { expects: "one document", roles: ["document"] },
+  insertMany: { expects: "an array of documents", roles: ["documents"] },
+  update: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  updateOne: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  updateMany: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  replaceOne: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
+  deleteOne: { expects: "a filter", roles: ["filter"] },
+  deleteMany: { expects: "a filter", roles: ["filter"] },
+  findOneAndUpdate: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  findOneAndReplace: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
+  findOneAndDelete: { expects: "a filter and optional options", roles: ["filter", "options"] },
+  createIndex: { expects: "an index keys document and optional options", roles: ["keys", "options"] },
+  dropIndex: { expects: "an index name or keys document", roles: ["index"] },
+  dropIndexes: { expects: "no arguments, or an index name or list of names", roles: ["index"] },
+  getIndexes: { expects: "no arguments", roles: [] },
+  drop: { expects: "no arguments", roles: [] },
+  stats: { expects: "an optional scale", roles: ["scale"] },
+  dataSize: { expects: "no arguments", roles: [] },
+  storageSize: { expects: "no arguments", roles: [] },
+  totalIndexSize: { expects: "no arguments", roles: [] },
+};
+
+const SUPPORTED_COLLECTION_METHODS = [
+  "find",
+  "findOne",
+  "aggregate",
+  "count",
+  "countDocuments",
+  "estimatedDocumentCount",
+  "distinct",
+  "insertOne",
+  "insertMany",
+  "updateOne",
+  "updateMany",
+  "replaceOne",
+  "deleteOne",
+  "deleteMany",
+  "findOneAndUpdate",
+  "findOneAndReplace",
+  "findOneAndDelete",
+  "getIndexes",
+  "createIndex",
+  "dropIndex",
+  "dropIndexes",
+  "drop",
+  "stats",
+];
+
+/** Database-level methods with a supported equivalent worth pointing at. */
+const DATABASE_METHOD_HINTS: Record<string, string> = {
+  getSiblingDB: "switch databases with `use <database>` and then run the command against db.<collection>",
+  adminCommand: "use db.runCommand({ ... })",
+  getCollectionNames: "collections are listed in the sidebar",
+  createCollection: 'collections are created on first insert, or use db.runCommand({ create: "name" })',
+};
+
+const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
+  version: { expects: "no arguments", roles: [] },
+  stats: { expects: "no arguments", roles: [] },
+  serverStatus: { expects: "no arguments", roles: [] },
+  createUser: { expects: "a user document and optional write concern", roles: ["user", "writeConcern"] },
+  runCommand: { expects: "one command document", roles: ["command"] },
+};
+
+const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createUser", "runCommand", "getCollection"];
+
+const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
+
+const COMMAND_SHAPE = /^db\s*(?:\.\s*(?<collection>[A-Za-z_$][\w$]*)|\[\s*(["'])(?<bracket>.*?)\2\s*\]|\.\s*getCollection\s*\(\s*(["'])(?<named>.*?)\4\s*\))?\s*\.\s*(?<method>[A-Za-z_$][\w$]*)\s*\(/;
+
+export function describeMongoCommandParseFailure(input: string): string {
+  const basic = describeMongoCommandParseFailureBasic(input);
+  if (basic !== MONGO_SHELL_COMMAND_HINT) return basic;
+  const source = trimMongoOuterComments(input).trim().replace(/;$/, "").trim();
+  return diagnoseMongoCommand(source) ?? basic;
+}
+
+function diagnoseMongoCommand(source: string): string | null {
+  if (/^show\s+(collections|tables)\b/i.test(source)) {
+    return "show collections is not supported here; collections are listed in the sidebar. Only show dbs is supported.";
+  }
+
+  const shape = COMMAND_SHAPE.exec(source);
+  if (!shape?.groups) return null;
+  const { method } = shape.groups;
+  if (!method) return null;
+  const isDatabaseLevel = shape.groups.collection === undefined && shape.groups.bracket === undefined && shape.groups.named === undefined;
+
+  const shapeSpec = isDatabaseLevel ? DATABASE_METHOD_SHAPES[method] : COLLECTION_METHOD_SHAPES[method];
+  if (!shapeSpec) {
+    if (isDatabaseLevel && SUPPORTED_DATABASE_METHODS.includes(method)) return null;
+    if (isDatabaseLevel) {
+      const hint = DATABASE_METHOD_HINTS[method];
+      return `db.${method}() is not supported${hint ? `; ${hint}` : ""}. Supported database commands: ${SUPPORTED_DATABASE_METHODS.map((name) => `db.${name}()`).join(", ")}.`;
+    }
+    return `Collection method ${method}() is not supported. Supported collection methods: ${SUPPORTED_COLLECTION_METHODS.join(", ")}.`;
+  }
+
+  const openIndex = source.indexOf("(", shape[0].length - 1);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0) return null;
+  const rawArgs = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  const args = rawArgs.length === 1 && !rawArgs[0]?.trim() ? [] : rawArgs;
+
+  for (const [index, arg] of args.entries()) {
+    if (!arg.trim() || normalizeJsonArgument(arg) !== null) continue;
+    const role = shapeSpec.roles[index] ?? `argument ${index + 1}`;
+    const constructor = findUnsupportedValueConstructor(arg);
+    if (constructor) {
+      return `Unsupported value ${constructor}(...) in the ${role} argument of ${method}(). Supported value constructors: ${SUPPORTED_VALUE_CONSTRUCTORS.join(", ")}.`;
+    }
+    return `The ${role} argument of ${method}() is not a valid document.`;
+  }
+
+  const tail = source.slice(closeIndex + 1).trim();
+  if (tail) return `Unexpected text after ${method}(...): "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
+  if (method === "replaceOne" && args[1]) {
+    const replacement = parseMongoObjectArgument(args[1]);
+    const operator = replacement ? Object.keys(JSON.parse(replacement) as Record<string, unknown>).find((key) => key.startsWith("$")) : undefined;
+    if (operator) return `replaceOne() replaces the whole document, so it must not contain update operators such as ${operator}; use updateOne() to modify fields.`;
+  }
+  return `${method}() expects ${shapeSpec.expects}.`;
+}
+
+/** First `Name(` outside a string that is not a constructor the parser understands. */
+function findUnsupportedValueConstructor(argument: string): string | null {
+  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < argument.length; index += 1) {
+    const char = argument[index]!;
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    const call = /^(?:new\s+)?([A-Za-z_$][\w$]*)\s*\(/.exec(argument.slice(index));
+    if (call && !known.has(call[1]!) && (index === 0 || !/[\w$.]/.test(argument[index - 1]!))) {
+      return /^new\s/.test(call[0]) ? `new ${call[1]}` : call[1]!;
+    }
+  }
+  return null;
+}
 
 export interface MongoFindCommand {
   collection: string;
@@ -89,7 +263,7 @@ export interface MongoDistinctCommand {
   filter?: string;
 }
 
-type MongoWriteKind = "runCommand" | "insert" | "update" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
+type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
@@ -106,6 +280,7 @@ export type MongoCommand =
   | ({ kind: "runCommand" } & MongoRunCommand)
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean }
+  | { kind: "replace"; collection: string; filter: string; replacement: string; options?: string }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
   | { kind: "createIndex"; collection: string; keys: string; options?: string }
   | { kind: "dropIndex"; collection: string; index: string }
@@ -359,7 +534,23 @@ export function applyMongoFindSort(input: string, column: string, direction: "as
 
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseFindCountCommand(source);
+  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseEstimatedDocumentCountCommand(source) ?? parseFindCountCommand(source);
+}
+
+/**
+ * estimatedDocumentCount() takes no filter and is metadata-backed, which is exactly
+ * the legacy count() fast path the driver already uses for a filterless count.
+ */
+function parseEstimatedDocumentCountCommand(source: string): MongoCountDocumentsCommand | null {
+  const target = parseCollectionMethodTarget(source, "estimatedDocumentCount");
+  if (!target) return null;
+
+  const openIndex = source.indexOf("(", target.methodCallIndex);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  if (source.slice(openIndex + 1, closeIndex).trim()) return null;
+
+  return { collection: target.collection, filter: "{}", mode: "legacy" };
 }
 
 function parseCollectionCountCommand(source: string, method: "countDocuments" | "count"): MongoCountDocumentsCommand | null {
@@ -509,8 +700,16 @@ export function parseMongoCreateUserCommand(input: string): MongoCreateUserComma
   };
 }
 
+/** The shell's shorthand for the matching runCommand, so they share its execution path. */
+const DATABASE_STATUS_COMMANDS: Record<string, string> = { stats: "dbStats", serverStatus: "serverStatus" };
+
 export function parseMongoRunCommand(input: string): MongoRunCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
+  for (const [method, command] of Object.entries(DATABASE_STATUS_COMMANDS)) {
+    if (new RegExp(`^db\\s*\\.\\s*${method}\\s*\\(\\s*\\)$`, "i").test(source)) {
+      return { commandJson: JSON.stringify({ [command]: 1 }) };
+    }
+  }
   const match = /^db\s*\.\s*runCommand\s*\(/i.exec(source);
   if (!match) return null;
   const openIndex = source.indexOf("(", match.index);
@@ -551,6 +750,20 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     if (!docs) return null;
     const value = JSON.parse(docs);
     return value !== null && typeof value === "object" ? { kind: "insert", collection: insert.collection, docsJson: docs } : null;
+  }
+
+  const replaceOne = parseCollectionMethodTarget(source, "replaceOne");
+  if (replaceOne) {
+    const args = parseMethodArgs(source, replaceOne.methodCallIndex);
+    if (!args || args.length < 2 || args.length > 3) return null;
+    const filter = normalizeJsonArgument(args[0]);
+    const replacement = parseMongoObjectArgument(args[1]);
+    if (!filter || !replacement) return null;
+    // A replacement is a whole document; `{$set: ...}` here means updateOne() was intended.
+    if (Object.keys(JSON.parse(replacement) as Record<string, unknown>).some((key) => key.startsWith("$"))) return null;
+    const options = args[2]?.trim() ? normalizeJsonArgument(args[2]) : undefined;
+    if (args[2]?.trim() && !options) return null;
+    return { kind: "replace", collection: replaceOne.collection, filter, replacement, ...(options ? { options } : {}) };
   }
 
   for (const method of ["updateOne", "updateMany"] as const) {
@@ -1325,6 +1538,7 @@ function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
 function mongoWriteFilter(command: MongoWriteCommand): string | null {
   switch (command.kind) {
     case "update":
+    case "replace":
     case "delete":
     case "findOneAndUpdate":
     case "findOneAndReplace":

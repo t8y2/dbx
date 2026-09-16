@@ -102,6 +102,34 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "exportProgress.agentSessionMissing",
   },
   {
+    name: "MongoDB Legacy insertMany unsupported",
+    message: "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver",
+    key: "mongo.import.legacyInsertUnsupported",
+  },
+  {
+    // crates/dbx-core/src/mongodb_import_export.rs attributes a batch-level failure to a row.
+    name: "MongoDB Legacy insertMany unsupported on a located row",
+    message: "row 1: MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver",
+    key: "mongo.import.legacyInsertUnsupported",
+  },
+  {
+    name: "MongoDB Legacy partial insert",
+    message: "MongoDB Legacy Agent rejected 2 of 500 documents: E11000 duplicate key error collection: app.users",
+    key: "mongo.insert.partialFailure",
+    params: { failed: "2", total: "500", message: "E11000 duplicate key error collection: app.users" },
+  },
+  {
+    name: "MongoDB Legacy export cursor invalid",
+    message: "MongoDB Legacy Agent returned an invalid find cursor",
+    key: "mongo.import.legacyCursorInvalid",
+  },
+  {
+    // Agent-raised messages reach the frontend through the "Agent RPC error (<code>): " envelope.
+    name: "MongoDB Legacy export cursor expired",
+    message: "Agent RPC error (-1): Find cursor not found",
+    key: "mongo.import.legacyCursorInvalid",
+  },
+  {
     name: "DuckDB draining",
     message: "The previous DuckDB query is still stopping. Please try again shortly.",
     key: "editor.duckdbDraining",
@@ -230,6 +258,20 @@ describe("backend error translation", () => {
     expect(sanitizeBackendErrorMessage(message)).toBe(message);
   });
 
+  test("strips the SQL error-position transport suffix from raw messages", () => {
+    const message = 'ERROR: relation "missing" does not exist\nDBX_SQL_ERROR_POSITION:15';
+    const expected = 'ERROR: relation "missing" does not exist';
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+    expect(formatError(new Error(message))).toBe(expected);
+  });
+
+  test("strips the position suffix that precedes appended context text", () => {
+    const message = "ERROR: boom\nDBX_SQL_ERROR_POSITION:7; cleanup failed";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe("ERROR: boom; cleanup failed");
+  });
+
   test("normalizes Error and structural message objects before translation", () => {
     const t = translatorFor("zh-CN");
     const message = "file does not exist: /tmp/missing.sqlite";
@@ -327,6 +369,44 @@ describe("backend error translation", () => {
     ).toBeNull();
   });
 
+  test("accepts an optional driver-reported error position", () => {
+    const error = normalizeBackendError({
+      version: 1,
+      code: "DBX-JDBC-4001",
+      messageKey: "backendErrors.jdbc.sqlFailed",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown",
+      detail: 'ERROR: relation "missing" does not exist',
+      errorPosition: { line: 2, column: 6, offset: 12 },
+    });
+
+    expect(error?.errorPosition).toEqual({ line: 2, column: 6, offset: 12 });
+
+    const t = translatorFor("zh-CN");
+    expect(translateBackendError(t, error)).toBe(`${t("backendErrors.jdbc.sqlFailed", { stage: "execute" })}\n\nERROR: relation "missing" does not exist`);
+  });
+
+  test.each([
+    ["zero line", { line: 0, column: 1, offset: 0 }],
+    ["negative column", { line: 1, column: -1, offset: 0 }],
+    ["non-integer offset", { line: 1, column: 1, offset: 1.5 }],
+    ["string line", { line: "1", column: 1, offset: 0 }],
+    ["array position", [1, 1, 0]],
+  ])("rejects a malformed error position with %s", (_name, errorPosition) => {
+    expect(
+      normalizeBackendError({
+        version: 1,
+        code: "DBX-JDBC-4001",
+        messageKey: "backendErrors.jdbc.sqlFailed",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+        errorPosition,
+      }),
+    ).toBeNull();
+  });
+
   test("accepts unknown compatibility sources and extensible origins", () => {
     const error = normalizeBackendError({
       version: 1,
@@ -347,6 +427,17 @@ describe("backend error translation", () => {
     const error = new BackendErrorException("legacy backend failure");
     expect(error.backendError.code).toBe("DBX-LEGACY-0001");
     expect(translateBackendError(t, error)).toBe(`${t("backendErrors.legacy")}\n\nlegacy backend failure`);
+  });
+
+  // Tauri wraps every backend rejection in a legacy envelope, so a message the catalog knows must
+  // still be phrased by the catalog rather than surfaced as raw English under a generic summary.
+  test("phrases a known message that arrived inside a legacy envelope", () => {
+    const t = translatorFor("zh-CN");
+    const wrap = (message: string) => new BackendErrorException(message);
+
+    expect(translateBackendError(t, wrap("row 1: MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"))).toBe(t("mongo.import.legacyInsertUnsupported"));
+    expect(translateBackendError(t, wrap("Agent RPC error (-1): Find cursor not found"))).toBe(t("mongo.import.legacyCursorInvalid"));
+    expect(translateBackendError(t, wrap("MongoDB Legacy Agent rejected 2 of 500 documents: E11000 duplicate key"))).toBe(t("mongo.insert.partialFailure", { failed: "2", total: "500", message: "E11000 duplicate key" }));
   });
 
   test("keeps an explicit original detail when a structured legacy error omits detail", () => {
@@ -477,6 +568,9 @@ describe("backend error wording is pinned to the Rust sources", () => {
   test.each([
     ["crates/dbx-core/src/query_result_export.rs", "Streaming export is unsupported for this query. Simplify it or use a supported driver."],
     ["crates/dbx-core/src/query_result_export.rs", "Streaming export needs a result-set session, but this driver returned no session_id."],
+    ["crates/dbx-core/src/mongodb_import_export.rs", "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"],
+    ["crates/dbx-core/src/mongodb_import_export.rs", "MongoDB Legacy Agent returned an invalid find cursor"],
+    ["crates/dbx-core/src/mongo_ops.rs", "MongoDB Legacy Agent rejected "],
     ["crates/dbx-core/src/agent_service.rs", "Failed to remove the old JRE directory: "],
     ["crates/dbx-core/src/agent_service.rs", "is in use by drivers: "],
     ["crates/dbx-core/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],

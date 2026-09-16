@@ -304,7 +304,10 @@ pub async fn import_agents_from_zip(
 
         let result = result?;
         send_progress_event(&tx, AgentProgressEvent::step("done").with_operation_id(&operation_id));
-        return Ok(Json(serde_json::json!({ "count": result.drivers_installed.len() as u32 })));
+        return Ok(Json(serde_json::json!({
+            "count": result.drivers_installed.len() as u32,
+            "jreCount": result.jre_installed.len(),
+        })));
     }
 
     Err(AppError::from("No file uploaded".to_string()))

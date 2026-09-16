@@ -180,14 +180,30 @@ pub(super) async fn prepare_table_ddl(
                 request.target_catalog.as_deref(),
                 request.quote_target_column_names,
             )
-        } else {
+        } else if let Some(rewritten) = rewrite_transfer_source_table_ddl(
+            &source_ddl,
+            &request.source_schema,
+            &request.target_schema,
+            source_db_type,
+            target_db_type,
+            table,
+            target_table,
+        ) {
             reused_source_ddl = source_ddl_was_read;
-            rewrite_transfer_source_table_ddl(
-                &source_ddl,
+            rewritten
+        } else {
+            // The reused DDL's CREATE TABLE head could not be renamed safely; fall back
+            // to the generated DDL rather than creating the table under the wrong name.
+            generate_create_table_ddl_with_column_quoting(
+                columns,
+                target_table,
                 &request.source_schema,
                 &request.target_schema,
-                source_db_type,
                 target_db_type,
+                source_db_type,
+                table_comment,
+                request.target_catalog.as_deref(),
+                request.quote_target_column_names,
             )
         }
     } else {

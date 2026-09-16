@@ -58,7 +58,7 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
-import { redisFuzzySearchScanBudget, redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
+import { redisFuzzySearchScanBudget, createRedisKeyPatternMatcher, redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
 import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { forgetRedisKeySearchHistory, loadRedisKeySearchHistory, rememberRedisKeySearchHistory, type RedisKeySearchHistoryScope } from "@/lib/redis/redisKeySearchHistory";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
@@ -148,6 +148,7 @@ const loading = ref(false);
 const loadingMore = ref(false);
 const searchPending = ref(false);
 const isFetchingAll = ref(false);
+const fetchAllSnapshotComplete = ref(false);
 const fetchAllStopRequested = ref(false);
 const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
@@ -258,7 +259,6 @@ const AUTO_LOAD_TOTAL_SCAN_ITERATIONS = 50;
 let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
-let fetchAllPreparingSnapshot = false;
 let redisDbFlushedListenerRegistered = false;
 let redisInfiniteScrollFrame = 0;
 let loadedKeyRaws = new Set<string>();
@@ -299,6 +299,8 @@ const valueQuery = computed(() => searchPattern.value.trim());
 const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
 const effectivePattern = computed(() => (searchMode.value === "key" ? redisKeySearchPattern(searchPattern.value, fuzzyKeySearch.value) : "*"));
 const isSearchMode = computed(() => (searchMode.value === "key" ? effectivePattern.value !== "*" : valueQuery.value !== ""));
+const localKeySearchActive = computed(() => fetchAllSnapshotComplete.value && searchMode.value === "key" && isSearchMode.value);
+const localKeyPatternMatcher = computed(() => createRedisKeyPatternMatcher(effectivePattern.value));
 // Keep regular glob search on the low-cost flat path. The explicit fuzzy mode
 // opts into the namespace hierarchy that users need for group selection.
 const isFuzzyKeySearch = computed(() => searchMode.value === "key" && isSearchMode.value && fuzzyKeySearch.value);
@@ -310,7 +312,7 @@ const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.valu
 const selectionBusy = computed(() => mutatingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
-const allKeysSelected = computed(() => (customGrouping.value.enabled ? filteredFlatKeys.value.length > 0 && checkedKeys.value.size === filteredFlatKeys.value.length : allLoadedKeysSelected.value && !hasMore.value));
+const allKeysSelected = computed(() => (customGrouping.value.enabled || localKeySearchActive.value ? filteredFlatKeys.value.length > 0 && checkedKeys.value.size === filteredFlatKeys.value.length : allLoadedKeysSelected.value && !hasMore.value));
 const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
@@ -368,18 +370,29 @@ watch([searchPattern, searchMode, fuzzyKeySearch, noExpiryOnly], persistRedisKey
 const fetchAllFilteredKeyCount = ref<number | null>(null);
 // 过滤后的平铺 key 列表：未开启过滤时与 flatKeys 完全一致，避免额外开销
 const filteredFlatKeys = computed(() => {
-  if (!noExpiryOnly.value) return flatKeys.value;
+  const onlyNoExpiry = noExpiryOnly.value;
+  const matchesPattern = localKeySearchActive.value ? localKeyPatternMatcher.value : undefined;
+  if (!onlyNoExpiry && !matchesPattern) return flatKeys.value;
   void noExpiryProjectionEpoch.value;
-  return flatKeys.value.filter((key) => key.ttl === -1);
+  return flatKeys.value.filter((key) => (!onlyNoExpiry || key.ttl === -1) && (!matchesPattern || matchesPattern(key.key_display, key.key_raw)));
 });
 // 过滤后的树：独立重建而不复用 treeIndex，避免污染后续 SCAN 增量合并的全量树基准；
 // 分组 id 只由 db+路径决定，与全量树一致，因此展开状态可直接复用
 const filteredTreeKeys = computed(() => {
-  if (!noExpiryOnly.value) return treeKeys.value;
+  if (!noExpiryOnly.value && !localKeySearchActive.value) return treeKeys.value;
   return buildRedisKeyTree(filteredFlatKeys.value, props.db, redisKeySeparator.value);
+});
+watch(effectivePattern, () => {
+  if (!fetchAllSnapshotComplete.value || searchMode.value !== "key") return;
+  if (localKeySearchActive.value && isFuzzyHierarchyView.value) expandedGroupIds.value = collectExpandedGroupIds(filteredTreeKeys.value);
+  void nextTick(() => {
+    redisKeyScroller()?.scrollToItem(0, { align: "start" });
+    refreshRedisKeyScroller();
+  });
 });
 const displayedKeyCount = computed(() => {
   if (isFetchingAll.value) return fetchAllLoadedCount.value;
+  if (localKeySearchActive.value) return filteredFlatKeys.value.length;
   // 过滤时展示匹配数量，便于确认“无过期”key 的规模
   if (noExpiryOnly.value) return fetchAllFilteredKeyCount.value ?? filteredFlatKeys.value.length;
   return flatKeys.value.length;
@@ -493,10 +506,28 @@ async function updateCreateKeyTypeHelpOffset() {
 watch(activeCreateKeyTypeHelp, () => {
   void updateCreateKeyTypeHelpOffset();
 });
+const localFlatSearchRows = computed(() => {
+  const keys = filteredFlatKeys.value;
+  const database = props.db;
+  return markRaw(
+    new Proxy([] as RedisKeyTreeRow[], {
+      get(target, property, receiver) {
+        if (property === "length") return keys.length;
+        const index = facadeArrayIndex(property);
+        return index >= 0 ? (keys[index] ? redisKeyToFlatTreeRow(keys[index], database) : undefined) : Reflect.get(target, property, receiver);
+      },
+      has(target, property) {
+        const index = facadeArrayIndex(property);
+        return index >= 0 ? index < keys.length : Reflect.has(target, property);
+      },
+    }),
+  );
+});
 const regularVisibleRows = computed(() => {
   // Prepared snapshots already own their rows. Even a watcher whose callback
   // ignores them would otherwise synchronously re-map/flatten the keyspace.
   if (showCustomGrouping.value || fetchAllVisibleRowsActive.value) return [];
+  if (useFlatKeySearchRows.value && localKeySearchActive.value) return localFlatSearchRows.value;
   return useFlatKeySearchRows.value ? filteredFlatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(filteredTreeKeys.value, expandedGroupIds.value);
 });
 let fetchAllVisibleRowsSource: readonly RedisKeyTreeRow[] = [];
@@ -765,7 +796,7 @@ function toggleNodeCheck(node: RedisKeyTreeNode, event: MouseEvent) {
 function selectAllLoadedKeys() {
   if (selectionBusy.value || loadedKeyRaws.size === 0) return;
   focusKeyPane();
-  setKeysChecked(customGrouping.value.enabled ? filteredFlatKeys.value.map((key) => key.key_raw) : loadedKeyRaws, true);
+  setKeysChecked(customGrouping.value.enabled || localKeySearchActive.value ? filteredFlatKeys.value.map((key) => key.key_raw) : loadedKeyRaws, true);
   selectionAnchorRowId.value = visibleRows.value[0]?.id ?? null;
 }
 
@@ -871,7 +902,6 @@ function invalidateScanRequests(resetAutoLoadBudget = true): number {
   isFetchingAll.value = false;
   fetchAllStopRequested.value = true;
   fetchAllLoadedCount.value = 0;
-  fetchAllPreparingSnapshot = false;
   searchRequestId++;
   loadMoreOperationId++;
   loadingMore.value = false;
@@ -881,6 +911,7 @@ function invalidateScanRequests(resetAutoLoadBudget = true): number {
 }
 
 function invalidateFetchAllForStructuralMutation() {
+  fetchAllSnapshotComplete.value = false;
   if (isFetchingAll.value || fetchAllPublicationRollback) invalidateScanRequests();
 }
 
@@ -1025,6 +1056,7 @@ async function loadKeys() {
   searchPending.value = false;
   rememberRedisKeySearchHistory(searchHistoryScope.value, searchPattern.value);
   const requestId = invalidateScanRequests();
+  fetchAllSnapshotComplete.value = false;
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
@@ -1288,6 +1320,7 @@ async function publishFetchAllVisibleRows(rows: readonly RedisKeyTreeRow[], requ
 async function fetchAll(): Promise<boolean> {
   if (!hasMore.value || isFetchingAll.value) return false;
   const requestId = searchRequestId;
+  const fetchAllIsFullKeyspace = searchMode.value === "key" && !isSearchMode.value;
   const bufferedKeys: RedisKeyInfo[] = [];
   const bufferedKeyRaws = new Set<string>();
   const initialFlatKeys = flatKeys.value;
@@ -1347,7 +1380,6 @@ async function fetchAll(): Promise<boolean> {
           snapshotConfig.expandedGroupIds = expandedGroupIds.value;
           snapshotConfig.noExpiryOnly = noExpiryOnly.value;
           activateFetchAllVisibleRows();
-          fetchAllPreparingSnapshot = true;
           const snapshot = await buildRedisKeySnapshotCooperatively([initialFlatKeys, bufferedKeys], snapshotConfig, {
             shouldContinue: () => requestId === searchRequestId && redisBrowserIsActive && !fetchAllStopRequested.value,
           });
@@ -1364,9 +1396,9 @@ async function fetchAll(): Promise<boolean> {
           }
         }
       } finally {
-        fetchAllPreparingSnapshot = false;
         publicationSucceeded = published;
         if (published) {
+          fetchAllSnapshotComplete.value = fetchAllIsFullKeyspace;
           fetchAllPublicationRollback = null;
           if (!hasMore.value) refreshExpandedGroupIds.clear();
         }
@@ -1504,12 +1536,6 @@ function resumePendingGroupSubtrees(requestId = searchRequestId) {
 }
 
 function toggleGroup(groupId: string) {
-  if (fetchAllPreparingSnapshot) {
-    invalidateScanRequests();
-    isFetchingAll.value = false;
-    fetchAllStopRequested.value = false;
-    fetchAllLoadedCount.value = 0;
-  }
   deactivateFetchAllVisibleRows();
   const next = new Set(expandedGroupIds.value);
   const expanding = !next.has(groupId);
@@ -1733,6 +1759,7 @@ function onRedisRowContextMenu(event: MouseEvent, node: RedisKeyTreeNode, openCo
 
 function resetLoadedKeys() {
   invalidateScanRequests();
+  fetchAllSnapshotComplete.value = false;
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
@@ -2566,17 +2593,37 @@ function onSearchInput() {
   }, 400);
 }
 
+function submitSearch() {
+  if (!fetchAllSnapshotComplete.value || searchMode.value !== "key") {
+    void loadKeys();
+    return;
+  }
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = null;
+  searchPending.value = false;
+  rememberRedisKeySearchHistory(searchHistoryScope.value, searchPattern.value);
+  invalidateScanRequests();
+  loading.value = false;
+  isFetchingAll.value = false;
+  fetchAllStopRequested.value = false;
+  fetchAllLoadedCount.value = 0;
+  selectedKeyRaw.value = null;
+  resetCheckedKeys();
+  hasMore.value = false;
+}
+
 function setSearchMode(mode: RedisSearchMode) {
   if (searchMode.value === mode) return;
   searchMode.value = mode;
   dismissSearchHistoryMenu();
   if (mode !== "key") dismissKeyTemplateMenu();
-  void loadKeys();
+  if (mode === "key") submitSearch();
+  else void loadKeys();
 }
 
 function toggleFuzzyKeySearch() {
   fuzzyKeySearch.value = !fuzzyKeySearch.value;
-  if (searchMode.value === "key") void loadKeys();
+  if (searchMode.value === "key") submitSearch();
 }
 
 function toggleNoExpiryOnly() {
@@ -2776,7 +2823,7 @@ function onSearchKeydown(event: KeyboardEvent) {
         selectSearchHistory(searchHistorySelectedIndex.value);
       } else {
         dismissSearchHistoryMenu();
-        void loadKeys();
+        submitSearch();
       }
       return;
     }
@@ -2809,7 +2856,7 @@ function onSearchKeydown(event: KeyboardEvent) {
     }
   }
   if (event.key === "Enter") {
-    void loadKeys();
+    submitSearch();
     return;
   }
   if (!isCancelSearchShortcut(event)) return;
@@ -2817,7 +2864,7 @@ function onSearchKeydown(event: KeyboardEvent) {
   searchPattern.value = "";
   dismissKeyTemplateMenu();
   dismissSearchHistoryMenu();
-  void loadKeys();
+  submitSearch();
 }
 
 function onRedisDbFlushed(event: Event) {

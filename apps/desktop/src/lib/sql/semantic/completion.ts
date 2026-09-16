@@ -259,6 +259,66 @@ function semanticMutationTarget(model: SqlSemanticModel): SqlSemanticRowSource |
 }
 
 /**
+ * A generated alias is usually a syntax error on a mutation target: an INSERT
+ * target carries no alias at all, and a DELETE or UPDATE target only accepts
+ * one in the multi-table dialects that re-list it elsewhere (issue #9186:
+ * SQL Server rejects `DELETE FROM t AS a`). The typed case matches the
+ * replacement range against the parsed mutation-target span; the empty-prefix
+ * case cannot produce that source yet, so the mutation slot is recognized from
+ * the statement verb and the introducer right before the qualified name being
+ * completed. JOIN/USING/APPLY sources and SELECT FROM sources stay aliasable.
+ */
+function tableCompletionTargetIsAliasUnsafe(model: SqlSemanticModel): boolean {
+  if (model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "delete_target") return false;
+  const replacement = model.cursorIntent.replacementRange;
+  if (model.rowSources.some((source) => source.kind === "mutation_target" && !source.alias && replacement.start <= source.sourceSpan.end && replacement.end >= source.sourceSpan.start)) {
+    return true;
+  }
+  const introducer = mutationTargetIntroducer(model);
+  if (model.statement.kind === "delete") {
+    if (introducer.normalized === "delete") return true;
+    if (introducer.normalized !== "from") return false;
+    // Only the simple `DELETE FROM t` form targets the source being completed;
+    // once a target list sits between the verb and FROM (`DELETE t FROM ...`),
+    // the FROM clause introduces aliasable row sources.
+    const verbSide = introducer.index > 0 ? introducer.tokens[introducer.index - 1] : undefined;
+    return verbSide?.kind === "word" && verbSide.normalized === "delete";
+  }
+  if (model.statement.kind === "update") return introducer.normalized === "update";
+  if (model.statement.kind === "insert") return introducer.normalized === "into" || introducer.normalized === "insert";
+  return false;
+}
+
+/**
+ * The last syntax word before the table name being completed, skipping that
+ * name's qualifier parts and typed prefix, so `DELETE FROM dh.|` still reports
+ * `from` instead of the qualifier itself.
+ */
+function mutationTargetIntroducer(model: SqlSemanticModel): { normalized: string; index: number; tokens: readonly SqlSemanticToken[] } {
+  const before = model.tokens.filter((token) => token.span.end <= model.cursorIntent.replacementRange.start && token.kind !== "comment");
+  let index = before.length - 1;
+  let identifiersToSkip = model.cursorIntent.qualifierParts.length + (model.cursorIntent.prefix.length > 0 ? 1 : 0);
+  while (index >= 0 && identifiersToSkip > 0) {
+    if (before[index]?.text === ".") {
+      index -= 1;
+      continue;
+    }
+    if (!isSemanticIdentifier(before[index])) break;
+    identifiersToSkip -= 1;
+    index -= 1;
+  }
+  for (; index >= 0; index -= 1) {
+    const token = before[index];
+    if (!token) continue;
+    if (token.kind === "word") return { normalized: token.normalized, index, tokens: before };
+    if (token.kind === "quoted_identifier") return { normalized: "", index, tokens: before };
+    if (token.text === "." || token.kind === "comment") continue;
+    break;
+  }
+  return { normalized: "", index: -1, tokens: before };
+}
+
+/**
  * When the semantic scanner misses the trailing identifier that the legacy
  * scanner still reports (semantic prefix empty with a replacement range
  * collapsed at the cursor) while the merged context keeps a non-empty prefix
@@ -322,6 +382,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     insertSchema: model.cursorIntent.kind === "insert_column" ? mutationSchema : base.insertSchema,
     updateTarget: model.cursorIntent.kind === "update_column" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.updateTarget,
     deleteTarget: model.cursorIntent.kind === "delete_target" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.deleteTarget,
+    tableCompletionTargetAliasUnsafe: tableCompletionTargetIsAliasUnsafe(model),
     onStar: model.cursorIntent.kind === "star" || base.onStar,
     contextKind,
   };

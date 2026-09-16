@@ -444,7 +444,7 @@ fn contains_keyword_sequence(sql: &str, first: &str, second: &str) -> bool {
     false
 }
 
-fn contains_unquoted_keyword(sql: &str, dialect: &dyn sqlparser::dialect::Dialect, keyword: &str) -> bool {
+pub(crate) fn contains_unquoted_keyword(sql: &str, dialect: &dyn sqlparser::dialect::Dialect, keyword: &str) -> bool {
     Tokenizer::new(dialect, sql).tokenize().is_ok_and(|tokens| {
         tokens.into_iter().any(|token| {
             matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(keyword))

@@ -24,6 +24,33 @@ describe("sqlCompletion keyword snippets", () => {
     expect(shouldAutoOpenSqlCompletion(sql, sql.length)).toBe(true);
     expect(items).toEqual(expect.arrayContaining([expect.objectContaining({ label: "select *", type: "snippet" }), expect.objectContaining({ label: "SELECT", type: "keyword" })]));
   });
+
+  it("offers DuckDB-specific query and statement keywords", () => {
+    const expectedKeywords = ["QUALIFY", "SUMMARIZE", "PIVOT", "UNPIVOT", "ASOF", "POSITIONAL", "FROM"];
+
+    for (const keyword of expectedKeywords) {
+      const prefix = keyword.slice(0, 4);
+      const sql = keyword === "FROM" || keyword === "SUMMARIZE" ? prefix : `SELECT * FROM items ${prefix}`;
+      const items = buildSqlCompletionItems(sql, sql.length, {
+        tables: [],
+        columnsByTable: new Map(),
+        databaseType: "duckdb",
+      });
+
+      expect(items, keyword).toEqual(expect.arrayContaining([expect.objectContaining({ label: keyword, type: "keyword" })]));
+    }
+  });
+
+  it("does not expose DuckDB-only keywords to other databases", () => {
+    const sql = "SELECT * FROM items qua";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "postgres",
+    });
+
+    expect(items.some((item) => item.label === "QUALIFY")).toBe(false);
+  });
 });
 
 describe("SQL Server datepart completion", () => {

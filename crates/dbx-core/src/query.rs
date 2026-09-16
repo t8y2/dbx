@@ -68,23 +68,43 @@ pub enum PoolErrorAction {
 #[derive(Debug, Clone)]
 pub enum QueryExecutionError {
     Agent(AgentCallError),
-    DuckDb { code: String, message: String },
-    Canceled { stage: AgentErrorStage, operation_outcome: AgentOperationOutcome },
+    DuckDb {
+        code: String,
+        message: String,
+    },
+    Canceled {
+        stage: AgentErrorStage,
+        operation_outcome: AgentOperationOutcome,
+    },
     Timeout(String),
     Sql(String),
+    /// Native PostgreSQL SQL failure whose driver-reported cursor position was
+    /// resolved against the executed statement text. Kept distinct from
+    /// [`Self::Sql`] so the position survives `classify_query_error` and reaches
+    /// [`Self::into_backend_error`] as a typed field instead of being parsed back
+    /// out of a string.
+    SqlWithPosition {
+        message: String,
+        position: crate::sql_error_position::SqlErrorPosition,
+    },
     Legacy(String),
 }
 
 impl QueryExecutionError {
     pub fn into_legacy_string(self) -> String {
-        match self {
+        let mut message = match self {
             Self::Agent(error) => error.into_legacy_string(),
             Self::DuckDb { message, .. } => message,
             Self::Canceled { .. } => canceled_error(),
             Self::Timeout(error) => error,
             Self::Sql(error) => error,
+            Self::SqlWithPosition { message, .. } => message,
             Self::Legacy(error) => error,
-        }
+        };
+        // Defensive: any remaining transport marker (e.g. from a driver error
+        // that never passed through the resolve step) must not reach clients.
+        while crate::sql_error_position::take_marker(&mut message).is_some() {}
+        message
     }
 
     pub fn into_backend_error(self) -> crate::backend_error::BackendError {
@@ -98,6 +118,9 @@ impl QueryExecutionError {
             }
             Self::Timeout(error) => crate::backend_error::BackendError::from_timeout_detail(&error),
             Self::Sql(error) => crate::backend_error::BackendError::from_sql_detail(&error),
+            Self::SqlWithPosition { message, position } => {
+                crate::backend_error::BackendError::from_sql_detail_with_position(&message, position)
+            }
             Self::Legacy(error) => crate::backend_error::BackendError::from_legacy_string(&error),
         }
     }
@@ -111,6 +134,9 @@ impl QueryExecutionError {
             canceled @ Self::Canceled { .. } => canceled,
             Self::Timeout(error) => Self::Timeout(query_error_with_omitted_sql_context(&error, sql)),
             Self::Sql(error) => Self::Sql(append_typed_sql_error_context(&error, sql)),
+            Self::SqlWithPosition { message, position } => {
+                Self::SqlWithPosition { message: append_typed_sql_error_context(&message, sql), position }
+            }
             Self::Legacy(error) => Self::Legacy(query_error_with_omitted_sql_context(&error, sql)),
         }
     }
@@ -122,6 +148,9 @@ impl QueryExecutionError {
             canceled @ Self::Canceled { .. } => canceled,
             Self::Timeout(error) => Self::Timeout(format!("{error}; {context}")),
             Self::Sql(error) => Self::Sql(format!("{error}; {context}")),
+            Self::SqlWithPosition { message, position } => {
+                Self::SqlWithPosition { message: format!("{message}; {context}"), position }
+            }
             Self::Legacy(error) => Self::Legacy(format!("{error}; {context}")),
         }
     }
@@ -129,7 +158,12 @@ impl QueryExecutionError {
     fn as_agent_error(&self) -> Option<&AgentCallError> {
         match self {
             Self::Agent(error) => Some(error),
-            Self::DuckDb { .. } | Self::Canceled { .. } | Self::Timeout(_) | Self::Sql(_) | Self::Legacy(_) => None,
+            Self::DuckDb { .. }
+            | Self::Canceled { .. }
+            | Self::Timeout(_)
+            | Self::Sql(_)
+            | Self::SqlWithPosition { .. }
+            | Self::Legacy(_) => None,
         }
     }
 }
@@ -142,6 +176,7 @@ impl std::fmt::Display for QueryExecutionError {
             Self::Canceled { .. } => formatter.write_str(QUERY_CANCELED),
             Self::Timeout(error) => formatter.write_str(error),
             Self::Sql(error) => formatter.write_str(error),
+            Self::SqlWithPosition { message, .. } => formatter.write_str(message),
             Self::Legacy(error) => formatter.write_str(error),
         }
     }
@@ -197,14 +232,15 @@ pub struct ExecuteMultiResult {
     pub error: Option<crate::backend_error::BackendError>,
     #[serde(skip_serializing_if = "is_false")]
     pub server_message: bool,
-    /// Oracle-only manual-transaction UX metadata: true only for a statement
-    /// proven to be an ordinary top-level read. Absent/false for every other
-    /// Oracle statement and every non-Oracle execution. Not part of the
-    /// reusable database-result model (`db::QueryResult`).
+    /// Manual-transaction UX metadata for sticky proven-read-only dialects
+    /// (Oracle, OceanBase-Oracle, MySQL, PostgreSQL): true only for a statement
+    /// proven to be an ordinary read by that dialect's strict heuristic.
+    /// Absent/false for unproven statements and non-participating dialects.
+    /// Not part of the reusable database-result model (`db::QueryResult`).
     #[serde(skip_serializing_if = "is_false")]
     pub manual_transaction_proven_read_only: bool,
-    /// Oracle-only manual-transaction UX metadata: true on the synthetic
-    /// successful result when the manual-execution splitter found zero
+    /// Manual-transaction UX metadata for the same dialects: true on the
+    /// synthetic successful result when the manual-execution splitter found zero
     /// statements (empty/whitespace/comments-only script). Lets the frontend
     /// treat it as a no-op rather than an unproven statement.
     #[serde(skip_serializing_if = "is_false")]
@@ -1473,6 +1509,54 @@ fn query_pool_error_action(db_type: Option<DatabaseType>, sql: &str, err: &str) 
     }
 }
 
+fn native_postgres_compatibility_type(db_type: Option<DatabaseType>) -> bool {
+    matches!(
+        db_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Gaussdb
+                | DatabaseType::OpenGauss
+                | DatabaseType::Kwdb
+                | DatabaseType::Questdb
+        )
+    )
+}
+
+fn postgres_create_table_relation(sql: &str) -> Option<(Option<String>, String)> {
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).ok()?;
+    let [Statement::CreateTable(table)] = statements.as_slice() else {
+        return None;
+    };
+    if table.temporary {
+        return None;
+    }
+    // PostgreSQL stores unquoted identifiers lower-cased, so the existence
+    // probe must compare the folded spelling; quoted names keep their case.
+    let mut parts = table.name.0.iter().filter_map(|part| {
+        part.as_ident().map(|ident| match ident.quote_style {
+            Some(_) => ident.value.clone(),
+            None => ident.value.to_lowercase(),
+        })
+    });
+    let table_name = parts.next_back()?;
+    Some((parts.next_back(), table_name))
+}
+
+fn should_verify_postgres_create_table_after_connection_error(
+    db_type: Option<DatabaseType>,
+    sql: &str,
+    error: &str,
+) -> bool {
+    native_postgres_compatibility_type(db_type)
+        && is_connection_error(error)
+        && postgres_create_table_relation(sql).is_some()
+}
+
+fn is_postgres_duplicate_relation_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("already exists") && (lower.contains("relation") || lower.contains("table"))
+}
+
 fn query_execution_error_action(
     db_type: Option<DatabaseType>,
     sql: &str,
@@ -1490,6 +1574,7 @@ fn query_execution_error_action(
         QueryExecutionError::DuckDb { message, .. } => query_pool_error_action(db_type, sql, message),
         QueryExecutionError::Timeout(message)
         | QueryExecutionError::Sql(message)
+        | QueryExecutionError::SqlWithPosition { message, .. }
         | QueryExecutionError::Legacy(message) => query_pool_error_action(db_type, sql, message),
         QueryExecutionError::Agent(_) => unreachable!("Agent errors return above"),
     }
@@ -2345,7 +2430,23 @@ async fn do_execute_typed(
             if let Some(duckdb_error) = typed_duckdb_error {
                 return QueryExecutionError::DuckDb { code: duckdb_error.code, message: duckdb_error.message };
             }
-            typed_agent_error.map_or_else(|| QueryExecutionError::Legacy(error), QueryExecutionError::Agent)
+            if let Some(agent_error) = typed_agent_error {
+                return QueryExecutionError::Agent(agent_error);
+            }
+            // PostgreSQL reports a cursor position as a marker suffix on the
+            // driver message. Resolve it here, while the executed statement text
+            // is still available, into a typed field. The marker is stripped even
+            // when it cannot be resolved, so it can never reach a user-facing
+            // message. The PostgreSQL driver also backs Redshift/GaussDB/Kwdb/
+            // QuestDB/openGauss, so this is not gated on `DatabaseType::Postgres`.
+            if error.contains(crate::sql_error_position::SQL_ERROR_POSITION_MARKER) {
+                let (message, position) = crate::sql_error_position::take_message_position(&error, sql);
+                return match position {
+                    Some(position) => QueryExecutionError::SqlWithPosition { message, position },
+                    None => QueryExecutionError::Legacy(message),
+                };
+            }
+            QueryExecutionError::Legacy(error)
         })
         .map_err(|error| classify_query_error(pool_db_type, error))
 }
@@ -2787,6 +2888,85 @@ pub async fn execute_sql_statement_with_options_typed(
     result
 }
 
+async fn recover_postgres_create_table_after_connection_error(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: Option<&str>,
+    sql: &str,
+    cancel_token: Option<CancellationToken>,
+    options: &QueryExecutionOptions,
+    db_type: Option<DatabaseType>,
+    initial_error: &QueryExecutionError,
+) -> Option<Result<db::QueryResult, QueryExecutionError>> {
+    if is_canceled(&cancel_token)
+        || !should_verify_postgres_create_table_after_connection_error(db_type, sql, &initial_error.to_string())
+    {
+        return None;
+    }
+
+    let pool_database = query_pool_database(database, options.catalog.as_deref());
+    let new_key = state
+        .reconnect_pool_for_session(connection_id, pool_database, options.client_session_id.as_deref())
+        .await
+        .ok()?;
+    let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
+
+    // A compatible PostgreSQL server may close the session after committing a
+    // CREATE TABLE. Retry once on a fresh session: this covers a disconnect
+    // before execution, while a duplicate relation below confirms that the
+    // original request already took effect.
+    let retry_error = match do_execute_typed(
+        state,
+        &new_key,
+        mysql_dialect,
+        Some(database),
+        sql,
+        schema,
+        cancel_token.clone(),
+        options.clone(),
+    )
+    .await
+    {
+        Ok(result) => return Some(Ok(result)),
+        Err(error) => error,
+    };
+    if !is_postgres_duplicate_relation_error(&retry_error.to_string()) {
+        return None;
+    }
+
+    let (qualified_schema, table_name) = postgres_create_table_relation(sql)?;
+    let schema_predicate = qualified_schema
+        .or_else(|| schema.map(str::to_owned))
+        .map(|schema_name| format!("n.nspname = {}", db::postgres::pg_quote_literal(&schema_name)))
+        .unwrap_or_else(|| "n.nspname = current_schema()".to_string());
+    let verify_sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE {} AND c.relname = {}) AS dbx_create_table_applied",
+        schema_predicate,
+        db::postgres::pg_quote_literal(&table_name),
+    );
+    let verify_options = QueryExecutionOptions {
+        max_rows: Some(1),
+        client_session_id: options.client_session_id.clone(),
+        ..Default::default()
+    };
+    let verified = do_execute_typed(
+        state,
+        &new_key,
+        mysql_dialect,
+        Some(database),
+        &verify_sql,
+        None,
+        cancel_token,
+        verify_options,
+    )
+    .await
+    .ok()
+    .and_then(|result| result.rows.first().and_then(|row| row.first()).and_then(|value| value.as_bool()))
+    .unwrap_or(false);
+    verified.then(|| Ok(empty_query_result(0)))
+}
+
 async fn execute_sql_statement_with_options_typed_inner(
     state: &AppState,
     connection_id: &str,
@@ -2851,6 +3031,23 @@ async fn execute_sql_statement_with_options_typed_inner(
     };
 
     let action = result.as_ref().err().map(|error| query_execution_error_action(db_type, sql, error));
+    if let Some(initial_error) = result.as_ref().err() {
+        if let Some(recovered) = recover_postgres_create_table_after_connection_error(
+            state,
+            connection_id,
+            database,
+            schema,
+            sql,
+            cancel_token.clone(),
+            &options,
+            db_type,
+            initial_error,
+        )
+        .await
+        {
+            return with_sql_context(recovered);
+        }
+    }
     match action {
         Some(PoolErrorAction::ReconnectAndRetry) if !is_canceled(&cancel_token) => {
             let pool_database = query_pool_database(database, options.catalog.as_deref());
@@ -5182,6 +5379,45 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
     }
 }
 
+/// Compute per-execution-statement proven-read-only markers for the sticky
+/// manual-transaction UX (#7122 Oracle, #9018 MySQL/PostgreSQL). The user-facing
+/// classification SQL is split with the same dialect-aware splitter as the
+/// execution SQL and paired by count/position; any mismatch is fail-closed (no
+/// markers). Oracle/OceanBase-Oracle keep the lexical classifier, MySQL and
+/// PostgreSQL use the strict `sql_risk` proof; every other dialect is unproven.
+fn classify_manual_transaction_statements(
+    database_type: Option<DatabaseType>,
+    execution_statement_count: usize,
+    classification_sql: Option<&str>,
+) -> Vec<bool> {
+    let Some(database_type) = database_type.filter(|database_type| {
+        matches!(
+            database_type,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Mysql | DatabaseType::Postgres
+        )
+    }) else {
+        return Vec::new();
+    };
+    let Some(classification_sql) = classification_sql else {
+        return Vec::new();
+    };
+    let user_statements = crate::sql::split_sql_statements_for_database(classification_sql, database_type);
+    let paired = user_statements.len() == execution_statement_count && !user_statements.is_empty();
+    if !paired {
+        return Vec::new();
+    }
+    user_statements
+        .iter()
+        .map(|statement| match database_type {
+            DatabaseType::Mysql | DatabaseType::Postgres => {
+                crate::sql_risk::prove_read_only_for_database(statement, database_type)
+                    == crate::sql_risk::ReadProof::ProvenReadOnly
+            }
+            _ => is_oracle_proven_read_only_statement(statement),
+        })
+        .collect()
+}
+
 async fn begin_transaction_session(
     state: &AppState,
     connection_id: &str,
@@ -5492,7 +5728,7 @@ pub async fn execute_in_manual_transaction_with_options(
         },
     );
     if statements.is_empty() {
-        // Oracle-only UX marker: the no-op is Core's decision that the script
+        // Sticky-dialect UX marker: the no-op is Core's decision that the script
         // (empty/whitespace/comments-only) has no statements, so the frontend
         // must not treat it as an unproven statement. Every other database
         // receives the plain empty result.
@@ -5500,7 +5736,10 @@ pub async fn execute_in_manual_transaction_with_options(
             empty_query_result(0),
             options.table_data_preview,
         );
-        if db_type == Some(DatabaseType::Oracle) {
+        if matches!(
+            db_type,
+            Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Mysql | DatabaseType::Postgres)
+        ) {
             result = result.with_manual_transaction_no_statement();
         }
         return Ok(vec![result]);
@@ -5556,29 +5795,14 @@ pub async fn execute_in_manual_transaction_with_options(
     let row_limit = options.max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
 
-    // Oracle-only classification pairing. The core splits both the execution
+    // Sticky-dialect classification pairing. The core splits both the execution
     // SQL and, when present, the user-facing classification SQL with the same
-    // Oracle-aware splitter. A marker is emitted only when both lists have the
+    // dialect-aware splitter. A marker is emitted only when both lists have the
     // same non-zero count and every paired user statement is proven read-only;
     // any mismatch is fail-closed (no marker). This is deliberately a
     // trust-boundary count/position pairing, not a SQL-equivalence parser.
-    let classification: Vec<bool> = if db_type == Some(DatabaseType::Oracle) {
-        match options.classification_sql.as_deref() {
-            Some(classification_sql) => {
-                let user_statements =
-                    crate::sql::split_sql_statements_for_database(classification_sql, DatabaseType::Oracle);
-                let paired = user_statements.len() == statements.len() && !user_statements.is_empty();
-                if paired {
-                    user_statements.iter().map(|statement| is_oracle_proven_read_only_statement(statement)).collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
+    let classification: Vec<bool> =
+        classify_manual_transaction_statements(db_type, statements.len(), options.classification_sql.as_deref());
 
     let mut conn = connection.lock().await;
     for (i, statement) in statements.iter().enumerate() {
@@ -8749,6 +8973,46 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn postgres_sql_error_with_position_survives_classification_and_legacy_rendering() {
+        let sql = "SELECT *\nFROM no_such_table";
+        let cursor = sql.find("no_such_table").unwrap() as u32 + 1;
+        let raw = format!(
+            "ERROR: relation \"no_such_table\" does not exist{}",
+            crate::sql_error_position::encode_marker(cursor)
+        );
+        let (message, position) = crate::sql_error_position::take_message_position(&raw, sql);
+        let error = QueryExecutionError::SqlWithPosition { message, position: position.unwrap() };
+
+        // The transport marker must never reach the user-facing message.
+        let legacy = error.clone().into_legacy_string();
+        assert!(!legacy.contains(crate::sql_error_position::SQL_ERROR_POSITION_MARKER));
+        assert_eq!(legacy, "ERROR: relation \"no_such_table\" does not exist");
+
+        // Classification must not downgrade the typed variant.
+        let classified = classify_query_error(Some(DatabaseType::Postgres), error.clone());
+        assert!(matches!(classified, QueryExecutionError::SqlWithPosition { .. }));
+
+        let backend_error = classified.into_backend_error();
+        assert_eq!(backend_error.code(), "DBX-JDBC-4001");
+        let position = backend_error.error_position().expect("position must survive into the envelope");
+        assert_eq!((position.line, position.column), (2, 6));
+    }
+
+    #[test]
+    fn legacy_rendering_strips_a_leftover_transport_marker() {
+        // Guards the driver-error path that never went through the resolve step
+        // (e.g. a PostgreSQL-family driver error shown as a legacy string).
+        let error = QueryExecutionError::Legacy(format!(
+            "ERROR: boom{}{}",
+            crate::sql_error_position::encode_marker(9),
+            crate::sql_error_position::encode_marker(2)
+        ));
+        let rendered = error.into_legacy_string();
+        assert_eq!(rendered, "ERROR: boom");
+        assert!(!rendered.contains(crate::sql_error_position::SQL_ERROR_POSITION_MARKER));
+    }
+
+    #[test]
     fn duckdb_worker_error_preserves_catalog_identity_and_detail() {
         let error = QueryExecutionError::DuckDb {
             code: "duckdb_execute_failed".to_string(),
@@ -9528,6 +9792,63 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn postgres_create_table_recovery_only_targets_persistent_tables() {
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE \"app\".\"events\" (id bigint)"),
+            Some((Some("app".to_string()), "events".to_string()))
+        );
+        assert_eq!(
+            postgres_create_table_relation("-- ddl\nCREATE TABLE events (id bigint)"),
+            Some((None, "events".to_string()))
+        );
+        assert_eq!(postgres_create_table_relation("CREATE TEMP TABLE events (id bigint)"), None);
+        assert_eq!(postgres_create_table_relation("ALTER TABLE events ADD COLUMN note text"), None);
+    }
+
+    #[test]
+    fn postgres_create_table_recovery_folds_unquoted_identifiers() {
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE MyTable (id bigint)"),
+            Some((None, "mytable".to_string()))
+        );
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE Core.Orders (id bigint)"),
+            Some((Some("core".to_string()), "orders".to_string()))
+        );
+        assert_eq!(
+            postgres_create_table_relation("CREATE TABLE \"Core\".\"Orders\" (id bigint)"),
+            Some((Some("Core".to_string()), "Orders".to_string()))
+        );
+    }
+
+    #[test]
+    fn postgres_create_table_recovery_requires_native_connection_loss() {
+        let sql = "CREATE TABLE events (id bigint)";
+        assert!(should_verify_postgres_create_table_after_connection_error(
+            Some(DatabaseType::Postgres),
+            sql,
+            "connection closed; PostgreSQL schema.reset cleanup failed: connection closed"
+        ));
+        assert!(should_verify_postgres_create_table_after_connection_error(
+            Some(DatabaseType::Gaussdb),
+            sql,
+            "connection reset by peer"
+        ));
+        assert!(!should_verify_postgres_create_table_after_connection_error(
+            Some(DatabaseType::Postgres),
+            sql,
+            "ERROR: permission denied"
+        ));
+        assert!(!should_verify_postgres_create_table_after_connection_error(
+            Some(DatabaseType::Vastbase),
+            sql,
+            "connection closed"
+        ));
+        assert!(is_postgres_duplicate_relation_error("ERROR: relation \"events\" already exists"));
+        assert!(!is_postgres_duplicate_relation_error("ERROR: permission denied for schema public"));
+    }
+
+    #[test]
     fn query_error_context_omits_raw_sql_and_is_not_duplicated() {
         let sql = "select 'secret-123' as token";
         let error = query_error_with_omitted_sql_context("driver rejected statement", sql);
@@ -10196,6 +10517,44 @@ for line in sys.stdin:
         assert_eq!(second_params["sessionId"], "oracle-go-1");
         assert_eq!(second_params["pageSize"], 100);
         assert!(second_params.get("sql").is_none());
+    }
+
+    /// Spawns a fake Python agent and registers a manual transaction session in
+    /// the app state so `execute_in_manual_transaction_with_options` can run
+    /// end to end without a live database.
+    #[test]
+    fn manual_transaction_classification_pairs_statements_and_fails_closed() {
+        // MySQL/PostgreSQL route through the strict sql_risk proof.
+        assert_eq!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1")), vec![true]);
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users")),
+            vec![true]
+        );
+        // Mixed script: every statement is classified individually.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 2, Some("SELECT 1; DELETE FROM t")),
+            vec![true, false]
+        );
+        // Session-state writes fail the proof (SELECT ... INTO @var).
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1 INTO @x")),
+            vec![false]
+        );
+        // Count mismatch, missing classification SQL, non-participating dialects
+        // and unknown connections are all fail-closed (no markers).
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 3, Some("SELECT 1")).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, None).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Doris), 1, Some("SELECT 1")).is_empty());
+        assert!(classify_manual_transaction_statements(None, 1, Some("SELECT 1")).is_empty());
+        // Oracle keeps its lexical classifier and its pairing behavior.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT * FROM EMP")),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::OceanbaseOracle), 1, Some("DELETE FROM EMP")),
+            vec![false]
+        );
     }
 
     /// Spawns a fake Python agent and registers a manual transaction session in

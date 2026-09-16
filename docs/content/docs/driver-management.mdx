@@ -85,7 +85,7 @@ This is useful for air-gapped networks, strict firewall environments, or pre-app
 
 Every agent provides a single-driver ZIP that can be installed with **Import offline package**. Java agent packages are platform-independent and do not duplicate the JRE, while native agents such as KingbaseES, Oracle, and Xugu provide separate packages for each OS and CPU architecture.
 
-If the target machine does not already have the managed JRE required by a Java agent, import the matching JRE package once or use the full offline bundle containing every driver and the JRE.
+If the target machine does not already have the managed JRE required by a Java agent, use **Import offline package** to select the matching platform's `dbx-jre-<version>-<platform>.tar.zst`, or use the full offline bundle containing every driver and the JRE. Standalone JRE packages do not require `agent-registry.json`; DBX validates the Java executable's operating system and CPU architecture before installation.
 
 ### Importing KingbaseES on Windows
 

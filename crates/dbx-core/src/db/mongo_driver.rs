@@ -2120,8 +2120,55 @@ pub async fn update_documents(
     Ok(result.modified_count)
 }
 
+/// replaceOne(filter, replacement[, { upsert }]): the whole document is swapped, so
+/// unlike update there are no array filters to apply.
+pub async fn replace_document(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<u64, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let replacement_value: serde_json::Value =
+        serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    if let Some(operator) = replacement.keys().find(|key| key.starts_with('$')) {
+        return Err(format!("Replacement document must not contain update operators such as {operator}"));
+    }
+    let upsert = parse_replace_options(options_json)?;
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.replace_one(filter, replacement);
+    if let Some(upsert) = upsert {
+        action = action.upsert(upsert);
+    }
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(result.modified_count)
+}
+
 #[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoReplaceOptions {
+    upsert: Option<bool>,
+}
+
+fn parse_replace_options(options_json: Option<&str>) -> Result<Option<bool>, String> {
+    let Some(raw) = options_json.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let options: MongoReplaceOptions =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid replace options: {e}"))?;
+    Ok(options.upsert)
+}
+
+/// Unknown options are rejected rather than dropped, so a `collation` or `hint` the
+/// driver does not apply fails loudly instead of silently changing nothing. This
+/// matches `MongoReplaceOptions` and the legacy agent, which already reject them.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MongoUpdateOptions {
     upsert: Option<bool>,
     array_filters: Option<Vec<serde_json::Value>>,
@@ -2603,6 +2650,41 @@ fn map_insert_many_error(error: mongodb::error::Error) -> MongoBulkWriteError {
 
 fn is_retryable_mongo_write_code(code: i32) -> bool {
     !matches!(code, 11000 | 11001 | 12582)
+}
+
+/// Reads the `insert_documents` result of a MongoDB legacy agent. The agent reports a partly
+/// applied batch as a success carrying one entry per rejected document, so callers must inspect
+/// [`MongoInsertOutcome::errors`] instead of trusting a bare affected-row count.
+pub fn agent_insert_outcome(result: &serde_json::Value) -> Result<MongoInsertOutcome, String> {
+    let inserted = result
+        .get("affected_rows")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "MongoDB Legacy Agent returned an invalid insertMany result".to_string())?;
+    let errors = result
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .map(|errors| errors.iter().map(agent_insert_error).collect())
+        .unwrap_or_default();
+    Ok(MongoInsertOutcome { inserted, errors })
+}
+
+/// One rejected document, or a batch-wide rejection the agent could not attribute to a document
+/// (a write concern failure) — those carry no index and keep [`MongoBulkWriteError::index`] `None`.
+fn agent_insert_error(value: &serde_json::Value) -> MongoBulkWriteError {
+    // A rejection is never dropped for lack of a message: dropping it would make a document the
+    // server refused look like a successful insert.
+    let message = value
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("MongoDB Legacy Agent rejected a document without a message")
+        .to_string();
+    let code = value.get("code").and_then(serde_json::Value::as_i64).map(|code| code as i32);
+    MongoBulkWriteError {
+        message,
+        index: value.get("index").and_then(serde_json::Value::as_u64).map(|index| index as usize),
+        code,
+        retryable: code.is_some_and(is_retryable_mongo_write_code),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3209,6 +3291,16 @@ mod tests {
 
         let value_error = json_update_to_modifications(&serde_json::json!("invalid")).unwrap_err();
         assert!(value_error.contains("object or pipeline array"));
+    }
+
+    #[test]
+    fn update_options_reject_unknown_fields_instead_of_dropping_them() {
+        let error = parse_update_options(Some(r#"{"upsert":true,"collation":{"locale":"en"}}"#)).unwrap_err();
+        assert!(error.contains("collation"), "{error}");
+        // Same rule as replace: an option the driver would not apply must not be silently ignored.
+        assert!(parse_replace_options(Some(r#"{"upsert":true,"collation":{"locale":"en"}}"#)).is_err());
+        assert!(parse_update_options(Some("{}")).is_ok());
+        assert!(parse_update_options(None).is_ok());
     }
 
     #[test]

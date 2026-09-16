@@ -173,7 +173,6 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-icons", category: "appearance", titleKey: "settings.iconTheme", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-tray", category: "appearance", titleKey: "settings.showTrayIcon", descriptionKey: "settings.showTrayIconDescription", targetId: "appearance", visible: desktopOnly },
   { id: "appearance-quit", category: "appearance", titleKey: "settings.quitOnClose", descriptionKey: "settings.quitOnCloseDescription", targetId: "appearance", visible: desktopOnly },
-  { id: "appearance-updates", category: "appearance", titleKey: "settings.updateNotificationsEnabled", descriptionKey: "settings.updateNotificationsEnabledDescription", targetId: "appearance" },
   { id: "appearance-debug-logs", category: "appearance", titleKey: "settings.debugLoggingEnabled", descriptionKey: "settings.debugLoggingEnabledDescription", targetId: "appearance", visible: desktopOnly },
   { id: "navigation", category: "navigation", titleKey: "settings.navigationTab", targetId: "navigation" },
   { id: "navigation-sidebar", category: "navigation", titleKey: "settings.sidebarActivation", targetId: "navigation" },
@@ -263,6 +262,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "security-password", category: "security", titleKey: "auth.changePassword", targetId: "security", visible: webOnly },
   { id: "about-support", category: "about", titleKey: "settings.supportInfoTitle", descriptionKey: "settings.supportInfoDescription", targetId: "about" },
   { id: "about-transfer", category: "about", titleKey: "settings.settingsTransferTitle", descriptionKey: "settings.settingsTransferDescription", targetId: "about" },
+  { id: "about-update-notifications", category: "about", titleKey: "settings.updateNotificationsEnabled", descriptionKey: "settings.updateNotificationsEnabledDescription", targetId: "about" },
   { id: "about-update", category: "about", titleKey: "settings.updateDownloadSource", descriptionKey: "settings.updateDownloadSourceDescription", targetId: "about" },
 ];
 

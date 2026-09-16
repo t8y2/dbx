@@ -110,8 +110,7 @@ jobs:
             sha256 arm:   "__SHA_ARM64__",
                    intel: "__SHA_X64__"
 
-            url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_#{arch}.dmg",
-                verified: "github.com/__OWNER__/__APP__/"
+            url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_#{arch}.dmg"
             name "DBX"
             desc "Database management tool"
             homepage "https://dbxio.com/"

@@ -76,7 +76,7 @@ test("ContentArea wires server messages into the switcher and the messages view"
   // when a later statement owns the active result.
   assert.match(contentArea, /const resultMessages = computed<QueryMessage\[\]>\(\(\) => \{/);
   assert.match(contentArea, /props\.activeTab\.results\?\.length \? props\.activeTab\.results : props\.activeTab\.result \? \[props\.activeTab\.result\] : \[\]/);
-  assert.match(contentArea, /results\.flatMap\(\(result\) => result\.messages \?\? \[\]\)/);
+  assert.match(contentArea, /results\.flatMap\(queryResultMessages\)/);
   assert.match(contentArea, /resultMessageCount = computed\(\(\) => resultMessages\.value\.length\)/);
   assert.match(contentArea, /canShowMessagesOutput = computed\(\(\) => resultMessageCount\.value > 0\)/);
   assert.equal((contentArea.match(/:can-show-messages="canShowMessagesOutput"/g) ?? []).length, 2);

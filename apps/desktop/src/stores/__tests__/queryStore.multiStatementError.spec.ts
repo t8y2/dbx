@@ -214,6 +214,39 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.batchSqlExecution?.items[0]?.error).toContain(originalMessage);
   });
 
+  it("annotates a thrown single-statement error so the locate flow keeps its source", async () => {
+    const position = { line: 1, column: 16, offset: 15 };
+    const structuredError = {
+      ...structuredSqlError('ERROR: relation "no_such_table" does not exist'),
+      errorPosition: position,
+    };
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementationOnce(async (options) => ({
+      sqlToExecute: `${options.sql} LIMIT 100`,
+      pageSql: undefined,
+      pageLimit: undefined,
+      pageOffset: undefined,
+      countSql: undefined,
+      useAgentResultSession: false,
+    }));
+    mocks.executeMulti.mockRejectedValue(
+      new BackendErrorException({
+        backendError: structuredError,
+        message: 'ERROR: relation "no_such_table" does not exist',
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM no_such_table");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.execution_error).toBe(true);
+    expect(tab.result?.error?.errorPosition).toEqual(position);
+    expect(tab.result?.sourceStatement).toBe("SELECT * FROM no_such_table");
+    expect(tab.result?.executedStatement).toBe("SELECT * FROM no_such_table LIMIT 100");
+  });
+
   it("updates live per-statement progress before the batch promise resolves", async () => {
     const pendingExecution = deferred<any[]>();
     let reportProgress!: (progress: any) => void;
@@ -558,11 +591,11 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.results).toHaveLength(4);
   });
 
-  it("invalidates only the executing Oracle tab after successful CURRENT_SCHEMA changes", async () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("invalidates only the executing %s tab after successful CURRENT_SCHEMA changes", async (databaseType) => {
     mocks.getConnectionConfig.mockReturnValue({
-      id: "oracle-1",
-      name: "Oracle",
-      db_type: "oracle",
+      id: `${databaseType}-1`,
+      name: databaseType,
+      db_type: databaseType,
       database: "ORCL",
       query_timeout_secs: 30,
     });
@@ -572,8 +605,8 @@ describe("queryStore multi-statement errors", () => {
       .mockResolvedValueOnce([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const tabA = store.createTab("oracle-1", "ORCL", "Tab A");
-    const tabB = store.createTab("oracle-1", "ORCL", "Tab B");
+    const tabA = store.createTab(`${databaseType}-1`, "ORCL", "Tab A");
+    const tabB = store.createTab(`${databaseType}-1`, "ORCL", "Tab B");
     // Exercise the explicit auto-commit execute-multi path.
     store.setAutoCommit(tabA, true);
     store.setAutoCommit(tabB, true);

@@ -61,6 +61,13 @@ pub struct SqlFileRequest {
     pub continue_on_error: bool,
     #[serde(default)]
     pub selected_tables: Option<Vec<crate::sql_file_import::SqlFileTable>>,
+    #[serde(default)]
+    pub part_cooldown_ms: u64,
+    /// Temporarily disable MySQL `FOREIGN_KEY_CHECKS` for this import and
+    /// restore them on completion, error, or cancellation. Only applies to
+    /// MySQL-compatible connections that reuse one pinned session.
+    #[serde(default)]
+    pub skip_relational_constraints: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +80,10 @@ pub struct SqlFilePreview {
     pub can_execute_without_selected_database: bool,
     #[serde(default)]
     pub establishes_database_context: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_file_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_part_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

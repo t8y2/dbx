@@ -32,6 +32,10 @@ const AI_HTML_PREVIEW_KEYS = ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpa
 // header menu entry, report role labels, failure marker, and empty-state copy.
 const AI_CONVERSATION_EXPORT_KEYS = ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"] as const;
 
+// Keys conversation rename and the database picker add to the `ai` namespace —
+// the picker renders in every locale and a missing key leaks raw keys into it.
+const AI_CONVERSATION_MANAGEMENT_KEYS = ["renameConversation", "conversationRenameFailed", "clearDatabaseSelection", "searchDatabases", "noDatabasesFound"] as const;
+
 describe("AI rich content locale parity", () => {
   it.each(locales)("%s exposes the full ai.html* key set with non-empty copy", (_name, locale) => {
     const ai = (locale as { ai: Record<string, unknown> }).ai;
@@ -44,6 +48,14 @@ describe("AI rich content locale parity", () => {
   it.each(locales)("%s exposes the full conversation-export key set with non-empty copy", (_name, locale) => {
     const ai = (locale as { ai: Record<string, unknown> }).ai;
     for (const key of AI_CONVERSATION_EXPORT_KEYS) {
+      expect(ai[key], `${_name}: ai.${key}`).toBeTypeOf("string");
+      expect(ai[key] as string, `${_name}: ai.${key}`).not.toHaveLength(0);
+    }
+  });
+
+  it.each(locales)("%s exposes the full conversation-management key set with non-empty copy", (_name, locale) => {
+    const ai = (locale as { ai: Record<string, unknown> }).ai;
+    for (const key of AI_CONVERSATION_MANAGEMENT_KEYS) {
       expect(ai[key], `${_name}: ai.${key}`).toBeTypeOf("string");
       expect(ai[key] as string, `${_name}: ai.${key}`).not.toHaveLength(0);
     }

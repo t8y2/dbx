@@ -292,6 +292,7 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("get locale() { return locale; }");
     expect(document).toContain("openFilesystem");
     expect(document).toContain("saveFile");
+    expect(document).toContain("copy");
     expect(document).toContain("document.dispatchEvent(new CustomEvent('dbx-plugin-env'");
     expect(document).toContain("shortcut: 'closeTab'");
     expect(document).toContain("connect-src 'none'");
@@ -406,6 +407,59 @@ describe("PluginHostBridge", () => {
     await vi.waitFor(() => expect(messages).toHaveLength(2));
     expect(saveFile).toHaveBeenLastCalledWith("sample", {}, new Uint8Array([1, 2, 3]));
     expect(messages[1]).toMatchObject({ type: "response", id: "save2", result: null });
+  });
+
+  it("routes host.copy through the host clipboard and rejects bad payloads", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const copyText = vi.fn().mockResolvedValue(undefined);
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      copyText,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "copy1", method: "host.copy", params: { text: "https://example.com/share?sig=1" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(copyText).toHaveBeenCalledWith("sample", "https://example.com/share?sig=1");
+    expect(messages[0]).toMatchObject({ type: "response", id: "copy1", result: { success: true } });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "copy2", method: "host.copy", params: { text: "" } },
+    } as MessageEvent);
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "copy3", method: "host.copy", params: { text: "x".repeat(2 * 1024 * 1024 + 1) } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(byId.get("copy2")).toMatchObject({ id: "copy2", error: "host.copy requires text" });
+    // Oversized text is stopped by the generic bridge payload guard before the handler cap.
+    expect(String((byId.get("copy3") as { error?: string }).error)).toMatch(/too large|exceeds/);
+  });
+
+  it("rejects host.copy when the host has no clipboard support", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "nocopy", method: "host.copy", params: { text: "hello" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "nocopy", error: "Host clipboard is unavailable" });
   });
 
   it("rejects host.saveFile without payload or host support", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectStableDrivers, selectUpdatableDrivers, hasAnyUpdatableDriverMatching } from "@/lib/connection/driverListFilter";
+import { selectStableDrivers, selectUpdatableDrivers, hasAnyUpdatableDriverMatching, selectDriversByInstallStatus, countInstalledDrivers, countAvailableDrivers, partitionDriversByInstallStatus, upgradeAllDriverTypes, upgradeAllMatchesFullUpdateSet } from "@/lib/connection/driverListFilter";
 import type { AgentDriverInfo } from "@/lib/backend/api";
 
 function driver(overrides: Partial<AgentDriverInfo> = {}): AgentDriverInfo {
@@ -16,6 +16,123 @@ function driver(overrides: Partial<AgentDriverInfo> = {}): AgentDriverInfo {
     ...overrides,
   };
 }
+
+describe("selectDriversByInstallStatus", () => {
+  const mysql = driver({ db_type: "mysql", installed: true });
+  const postgres = driver({ db_type: "postgres", installed: false });
+  const sqlite = driver({ db_type: "sqlite", installed: true, update_available: true });
+
+  it("returns a copy of all drivers for 'all'", () => {
+    const drivers = [mysql, postgres, sqlite];
+    const result = selectDriversByInstallStatus(drivers, "all");
+    expect(result.map((d) => d.db_type)).toEqual(["mysql", "postgres", "sqlite"]);
+    expect(result).not.toBe(drivers);
+  });
+
+  it("returns only installed drivers, including those with updates", () => {
+    expect(selectDriversByInstallStatus([mysql, postgres, sqlite], "installed").map((d) => d.db_type)).toEqual(["mysql", "sqlite"]);
+  });
+
+  it("returns only drivers that are not installed", () => {
+    expect(selectDriversByInstallStatus([mysql, postgres, sqlite], "available").map((d) => d.db_type)).toEqual(["postgres"]);
+  });
+
+  it("returns empty arrays when nothing matches", () => {
+    expect(selectDriversByInstallStatus([postgres], "installed")).toEqual([]);
+    expect(selectDriversByInstallStatus([mysql], "available")).toEqual([]);
+    expect(selectDriversByInstallStatus([], "all")).toEqual([]);
+  });
+});
+
+describe("install-status counts", () => {
+  it("counts installed and available drivers without double-counting updates", () => {
+    const drivers = [driver({ db_type: "mysql", installed: true }), driver({ db_type: "postgres", installed: false }), driver({ db_type: "sqlite", installed: true, update_available: true })];
+    expect(countInstalledDrivers(drivers)).toBe(2);
+    expect(countAvailableDrivers(drivers)).toBe(1);
+  });
+
+  it("returns zeros for an empty list", () => {
+    expect(countInstalledDrivers([])).toBe(0);
+    expect(countAvailableDrivers([])).toBe(0);
+  });
+});
+
+describe("partitionDriversByInstallStatus", () => {
+  const mysql = driver({ db_type: "mysql", installed: true, update_available: false });
+  const postgres = driver({ db_type: "postgres", installed: false, update_available: false });
+  const sqlite = driver({ db_type: "sqlite", installed: true, update_available: true });
+  // Stale registry / missing jar: not installed, but update_available is true.
+  const staleOracle = driver({ db_type: "oracle", installed: false, update_available: true });
+
+  it("keeps uninstalled update_available drivers in the available list and hides the banner", () => {
+    const { updatable, stable } = partitionDriversByInstallStatus([mysql, postgres, sqlite, staleOracle], "available");
+
+    expect(updatable).toEqual([]);
+    expect(stable.map((d) => d.db_type)).toEqual(["postgres", "oracle"]);
+  });
+
+  it("does not put uninstalled update_available drivers in the installed banner", () => {
+    const { updatable, stable } = partitionDriversByInstallStatus([mysql, postgres, sqlite, staleOracle], "installed");
+
+    expect(updatable.map((d) => d.db_type)).toEqual(["sqlite"]);
+    expect(stable.map((d) => d.db_type)).toEqual(["mysql"]);
+  });
+
+  it("keeps the all-status partition aligned with updatable vs stable", () => {
+    const drivers = [mysql, postgres, sqlite, staleOracle];
+    const { updatable, stable } = partitionDriversByInstallStatus(drivers, "all");
+
+    expect(updatable.map((d) => d.db_type)).toEqual(["sqlite", "oracle"]);
+    expect(stable.map((d) => d.db_type)).toEqual(["mysql", "postgres"]);
+    expect(updatable.length + stable.length).toBe(drivers.length);
+  });
+
+  it("returns empty sides when the status filter matches nothing", () => {
+    expect(partitionDriversByInstallStatus([postgres], "installed")).toEqual({ updatable: [], stable: [] });
+    expect(partitionDriversByInstallStatus([mysql], "available")).toEqual({ updatable: [], stable: [] });
+  });
+
+  it("does not copy the naive available composition that drops stale updatables", () => {
+    expect(selectStableDrivers(selectDriversByInstallStatus([staleOracle], "available"))).toEqual([]);
+    expect(partitionDriversByInstallStatus([staleOracle], "available").stable.map((d) => d.db_type)).toEqual(["oracle"]);
+  });
+
+  it("installed banner+list cover every installed driver exactly once", () => {
+    const drivers = [mysql, postgres, sqlite, staleOracle];
+    const { updatable, stable } = partitionDriversByInstallStatus(drivers, "installed");
+    expect(updatable.length + stable.length).toBe(countInstalledDrivers(drivers));
+  });
+
+  it("available list covers every uninstalled driver exactly once", () => {
+    const drivers = [mysql, postgres, sqlite, staleOracle];
+    const { updatable, stable } = partitionDriversByInstallStatus(drivers, "available");
+    expect(updatable).toEqual([]);
+    expect(stable.length).toBe(countAvailableDrivers(drivers));
+  });
+
+  it("Upgrade All keys match the visible banner, not hidden stale uninstalled rows", () => {
+    const drivers = [mysql, postgres, sqlite, staleOracle];
+    expect(upgradeAllDriverTypes(drivers, "installed")).toEqual(["sqlite"]);
+    expect(upgradeAllMatchesFullUpdateSet(drivers, "installed")).toBe(false);
+    expect(upgradeAllDriverTypes(drivers, "all")).toEqual(["sqlite", "oracle"]);
+    expect(upgradeAllMatchesFullUpdateSet(drivers, "all")).toBe(true);
+    expect(upgradeAllDriverTypes(drivers, "available")).toEqual([]);
+    expect(upgradeAllMatchesFullUpdateSet(drivers, "available")).toBe(false);
+  });
+
+  it("allows the batch Upgrade All button when every updatable is visible", () => {
+    expect(upgradeAllMatchesFullUpdateSet([sqlite], "installed")).toBe(true);
+    expect(upgradeAllDriverTypes([sqlite], "installed")).toEqual(["sqlite"]);
+  });
+
+  it("does not treat equal-sized but different updatable sets as a safe batch", () => {
+    const installedOther = driver({ db_type: "mysql", installed: true, update_available: false });
+    const visibleInstalled = driver({ db_type: "sqlite", installed: true, update_available: true });
+    const hiddenStale = driver({ db_type: "oracle", installed: false, update_available: true });
+    expect(upgradeAllDriverTypes([installedOther, visibleInstalled, hiddenStale], "installed")).toEqual(["sqlite"]);
+    expect(upgradeAllMatchesFullUpdateSet([installedOther, visibleInstalled, hiddenStale], "installed")).toBe(false);
+  });
+});
 
 describe("selectUpdatableDrivers", () => {
   it("returns only drivers with update_available === true", () => {
@@ -187,6 +304,30 @@ describe("hasAnyUpdatableDriverMatching", () => {
         selectedCategory: "graph",
         driverMatchesSearch: labelSearch,
         driverCategory: categoryOf,
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when the install-status filter is 'available' (update banner is hidden)", () => {
+    expect(
+      hasAnyUpdatableDriverMatching([neo4j], {
+        searchQuery: "",
+        selectedCategory: "all",
+        driverMatchesSearch: labelSearch,
+        driverCategory: categoryOf,
+        installStatus: "available",
+      }),
+    ).toBe(false);
+  });
+
+  it("still matches updatable drivers when the install-status filter is 'installed'", () => {
+    expect(
+      hasAnyUpdatableDriverMatching([neo4j], {
+        searchQuery: "",
+        selectedCategory: "all",
+        driverMatchesSearch: labelSearch,
+        driverCategory: categoryOf,
+        installStatus: "installed",
       }),
     ).toBe(true);
   });

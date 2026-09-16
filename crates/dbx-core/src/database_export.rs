@@ -1211,10 +1211,14 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         .collect::<Vec<_>>()
         .join(", ");
     let mut statements = Vec::new();
-    let needs_dameng_identity_insert = options.database_type == Some(DatabaseType::Dameng)
-        && insert_columns.iter().any(|(index, _, _)| {
-            is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
-        });
+    // Dameng and SQL Server both reject explicit values for identity columns
+    // unless `SET IDENTITY_INSERT <table> ON` wraps the statement (SQL Server
+    // error 544), so exported INSERTs must carry the wrapper.
+    let needs_identity_insert_wrapper =
+        matches!(options.database_type, Some(DatabaseType::Dameng) | Some(DatabaseType::SqlServer))
+            && insert_columns.iter().any(|(index, _, _)| {
+                is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
+            });
 
     let statement_prefix = format!("INSERT INTO {table} ({columns}) VALUES ");
     let statement_overhead_bytes = export_sql_statement_bytes(options.database_type, &statement_prefix) + 1;
@@ -1233,7 +1237,7 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
             insert_sql.push_str(&statement_prefix);
             insert_sql.push_str(values);
             insert_sql.push(';');
-            if needs_dameng_identity_insert {
+            if needs_identity_insert_wrapper {
                 statements.push(wrap_dameng_identity_insert_sql_for_table(&insert_sql, &table));
             } else {
                 statements.push(insert_sql);
@@ -3797,7 +3801,8 @@ fn filter_export_table_infos(
 }
 
 fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseType) -> String {
-    format!("DROP TABLE IF EXISTS {};", crate::transfer::qualified_table(table_name, schema, db_type, None))
+    let cascade = if db_type == &DatabaseType::Postgres { " CASCADE" } else { "" };
+    format!("DROP TABLE IF EXISTS {}{};", crate::transfer::qualified_table(table_name, schema, db_type, None), cascade)
 }
 
 fn build_database_export_object_source_sql(
@@ -4305,7 +4310,7 @@ mod tests {
     fn builds_drop_table_if_exists_without_empty_schema() {
         let sql = drop_table_if_exists_sql("users", "", &DatabaseType::Postgres);
 
-        assert_eq!(sql, "DROP TABLE IF EXISTS \"users\";");
+        assert_eq!(sql, "DROP TABLE IF EXISTS \"users\" CASCADE;");
     }
 
     #[test]
@@ -5691,6 +5696,35 @@ mod tests {
             statements,
             vec![
                 "SET IDENTITY_INSERT \"SYSDBA\".\"USERS\" ON;\nINSERT INTO \"SYSDBA\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nSET IDENTITY_INSERT \"SYSDBA\".\"USERS\" OFF;"
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_identity_export_inserts_enable_identity_insert() {
+        // The SQL Server column metadata reports `identity(seed,increment)`;
+        // explicit values for such columns are rejected with error 544 unless
+        // the INSERT is wrapped in SET IDENTITY_INSERT.
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("events".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: vec![Some("int".to_string()), Some("nvarchar(50)".to_string())],
+            column_extras: vec![Some("identity(1,1)".to_string()), None],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "SET IDENTITY_INSERT [dbo].[events] ON;\nINSERT INTO [dbo].[events] ([id], [name]) VALUES (1, N'Ada');\nSET IDENTITY_INSERT [dbo].[events] OFF;"
             ]
         );
     }

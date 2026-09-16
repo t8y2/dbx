@@ -123,6 +123,7 @@ function installBridge(channel) {
     },
     openWorkbench: (contributionId, context) => request("host.openWorkbench", { contributionId, context }),
     openFilesystem: (providerId, context) => request("host.openFilesystem", { providerId, context }),
+    copy: (text) => request("host.copy", { text }),
     onContext: (fn) => listen("context", fn),
     onEvent: (fn) => listen("event", fn),
     onBinary: (fn) => listen("binary", fn),

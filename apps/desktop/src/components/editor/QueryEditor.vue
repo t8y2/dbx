@@ -1118,6 +1118,17 @@ function focusStatementRange(range: { from: number; to: number } | null) {
   currentView.focus();
 }
 
+function focusErrorPosition(offset: number) {
+  const currentView = view.value;
+  if (!currentView || !editorViewModule) return;
+  const errorPos = Math.max(0, Math.min(offset, currentView.state.doc.length));
+  currentView.dispatch({
+    selection: { anchor: errorPos },
+    effects: [editorViewModule.EditorView.scrollIntoView(errorPos, { y: "center" })],
+  });
+  currentView.focus();
+}
+
 function onPickerActiveIndexChange(index: number) {
   pickerActiveIndex.value = index;
   const candidate = pickerCandidates.value[index];
@@ -7553,6 +7564,7 @@ defineExpose({
   captureExecutionSnapshot,
   pasteClipboardAsSqlInCondition,
   focusStatementRange,
+  focusErrorPosition,
   previewStatementRange,
   refreshCompletionCache,
 });

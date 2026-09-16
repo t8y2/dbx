@@ -12,6 +12,7 @@ const i18n = {
   en: {
     home: "Home",
     docs: "Docs",
+    plugins: "Plugins",
     changelog: "Changelog",
     community: "Community",
     sponsors: "Sponsors",
@@ -25,6 +26,7 @@ const i18n = {
   cn: {
     home: "首页",
     docs: "文档",
+    plugins: "插件",
     changelog: "更新日志",
     community: "交流群",
     sponsors: "赞助商",
@@ -37,13 +39,14 @@ const i18n = {
   },
 };
 
-export function LandingNav({ lang, active }: { lang: DocsLang; active?: "home" | "databases" | "changelog" | "community" | "issue" | "sponsors" | "contributors" | "drivers" }) {
+export function LandingNav({ lang, active }: { lang: DocsLang; active?: "home" | "databases" | "changelog" | "community" | "issue" | "sponsors" | "contributors" | "drivers" | "plugins" }) {
   const ref = useRef<HTMLElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const t = i18n[lang];
   const otherLang = LANG_CYCLE[(LANG_CYCLE.indexOf(lang) + 1) % LANG_CYCLE.length];
   const langHrefMap: Record<string, string> = {
     databases: `/${otherLang}/databases`,
+    plugins: `/${otherLang}/plugins`,
     changelog: `/${otherLang}/changelog`,
     community: `/${otherLang}/community`,
     issue: `/${otherLang}/issue`,
@@ -55,6 +58,7 @@ export function LandingNav({ lang, active }: { lang: DocsLang; active?: "home" |
   const navItems = [
     { id: "home", href: `/${lang}`, label: t.home, tabletHidden: false },
     { id: "docs", href: `/${lang}/docs/what-is-dbx`, label: t.docs, tabletHidden: false },
+    { id: "plugins", href: `/${lang}/plugins`, label: t.plugins, tabletHidden: false },
     { id: "changelog", href: `/${lang}/changelog`, label: t.changelog, tabletHidden: false },
     { id: "community", href: `/${lang}/community`, label: t.community, tabletHidden: false },
     { id: "sponsors", href: `/${lang}/sponsors`, label: t.sponsors, tabletHidden: true },

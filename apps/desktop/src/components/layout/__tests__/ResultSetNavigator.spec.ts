@@ -12,9 +12,9 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-async function mountNavigator() {
+async function mountNavigator(inputResults?: QueryResult[]) {
   // Include a non-tabular result so ordinal and storage index are different.
-  const results = [{ columns: [], rows: [] }, ...Array.from({ length: 100 }, (_, i) => ({ columns: ["value"], rows: [[i + 1]], sourceStatement: `SELECT ${i + 1} AS value` }))] as QueryResult[];
+  const results = inputResults ?? ([{ columns: [], rows: [] }, ...Array.from({ length: 100 }, (_, i) => ({ columns: ["value"], rows: [[i + 1]], sourceStatement: `SELECT ${i + 1} AS value` }))] as QueryResult[]);
   const select = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
@@ -26,6 +26,18 @@ async function mountNavigator() {
 }
 
 describe("large result-set navigation", () => {
+  it("renders three data sets rather than five tabs when messages are interleaved", async () => {
+    const message: QueryResult = { columns: ["Message"], rows: [["notice"]], affected_rows: 0, execution_time_ms: 1, server_message: true };
+    const data: QueryResult = { columns: ["Message"], rows: [["real data"]], affected_rows: 0, execution_time_ms: 1 };
+    const { container, select } = await mountNavigator([message, data, message, { ...data, rows: [] }, data]);
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".result-set-scroll button")];
+
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Result 1", "Result 2", "Result 3"]);
+    expect(container.textContent).toContain("All results (3)");
+    buttons[1]?.click();
+    expect(select.mock.calls[0]?.[0]).toMatchObject({ index: 3, n: 2 });
+  });
+
   it("scrolls the result-set strip with a vertical wheel and consumes boundary gestures", async () => {
     const { container } = await mountNavigator();
     const strip = container.querySelector<HTMLElement>(".result-set-scroll")!;

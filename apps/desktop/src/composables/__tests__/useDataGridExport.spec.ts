@@ -1644,14 +1644,14 @@ describe("useDataGridExport VARBINARY 文本复制 (#7471)", () => {
     expect(parseDataGridClipboard("abc")).toEqual([["0x616263"]]);
   });
 
-  it("非文本 VARBINARY 保持 0x/hex，避免破坏任意 bytes", async () => {
+  it("恰好构成合法 GBK 序列的 VARBINARY 按解码文本复制（与网格显示一致）", async () => {
     const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["0xdeadbeef"]] };
-    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "0xdeadbeef", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "蕲撅", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
     const state = createExportState(varbinTable, ["id", "name"], matrix, [1, "0xdeadbeef"]);
 
     await expect(state.copyWithPreference("smart")).resolves.toBe(true);
 
-    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0xdeadbeef"]] }));
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["蕲撅"]] }));
   });
 
   it("多选 TSV 复制同样对文本型 VARBINARY 解码", async () => {
@@ -1702,12 +1702,12 @@ describe("useDataGridExport VARBINARY 文本复制 (#7471)", () => {
     expect(extractDataGridSelection).not.toHaveBeenCalled();
   });
 
-  it("右键「复制单元格」对非文本 VARBINARY 保持 0x/hex", async () => {
+  it("右键「复制单元格」对 GBK 可解码 VARBINARY 复制解码文本", async () => {
     const state = createExportState(varbinTable, ["id", "name"], undefined, [1, "0xdeadbeef"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
 
     await state.copyCell();
 
-    expect(copyToClipboard).toHaveBeenCalledWith("0xdeadbeef");
+    expect(copyToClipboard).toHaveBeenCalledWith("蕲撅");
   });
 
   it("复制整行 JSON 时呈现文本型 VARBINARY", async () => {

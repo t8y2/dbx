@@ -29,6 +29,7 @@ export interface QueryEditorSurfaceHandle {
   executeRedisCommand(command: string): Promise<boolean>;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
+  focusErrorPosition(offset: number): boolean;
 }
 
 export interface QueryResultSurfaceHandle {
@@ -38,6 +39,7 @@ export interface QueryResultSurfaceHandle {
   handleModRTarget(target: Element): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
+  focusErrorPosition(offset: number): boolean;
 }
 
 export interface ContentAreaSurfaceProps {
@@ -97,6 +99,7 @@ export interface ContentAreaSurfaceEmits {
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];
   focusStatement: [tabId: string, range: StatementRange | null];
+  focusErrorOffset: [tabId: string, offset: number];
   openSettings: [initialTab?: string, initialSection?: string];
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   toggleZenMode: [];

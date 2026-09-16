@@ -1,4 +1,5 @@
 import type { QueryResult } from "@/types/database";
+import { queryResultMessages } from "./queryResultMessages";
 
 /**
  * Picks the default output view for a result that has no result set.
@@ -6,7 +7,8 @@ import type { QueryResult } from "@/types/database";
  * messages view; routine DML like a MySQL INSERT also carries an INFO message
  * ("Records: N ...") but keeps the established summary view.
  */
-export function defaultViewForResult(result: Pick<QueryResult, "columns" | "rows" | "affected_rows" | "messages">): "messages" | "summary" {
+export function defaultViewForResult(result: Pick<QueryResult, "columns" | "rows" | "affected_rows" | "messages" | "server_message">): "messages" | "summary" {
+  if (result.server_message === true && queryResultMessages(result).length > 0) return "messages";
   const messageOnly = result.columns.length === 0 && result.rows.length === 0 && result.affected_rows === 0 && (result.messages?.length ?? 0) > 0;
   return messageOnly ? "messages" : "summary";
 }

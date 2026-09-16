@@ -76,6 +76,8 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             let request = SqlFileRequest {
                 execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: false,
                 selected_tables: Some(vec![SqlFileTable { database: Some(database.clone()), name: "chosen".into() }]),
+                part_cooldown_ms: 0,
+                skip_relational_constraints: false,
             };
             execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |_| {}).await?;
             let rows = execute_sql_statement(&state, &connection_id, &database, "SELECT id, LENGTH(body) FROM chosen", None, None).await?;
@@ -90,6 +92,8 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
         let request = SqlFileRequest {
             execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: true,
             selected_tables: Some(vec![SqlFileTable { database: None, name: "chosen".into() }]),
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
         };
         let mut events = Vec::new();
         assert!(execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |event| events.push(event)).await.is_err());
@@ -171,6 +175,8 @@ async fn live_mysql_database_export_restores_dependent_views() {
             file_path: file_path.to_string_lossy().to_string(),
             continue_on_error: false,
             selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
         };
         execute_sql_file_path(
             &state,

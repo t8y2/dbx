@@ -531,7 +531,9 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     );
     let columns = insert_columns
         .iter()
-        .map(|(column, _, _)| data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()))
+        .map(|(_, index, _)| {
+            data_grid_identifier(options.database_type, &options.columns[*index], options.identifier_quote.as_deref())
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let value_rows = options
@@ -4023,6 +4025,127 @@ mod tests {
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
         );
+    }
+
+    #[test]
+    fn copy_insert_uses_display_columns_but_source_columns_for_metadata() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "psn_basic_info".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "PSN_NO".to_string(),
+                        data_type: "varchar(32)".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "NAME".to_string(),
+                        data_type: "varchar(32)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["psn".to_string(), "psn_no".to_string(), "name".to_string()],
+            column_types: None,
+            source_columns: Some(vec![
+                Some("PSN_NO".to_string()),
+                Some("PSN_NO".to_string()),
+                Some("NAME".to_string()),
+            ]),
+            rows: vec![vec![json!("A-1"), json!("A-1"), json!("Ada")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `psn_basic_info` (`psn`, `psn_no`, `name`) VALUES ('A-1', 'A-1', 'Ada');")
+        );
+    }
+
+    #[test]
+    fn copy_insert_uses_source_columns_for_generated_column_exclusions() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "bigint".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: Some("auto_increment".to_string()),
+                    },
+                    DataGridColumnInfo {
+                        name: "display_name".to_string(),
+                        data_type: "varchar(64)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "display_name_upper".to_string(),
+                        data_type: "varchar(64)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: Some("virtual generated".to_string()),
+                    },
+                ]),
+            }),
+            columns: vec!["identifier".to_string(), "label".to_string(), "label_upper".to_string()],
+            column_types: None,
+            source_columns: Some(vec![
+                Some("id".to_string()),
+                Some("display_name".to_string()),
+                Some("display_name_upper".to_string()),
+            ]),
+            rows: vec![vec![json!(1), json!("Ada"), json!("ADA")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`label`) VALUES ('Ada');"));
+    }
+
+    #[test]
+    fn copy_update_keeps_source_columns_for_writeback() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["identifier".to_string(), "label".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("display_name".to_string())]),
+            rows: vec![vec![json!(1), json!("Ada")]],
+        });
+        assert_eq!(statements, vec!["UPDATE `users` SET `display_name` = 'Ada' WHERE `id` = 1;"]);
     }
 
     #[test]

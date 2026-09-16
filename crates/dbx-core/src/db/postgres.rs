@@ -1480,6 +1480,25 @@ fn escape_tsvector_lexeme(value: &str) -> String {
 }
 
 fn pg_error_to_string(err: tokio_postgres::Error) -> String {
+    let Some(db_error) = err.as_db_error() else {
+        return err.to_string();
+    };
+    let mut message = db_error.to_string();
+    // Carry the server-reported cursor position across the `db` layer's
+    // `Result<_, String>` boundary; `query.rs` resolves it against the executed
+    // statement and strips the suffix before the message reaches any client.
+    if let Some(tokio_postgres::error::ErrorPosition::Original(cursor)) = db_error.position() {
+        message.push_str(&crate::sql_error_position::encode_marker(*cursor));
+    }
+    message
+}
+
+/// Same as [`pg_error_to_string`] but never carries a cursor position.
+///
+/// Used for infrastructure/setup statements (search_path, BEGIN/ROLLBACK, …)
+/// whose SQL is not the statement the user is editing: a marker from those would
+/// be resolved against the user's SQL and point at the wrong place.
+fn pg_error_to_string_plain(err: tokio_postgres::Error) -> String {
     err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string())
 }
 
@@ -2822,7 +2841,10 @@ async fn set_automatic_postgres_timezone(client: &deadpool_postgres::Client, tim
                 }
             }
             Err(error) => {
-                return Err(format!("PostgreSQL SET timezone failed after connecting: {}", pg_error_to_string(error)));
+                return Err(format!(
+                    "PostgreSQL SET timezone failed after connecting: {}",
+                    pg_error_to_string_plain(error)
+                ));
             }
         }
     }
@@ -7146,7 +7168,7 @@ pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<C
         .await
 }
 
-fn pg_quote_literal(value: &str) -> String {
+pub(crate) fn pg_quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
@@ -8025,7 +8047,7 @@ pub(crate) async fn execute_postgres_infra_statement(
     tokio::time::timeout(timeout_duration, client.execute_typed(sql, &[]))
         .await
         .map_err(|_| format!("PostgreSQL {stage} timed out after {} seconds", timeout_duration.as_secs()))?
-        .map_err(pg_error_to_string)
+        .map_err(pg_error_to_string_plain)
 }
 
 pub(crate) async fn wait_postgres_operation<T, F>(

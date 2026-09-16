@@ -100,6 +100,31 @@ describe("SQL Server result focus: doExecute vs executeTargetSql", () => {
     setActivePinia(createPinia());
   });
 
+  it("opens message-only executeTargetSql output in the messages view", async () => {
+    const tab = { ...queryTab(), sql: "PRINT N'x'" };
+    const connection = sqlServerConnection();
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart" | "messages">("result");
+    const queryStore = useQueryStore();
+    const { messageResult } = sqlServerMessageFirstResults();
+    vi.spyOn(queryStore, "executeTabSql").mockImplementation(async () => {
+      tab.result = messageResult;
+      return true;
+    });
+    vi.spyOn(queryStore, "getExecutionTab").mockReturnValue(tab);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({
+      activeTab: computed(() => tab as QueryTab | undefined),
+      activeConnection: computed(() => connection),
+      executableSql: computed(() => tab.sql),
+      activeOutputView,
+    });
+
+    await execution.executeTargetSql({ tab, connection, sql: tab.sql });
+
+    expect(activeOutputView.value).toBe("messages");
+    expect(tab.result?.rows).toEqual([["x"]]);
+  });
+
   // ---- control: the single-connection editor path (fixed by be3336c1e) ----
   it("CONTROL doExecute re-focuses the real data result when a message result was selected", async () => {
     const sql = "PRINT N'x'; SELECT 1 AS value;";

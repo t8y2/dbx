@@ -10,10 +10,14 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.ConnectionString;
+import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
+import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.WriteConcernError;
 import com.mongodb.client.AggregateIterable;
+import com.mongodb.client.FindIterable;
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
@@ -26,6 +30,7 @@ import com.mongodb.client.model.CollationMaxVariable;
 import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
 import com.mongodb.client.model.InsertManyOptions;
+import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.result.UpdateResult;
 import java.io.BufferedReader;
@@ -57,6 +62,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -80,11 +86,22 @@ public final class MongoAgent {
     private static final JsonWriterSettings EXTENDED_JSON_SETTINGS = JsonWriterSettings.builder()
         .outputMode(JsonMode.RELAXED)
         .build();
+    // Driver 3.x names the canonical Extended JSON v2 output "EXTENDED"; RELAXED is its lossy
+    // sibling (plain numbers, ISO dates), so exports must use this one to keep BSON types.
+    private static final JsonWriterSettings CANONICAL_JSON_SETTINGS = JsonWriterSettings.builder()
+        .outputMode(JsonMode.EXTENDED)
+        .build();
     private static final String LEGACY_SESSION_ID = "__legacy__";
     private static final String DEFAULT_ID_INDEX_NAME = "_id_";
     private static final int CLONE_INSERT_BATCH_SIZE = 1_000;
+    private static final int DEFAULT_FIND_CURSOR_BATCH_SIZE = 1_000;
+    private static final int MAX_FIND_CURSORS_PER_OWNER = 16;
+    private static final int MAX_FIND_CURSORS_TOTAL = 64;
     private static final int MAX_SESSIONS = 256;
     private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
+    private static final ThreadLocal<Set<String>> CURRENT_FIND_CURSOR_OWNER = new ThreadLocal<>();
+    private static final ConcurrentHashMap<String, MongoCursor<Document>> FIND_CURSORS = new ConcurrentHashMap<>();
+    private static final Set<String> LEGACY_FIND_CURSOR_IDS = ConcurrentHashMap.newKeySet();
     private static MongoClient legacyClient;
 
     private MongoAgent() {
@@ -1488,8 +1505,174 @@ public final class MongoAgent {
         MongoClient client = requireClient();
         String database = params.get("database").getAsString();
         String collection = params.get("collection").getAsString();
-        client.getDatabase(database).getCollection(collection).insertMany(documents);
-        return Collections.singletonMap("affected_rows", documents.size());
+        InsertManyOptions options = new InsertManyOptions();
+        if (params.has("ordered") && !params.get("ordered").isJsonNull()) {
+            JsonElement ordered = params.get("ordered");
+            if (!ordered.isJsonPrimitive() || !ordered.getAsJsonPrimitive().isBoolean()) {
+                throw new IllegalArgumentException("ordered must be a boolean");
+            }
+            options.ordered(ordered.getAsBoolean());
+        }
+        try {
+            client.getDatabase(database).getCollection(collection).insertMany(documents, options);
+            return Collections.singletonMap("affected_rows", documents.size());
+        } catch (MongoBulkWriteException error) {
+            return bulkInsertResult(error);
+        }
+    }
+
+    static Map<String, Object> bulkInsertResult(MongoBulkWriteException error) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("affected_rows", error.getWriteResult().getInsertedCount());
+        List<Map<String, Object>> errors = new ArrayList<>();
+        for (BulkWriteError writeError : error.getWriteErrors()) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("index", writeError.getIndex());
+            item.put("code", writeError.getCode());
+            item.put("message", writeError.getMessage());
+            errors.add(item);
+        }
+        // The driver raises the same exception for write concern failures only (for example a
+        // wtimeout): there are no per-document errors then, but the batch must not look
+        // successful, so report the write concern error as a batch-wide rejection without index.
+        WriteConcernError writeConcernError = error.getWriteConcernError();
+        if (errors.isEmpty() && writeConcernError != null) {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("code", writeConcernError.getCode());
+            item.put("message", writeConcernError.getMessage());
+            errors.add(item);
+        }
+        result.put("errors", errors);
+        return result;
+    }
+
+    private static Object startFindCursor(JsonObject params) {
+        Set<String> owner = CURRENT_FIND_CURSOR_OWNER.get();
+        if (owner != null && owner.size() >= MAX_FIND_CURSORS_PER_OWNER) {
+            throw new IllegalStateException("MongoDB find cursor limit reached: " + MAX_FIND_CURSORS_PER_OWNER);
+        }
+        // The per-owner budget keeps one session from starving the others; the process-wide cap
+        // only bounds how many server cursors this agent can hold in total.
+        if (FIND_CURSORS.size() >= MAX_FIND_CURSORS_TOTAL) {
+            throw new IllegalStateException("MongoDB find cursor limit reached: " + MAX_FIND_CURSORS_TOTAL);
+        }
+        MongoClient client = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        Document filterDoc = documentOrNull(params, "filter");
+        Document projectionDoc = documentOrNull(params, "projection");
+        Document sortDoc = documentOrNull(params, "sort");
+        Collation collation = collationOrNull(documentOrNull(params, "collation"));
+        int batchSize = findCursorBatchSize(params);
+
+        FindIterable<Document> iterable = client.getDatabase(database)
+            .getCollection(collection)
+            .find(filterDoc == null ? new Document() : filterDoc)
+            .batchSize(batchSize);
+        if (projectionDoc != null) {
+            iterable = iterable.projection(projectionDoc);
+        }
+        if (sortDoc != null) {
+            iterable = iterable.sort(sortDoc);
+        }
+        if (collation != null) {
+            iterable = iterable.collation(collation);
+        }
+
+        String cursorId = UUID.randomUUID().toString();
+        FIND_CURSORS.put(cursorId, iterable.iterator());
+        if (owner != null) {
+            owner.add(cursorId);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("cursor_id", cursorId);
+        result.put("batch_size", batchSize);
+        return result;
+    }
+
+    private static Object fetchFindCursor(JsonObject params) {
+        String cursorId = requiredCursorId(params);
+        MongoCursor<Document> cursor = FIND_CURSORS.get(cursorId);
+        if (cursor == null) {
+            throw new IllegalStateException("Find cursor not found");
+        }
+        int limit = params.has("limit") ? params.get("limit").getAsInt() : DEFAULT_FIND_CURSOR_BATCH_SIZE;
+        if (limit <= 0) {
+            throw new IllegalArgumentException("Find cursor limit must be a positive integer");
+        }
+        List<JsonObject> documents = new ArrayList<>();
+        try {
+            while (documents.size() < limit && cursor.hasNext()) {
+                documents.add(bsonToCanonicalExtendedJson(cursor.next()));
+            }
+        } catch (RuntimeException error) {
+            // A cursor that fails mid-iteration (server-side idle timeout, lost connection) can
+            // never be resumed, so drop it instead of leaking a slot in the cursor budgets.
+            closeFindCursorById(cursorId);
+            throw error;
+        }
+        boolean exhausted = !cursor.hasNext();
+        if (exhausted) {
+            closeFindCursorById(cursorId);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("documents", documents);
+        result.put("exhausted", exhausted);
+        return result;
+    }
+
+    private static Object closeFindCursor(JsonObject params) {
+        closeFindCursorById(requiredCursorId(params));
+        return Collections.singletonMap("ok", true);
+    }
+
+    private static String requiredCursorId(JsonObject params) {
+        String cursorId = stringOrNull(params, "cursor_id");
+        if (cursorId == null || cursorId.isBlank()) {
+            throw new IllegalArgumentException("cursor_id is required");
+        }
+        return cursorId;
+    }
+
+    private static int findCursorBatchSize(JsonObject params) {
+        if (!params.has("batch_size") || params.get("batch_size").isJsonNull()) {
+            return DEFAULT_FIND_CURSOR_BATCH_SIZE;
+        }
+        int batchSize = params.get("batch_size").getAsInt();
+        if (batchSize <= 0) {
+            throw new IllegalArgumentException("batch_size must be a positive integer");
+        }
+        return batchSize;
+    }
+
+    private static void closeFindCursorById(String cursorId) {
+        MongoCursor<Document> cursor = FIND_CURSORS.remove(cursorId);
+        if (cursor != null) {
+            try {
+                cursor.close();
+            } catch (RuntimeException ignored) {
+                // Closing a server cursor is best-effort; the client may already be gone.
+            }
+        }
+        Set<String> owner = CURRENT_FIND_CURSOR_OWNER.get();
+        if (owner != null) {
+            owner.remove(cursorId);
+        }
+        LEGACY_FIND_CURSOR_IDS.remove(cursorId);
+    }
+
+    private static void closeFindCursors(Set<String> cursorIds) {
+        for (String cursorId : new ArrayList<>(cursorIds)) {
+            closeFindCursorById(cursorId);
+        }
+        cursorIds.clear();
+    }
+
+    static void resetFindCursorsForTests() {
+        for (String cursorId : new ArrayList<>(FIND_CURSORS.keySet())) {
+            closeFindCursorById(cursorId);
+        }
+        LEGACY_FIND_CURSOR_IDS.clear();
     }
 
     static Object parseId(String id) {
@@ -1682,6 +1865,56 @@ public final class MongoAgent {
         return true;
     }
 
+    private static Object replaceDocument(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String filterJson = params.get("filter_json").getAsString();
+        String replacementJson = params.get("replacement_json").getAsString();
+        String optionsJson = params.has("options_json") && !params.get("options_json").isJsonNull()
+            ? params.get("options_json").getAsString()
+            : null;
+
+        var col = c.getDatabase(database).getCollection(collection);
+        Document filter = documentForWrite(filterJson);
+        Document replacement = documentForWrite(replacementJson);
+        requireReplacementDocument(replacement);
+        ReplaceOptions options = replaceOptionsForWrite(optionsJson);
+        var result = col.replaceOne(filter, replacement, options);
+        return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
+    /** replaceOne swaps the whole document; update operators here mean updateOne was intended. */
+    static void requireReplacementDocument(Document doc) {
+        for (String key : doc.keySet()) {
+            if (key.startsWith("$")) {
+                throw new IllegalArgumentException(
+                    "Replacement document must not contain update operators such as " + key);
+            }
+        }
+    }
+
+    static ReplaceOptions replaceOptionsForWrite(String optionsJson) {
+        ReplaceOptions result = new ReplaceOptions();
+        if (optionsJson == null || optionsJson.trim().isEmpty()) {
+            return result;
+        }
+        Document options = Document.parse(optionsJson);
+        for (String key : options.keySet()) {
+            if (!"upsert".equals(key)) {
+                throw new IllegalArgumentException("Unsupported replace option: " + key);
+            }
+        }
+        Object rawUpsert = options.get("upsert");
+        if (rawUpsert != null) {
+            if (!(rawUpsert instanceof Boolean)) {
+                throw new IllegalArgumentException("upsert must be a boolean");
+            }
+            result.upsert((Boolean) rawUpsert);
+        }
+        return result;
+    }
+
     static void requireBulkUpdateOperatorDocument(Document doc) {
         if (!isUpdateOperatorDocument(doc)) {
             // updateOne/updateMany are shell-style bulk updates here; replacements stay on the
@@ -1734,6 +1967,10 @@ public final class MongoAgent {
     static JsonObject bsonToExtendedJson(Document doc) {
         JsonObject relaxed = JsonParser.parseString(doc.toJson(EXTENDED_JSON_SETTINGS)).getAsJsonObject();
         return preserveUnsafeLongsForJsonClients(doc, relaxed).getAsJsonObject();
+    }
+
+    static JsonObject bsonToCanonicalExtendedJson(Document doc) {
+        return JsonParser.parseString(doc.toJson(CANONICAL_JSON_SETTINGS)).getAsJsonObject();
     }
 
     private static JsonElement preserveUnsafeLongsForJsonClients(Object bsonValue, JsonElement relaxedValue) {
@@ -1863,12 +2100,17 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_DROP_DATABASE -> dropDatabase(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS -> insertDocuments(params);
+            case AgentProtocol.MONGO_METHOD_START_FIND_CURSOR -> startFindCursor(params);
+            case AgentProtocol.MONGO_METHOD_FETCH_FIND_CURSOR -> fetchFindCursor(params);
+            case AgentProtocol.MONGO_METHOD_CLOSE_FIND_CURSOR -> closeFindCursor(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
+            case AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT -> replaceDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
             case AgentProtocol.MONGO_METHOD_RUN_COMMAND -> runCommand(params);
             case AgentProtocol.METHOD_DISCONNECT, AgentProtocol.METHOD_SHUTDOWN -> {
+                closeFindCursors(LEGACY_FIND_CURSOR_IDS);
                 closeLegacyClient();
                 if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
                     System.exit(0);
@@ -1916,6 +2158,7 @@ public final class MongoAgent {
     static String handleRequest(String line, MongoClient client) {
         if (client != null) {
             CURRENT_CLIENT.set(client);
+            CURRENT_FIND_CURSOR_OWNER.set(LEGACY_FIND_CURSOR_IDS);
         }
         try {
             JsonObject req = JsonParser.parseString(line).getAsJsonObject();
@@ -1943,6 +2186,7 @@ public final class MongoAgent {
         } finally {
             if (client != null) {
                 CURRENT_CLIENT.remove();
+                CURRENT_FIND_CURSOR_OWNER.remove();
             }
         }
     }
@@ -2068,6 +2312,7 @@ public final class MongoAgent {
 
     private static final class Session {
         private final MongoClient client;
+        private final Set<String> findCursorIds = ConcurrentHashMap.newKeySet();
 
         private Session(MongoClient client) {
             this.client = client;
@@ -2075,10 +2320,12 @@ public final class MongoAgent {
 
         private synchronized Object handle(String method, JsonObject params) {
             CURRENT_CLIENT.set(client);
+            CURRENT_FIND_CURSOR_OWNER.set(findCursorIds);
             try {
                 return dispatch(method, params);
             } finally {
                 CURRENT_CLIENT.remove();
+                CURRENT_FIND_CURSOR_OWNER.remove();
             }
         }
 
@@ -2092,6 +2339,7 @@ public final class MongoAgent {
         }
 
         private synchronized void close() {
+            closeFindCursors(findCursorIds);
             client.close();
         }
     }

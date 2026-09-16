@@ -85,6 +85,7 @@ const database = ref("");
 const databaseOptions = ref<string[]>([]);
 const loadingDatabases = ref(false);
 const continueOnError = ref(false);
+const skipRelationalConstraints = ref(false);
 
 const running = ref(false);
 const cancelling = ref(false);
@@ -132,6 +133,15 @@ function resetPerFileState() {
 }
 
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
+// Mirrors the core executor gate (`supports_connection_level_database_bootstrap_target`): the
+// MySQL-family types it runs for, so the constraint toggle appears wherever the backend honors it.
+const MYSQL_BOOTSTRAP_IMPORT_TYPES = new Set(["mysql", "doris", "starrocks", "goldendb"]);
+const MYSQL_BOOTSTRAP_IMPORT_PROFILES = new Set(["mariadb", "tidb", "oceanbase", "custom_mysql", "doris", "starrocks", "selectdb", "goldendb"]);
+const isMysqlCompatibleTarget = computed(() => {
+  const config = store.getConfig(connectionId.value);
+  if (!config) return false;
+  return MYSQL_BOOTSTRAP_IMPORT_TYPES.has(config.db_type) || (!!config.driver_profile && MYSQL_BOOTSTRAP_IMPORT_PROFILES.has(config.driver_profile.toLowerCase()));
+});
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
 
@@ -309,6 +319,7 @@ function resetState() {
   databaseOptions.value = [];
   loadingDatabases.value = false;
   continueOnError.value = false;
+  skipRelationalConstraints.value = false;
   restoreSelectedTables.value = false;
   resetExecution();
 }
@@ -386,7 +397,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
+      filters: [{ name: "SQL package", extensions: ["sql", "gz", "zip"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -539,16 +550,19 @@ async function startExecution() {
 
     try {
       executionStarted.value = true;
+      const executionPaths = previews.value.flatMap((item) => item.packageFilePaths ?? [item.filePath]);
       await executeSqlFiles(
         {
           executionId: batchId,
           connectionId: connectionId.value,
           database: database.value.trim(),
-          filePath: previews.value[0]!.filePath,
+          filePath: executionPaths[0]!,
           continueOnError: continueOnError.value,
           ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
+          partCooldownMs: previews.value.some((item) => item.packageFilePaths) ? 500 : 0,
+          skipRelationalConstraints: skipRelationalConstraints.value,
         },
-        previews.value.map((item) => item.filePath),
+        executionPaths,
       );
       const terminal = await terminalProgress;
       if (terminal.status === "error") {
@@ -656,7 +670,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,.sql.gz,text/sql,application/gzip" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
             <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
@@ -696,6 +710,7 @@ watch(
                   <span>{{ previewLineSummary(activePreview) }}</span>
                   <span class="h-3 w-px bg-border" />
                   <span>{{ formatBytes(activePreview.sizeBytes) }}</span>
+                  <span v-if="activePreview.packagePartCount">{{ t("sqlFile.packageParts", { count: activePreview.packagePartCount }) }}</span>
                 </div>
               </div>
               <div class="sql-file-preview-viewer flex max-w-full overflow-auto bg-muted/15 text-xs rounded-b-md border border-t-0" :class="previews.length === 1 ? 'min-h-56 max-h-[min(46vh,420px)]' : 'min-h-0 max-h-[min(46vh,420px)]'">
@@ -790,6 +805,11 @@ watch(
             <CheckSquare v-if="continueOnError" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
             {{ t("sqlFile.continueOnError") }}
+          </button>
+          <button v-if="isMysqlCompatibleTarget" type="button" class="flex items-center gap-2 text-xs text-left" :disabled="running" @click="skipRelationalConstraints = !skipRelationalConstraints">
+            <CheckSquare v-if="skipRelationalConstraints" class="w-3.5 h-3.5 text-primary shrink-0" />
+            <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+            {{ t("sqlFile.skipRelationalConstraints") }}
           </button>
         </div>
 

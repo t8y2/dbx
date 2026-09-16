@@ -20,6 +20,8 @@ import {
   supportsTableImport,
   supportsTableVacuum,
   supportsTransaction,
+  usesOracleStickyTransactionState,
+  usesProvenReadOnlyStickyTransactionState,
   usesConnectionOnlyQueryTarget,
   usesTreeSchemaMode,
   schemaNodeHasLoadableName,
@@ -160,10 +162,10 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
+    expect(supportsTransaction("oceanbase-oracle")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
-    expect(supportsTransaction("oceanbase-oracle")).toBe(false);
     expect(supportsTransaction("redis")).toBe(false);
     expect(supportsTransaction("mongodb")).toBe(false);
     expect(supportsTransaction("duckdb")).toBe(false);
@@ -198,6 +200,7 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("mysql", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "auto")).toBe(true);
   });
@@ -208,8 +211,46 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("sqlite", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("clickhouse", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "manual")).toBe(true);
+  });
+});
+
+describe("usesOracleStickyTransactionState", () => {
+  it("marks only the Oracle family for schema-change compensation", () => {
+    expect(usesOracleStickyTransactionState("oracle")).toBe(true);
+    expect(usesOracleStickyTransactionState("oceanbase-oracle")).toBe(true);
+  });
+
+  it("keeps other databases on the generic transaction path", () => {
+    expect(usesOracleStickyTransactionState("mysql")).toBe(false);
+    expect(usesOracleStickyTransactionState("postgres")).toBe(false);
+    expect(usesOracleStickyTransactionState("jdbc")).toBe(false);
+    expect(usesOracleStickyTransactionState(undefined)).toBe(false);
+  });
+});
+
+describe("usesProvenReadOnlyStickyTransactionState", () => {
+  it("enables the sticky toolbar for the Oracle family, MySQL and PostgreSQL", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("oceanbase-oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("mysql")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
+  });
+
+  it("keeps databases without manual-transaction support on the legacy toolbar", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("doris")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("jdbc")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("redis")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState(undefined)).toBe(false);
+  });
+
+  it("only enables sticky state where manual mode is reachable", () => {
+    // The sticky UX gates commit/rollback in manual mode; a member without
+    // transaction support could never reach it. Guards against drift.
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres"]) {
+      expect(supportsTransaction(dbType)).toBe(true);
+    }
   });
 });
 

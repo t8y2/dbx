@@ -5,6 +5,7 @@ const tauri = readFileSync(new URL("../tauri.ts", import.meta.url), "utf8");
 const http = readFileSync(new URL("../http.ts", import.meta.url), "utf8");
 const api = readFileSync(new URL("../api.ts", import.meta.url), "utf8");
 const driverStore = readFileSync(new URL("../../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
+const driverStoreAgentRow = readFileSync(new URL("../../../components/config/DriverStoreAgentRow.vue", import.meta.url), "utf8");
 const tauriRegistry = readFileSync(new URL("../../../../../../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const webRegistry = readFileSync(new URL("../../../../../../crates/dbx-web/src/main.rs", import.meta.url), "utf8");
 
@@ -91,9 +92,18 @@ describe("offline Agent export transport contract", () => {
       expect(busyContract).toContain(dependency);
     }
 
-    for (const handler of ["upgradeAll", "installDriver(driver.db_type)", "importDriverFile(driver)", "uninstallDriver(driver.db_type)", "reinstallJre(jre.key)", "uninstallJre(jre.key)"]) {
+    for (const handler of ["upgradeAll", "reinstallJre(jre.key)", "uninstallJre(jre.key)"]) {
       for (const button of buttonTagsForClick(handler)) expect(button).toContain("agentPackageBusy");
     }
+
+    expect(driverStore).toContain("packageBusy: agentPackageBusy.value");
+    expect(driverStore).toContain('@install="installDriver(driver.db_type)"');
+    expect(driverStore).toContain('@uninstall="uninstallDriver(driver.db_type)"');
+    expect(driverStore).toContain('@import-file="importDriverFile(driver)"');
+    expect(driverStoreAgentRow).toContain("packageBusy");
+    expect(driverStoreAgentRow).toContain(':disabled="queueOrUpgradeBusy"');
+    expect(driverStoreAgentRow).toContain(':disabled="preparingUpgradeAll || upgradingAll || installing || packageBusy"');
+    expect(driverStoreAgentRow).toContain(':disabled="uninstallBusy"');
 
     expect(sourceSection(driverStore, "async function importOfflineZip", "\n\nasync function importDriverFile")).toContain("if (agentExportImportBlocked.value) return;");
   });

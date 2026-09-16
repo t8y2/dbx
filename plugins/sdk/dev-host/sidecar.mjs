@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { stopProcessTree } from "./process-tree.mjs";
 
 export const JSON_LIMIT = 8 * 1024 * 1024;
@@ -71,10 +73,28 @@ export class Sidecar extends EventEmitter {
   pending = new Map();
   sequence = 0;
   state = "stopped";
-  constructor({ executable, args = [], cwd, manifest, transport }) {
+  constructor({ executable, args = [], cwd, manifest, manifestPath, transport }) {
     super();
-    Object.assign(this, { executable, args, cwd, manifest });
+    Object.assign(this, { executable, args, cwd, manifest, manifestPath });
     this.transport = transport || manifest.entrypoints?.backend?.transport || "stdio-jsonl";
+  }
+  identityMatches(info) {
+    return info?.protocolVersion === 1 && info?.plugin?.id === this.manifest.id && info?.plugin?.version === this.manifest.version;
+  }
+  // The manifest is a source file during development: version bumps and field
+  // edits made after this host started leave the in-memory copy stale. Re-read
+  // it from disk before declaring a freshly spawned sidecar incompatible.
+  async refreshManifestFromDisk() {
+    const path = this.manifestPath || (this.cwd ? join(this.cwd, "manifest.json") : "");
+    if (!path) return false;
+    try {
+      const parsed = JSON.parse(await readFile(path, "utf8"));
+      if (typeof parsed?.id !== "string" || typeof parsed?.version !== "string") return false;
+      this.manifest = parsed;
+      return true;
+    } catch {
+      return false;
+    }
   }
   async start() {
     if (!this.executable) {
@@ -126,8 +146,10 @@ export class Sidecar extends EventEmitter {
     });
     try {
       const info = await this.request("plugin/initialize", { host: { protocolVersions: [1] } }, 10000);
-      if (info?.protocolVersion !== 1 || info?.plugin?.id !== this.manifest.id || info?.plugin?.version !== this.manifest.version) {
-        throw new Error("Sidecar identity or protocol does not match manifest");
+      if (!this.identityMatches(info)) {
+        const refreshed = await this.refreshManifestFromDisk();
+        if (!refreshed || !this.identityMatches(info)) throw new Error("Sidecar identity or protocol does not match manifest");
+        this.emit("diagnostic", { level: "info", message: "manifest.json 已重新加载", details: { version: this.manifest.version } });
       }
       this.state = "ready";
       this.emit("status", this.state);

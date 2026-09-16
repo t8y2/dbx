@@ -542,6 +542,40 @@ pub async fn mongo_update_documents(
 }
 
 #[tauri::command]
+pub async fn mongo_replace_document(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    filter_json: String,
+    replacement_json: String,
+    options_json: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<u64, String> {
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_mongo_filtered_write_allowed_by_id(
+            state.inner(),
+            &connection_id,
+            &database,
+            "Replace",
+            &filter_json,
+        )
+        .await?;
+    }
+    ensure_connection_writable(&state, &connection_id, "Replace").await?;
+    dbx_core::mongo_ops::mongo_replace_document_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &filter_json,
+        &replacement_json,
+        options_json.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_delete_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

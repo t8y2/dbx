@@ -1,4 +1,4 @@
-import { GENERIC_TRANSPORT_FAILURE_MESSAGE, normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
+import { GENERIC_TRANSPORT_FAILURE_MESSAGE, LEGACY_BACKEND_ERROR_CODE, normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
 import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 /**
@@ -127,6 +127,17 @@ const patterns: [RegExp, string][] = [
 
   // Query result export limits (crates/dbx-core/src/query_result_export.rs)
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
+  // MongoDB Legacy agent failures: messages raised by the agent arrive wrapped in "Agent RPC
+  // error (<code>): ", and the import path prefixes the row a batch-level failure belongs to.
+  [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver$/, "mongo.import.legacyInsertUnsupported"],
+  [/^(?:row \d+: )?MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver$/, "mongo.import.legacyInsertUnsupported"],
+  [/^MongoDB Legacy Agent rejected (\d+) of (\d+) documents: ([\s\S]+)$/, "mongo.insert.partialFailure"],
+  [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent returned an invalid find cursor$/, "mongo.import.legacyCursorInvalid"],
+  [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent returned an invalid find cursor page$/, "mongo.import.legacyCursorInvalid"],
+  [/^(?:Agent RPC error \(-?\d+\): )?Find cursor not found$/, "mongo.import.legacyCursorInvalid"],
+  [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent does not support type-preserving export; upgrade or reinstall the MongoDB Legacy driver$/, "mongo.import.legacyExportUnsupported"],
+  [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent returned the same export page twice; upgrade or reinstall the MongoDB Legacy driver$/, "mongo.import.legacyExportStalled"],
+  [/^(?:Agent RPC error \(-?\d+\): )?MongoDB Legacy Agent returned a document without _id$/, "mongo.import.legacyExportMissingId"],
   [/^Streaming export needs a result-set session, but this driver returned no session_id\.$/, "exportProgress.agentSessionMissing"],
 
   // Legacy bundled DuckDB error kept for compatibility with older backends.
@@ -157,6 +168,7 @@ const paramNames: Record<string, string | string[]> = {
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",
   "nacos.nacosManagedNamespaceAccessDenied": "detail",
+  "mongo.insert.partialFailure": ["failed", "total", "message"],
   "settings.tunnelsHttpTestSuccess": "code",
   "settings.tunnelsProxyTimedOut": "duration",
   "settings.tunnelsProxyConnectFailed": "error",
@@ -188,27 +200,11 @@ function usableFallbackDetail(value: unknown): string | undefined {
   return detail;
 }
 
-function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError, fallbackDetail?: unknown): string {
-  const translated = t(error.messageKey, error.messageParams);
-  const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
-  let detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : usableFallbackDetail(fallbackDetail);
-  // Callers may pass an already-composited "summary\n\noriginal" cell as the
-  // fallback (query history re-translation of a failed result grid); strip the
-  // repeated summary so the message stays singular.
-  if (detail && detail.startsWith(`${summary}\n\n`)) {
-    detail = detail.slice(summary.length + 2).trim() || undefined;
-  }
-  const rawAdapterCode = error.diagnostics?.adapterCode;
-  const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
-  const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
-  return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
-}
-
-export function translateBackendError(t: BackendErrorTranslate, error: unknown, fallbackDetail?: unknown): string {
-  const structured = normalizeBackendError(error);
-  if (structured) return translateStructuredBackendError(t, structured, fallbackDetail);
-
-  const message = backendErrorMessage(error);
+/**
+ * Resolves a raw backend message through the known-message catalog, or `null` when the message is
+ * not one the UI knows how to phrase.
+ */
+function translateKnownMessage(t: BackendErrorTranslate, message: string): string | null {
   const exactKey = exactMessageKeys[message];
   if (exactKey) return t(exactKey);
 
@@ -238,5 +234,35 @@ export function translateBackendError(t: BackendErrorTranslate, error: unknown, 
       return t(key);
     }
   }
-  return message;
+  return null;
+}
+
+function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError, fallbackDetail?: unknown): string {
+  const translated = t(error.messageKey, error.messageParams);
+  const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
+  let detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : usableFallbackDetail(fallbackDetail);
+  // Callers may pass an already-composited "summary\n\noriginal" cell as the
+  // fallback (query history re-translation of a failed result grid); strip the
+  // repeated summary so the message stays singular.
+  if (detail && detail.startsWith(`${summary}\n\n`)) {
+    detail = detail.slice(summary.length + 2).trim() || undefined;
+  }
+  // An unclassified message still goes through the same catalog the raw transports use, so a
+  // message DBX knows reads the same whether it arrived wrapped or bare.
+  if (error.code === LEGACY_BACKEND_ERROR_CODE && detail) {
+    const known = translateKnownMessage(t, detail);
+    if (known) return known;
+  }
+  const rawAdapterCode = error.diagnostics?.adapterCode;
+  const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
+  const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
+  return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
+}
+
+export function translateBackendError(t: BackendErrorTranslate, error: unknown, fallbackDetail?: unknown): string {
+  const structured = normalizeBackendError(error);
+  if (structured) return translateStructuredBackendError(t, structured, fallbackDetail);
+
+  const message = backendErrorMessage(error);
+  return translateKnownMessage(t, message) ?? message;
 }

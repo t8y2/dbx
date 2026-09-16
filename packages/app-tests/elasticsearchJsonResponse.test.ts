@@ -99,7 +99,7 @@ test("uses the supplied result source statement to classify the response", () =>
 
 test("routes focused find shortcuts to both Elasticsearch response-panel entry points", () => {
   const contentArea = readFileSync(new URL("../../apps/desktop/src/components/layout/ContentArea.vue", import.meta.url), "utf8");
-  const focusSearch = contentArea.slice(contentArea.indexOf("function focusSearch()"), contentArea.indexOf("function refreshData()"));
+  const focusSearch = contentArea.slice(contentArea.indexOf("function focusSearch("), contentArea.indexOf("function refreshData()"));
 
   assert.match(focusSearch, /elasticsearchJsonResponsePanelRef\.value\?\.focusSearch\(\)/);
   assert.match(contentArea, /<ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef"/);

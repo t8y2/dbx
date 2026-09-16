@@ -80,7 +80,7 @@ describe("QueryEditor search shortcuts", () => {
     expect(queryEditorSource).toMatch(/\.\.\.binding\(shortcuts\.sendSelectionToAi[\s\S]*\.\.\.createQueryEditorSearchKeymap/);
     expect(queryEditorSource).not.toMatch(/Prec\.highest\(\s*keymap\.of\(\[\s*\.\.\.createQueryEditorSearchKeymap/);
     expect(queryEditorSource).toMatch(/function openReplace\(\): boolean \{\s*if \(props\.readOnly\) return false;/);
-    expect(contentAreaSource).toContain("if (props.resultOnly) return dataGridRef.value?.focusSearch() ?? false;");
+    expect(contentAreaSource).toContain("if (props.resultOnly) return dataGridRef.value?.focusSearch(target) ?? false;");
     expect(contentAreaSource).toContain("return queryEditorRef.value?.openSearch() ?? false;");
     expect(contentAreaSource).toContain("return queryEditorRef.value?.openReplace() ?? false;");
     expect(queryEditorSource).toMatch(/key:\s*"Escape"/);

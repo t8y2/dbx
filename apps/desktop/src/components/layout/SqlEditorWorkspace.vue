@@ -66,10 +66,10 @@ defineExpose({
     // A data-mode cell-detail dialog is portaled to body too but belongs to
     // the group's grid — indistinguishable in the DOM, hence the gate.
     if (element?.closest("[data-shared-result-surface]") || (showSharedResult.value && element?.closest("[data-cell-detail-editor-root]"))) {
-      return resultSurfaceRef.value?.focusSearch() ?? false;
+      return resultSurfaceRef.value?.focusSearch(element) ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
-    return group?.focusSearch() ?? false;
+    return group?.focusSearch(element) ?? false;
   },
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
   refreshData: (target: Element | null = null) => {
@@ -255,6 +255,14 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
   }
   return false;
 }
+function handleFocusErrorOffset(tabId: string, offset: number): boolean {
+  for (const group of groupRefs.values()) {
+    if (group.focusErrorPosition(tabId, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
 </script>
 
 <template>
@@ -346,6 +354,11 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
               @focus-statement="
                 (tabId: string, range: { from: number; to: number } | null) => {
                   handleFocusStatement(tabId, range);
+                }
+              "
+              @focus-error-offset="
+                (tabId: string, offset: number) => {
+                  handleFocusErrorOffset(tabId, offset);
                 }
               "
             />

@@ -31,6 +31,30 @@ describe("objectMetadataCache", () => {
     });
   });
 
+  it("reports deletion failures only to strict callers sharing the same invalidation", async () => {
+    let reject!: (error: Error) => void;
+    mocks.deleteSchemaCachePrefix.mockReturnValueOnce(
+      new Promise<void>((_, fail) => {
+        reject = fail;
+      }),
+    );
+    const bestEffort = invalidateObjectMetadataCache(request);
+    const strict = invalidateObjectMetadataCache(request, { strict: true });
+    const failure = new Error("storage unavailable");
+    const rejected = expect(strict).rejects.toMatchObject({ name: "ObjectCacheInvalidationError", reason: failure });
+    await vi.waitFor(() => expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledTimes(1));
+    reject(failure);
+    await rejected;
+    await expect(bestEffort).resolves.toBeUndefined();
+    await expect(invalidateObjectMetadataCache(request, { strict: true })).resolves.toBeUndefined();
+    expect(mocks.deleteSchemaCachePrefix).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps forced facet reads best effort if deletion fails", async () => {
+    mocks.deleteSchemaCachePrefix.mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(loadObjectMetadataFacet(request, "columns", async () => ["fresh"], { force: true })).resolves.toEqual({ value: ["fresh"], cacheStatus: "remote" });
+  });
+
   it("reads a facet from disk without invoking the loader", async () => {
     mocks.loadSchemaCache.mockResolvedValue({ version: 1, cachedAt: new Date().toISOString(), value: [{ name: "id" }] });
     const loader = vi.fn().mockResolvedValue([{ name: "remote" }]);

@@ -1295,6 +1295,8 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         file_path: "fixture.sql".to_string(),
         continue_on_error: false,
         selected_tables: None,
+        part_cooldown_ms: 0,
+        skip_relational_constraints: false,
     };
     let done_seen = AtomicBool::new(false);
 

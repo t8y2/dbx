@@ -66,6 +66,8 @@ pub enum MongoCommand {
     },
     #[serde(rename = "update")]
     Update { collection: String, filter: String, update: String, options: Option<String>, many: bool },
+    #[serde(rename = "replace")]
+    Replace { collection: String, filter: String, replacement: String, options: Option<String> },
     #[serde(rename = "delete")]
     Delete { collection: String, filter: String, many: bool },
     #[serde(rename = "createIndex")]
@@ -98,6 +100,7 @@ impl MongoCommand {
                 | Self::CreateUser { .. }
                 | Self::Insert { .. }
                 | Self::Update { .. }
+                | Self::Replace { .. }
                 | Self::Delete { .. }
                 | Self::CreateIndex { .. }
                 | Self::DropIndexes { .. }
@@ -117,6 +120,7 @@ impl MongoCommand {
     pub fn has_empty_filter(&self) -> bool {
         match self {
             Self::Update { filter, .. }
+            | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
             | Self::FindOneAndUpdate { filter, .. }
             | Self::FindOneAndReplace { filter, .. }
@@ -128,6 +132,7 @@ impl MongoCommand {
     pub fn has_effectively_unbounded_filter(&self) -> bool {
         match self {
             Self::Update { filter, .. }
+            | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
             | Self::FindOneAndUpdate { filter, .. }
             | Self::FindOneAndReplace { filter, .. }
@@ -371,6 +376,16 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
     }
+    // `db.stats()` and `db.serverStatus()` are the shell's shorthand for the
+    // matching runCommand, so they execute through the same supported path.
+    for (method, command) in [("stats", "dbStats"), ("serverStatus", "serverStatus")] {
+        if let Some((args, tail)) = database_method_call(source, method) {
+            if !tail.is_empty() || !args.iter().all(|arg| arg.trim().is_empty()) {
+                return Err(format!("MongoDB db.{method}() takes no arguments."));
+            }
+            return Ok(MongoCommand::RunCommand { command_json: format!(r#"{{"{command}":1}}"#) });
+        }
+    }
     if let Some((args, tail)) = database_method_call(source, "runCommand") {
         if !tail.is_empty() || args.len() != 1 {
             return Err("MongoDB runCommand() requires exactly one command document.".to_string());
@@ -490,6 +505,18 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
         });
     }
 
+    // estimatedDocumentCount() takes no filter and is metadata-backed, which is
+    // exactly the legacy count() fast path the driver already uses.
+    if let Some((args, tail)) = method_call(source, prefix_end, "estimatedDocumentCount") {
+        if !args.iter().all(|arg| arg.trim().is_empty()) {
+            return Err("MongoDB estimatedDocumentCount() takes no filter.".to_string());
+        }
+        if !tail.is_empty() {
+            return Err("MongoDB estimatedDocumentCount() does not support chained methods.".to_string());
+        }
+        return Ok(MongoCommand::Count { collection, filter: "{}".to_string(), accurate: false });
+    }
+
     for (method, accurate) in [("countDocuments", true), ("count", false)] {
         if let Some((args, tail)) = method_call(source, prefix_end, method) {
             if !tail.is_empty() || args.len() > 1 {
@@ -585,6 +612,22 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             return Err("MongoDB insert() requires a document or document array.".to_string());
         }
         return Ok(MongoCommand::Insert { collection, documents });
+    }
+
+    if let Some((args, tail)) = method_call(source, prefix_end, "replaceOne") {
+        if !tail.is_empty() || !(2..=3).contains(&args.len()) {
+            return Err(
+                "MongoDB replaceOne() requires a filter, a replacement document, and optional options.".to_string()
+            );
+        }
+        let replacement = normalized_json(&args[1])?;
+        require_replacement_document(&replacement)?;
+        return Ok(MongoCommand::Replace {
+            collection,
+            filter: normalized_json(&args[0])?,
+            replacement,
+            options: args.get(2).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?,
+        });
     }
 
     for (method, many) in [("updateOne", false), ("updateMany", true)] {
@@ -1326,6 +1369,19 @@ fn parse_use_database(source: &str) -> Option<String> {
     Some(database.to_string())
 }
 
+/// A replacement is a whole document; `{$set: ...}` here almost always means updateOne() was intended.
+fn require_replacement_document(replacement: &str) -> Result<(), String> {
+    let Some(Value::Object(document)) = parse_json_value(replacement) else {
+        return Err("MongoDB replaceOne() replacement must be a document.".to_string());
+    };
+    match document.keys().find(|key| key.starts_with('$')) {
+        Some(operator) => Err(format!(
+            "MongoDB replaceOne() replacement must not contain update operators such as {operator}; use updateOne() to modify fields."
+        )),
+        None => Ok(()),
+    }
+}
+
 fn is_empty_object(value: &str) -> bool {
     parse_json_value(value).is_some_and(|value| value.as_object().is_some_and(|object| object.is_empty()))
 }
@@ -1803,6 +1859,89 @@ mod tests {
             assert!(error.contains("aggregate() chain"), "{source} => {error}");
         }
         assert!(parse("db.orders.find({}).toArray(1)").unwrap_err().contains("find() chain"));
+    }
+
+    #[test]
+    fn parses_estimated_document_count_as_a_metadata_backed_count() {
+        // The driver already takes the metadata fast path for a filterless legacy
+        // count(), which is exactly what estimatedDocumentCount() asks for.
+        let expected =
+            MongoCommand::Count { collection: "orders".to_string(), filter: "{}".to_string(), accurate: false };
+        for source in [
+            "db.orders.estimatedDocumentCount()",
+            r#"db["orders"].estimatedDocumentCount()"#,
+            "db.getCollection('orders').estimatedDocumentCount();",
+        ] {
+            assert_eq!(parse(source).unwrap(), expected, "{source}");
+        }
+        assert!(!parse("db.orders.estimatedDocumentCount()").unwrap().is_mutating());
+
+        assert!(parse("db.orders.estimatedDocumentCount({a: 1})").unwrap_err().contains("no filter"));
+        assert!(parse("db.orders.estimatedDocumentCount().limit(5)").unwrap_err().contains("chained"));
+    }
+
+    #[test]
+    fn parses_db_stats_and_server_status_as_run_commands() {
+        assert_eq!(
+            parse("db.stats()").unwrap(),
+            MongoCommand::RunCommand { command_json: r#"{"dbStats":1}"#.to_string() }
+        );
+        assert_eq!(
+            parse("db . serverStatus ( ) ;").unwrap(),
+            MongoCommand::RunCommand { command_json: r#"{"serverStatus":1}"#.to_string() }
+        );
+
+        for source in ["db.stats(1)", "db.serverStatus({})"] {
+            assert!(parse(source).unwrap_err().contains("takes no arguments"), "{source}");
+        }
+
+        // db.collection.stats() still parses as collection stats, not a run command.
+        assert!(matches!(parse("db.orders.stats()").unwrap(), MongoCommand::CollectionStats { .. }));
+    }
+
+    #[test]
+    fn parses_replace_one_as_a_filtered_write() {
+        let command = parse(
+            r#"db.orders.replaceOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {name: "new", tags: []}, {upsert: true})"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::Replace {
+                collection: "orders".to_string(),
+                filter: r#"{"_id":{"$oid":"507f1f77bcf86cd799439011"}}"#.to_string(),
+                replacement: r#"{"name":"new","tags":[]}"#.to_string(),
+                options: Some(r#"{"upsert":true}"#.to_string()),
+            }
+        );
+        assert!(command.is_mutating());
+        assert!(!command.is_dangerous());
+        assert!(!command.has_empty_filter());
+        assert_eq!(validate_safety(&command, true, false, false), Ok(()));
+        assert_eq!(validate_safety(&command, false, false, false), Err(MongoSafetyError::WritesDisabled));
+
+        let without_options = parse("db.orders.replaceOne({a: 1}, {b: 2})").unwrap();
+        assert!(matches!(without_options, MongoCommand::Replace { options: None, .. }));
+
+        // An empty filter replaces an arbitrary document, so it is guarded like an update.
+        let unbounded = parse("db.orders.replaceOne({}, {b: 2})").unwrap();
+        assert!(unbounded.has_empty_filter());
+        assert_eq!(validate_safety(&unbounded, true, false, false), Err(MongoSafetyError::EmptyFilter));
+    }
+
+    #[test]
+    fn rejects_replace_one_with_operators_or_the_wrong_shape() {
+        let error = parse("db.orders.replaceOne({a: 1}, {$set: {b: 2}})").unwrap_err();
+        assert!(error.contains("$set") && error.contains("updateOne"), "{error}");
+
+        for source in [
+            "db.orders.replaceOne({a: 1})",
+            "db.orders.replaceOne({a: 1}, {b: 2}, {upsert: true}, 4)",
+            "db.orders.replaceOne({a: 1}, [{b: 2}])",
+            "db.orders.replaceOne({a: 1}, {b: 2}).limit(1)",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 
     #[test]

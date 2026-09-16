@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use mysql_async::prelude::Queryable;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
@@ -183,6 +184,7 @@ struct MySqlSqlFileExecutor {
     dialect: db::mysql::MySqlQueryDialect,
     budget: DbOperationBudget,
     conn: Option<mysql_async::Conn>,
+    constraints_disabled: bool,
 }
 
 impl MySqlSqlFileExecutor {
@@ -229,6 +231,7 @@ impl MySqlSqlFileExecutor {
             ),
             budget,
             conn: None,
+            constraints_disabled: false,
         }))
     }
 
@@ -320,6 +323,11 @@ impl MySqlSqlFileExecutor {
                         let database = self.database.trim();
                         let database = (!database.is_empty()).then_some(database);
                         self.pool_key = state.reconnect_pool_for_session(&self.connection_id, database, None).await?;
+                        // A fresh session restores the server default FOREIGN_KEY_CHECKS = 1;
+                        // re-issue the bypass so the remaining parts match the caller's toggle.
+                        if self.constraints_disabled {
+                            self.set_foreign_key_checks(state, child_token, false).await?;
+                        }
                         continue;
                     }
                     // Cancelled, or the retry itself failed with another
@@ -336,6 +344,19 @@ impl MySqlSqlFileExecutor {
             }
         }
         unreachable!("MySQL SQL file executor retry loop runs at most twice")
+    }
+
+    async fn set_foreign_key_checks(
+        &mut self,
+        state: &AppState,
+        token: &CancellationToken,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.ensure_conn(state, token).await?;
+        let conn = self.conn.as_mut().ok_or("MySQL SQL file executor is missing a connection".to_string())?;
+        conn.query_drop(if enabled { "SET FOREIGN_KEY_CHECKS = 1" } else { "SET FOREIGN_KEY_CHECKS = 0" })
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn ensure_conn(&mut self, state: &AppState, token: &CancellationToken) -> Result<(), String> {
@@ -489,72 +510,121 @@ pub async fn execute_sql_file_paths(
             return Err(error);
         }
     };
+    let constraints_disabled = request.skip_relational_constraints && mysql_executor.is_some();
+    if constraints_disabled {
+        let executor = mysql_executor.as_mut().expect("missing MySQL executor while disabling constraints");
+        if let Err(error) = executor.set_foreign_key_checks(state, &token, false).await {
+            emit(sql_file_execution_error_progress(&request.execution_id, started_at, &progress, error.clone()));
+            return Err(error);
+        }
+        executor.constraints_disabled = true;
+    }
     let file_count = file_paths.len();
     let mut prev_statement_index = 0usize;
     let mut prev_success_count = 0usize;
     let mut prev_failure_count = 0usize;
     let mut prev_affected_rows = 0u64;
-    for (file_index, file_path) in file_paths.iter().enumerate() {
-        let file_name = file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let import_result = async {
+        for (file_index, file_path) in file_paths.iter().enumerate() {
+            let file_name = file_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
 
-        // Emit a file-boundary progress event so the frontend knows which file is
-        // currently executing and can display a "File N/M" indicator.
-        if file_count > 1 {
-            emit(SqlFileProgress {
-                execution_id: request.execution_id.clone(),
-                status: SqlFileStatus::Running,
-                statement_index: progress.statement_index,
-                success_count: progress.success_count,
-                failure_count: progress.failure_count,
-                affected_rows: progress.affected_rows,
-                elapsed_ms: started_at.elapsed().as_millis(),
-                statement_summary: String::new(),
-                error: None,
-                file_index: Some(file_index),
-                file_name: Some(file_name.clone()),
+            // Emit a file-boundary progress event so the frontend knows which file is
+            // currently executing and can display a "File N/M" indicator.
+            if file_count > 1 {
+                emit(SqlFileProgress {
+                    execution_id: request.execution_id.clone(),
+                    status: SqlFileStatus::Running,
+                    statement_index: progress.statement_index,
+                    success_count: progress.success_count,
+                    failure_count: progress.failure_count,
+                    affected_rows: progress.affected_rows,
+                    elapsed_ms: started_at.elapsed().as_millis(),
+                    statement_summary: String::new(),
+                    error: None,
+                    file_index: Some(file_index),
+                    file_name: Some(file_name.clone()),
+                });
+            }
+
+            let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
+            let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
+            let normalize_mysql_binary_literals = import_target.as_ref().is_some_and(|target| {
+                crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
             });
-        }
+            let mut decoder =
+                match SqlFileStreamDecoder::open_for_target(file_path, normalize_mysql_binary_literals).await {
+                    Ok(decoder) => decoder,
+                    Err(error) => {
+                        emit(sql_file_execution_error_progress(
+                            &request.execution_id,
+                            started_at,
+                            &progress,
+                            error.clone(),
+                        ));
+                        return Err(error);
+                    }
+                };
 
-        let mut splitter = StreamingSqlFileSplitter::new(database_type, options);
-        let mut pending_statements = Vec::with_capacity(SQL_FILE_STATEMENT_BATCH_SIZE);
-        let normalize_mysql_binary_literals = import_target.as_ref().is_some_and(|target| {
-            crate::sql::is_mysql_compatible_import_target(&target.db_type, target.driver_profile.as_deref())
-        });
-        let mut decoder = match SqlFileStreamDecoder::open_for_target(file_path, normalize_mysql_binary_literals).await
-        {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                emit(sql_file_execution_error_progress(&request.execution_id, started_at, &progress, error.clone()));
-                return Err(error);
-            }
-        };
-
-        loop {
-            let chunk = match decoder.next_chunk().await {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    emit(sql_file_progress(
-                        &request.execution_id,
-                        SqlFileStatus::Error,
-                        progress.statement_index,
-                        progress.success_count,
-                        progress.failure_count,
-                        progress.affected_rows,
-                        started_at,
-                        "",
-                        Some(error.clone()),
-                    ));
-                    return Err(error);
+            loop {
+                let chunk = match decoder.next_chunk().await {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        emit(sql_file_progress(
+                            &request.execution_id,
+                            SqlFileStatus::Error,
+                            progress.statement_index,
+                            progress.success_count,
+                            progress.failure_count,
+                            progress.affected_rows,
+                            started_at,
+                            "",
+                            Some(error.clone()),
+                        ));
+                        return Err(error);
+                    }
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                if token.is_cancelled() {
+                    emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
+                    return Ok(());
                 }
-            };
-            let Some(chunk) = chunk else {
-                break;
-            };
-            if token.is_cancelled() {
-                emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
-                return Ok(());
+                let mut next_statements = splitter.push_chunk(&chunk);
+                if let Some(filter) = restore_filter.as_mut() {
+                    if let Err(error) = filter_restore_statements(
+                        &mut next_statements,
+                        filter,
+                        request.selected_tables.as_deref().unwrap_or_default(),
+                    ) {
+                        emit(sql_file_execution_error_progress(
+                            &request.execution_id,
+                            started_at,
+                            &progress,
+                            error.clone(),
+                        ));
+                        return Err(error);
+                    }
+                }
+                pending_statements.extend(next_statements);
+                if pending_statements.len() < SQL_FILE_STATEMENT_BATCH_SIZE {
+                    continue;
+                }
+                execute_sql_file_statement_batch(
+                    state,
+                    request,
+                    &token,
+                    started_at,
+                    &mut pending_statements,
+                    import_target.as_ref(),
+                    mysql_executor.as_mut(),
+                    &mut progress,
+                    &mut emit,
+                )
+                .await?;
             }
-            let mut next_statements = splitter.push_chunk(&chunk);
+
+            let mut next_statements = splitter.finish();
             if let Some(filter) = restore_filter.as_mut() {
                 if let Err(error) = filter_restore_statements(
                     &mut next_statements,
@@ -571,9 +641,6 @@ pub async fn execute_sql_file_paths(
                 }
             }
             pending_statements.extend(next_statements);
-            if pending_statements.len() < SQL_FILE_STATEMENT_BATCH_SIZE {
-                continue;
-            }
             execute_sql_file_statement_batch(
                 state,
                 request,
@@ -586,57 +653,48 @@ pub async fn execute_sql_file_paths(
                 &mut emit,
             )
             .await?;
-        }
 
-        let mut next_statements = splitter.finish();
-        if let Some(filter) = restore_filter.as_mut() {
-            if let Err(error) = filter_restore_statements(
-                &mut next_statements,
-                filter,
-                request.selected_tables.as_deref().unwrap_or_default(),
-            ) {
-                emit(sql_file_execution_error_progress(&request.execution_id, started_at, &progress, error.clone()));
-                return Err(error);
+            // After each file, emit a per-file summary with diff-based counters so
+            // the frontend can build a per-file breakdown table.
+            if file_count > 1 {
+                emit(SqlFileProgress {
+                    execution_id: request.execution_id.clone(),
+                    status: SqlFileStatus::StatementDone,
+                    statement_index: progress.statement_index - prev_statement_index,
+                    success_count: progress.success_count - prev_success_count,
+                    failure_count: progress.failure_count - prev_failure_count,
+                    affected_rows: progress.affected_rows - prev_affected_rows,
+                    elapsed_ms: started_at.elapsed().as_millis(),
+                    statement_summary: String::new(),
+                    error: None,
+                    file_index: Some(file_index),
+                    file_name: Some(file_name),
+                });
+                prev_statement_index = progress.statement_index;
+                prev_success_count = progress.success_count;
+                prev_failure_count = progress.failure_count;
+                prev_affected_rows = progress.affected_rows;
+            }
+            if file_index + 1 < file_count && request.part_cooldown_ms > 0 {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
+                        return Ok(());
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(request.part_cooldown_ms)) => {}
+                }
             }
         }
-        pending_statements.extend(next_statements);
-        execute_sql_file_statement_batch(
-            state,
-            request,
-            &token,
-            started_at,
-            &mut pending_statements,
-            import_target.as_ref(),
-            mysql_executor.as_mut(),
-            &mut progress,
-            &mut emit,
-        )
-        .await?;
-
-        // After each file, emit a per-file summary with diff-based counters so
-        // the frontend can build a per-file breakdown table.
-        if file_count > 1 {
-            emit(SqlFileProgress {
-                execution_id: request.execution_id.clone(),
-                status: SqlFileStatus::StatementDone,
-                statement_index: progress.statement_index - prev_statement_index,
-                success_count: progress.success_count - prev_success_count,
-                failure_count: progress.failure_count - prev_failure_count,
-                affected_rows: progress.affected_rows - prev_affected_rows,
-                elapsed_ms: started_at.elapsed().as_millis(),
-                statement_summary: String::new(),
-                error: None,
-                file_index: Some(file_index),
-                file_name: Some(file_name),
-            });
-            prev_statement_index = progress.statement_index;
-            prev_success_count = progress.success_count;
-            prev_failure_count = progress.failure_count;
-            prev_affected_rows = progress.affected_rows;
+        emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
+        Ok(())
+    }
+    .await;
+    if constraints_disabled {
+        if let Some(executor) = mysql_executor.as_mut() {
+            let _ = executor.set_foreign_key_checks(state, &token, true).await;
         }
     }
-    emit_sql_file_terminal_progress(request, &token, started_at, &progress, &mut emit);
-    Ok(())
+    import_result
 }
 
 pub async fn inspect_sql_file_tables(file_path: &Path) -> Result<Vec<SqlFileTable>, String> {
@@ -2589,6 +2647,8 @@ mod tests {
             file_path: path.to_string_lossy().to_string(),
             continue_on_error: true,
             selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
         };
         let mut progress = Vec::new();
 

@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { FrameDecoder, JsonLineDecoder, frame, binaryPayload, Sidecar, JSON_LIMIT } from "../sidecar.mjs";
 
 const config = { executable: process.execPath, args: [fileURLToPath(new URL("./echo-sidecar.mjs", import.meta.url))], transport: "stdio-framed", manifest: { id: "example.echo", version: "1.0.0" } };
@@ -86,6 +89,28 @@ test("handshake rejects wrong identity and missing executables terminate promptl
   const missing = new Sidecar({ ...config, executable: "/definitely/missing/mock-sidecar" });
   await assert.rejects(missing.start(), /start/);
   await missing.stop();
+});
+
+test("handshake adopts a manifest.json rewritten on disk when the in-memory copy is stale", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "dbx-sidecar-manifest-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  // Simulates a version bump made while the dev host was already running:
+  // the sidecar binary reports 1.0.0, the in-memory manifest is behind.
+  await writeFile(join(project, "manifest.json"), JSON.stringify({ id: "example.echo", version: "1.0.0" }));
+  const sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
+  t.after(() => sidecar.stop());
+  const info = await sidecar.start();
+  assert.equal(sidecar.state, "ready");
+  assert.equal(sidecar.manifest.version, "1.0.0");
+  assert.equal(info.plugin.version, "1.0.0");
+});
+
+test("handshake still rejects when the on-disk manifest also disagrees with the sidecar", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "dbx-sidecar-manifest-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  await writeFile(join(project, "manifest.json"), JSON.stringify({ id: "example.echo", version: "0.9.0" }));
+  const sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
+  await assert.rejects(sidecar.start(), /identity/);
 });
 
 test("JSONL supports split lines, concurrent RPC, events and rejects binary channels", async (t) => {

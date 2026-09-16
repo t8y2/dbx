@@ -463,7 +463,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="relative flex items-center px-2 py-1">
         <Search class="absolute left-3 w-3 h-3 text-muted-foreground pointer-events-none" />
-        <input v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 text-xs bg-transparent border rounded pl-5 pr-1 outline-none placeholder:text-muted-foreground" :placeholder="t('history.search')" />
+        <input data-history-search v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 text-xs bg-transparent border rounded pl-5 pr-1 outline-none placeholder:text-muted-foreground" :placeholder="t('history.search')" />
         <Popover :open="dateRangeOpen" @update:open="setDateRangeOpen">
           <PopoverTrigger as-child>
             <button

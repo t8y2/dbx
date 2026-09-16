@@ -5,7 +5,11 @@ import { DEFAULT_LANGUAGE, LANGUAGES } from "./languages.mjs";
 const OUT_DIR = resolve(import.meta.dirname, "../out");
 const SITE_URL = "https://dbxio.com";
 const EXCLUDE = new Set(["index.html", "404.html", "_not-found.html"]);
-const EXCLUDE_PATHS = new Set(LANGUAGES.map((language) => `/${language}/issue`));
+const EXCLUDE_PATHS = new Set([
+  ...LANGUAGES.map((language) => `/${language}/issue`),
+  // noindex shell served by the worker for plugin ids missing from the build snapshot.
+  ...LANGUAGES.map((language) => `/${language}/plugins/detail`),
+]);
 // hreflang codes differ from the route segment for locales whose segment is not
 // already a language code.
 const HREFLANG = { en: "en", cn: "zh" };

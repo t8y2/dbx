@@ -16,6 +16,7 @@ import { executeWithProductionContextGuard } from "@/lib/database/productionExec
 import { TABLE_IMPORT_ENCODING_OPTIONS } from "@/lib/table/tableImport";
 import { importPreviewInput, importSourceDisplayName, importTextDelimiterForName, uploadedImportSourceFromPreview, type UploadedImportSource } from "@/lib/import/importSource";
 import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -267,7 +268,7 @@ async function startImport() {
     running.value = false;
     open.value = false;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = translateBackendError(t, error);
     running.value = false;
   } finally {
     cancelling.value = false;

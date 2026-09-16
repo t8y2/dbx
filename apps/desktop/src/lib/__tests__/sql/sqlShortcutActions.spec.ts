@@ -30,6 +30,10 @@ describe("resolveSqlShortcutTemplate", () => {
   });
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe("enabledSqlShortcutActions", () => {
   it("filters disabled and unbound actions", () => {
     const actions = [action("a", "Mod+1"), action("b", "", { enabled: true }), action("c", "Mod+2", { enabled: false })];
@@ -104,6 +108,7 @@ describe("normalizeSqlShortcuts", () => {
   });
 
   it("keeps Ctrl+H on non-mac platforms where it is a legitimate SQL shortcut", async () => {
+    vi.stubGlobal("navigator", { platform: "Win32" });
     const { normalizeEditorSettings } = await import("@/stores/settingsStore");
     const normalized = normalizeEditorSettings({
       sqlShortcuts: [action("h", "Mod+H")],

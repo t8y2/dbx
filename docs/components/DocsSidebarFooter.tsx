@@ -43,6 +43,14 @@ function WeChatIcon() {
   );
 }
 
+function FeishuIcon() {
+  return (
+    <svg viewBox="164 204 762 617" fill="currentColor" className="size-4.5">
+      <path d="M559.915 530.453c-46.507-111.786-194.56-248.469-262.806-302.826h333.782c47.146 16.298 87.616 134.677 101.973 191.808-35.499 31.21-119.787 97.109-172.95 111.018zM632.021 452.992c-45.184 60.48-133.546 121.963-172.053 145.13l-2.88 24.278 235.947 63.637c32.213-25.962 103.061-87.296 128.96-124.928 4.394-6.378 68.992-135.914 79.402-151.552-18.24-11.306-42.56-18.261-104.277-21.738-82.56-4.331-116.437 20.864-165.099 65.173zM187.883 712.917V393.515C397.568 599.808 558.315 642.688 641.045 653.76c124.459 5.419 154.667-73.045 181.142-93.099-97.024 153.174-224.64 235.734-384.747 235.734-128.107 0-219.755-55.659-249.557-83.478z" />
+    </svg>
+  );
+}
+
 export function DocsSidebarLanguageButton() {
   return (
     <div className="flex justify-end pe-1">
@@ -69,6 +77,9 @@ export function DocsSidebarFooter() {
           </a>
           <a className={iconButton} href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank" rel="noreferrer" aria-label="WeChat">
             <WeChatIcon />
+          </a>
+          <a className={iconButton} href="https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227" target="_blank" rel="noreferrer" aria-label="Feishu">
+            <FeishuIcon />
           </a>
         </div>
         <ThemeSwitch mode="light-dark" className="dbx-docs-theme-switch" />

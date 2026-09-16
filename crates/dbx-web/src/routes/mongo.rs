@@ -260,6 +260,17 @@ pub struct MongoUpdateDocumentsRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoReplaceDocumentRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub filter_json: String,
+    pub replacement_json: String,
+    pub options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoDeleteDocumentsRequest {
     pub connection_id: String,
     pub database: String,
@@ -802,6 +813,32 @@ pub async fn update_documents(
         &req.filter_json,
         &req.update_json,
         req.many,
+        req.options_json.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "affected_rows": result })))
+}
+
+pub async fn replace_document(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoReplaceDocumentRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    if super::mcp_policy::mongo_filter_is_effectively_unbounded(&req.filter_json) {
+        super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Replace").await?;
+    } else {
+        super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &database, "Replace").await?;
+    }
+    ensure_writable(&state.app, &req.connection_id, "Replace").await?;
+    let result = dbx_core::mongo_ops::mongo_replace_document_core(
+        &state.app,
+        &req.connection_id,
+        &database,
+        &req.collection,
+        &req.filter_json,
+        &req.replacement_json,
         req.options_json.as_deref(),
     )
     .await

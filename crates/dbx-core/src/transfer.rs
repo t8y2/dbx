@@ -4171,11 +4171,16 @@ fn can_reuse_source_table_ddl(
         return false;
     }
 
-    preserves_target_table_name
-        && !matches!(target_db_type, DatabaseType::ClickHouse)
-        && (source_db_type == target_db_type
-            || (is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type))
-            || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type)))
+    let same_dialect_pair = source_db_type == target_db_type
+        || (is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type))
+        || (is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type));
+    // MySQL-family reuse rewrites the CREATE TABLE header to the target name, so a
+    // case-converted table no longer falls into the lossy generated-DDL path (which
+    // drops partitions, secondary indexes, and table options). Other dialects keep
+    // requiring an unchanged name because their reuse path has no name rewrite.
+    let name_compatible = preserves_target_table_name
+        || (is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type));
+    name_compatible && !matches!(target_db_type, DatabaseType::ClickHouse) && same_dialect_pair
 }
 
 fn strip_dameng_storage_clauses(sql: &str) -> String {
@@ -4242,14 +4247,117 @@ fn rewrite_transfer_source_table_ddl(
     target_schema: &str,
     source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
-) -> String {
+    table: &str,
+    target_table: &str,
+) -> Option<String> {
     if is_postgres_family_target(source_db_type) && is_postgres_family_target(target_db_type) {
-        rewrite_postgres_schema_qualified_references(sql, source_schema, target_schema)
+        Some(rewrite_postgres_schema_qualified_references(sql, source_schema, target_schema))
     } else if matches!((source_db_type, target_db_type), (DatabaseType::Dameng, DatabaseType::Dameng)) {
-        strip_dameng_storage_clauses(&rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
+        Some(strip_dameng_storage_clauses(&rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema)))
+    } else if is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type) {
+        // The reused SHOW CREATE TABLE DDL carries the source table name; rewrite the
+        // CREATE TABLE header when the transfer renames the table (name case conversion).
+        // Unparseable heads return None so the caller falls back to generated DDL instead
+        // of creating a table under the wrong name.
+        if table == target_table {
+            Some(sql.to_string())
+        } else {
+            rewrite_mysql_create_table_name(sql, target_table)
+        }
     } else {
-        sql.to_string()
+        Some(sql.to_string())
     }
+}
+
+/// Rewrites the table identifier of the leading CREATE TABLE statement of a reused
+/// MySQL-family DDL. Only the last (table) segment of a qualified name is replaced.
+/// Returns None when the statement head does not look like `CREATE [TEMPORARY] TABLE
+/// [IF NOT EXISTS] <identifier> (` — callers then must not reuse this DDL.
+fn rewrite_mysql_create_table_name(sql: &str, target_table: &str) -> Option<String> {
+    fn skip_ws(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    }
+    fn match_keyword(b: &[u8], i: usize, kw: &str) -> Option<usize> {
+        let i = skip_ws(b, i);
+        let end = i.checked_add(kw.len())?;
+        if end <= b.len()
+            && b[i..end].eq_ignore_ascii_case(kw.as_bytes())
+            && (end == b.len() || b[end].is_ascii_whitespace())
+        {
+            Some(end)
+        } else {
+            None
+        }
+    }
+
+    let b = sql.as_bytes();
+    let mut i = skip_ws(b, 0);
+    i = match_keyword(b, i, "CREATE")?;
+    if let Some(next) = match_keyword(b, i, "TEMPORARY") {
+        i = next;
+    }
+    i = match_keyword(b, i, "TABLE")?;
+    if let Some(next) = match_keyword(b, i, "IF") {
+        let next = match_keyword(b, next, "NOT")?;
+        i = match_keyword(b, next, "EXISTS")?;
+    }
+    i = skip_ws(b, i);
+
+    // Parse the identifier chain `a`.`b`.`c` (or bare), keeping the last segment's span.
+    let (segment_start, segment_end) = loop {
+        let current_start = i;
+        let current_end;
+        if i < b.len() && b[i] == b'`' {
+            i += 1;
+            let mut closed = false;
+            while i < b.len() {
+                if b[i] == b'`' {
+                    if i + 1 < b.len() && b[i + 1] == b'`' {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !closed {
+                return None;
+            }
+            current_end = i;
+        } else {
+            while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'.' && b[i] != b'(' {
+                i += 1;
+            }
+            current_end = i;
+            if current_start == current_end {
+                return None;
+            }
+        }
+        let after_segment = skip_ws(b, i);
+        if after_segment < b.len() && b[after_segment] == b'.' {
+            i = after_segment + 1;
+            continue;
+        }
+        break (current_start, current_end);
+    };
+
+    // A plain CREATE TABLE head is always followed by the column list.
+    let after = skip_ws(b, segment_end);
+    if after >= b.len() || b[after] != b'(' {
+        return None;
+    }
+
+    let quoted = format!("`{}`", target_table.replace('`', "``"));
+    let mut out = String::with_capacity(sql.len() + quoted.len());
+    out.push_str(&sql[..segment_start]);
+    out.push_str(&quoted);
+    out.push_str(&sql[segment_end..]);
+    Some(out)
 }
 
 fn rewrite_postgres_serial_columns_for_transfer(
@@ -5421,7 +5529,7 @@ async fn insert_mongo_documents_for_transfer(
     let docs_json = serde_json::to_string(documents).map_err(|e| format!("Failed to encode MongoDB documents: {e}"))?;
     match crate::mongo_ops::mongo_insert_documents_core(state, connection_id, database, collection, &docs_json).await {
         Ok(count) => Ok(count),
-        Err(error) if error.to_ascii_lowercase().contains("legacy agent") => {
+        Err(error) if crate::mongo_ops::is_legacy_agent_insert_many_unsupported(&error) => {
             let mut inserted = 0;
             for document in documents {
                 let doc_json =
@@ -5457,7 +5565,7 @@ async fn insert_mongo_documents_extended_json_for_transfer(
     .await
     {
         Ok(count) => Ok(count),
-        Err(error) if error.to_ascii_lowercase().contains("legacy agent") => {
+        Err(error) if crate::mongo_ops::is_legacy_agent_insert_many_unsupported(&error) => {
             insert_mongo_documents_for_transfer(state, connection_id, database, collection, documents).await
         }
         Err(error) => Err(error),
@@ -12852,6 +12960,95 @@ mod tests {
         assert!(can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, true,));
         assert!(!can_reuse_source_table_ddl(&DatabaseType::Postgres, &DatabaseType::Postgres, None, None, false,));
         assert!(can_reuse_source_table_ddl(&DatabaseType::Dameng, &DatabaseType::Dameng, None, None, true,));
+        // MySQL-family reuse renames the CREATE TABLE header, so a case-converted
+        // target name still reuses the source DDL (keeps partitions/indexes/options);
+        // dialects without a name rewrite keep requiring a preserved name.
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Mysql, None, None, false,));
+        assert!(can_reuse_source_table_ddl(&DatabaseType::Mysql, &DatabaseType::Doris, None, None, false,));
+        assert!(!can_reuse_source_table_ddl(&DatabaseType::Dameng, &DatabaseType::Dameng, None, None, false,));
+        assert!(!can_reuse_source_table_ddl(
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            Some("oceanbase"),
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn mysql_reused_ddl_renames_create_table_header_for_case_conversion() {
+        let ddl = "CREATE TABLE `orders_plain` (\n  `id` int NOT NULL,\n  PRIMARY KEY (`id`)\n) \
+ENGINE=InnoDB DEFAULT CHARSET=utf8mb4\nPARTITION BY RANGE (TO_DAYS(`created_day`))\n(\
+PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "dbx_src",
+            "dbx_dst",
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            "orders_plain",
+            "ORDERS_PLAIN",
+        )
+        .unwrap();
+
+        assert!(rewritten.starts_with("CREATE TABLE `ORDERS_PLAIN` ("));
+        assert!(rewritten.contains("PARTITION BY RANGE (TO_DAYS(`created_day`))"));
+        assert!(rewritten.contains("ENGINE=InnoDB"));
+        assert!(!rewritten.contains("`orders_plain`"));
+    }
+
+    #[test]
+    fn mysql_reused_ddl_keeps_identity_when_target_name_matches() {
+        let ddl = "CREATE TABLE `orders` (`id` int)";
+        assert_eq!(
+            rewrite_transfer_source_table_ddl(
+                ddl,
+                "s",
+                "t",
+                &DatabaseType::Mysql,
+                &DatabaseType::Mysql,
+                "orders",
+                "orders"
+            ),
+            Some(ddl.to_string())
+        );
+    }
+
+    #[test]
+    fn mysql_create_table_header_rename_handles_statement_shapes() {
+        let rewrite = |ddl: &str| rewrite_mysql_create_table_name(ddl, "TARGET");
+
+        // SHOW CREATE TABLE form with parenthesized column list.
+        assert_eq!(
+            rewrite("CREATE TABLE `src` (\n  `id` int\n)"),
+            Some("CREATE TABLE `TARGET` (\n  `id` int\n)".to_string())
+        );
+        // No space before the column list.
+        assert_eq!(rewrite("create table `src`(`id` int)"), Some("create table `TARGET`(`id` int)".to_string()));
+        // TEMPORARY + IF NOT EXISTS.
+        assert_eq!(
+            rewrite("CREATE TEMPORARY TABLE IF NOT EXISTS `src` (`id` int)"),
+            Some("CREATE TEMPORARY TABLE IF NOT EXISTS `TARGET` (`id` int)".to_string())
+        );
+        // Qualified name: only the table segment is replaced.
+        assert_eq!(
+            rewrite("CREATE TABLE `prod_db`.`src` (`id` int)"),
+            Some("CREATE TABLE `prod_db`.`TARGET` (`id` int)".to_string())
+        );
+        // Escaped backticks inside the source identifier.
+        assert_eq!(rewrite("CREATE TABLE `od``d` (`id` int)"), Some("CREATE TABLE `TARGET` (`id` int)".to_string()));
+        // Backtick inside the target identifier is escaped.
+        assert_eq!(
+            rewrite_mysql_create_table_name("CREATE TABLE `src` (`id` int)", "ta`rget"),
+            Some("CREATE TABLE `ta``rget` (`id` int)".to_string())
+        );
+        // Anything that is not a plain CREATE TABLE head is rejected.
+        assert_eq!(rewrite("ALTER TABLE `src` ADD COLUMN `x` int"), None);
+        assert_eq!(rewrite("CREATE TABLE `src` LIKE `other`"), None);
+        assert_eq!(rewrite("CREATE TABLE `src`"), None);
+        assert_eq!(rewrite("CREATE TABLE `unterminated (`id` int)"), None);
+        assert_eq!(rewrite(""), None);
     }
 
     #[test]
@@ -12968,8 +13165,16 @@ mod tests {
         let ddl =
             "CREATE TABLE \"src\".\"items\" (\"id\" integer);\nCOMMENT ON COLUMN \"src\".\"items\".\"id\" IS 'id';";
 
-        let rewritten =
-            rewrite_transfer_source_table_ddl(ddl, "src", "dst", &DatabaseType::Postgres, &DatabaseType::Postgres);
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "src",
+            "dst",
+            &DatabaseType::Postgres,
+            &DatabaseType::Postgres,
+            "items",
+            "items",
+        )
+        .unwrap();
 
         assert!(rewritten.contains("CREATE TABLE \"dst\".\"items\""));
         assert!(rewritten.contains("COMMENT ON COLUMN \"dst\".\"items\".\"id\""));
@@ -12990,8 +13195,16 @@ mod tests {
             "ALTER TABLE \"SRC\".\"items\" ADD \"value\" INTEGER;",
         );
 
-        let rewritten =
-            rewrite_transfer_source_table_ddl(ddl, "SRC", "DST", &DatabaseType::Dameng, &DatabaseType::Dameng);
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "SRC",
+            "DST",
+            &DatabaseType::Dameng,
+            &DatabaseType::Dameng,
+            "items",
+            "items",
+        )
+        .unwrap();
 
         assert!(rewritten.contains("CREATE TABLE \"DST\".\"items\""));
         assert!(rewritten.contains("COMMENT ON TABLE \"DST\".\"items\""));
@@ -13005,12 +13218,28 @@ mod tests {
         assert!(rewritten.contains("/* keep STORAGE(ON block_comment_ts) and \"SRC\".block_comment */"));
         let storage_portable_ddl = strip_dameng_storage_clauses(ddl);
         assert_eq!(
-            rewrite_transfer_source_table_ddl(ddl, "SRC", "SRC", &DatabaseType::Dameng, &DatabaseType::Dameng),
-            storage_portable_ddl
+            rewrite_transfer_source_table_ddl(
+                ddl,
+                "SRC",
+                "SRC",
+                &DatabaseType::Dameng,
+                &DatabaseType::Dameng,
+                "items",
+                "items"
+            ),
+            Some(storage_portable_ddl.clone())
         );
         assert_eq!(
-            rewrite_transfer_source_table_ddl(ddl, "", "DST", &DatabaseType::Dameng, &DatabaseType::Dameng),
-            storage_portable_ddl
+            rewrite_transfer_source_table_ddl(
+                ddl,
+                "",
+                "DST",
+                &DatabaseType::Dameng,
+                &DatabaseType::Dameng,
+                "items",
+                "items"
+            ),
+            Some(storage_portable_ddl)
         );
     }
 
@@ -14327,7 +14556,10 @@ mod tests {
             "archive",
             &DatabaseType::Postgres,
             &DatabaseType::Postgres,
-        );
+            "it_quick_entry",
+            "it_quick_entry",
+        )
+        .unwrap();
         let sequence = PostgresOwnedSequence {
             name: "it_quick_entry_id_seq".to_string(),
             owner_table: "it_quick_entry".to_string(),

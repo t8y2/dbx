@@ -18,6 +18,7 @@ const activeConnectionFilterSource = readFileSync(new URL("../../components/side
 const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
 const databaseBackupConfigFieldsSource = readFileSync(new URL("../../components/backup/DatabaseBackupConfigFields.vue", import.meta.url), "utf8");
 const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
+const driverStoreAgentRowSource = readFileSync(new URL("../../components/config/DriverStoreAgentRow.vue", import.meta.url), "utf8");
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
@@ -343,8 +344,9 @@ describe("legacy WebView CSS fallbacks", () => {
     const fallbackEnd = driverStoreDialogSource.indexOf("@media (max-width: 900px)", fallbackStart);
     const fallback = driverStoreDialogSource.slice(fallbackStart, fallbackEnd);
 
-    expect(driverStoreDialogSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(3);
-    expect(driverStoreDialogSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(3);
+    expect(driverStoreAgentRowSource.match(/driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground/g)?.length).toBe(1);
+    expect(driverStoreAgentRowSource.match(/variant="ghost"\n\s+class="driver-store-local-import-button/g)?.length).toBe(1);
+    expect(driverStoreDialogSource).toContain("<DriverStoreAgentRow");
     expect(fallback).toContain(".driver-store-local-import-button");
     expect(fallback).toContain("width: 2rem !important;");
     expect(fallback).toContain("height: 2rem !important;");

@@ -1065,6 +1065,11 @@ pub async fn import_agents_from_zip(
 
 pub fn inspect_offline_package(package_path: &Path) -> Result<OfflineImportPlan, String> {
     if is_tar_zstd_package(package_path) {
+        if let Some(info) = tar_zstd_jre_package_info(package_path)? {
+            let staging = tempfile::tempdir().map_err(|error| error.to_string())?;
+            extract_and_validate_standalone_jre(package_path, staging.path(), &info)?;
+            return Ok(OfflineImportPlan { driver_keys: Vec::new(), includes_jre: true });
+        }
         inspect_tar_zstd_driver_package(package_path)
     } else {
         inspect_offline_zip(package_path)
@@ -1077,6 +1082,9 @@ pub async fn import_agents_from_package(
     progress: impl Fn(AgentProgressEvent),
 ) -> Result<OfflineImportResult, String> {
     if is_tar_zstd_package(package_path) {
+        if let Some(info) = tar_zstd_jre_package_info(package_path)? {
+            return import_tar_zstd_jre_package(am, package_path, &info, &progress).await;
+        }
         import_tar_zstd_driver_package(am, package_path, |event| {
             progress(AgentProgressEvent {
                 operation_id: None,
@@ -2465,6 +2473,125 @@ pub struct OfflineImportResult {
     pub jre_installed: Vec<String>,
     pub drivers_installed: Vec<String>,
     pub drivers_skipped: Vec<String>,
+}
+
+#[derive(Debug)]
+struct TarZstdJrePackageInfo {
+    key: String,
+    version: String,
+}
+
+fn tar_zstd_jre_package_info(package_path: &Path) -> Result<Option<TarZstdJrePackageInfo>, String> {
+    let file = std::fs::File::open(package_path).map_err(|error| error.to_string())?;
+    let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| error.to_string())?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut release = None;
+    let mut has_registry = false;
+    let mut invalid_jre_entry = false;
+    for entry in archive.entries().map_err(|error| error.to_string())? {
+        let mut entry = entry.map_err(|error| error.to_string())?;
+        let name = safe_archive_entry_name(&entry.path().map_err(|error| error.to_string())?)?;
+        has_registry |= name == "agent-registry.json";
+        invalid_jre_entry |= !(name == "dbx-jre" || name.starts_with("dbx-jre/"))
+            || !(entry.header().entry_type().is_file()
+                || entry.header().entry_type().is_dir()
+                || (entry.header().entry_type().is_symlink() && standalone_jre_link_is_safe(&entry, &name)?));
+        if name == "dbx-jre/release" {
+            if release.is_some() || !entry.header().entry_type().is_file() || entry.size() > 64 * 1024 {
+                return Err("Invalid offline JRE release metadata".to_string());
+            }
+            let mut text = String::new();
+            entry.read_to_string(&mut text).map_err(|error| error.to_string())?;
+            release = Some(text);
+        }
+    }
+    if has_registry {
+        return Ok(None);
+    }
+    let Some(release) = release else { return Ok(None) };
+    if invalid_jre_entry {
+        return Err("Offline JRE package contains an unexpected or non-regular entry".to_string());
+    }
+    let version = release
+        .lines()
+        .find_map(|line| line.strip_prefix("JAVA_VERSION=").map(|value| value.trim().trim_matches('"')))
+        .ok_or("Offline JRE package is missing JAVA_VERSION")?;
+    let key = version.split('.').next().unwrap_or("");
+    if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_digit()) || key == "0" {
+        return Err("Invalid offline JRE JAVA_VERSION".to_string());
+    }
+    validate_offline_identifier(version, "JRE version")?;
+    Ok(Some(TarZstdJrePackageInfo { key: key.to_string(), version: version.to_string() }))
+}
+
+fn standalone_jre_link_is_safe<R: Read>(entry: &tar::Entry<'_, R>, name: &str) -> Result<bool, String> {
+    let Some(target) = entry.link_name().map_err(|error| error.to_string())? else { return Ok(false) };
+    let mut parts: Vec<_> = name.split('/').collect();
+    parts.pop();
+    for component in target.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                let Some(value) = value.to_str() else { return Ok(false) };
+                parts.push(value);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if parts.len() > 1 => {
+                parts.pop();
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(parts.first() == Some(&"dbx-jre"))
+}
+
+fn extract_and_validate_standalone_jre(
+    package_path: &Path,
+    staging: &Path,
+    info: &TarZstdJrePackageInfo,
+) -> Result<(), String> {
+    extract_jre_archive(package_path, staging, Some(ArtifactFormat::TarZstd))?;
+    let java = staging.join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+    if !java.is_file() {
+        return Err(format!(
+            "Offline JRE {} package does not contain a Java executable for {}",
+            info.key,
+            AgentManager::current_platform()
+        ));
+    }
+    validate_native_agent_binary(&java).map_err(|_| {
+        format!("Offline JRE {} package does not support platform: {}", info.key, AgentManager::current_platform())
+    })?;
+    mark_executable(&java)
+}
+
+async fn import_tar_zstd_jre_package(
+    am: &AgentManager,
+    package_path: &Path,
+    info: &TarZstdJrePackageInfo,
+    progress: &impl Fn(AgentProgressEvent),
+) -> Result<OfflineImportResult, String> {
+    let _installation_guard = am.installation_operation_lock.write().await;
+    std::fs::create_dir_all(am.base_dir()).map_err(|error| error.to_string())?;
+    let staging = tempfile::Builder::new()
+        .prefix(".jre-offline-import-")
+        .tempdir_in(am.base_dir())
+        .map_err(|error| error.to_string())?;
+    progress(AgentProgressEvent::step("jre-extract"));
+    extract_and_validate_standalone_jre(package_path, staging.path(), info)?;
+    // Validate before stopping active daemons or replacing a working runtime.
+    am.stop_daemons().await;
+    let pending_cleanup = replace_imported_jre_dir(staging.path(), &am.jre_dir(&info.key))?;
+    am.mutate_state(|state| {
+        state.jre_versions.insert(info.key.clone(), info.version.clone());
+        if let Some(path) = pending_cleanup {
+            state.pending_jre_cleanup.push(path);
+        }
+    })?;
+    Ok(OfflineImportResult {
+        jre_installed: vec![info.key.clone()],
+        drivers_installed: Vec::new(),
+        drivers_skipped: Vec::new(),
+    })
 }
 
 #[derive(Debug, Clone)]

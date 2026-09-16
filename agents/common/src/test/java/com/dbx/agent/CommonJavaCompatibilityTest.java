@@ -151,6 +151,42 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void jsonRpcServerDispatchesInteractiveTransactionMethods() {
+        List<String> calls = new ArrayList<>();
+        MinimalAgent agent = new MinimalAgent() {
+            @Override
+            public Map<String, Object> beginManualTransaction(String schema) {
+                calls.add("begin:" + schema);
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> commitManualTransaction() {
+                calls.add("commit");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> rollbackManualTransaction() {
+                calls.add("rollback");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+        };
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"begin_manual_transaction\",\"params\":{\"schema\":\"APP\"}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"commit_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"rollback_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertEquals(List.of("begin:APP", "commit", "rollback"), calls);
+    }
+
+    @Test
     void multiSessionServerCreatesAndClosesIndependentAgents() throws Exception {
         java.util.List<TrackingAgent> created = new java.util.ArrayList<>();
         MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> {

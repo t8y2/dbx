@@ -2107,6 +2107,66 @@ describe("RedisKeyBrowser KeepAlive scan budget (issue #7779)", () => {
 });
 
 describe("RedisKeyBrowser interrupted Fetch All", () => {
+  it("keeps the complete snapshot when a group is opened during preparation", async () => {
+    const initial = { key_display: "group:first", key_raw: btoa("group:first"), key_type: "string", ttl: -1 };
+    const buffered = { key_display: "group:second", key_raw: btoa("group:second"), key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [initial], total_keys: 2 } : { cursor: 0, keys: [buffered], total_keys: 0 }));
+    const buildStarted = deferred<void>();
+    const releaseBuild = deferred<void>();
+    const buildSnapshot = mocks.buildRedisKeySnapshotCooperatively.getMockImplementation()!;
+    mocks.buildRedisKeySnapshotCooperatively.mockImplementationOnce(async (...args) => {
+      buildStarted.resolve();
+      await releaseBuild.promise;
+      return buildSnapshot(...args);
+    });
+    mountBrowser();
+    await settle();
+    clickButtonWithText("redis.fetchAllKeys");
+    await buildStarted.promise;
+    groupRow("group").click();
+    releaseBuild.resolve();
+    await settle();
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+    await submitKeySearch("group:second");
+
+    expect(document.querySelector(`[data-redis-leaf="${buffered.key_raw}"]`)).not.toBeNull();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain("redis.fetchAllKeys");
+  });
+
+  it("filters a completed Fetch All snapshot while editing a key search", async () => {
+    const unrelated = { key_display: "session:unrelated", key_raw: "c2Vzc2lvbjp1bnJlbGF0ZWQ=", key_type: "string", ttl: -1 };
+    const target = { key_display: "prod:login_fail_count", key_raw: "cHJvZDpsb2dpbl9mYWlsX2NvdW50", key_type: "string", ttl: -1 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => Promise.resolve(cursor === 0 ? { cursor: 1, keys: [unrelated], total_keys: 2 } : { cursor: 0, keys: [target], total_keys: 0 }));
+    mountBrowser();
+    await settle();
+
+    clickButtonWithText("redis.fetchAllKeys");
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(document.body.textContent).not.toContain("redis.stopFetchAll"));
+    const scanCalls = mocks.redisScanKeysBatch.mock.calls.length;
+
+    await setInput("[data-redis-search-input]", "prod:login_fail_count");
+
+    expect(document.body.textContent).toContain(target.key_display);
+    expect(document.body.textContent).not.toContain(unrelated.key_display);
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    const input = requiredElement<HTMLInputElement>("[data-redis-search-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    expect(document.body.textContent).toContain(target.key_display);
+    requiredElement<HTMLButtonElement>("[data-redis-select-all]").click();
+    await settle();
+    expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("1");
+    expect(document.querySelector("[data-redis-select-all]")).toBeNull();
+
+    await setInput("[data-redis-search-input]", "");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(scanCalls);
+    expect(mocks.scrollerItems[mocks.scrollerItems.length - 1]).toHaveLength(2);
+  });
+
   it("publishes Fetch All rows through one stable Array facade and explicitly refreshes its viewport", async () => {
     const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };
     const buffered = { key_display: "buffered", key_raw: "YnVmZmVyZWQ=", key_type: "string", ttl: -1 };

@@ -40,16 +40,17 @@ pub use manifest::{
     current_plugin_target, resolve_safe_plugin_path, PluginBackendEntrypoint, PluginBackendTransport,
     PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant, PluginConnectionActionWhen,
     PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution, PluginDriverManifest,
-    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFilesystemCapability,
-    PluginFilesystemProviderContribution, PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption,
-    PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
-    PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
-    PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_MANIFEST_VERSION,
-    SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
+    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause, PluginFieldConditionLiteral,
+    PluginFilesystemCapability, PluginFilesystemProviderContribution, PluginFormFieldBinding,
+    PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldType, PluginManifest, PluginUiEntrypoint,
+    PluginWorkbenchContribution, PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD,
+    PLUGIN_CONNECTION_DISCONNECT_METHOD, PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION,
+    SUPPORTED_PLUGIN_HOST_FEATURES, SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
+    SUPPORTED_PLUGIN_PROTOCOL_VERSION,
 };
 pub use runtime::{
     PluginBinaryMessage, PluginEvent, PluginHandshake, PluginHandshakeIdentity, PluginSessionState,
-    PluginSessionStatus, PluginSidecarSession, PLUGIN_REQUEST_TIMEOUT,
+    PluginSessionStatus, PluginSidecarSession, PLUGIN_REQUEST_TIMEOUT, PLUGIN_REQUEST_USER_INPUT_METHOD,
 };
 
 #[derive(Debug, Clone)]

@@ -432,4 +432,122 @@ describe("SshHostKeyPromptDialog web bridge", () => {
       });
     });
   });
+
+  it("relays a plugin question and submits the typed answer", async () => {
+    // Host API `host/requestUserInput`: a plugin backend (e.g. the SSH plugin
+    // answering a bastion's keyboard-interactive MFA) asks through the same
+    // dialog, and the host only carries the question and the typed value.
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "plugin-input-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Verification code (6 digits)",
+        title: "JumpServer login",
+        source: "SSH Terminal",
+        echo: false,
+        default_value: "12",
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("JumpServer login");
+    expect(document.body.textContent).toContain("SSH Terminal needs input before it can continue.");
+    expect(document.body.textContent).toContain("Verification code (6 digits)");
+
+    const input = document.body.querySelector<HTMLInputElement>("input");
+    expect(input?.type).toBe("password");
+    // A caller-provided default is offered but still has to be submitted.
+    expect(input?.value).toBe("12");
+    if (!input) throw new Error("plugin prompt input was not rendered");
+    input.value = "654321";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    const buttons = [...document.body.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual(["Cancel", "Submit"]);
+    buttons[buttons.length - 1].click();
+
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "plugin-input-1",
+        action: "secret",
+        remember: undefined,
+        secret: "654321",
+      });
+    });
+  });
+
+  it("answers a fixed-choice plugin question by picking an option", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "plugin-choice-1",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        title: "Select account",
+        prompt: "Which bastion account should be used?",
+        source: "LDAP Directory",
+        options: [
+          { value: "jinpy", label: "jinpy (admin)" },
+          { value: "deploy", label: "deploy (read-only)" },
+        ],
+      },
+    });
+    await nextTick();
+
+    expect(document.body.textContent).toContain("Which bastion account should be used?");
+    const buttons = [...document.body.querySelectorAll<HTMLButtonElement>("button")];
+    // Options replace the free-form input, so only the choices plus Cancel show.
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual(["jinpy (admin)", "deploy (read-only)", "Cancel"]);
+    expect(document.body.querySelector("input")).toBeNull();
+
+    buttons.find((button) => button.textContent?.trim() === "deploy (read-only)")?.click();
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "plugin-choice-1",
+        action: "secret",
+        remember: undefined,
+        secret: "deploy",
+      });
+    });
+  });
+
+  it("cancels a plugin question without answering it", async () => {
+    await mountDialog();
+
+    const eventSource = MockEventSource.instances[0];
+    eventSource?.emit({
+      type: "prompt",
+      request: {
+        id: "plugin-input-cancel",
+        kind: "UserInput",
+        host: "",
+        port: 0,
+        prompt: "Verification code",
+        source: "SSH Terminal",
+      },
+    });
+    await nextTick();
+
+    const cancel = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel");
+    cancel?.click();
+    await vi.waitFor(() => {
+      expect(resolveSshPromptMock).toHaveBeenCalledWith({
+        id: "plugin-input-cancel",
+        action: "reject",
+        remember: undefined,
+        secret: undefined,
+      });
+    });
+  });
 });

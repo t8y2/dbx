@@ -285,12 +285,38 @@ export interface PluginFormFieldOption {
   value: string;
 }
 
-export interface PluginFieldCondition {
-  /** Key of another plugin form field whose current value drives the condition. */
+/** A literal a `one_of` clause may list; compared by canonical string form. */
+export type PluginFieldConditionLiteral = string | number | boolean;
+
+/** Legacy single-field clause: `{ field, one_of }`. */
+export interface PluginFieldConditionClause {
+  /** Key of another plugin form field whose current value drives the clause. */
   field: string;
-  /** The condition matches when the referenced field's value is in this list. */
-  one_of: string[];
+  /** The clause matches when the referenced field's value is in this list. */
+  one_of: PluginFieldConditionLiteral[];
 }
+
+/** Every nested condition must match. */
+export interface PluginFieldConditionAllOf {
+  all_of: PluginFieldCondition[];
+}
+
+/** At least one nested condition must match. */
+export interface PluginFieldConditionAnyOf {
+  any_of: PluginFieldCondition[];
+}
+
+/** Inverts the nested condition. */
+export interface PluginFieldConditionNot {
+  not: PluginFieldCondition;
+}
+
+/**
+ * `visible_when` / `required_when` expression. The legacy `{ field, one_of }`
+ * clause keeps its exact meaning; `all_of` / `any_of` / `not` compose clauses
+ * (e.g. `sudo_source = custom AND read_only = false`).
+ */
+export type PluginFieldCondition = PluginFieldConditionClause | PluginFieldConditionAllOf | PluginFieldConditionAnyOf | PluginFieldConditionNot;
 
 export interface PluginFormField {
   key: string;

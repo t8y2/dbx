@@ -1877,11 +1877,13 @@ pub(crate) fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {
     }
 }
 
-/// Serializes every test that mutates the process-global SSH prompt gateway so
-/// they cannot clobber each other's gateway (or the MITM fail-closed test,
-/// which relies on *no* gateway being installed). Test-only.
+/// Serializes every test that mutates the process-global prompt gateway. The
+/// lock lives in `db::ssh_prompt` because the gateway is shared with the plugin
+/// Host API, so prompt tests in other modules must take the same lock. Test-only.
 #[cfg(test)]
-static PROMPT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+fn prompt_test_lock() -> &'static tokio::sync::Mutex<()> {
+    crate::db::ssh_prompt::prompt_gateway_test_lock()
+}
 
 #[cfg(test)]
 fn plan_chain(
@@ -1918,10 +1920,10 @@ fn plan_chain(
 
 #[cfg(test)]
 mod tests {
+    use super::prompt_test_lock;
     #[cfg(unix)]
     use super::resolve_ssh_agent_socket_path;
     use super::SshClient;
-    use super::PROMPT_TEST_LOCK;
     use super::{
         bind_tunnel_listener, connect_and_authenticate, describe_terminal_auth_failure, effective_hop_timeout,
         netcat_proxy_command, openssh_padding_len, plan_chain, read_ssh_string,
@@ -2404,7 +2406,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_host_prompt_accept_learns_key() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         let verifier = HostKeyVerifier::new(path.clone());
@@ -2428,7 +2430,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_host_prompt_accept_without_remember_is_session_only() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         let verifier = HostKeyVerifier::new(path.clone());
@@ -2454,7 +2456,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_host_prompt_reject_aborts_handshake() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         let verifier = HostKeyVerifier::new(path.clone());
@@ -2480,7 +2482,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_host_without_gateway_fails_closed() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         // Ensure no gateway is installed so request_ssh_prompt returns None.
         ssh_prompt::clear_ssh_prompt_gateway();
         let dir = tempdir().unwrap();
@@ -2501,7 +2503,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_host_skips_prompt() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         let verifier = HostKeyVerifier::new(path);
@@ -2531,7 +2533,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_host_prompt_update_replaces_key() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         seed_changed_host_key(&path);
@@ -2559,7 +2561,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_host_prompt_continue_is_session_only() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         seed_changed_host_key(&path);
@@ -2587,7 +2589,7 @@ mod tests {
 
     #[tokio::test]
     async fn changed_host_prompt_reject_aborts_handshake() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         let dir = tempdir().unwrap();
         let path = dir.path().join("known_hosts");
         seed_changed_host_key(&path);
@@ -2735,7 +2737,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn password_auth_continues_with_keyboard_interactive_totp() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let (port, server_task) = start_password_then_totp_server().await;
         let dir = tempdir().unwrap();
@@ -2781,7 +2783,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn public_key_auth_continues_with_keyboard_interactive_totp() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let (port, server_task) = start_password_then_totp_server().await;
         let dir = tempdir().unwrap();
@@ -2901,7 +2903,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn socks5_proxy_forwards_requested_target_over_ssh() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
         let server_config = server::Config { keys: vec![server_key], ..Default::default() };
@@ -3052,7 +3054,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn tunnel_falls_back_to_netcat_when_direct_tcpip_is_prohibited() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
         let server_config = server::Config { keys: vec![server_key], ..Default::default() };
@@ -3107,7 +3109,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn prohibited_direct_tcpip_does_not_run_netcat_by_default() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let server_key = decode_secret_key(TEST_SERVER_KEY_PEM, None).expect("decode test server key");
         let server_config = server::Config { keys: vec![server_key], ..Default::default() };
@@ -3157,7 +3159,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn forwarded_connection_checks_logical_host_identity() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let (connect_port, server_task) = start_accept_none_server().await;
         let dir = tempdir().unwrap();
@@ -3205,7 +3207,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
     /// wait must not be charged against `connect_timeout_secs`.
     #[tokio::test]
     async fn slow_host_key_acceptance_does_not_time_out_the_connection() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let (connect_port, server_task) = start_accept_none_server().await;
         let dir = tempdir().unwrap();
@@ -3248,7 +3250,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn concurrent_tunnel_starts_share_one_handshake() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
         let (connect_port, server_task) = start_accept_none_server().await;
         let dir = tempdir().unwrap();
@@ -3342,7 +3344,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn unknown_host_without_persist_permission_does_not_leak_password() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         // This test proves the client never sends a password to an untrusted
         // host. It must run with NO prompt gateway installed so the handshake
         // fails closed (no UI to confirm the key -> reject before auth).
@@ -3479,7 +3481,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn reconnect_auth_failure_is_reported_instead_of_a_dead_local_port() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
 
         let publickey_attempts = Arc::new(AtomicUsize::new(0));
@@ -3573,7 +3575,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
 
     #[tokio::test]
     async fn rejected_public_key_reports_what_the_server_refused() {
-        let _guard = PROMPT_TEST_LOCK.lock().await;
+        let _guard = prompt_test_lock().lock().await;
         ssh_prompt::clear_ssh_prompt_gateway();
 
         // Every publickey attempt is refused, so this exercises the initial

@@ -130,3 +130,16 @@ test("JSONL supports split lines, concurrent RPC, events and rejects binary chan
   assert.equal((await event)[0].params.ok, true);
   await assert.rejects(sidecar.sendBinary("bytes", Buffer.from("data")), /framed/);
 });
+
+test("answers plugin-initiated host requests instead of leaving them pending", async (t) => {
+  // Host API 1.1 lets a plugin ask the user through `host/requestUserInput`
+  // (string ids). The dev host has no dialog, so it must fail that call fast
+  // rather than let the plugin block until its own timeout.
+  const sidecar = new Sidecar(config);
+  t.after(() => sidecar.stop());
+  await sidecar.start();
+  const answer = await sidecar.request("ask-user");
+  assert.equal(answer.id, "plugin-1");
+  assert.equal(answer.error.code, -32001);
+  assert.match(answer.error.message, /host\/requestUserInput/);
+});

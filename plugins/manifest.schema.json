@@ -142,12 +142,64 @@
       }
     },
     "fieldCondition": {
+      "oneOf": [
+        { "$ref": "#/$defs/fieldConditionClause" },
+        { "$ref": "#/$defs/fieldConditionAllOf" },
+        { "$ref": "#/$defs/fieldConditionAnyOf" },
+        { "$ref": "#/$defs/fieldConditionNot" }
+      ]
+    },
+    "fieldConditionClause": {
       "type": "object",
       "additionalProperties": false,
       "required": ["field", "one_of"],
       "properties": {
         "field": { "$ref": "#/$defs/identifier" },
-        "one_of": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        "one_of": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "description": "Compared against the referenced field's value by canonical string form, so `false` and `\"false\"` both match a boolean false.",
+            "type": ["string", "boolean", "number"]
+          }
+        }
+      }
+    },
+    "fieldConditionAllOf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all_of"],
+      "properties": {
+        "all_of": {
+          "description": "Matches only when every nested condition matches.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fieldCondition" }
+        }
+      }
+    },
+    "fieldConditionAnyOf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["any_of"],
+      "properties": {
+        "any_of": {
+          "description": "Matches when at least one nested condition matches.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fieldCondition" }
+        }
+      }
+    },
+    "fieldConditionNot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": {
+        "not": {
+          "description": "Inverts the nested condition.",
+          "$ref": "#/$defs/fieldCondition"
+        }
       }
     },
     "formField": {

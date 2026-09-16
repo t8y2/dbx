@@ -5,7 +5,15 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
 pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
-pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.0.0";
+/// Host API version the host advertises at `plugin/initialize`.
+///
+/// 1.1 adds the plugin-initiated `host/requestUserInput` method (see
+/// `plugins/runtime.rs`). It is additive: 1.0 plugins keep working, and a
+/// plugin that wants the capability must check the advertised version (or the
+/// `host.requestUserInput` entry in `host.features`) before calling it.
+pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.1.0";
+/// Capabilities the host advertises to a plugin backend at `plugin/initialize`.
+pub const SUPPORTED_PLUGIN_HOST_FEATURES: &[&str] = &["host.requestUserInput"];
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
 pub const PLUGIN_CONNECTION_TEST_METHOD: &str = "connection/test";
 pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
@@ -16,6 +24,10 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &["host.events", "host.binary"
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
 pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
+/// Bound the `visible_when` / `required_when` expression tree so a hostile
+/// manifest cannot make the host or the dialog evaluator do unbounded work.
+pub const MAX_PLUGIN_FIELD_CONDITION_DEPTH: usize = 8;
+pub const MAX_PLUGIN_FIELD_CONDITION_NODES: usize = 64;
 const HOST_NETWORK_PERMISSION_PREFIX: &str = "host.network:";
 
 /// Parse a `host.network:https://host[:port]` permission into the origin that
@@ -260,11 +272,189 @@ pub struct PluginFormFieldDefinition {
     pub required_when: Option<PluginFieldCondition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A `visible_when` / `required_when` expression.
+///
+/// The legacy single-field form `{ "field": "mode", "one_of": ["custom"] }`
+/// keeps its exact meaning. Composite forms (`all_of`, `any_of`, `not`) let a
+/// manifest express combinations such as
+/// `sudo_source = custom AND read_only = false`, which a single-field
+/// condition cannot. Composite nodes nest arbitrarily; [`MAX_PLUGIN_FIELD_CONDITION_DEPTH`]
+/// bounds the evaluation cost of a hostile manifest.
+///
+/// Semantics are shared with the frontend evaluator
+/// (`apps/desktop/src/lib/plugins/pluginFieldConditions.ts`): a leaf matches
+/// when the referenced sibling field holds a non-empty value that equals one of
+/// the listed literals (compared by canonical string form, so the boolean
+/// `false` matches both the literal `false` and the literal `"false"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum PluginFieldCondition {
+    /// Legacy single-field clause: `{ "field": "...", "one_of": [...] }`.
+    Field(PluginFieldConditionClause),
+    /// Every nested condition must match.
+    AllOf { all_of: Vec<PluginFieldCondition> },
+    /// At least one nested condition must match.
+    AnyOf { any_of: Vec<PluginFieldCondition> },
+    /// Inverts the nested condition.
+    Not { not: Box<PluginFieldCondition> },
+}
+
+/// The legacy single-field clause of a [`PluginFieldCondition`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PluginFieldCondition {
+pub struct PluginFieldConditionClause {
     pub field: String,
-    pub one_of: Vec<String>,
+    pub one_of: Vec<PluginFieldConditionLiteral>,
+}
+
+/// A value a manifest may list in `one_of`. Plugins mostly compare strings,
+/// but booleans and numbers are allowed so a condition can be written exactly
+/// like the value the form produces (`"read_only": [false]` instead of
+/// `["false"]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PluginFieldConditionLiteral {
+    String(String),
+    Bool(bool),
+    Number(serde_json::Number),
+}
+
+impl PluginFieldConditionLiteral {
+    /// Canonical string form used for comparison. This is the rule the
+    /// frontend has always applied (`String(value)`), so every manifest written
+    /// against the string-only contract keeps matching.
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Bool(value) => value.to_string(),
+            // `serde_json::Number` prints `22.0` for a float that JavaScript
+            // renders as `22`; normalize integral floats so the two sides agree.
+            Self::Number(value) => normalize_condition_number(value),
+        }
+    }
+}
+
+fn normalize_condition_number(number: &serde_json::Number) -> String {
+    if let Some(value) = number.as_i64() {
+        return value.to_string();
+    }
+    if let Some(value) = number.as_u64() {
+        return value.to_string();
+    }
+    if let Some(value) = number.as_f64() {
+        if value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+            return format!("{}", value as i64);
+        }
+    }
+    number.to_string()
+}
+
+impl PluginFieldCondition {
+    /// Every sibling field key the expression reads, in declaration order.
+    /// Duplicates are preserved; callers de-duplicate when they need to.
+    pub fn referenced_fields(&self) -> Vec<&str> {
+        let mut fields = Vec::new();
+        self.collect_referenced_fields(&mut fields);
+        fields
+    }
+
+    fn collect_referenced_fields<'a>(&'a self, fields: &mut Vec<&'a str>) {
+        match self {
+            Self::Field(clause) => fields.push(clause.field.as_str()),
+            Self::AllOf { all_of } => all_of.iter().for_each(|child| child.collect_referenced_fields(fields)),
+            Self::AnyOf { any_of } => any_of.iter().for_each(|child| child.collect_referenced_fields(fields)),
+            Self::Not { not } => not.collect_referenced_fields(fields),
+        }
+    }
+
+    /// Structural validation shared by every condition site. Returns
+    /// human-readable problems without a location prefix.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.node_count() > MAX_PLUGIN_FIELD_CONDITION_NODES {
+            errors.push(format!("condition uses more than {MAX_PLUGIN_FIELD_CONDITION_NODES} nodes"));
+            return errors;
+        }
+        self.validate_at_depth(0, &mut errors);
+        errors
+    }
+
+    fn validate_at_depth(&self, depth: usize, errors: &mut Vec<String>) {
+        if depth > MAX_PLUGIN_FIELD_CONDITION_DEPTH {
+            errors.push(format!("condition nesting exceeds {MAX_PLUGIN_FIELD_CONDITION_DEPTH} levels"));
+            return;
+        }
+        match self {
+            Self::Field(clause) => {
+                if clause.field.trim().is_empty() {
+                    errors.push("condition field cannot be empty".to_string());
+                }
+                if clause.one_of.is_empty() {
+                    errors.push("condition one_of cannot be empty".to_string());
+                }
+            }
+            Self::AllOf { all_of } => {
+                if all_of.is_empty() {
+                    errors.push("condition all_of cannot be empty".to_string());
+                }
+                for child in all_of {
+                    child.validate_at_depth(depth + 1, errors);
+                }
+            }
+            Self::AnyOf { any_of } => {
+                if any_of.is_empty() {
+                    errors.push("condition any_of cannot be empty".to_string());
+                }
+                for child in any_of {
+                    child.validate_at_depth(depth + 1, errors);
+                }
+            }
+            Self::Not { not } => not.validate_at_depth(depth + 1, errors),
+        }
+    }
+
+    /// Number of nodes in this expression tree (including this one).
+    pub fn node_count(&self) -> usize {
+        match self {
+            Self::Field(_) => 1,
+            Self::AllOf { all_of } => 1 + all_of.iter().map(Self::node_count).sum::<usize>(),
+            Self::AnyOf { any_of } => 1 + any_of.iter().map(Self::node_count).sum::<usize>(),
+            Self::Not { not } => 1 + not.node_count(),
+        }
+    }
+
+    /// Raw expression evaluation against a field-value reader. Visibility
+    /// cascade handling (a referenced field that is itself hidden) is applied
+    /// by callers, exactly like the single-field contract behaved.
+    pub fn matches(&self, read: &impl Fn(&str) -> Option<serde_json::Value>) -> bool {
+        match self {
+            Self::Field(clause) => {
+                let Some(value) = read(&clause.field) else {
+                    return false;
+                };
+                let text = condition_value_text(&value);
+                if text.trim().is_empty() {
+                    return false;
+                }
+                clause.one_of.iter().any(|literal| literal.canonical() == text)
+            }
+            Self::AllOf { all_of } => all_of.iter().all(|child| child.matches(read)),
+            Self::AnyOf { any_of } => any_of.iter().any(|child| child.matches(read)),
+            Self::Not { not } => !not.matches(read),
+        }
+    }
+}
+
+/// Canonical string form of a stored field value, mirroring the frontend
+/// (`String(value)`) so a boolean `false` and the literal `"false"` agree.
+pub fn condition_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => normalize_condition_number(value),
+        other => other.to_string(),
+    }
 }
 
 impl PluginFormFieldDefinition {
@@ -1000,16 +1190,15 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             let Some(condition) = condition else {
                 continue;
             };
-            if condition.one_of.is_empty() {
-                errors.push(format!(
-                    "Contribution at index {contribution_index} field {field_index} {name} one_of cannot be empty"
-                ));
-            }
-            if !field_keys.contains(condition.field.as_str()) {
-                errors.push(format!(
-                    "Contribution at index {contribution_index} field {field_index} {name} references unknown field '{}'",
-                    condition.field
-                ));
+            let location = format!("Contribution at index {contribution_index} field {field_index} {name}");
+            errors.extend(condition.validate().into_iter().map(|error| format!("{location} {error}")));
+            for referenced in condition.referenced_fields() {
+                // Self-references are tolerated for backward compatibility (a
+                // single-field manifest could always point a field at itself);
+                // unknown targets were already rejected by the v1 contract.
+                if !field_keys.contains(referenced) {
+                    errors.push(format!("{location} references unknown field '{referenced}'"));
+                }
             }
         }
 
@@ -1754,9 +1943,21 @@ mod tests {
 
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
         let visible_when = provider.fields[1].visible_when.as_ref().unwrap();
-        assert_eq!(visible_when.field, "mode");
-        assert_eq!(visible_when.one_of, vec!["custom".to_string()]);
-        assert_eq!(provider.fields[1].required_when.as_ref().unwrap().one_of, vec!["custom".to_string()]);
+        let super::PluginFieldCondition::Field(clause) = visible_when else {
+            panic!("legacy single-field condition must deserialize into the field clause");
+        };
+        assert_eq!(clause.field, "mode");
+        assert_eq!(clause.one_of, vec![super::PluginFieldConditionLiteral::String("custom".to_string())]);
+        // Serializing a legacy clause keeps the exact v1 manifest shape.
+        assert_eq!(
+            serde_json::to_value(visible_when).unwrap(),
+            serde_json::json!({ "field": "mode", "one_of": ["custom"] })
+        );
+        let required = provider.fields[1].required_when.as_ref().unwrap();
+        let super::PluginFieldCondition::Field(required_clause) = required else {
+            panic!("legacy single-field condition must deserialize into the field clause");
+        };
+        assert_eq!(required_clause.one_of, vec![super::PluginFieldConditionLiteral::String("custom".to_string())]);
     }
 
     #[test]
@@ -1815,10 +2016,119 @@ mod tests {
         let compatibility = manifest.compatibility(dir.path(), "0.5.68");
 
         assert!(!compatibility.compatible);
-        assert!(compatibility.errors.iter().any(|error| error.contains("visible_when one_of cannot be empty")));
+        assert!(compatibility
+            .errors
+            .iter()
+            .any(|error| error.contains("visible_when condition one_of cannot be empty")));
         assert!(compatibility
             .errors
             .iter()
             .any(|error| error.contains("visible_when references unknown field 'missing'")));
+    }
+
+    #[test]
+    fn parses_composite_form_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    { "key": "authentication", "label": "Auth", "type": "text" },
+                    { "key": "read_only", "label": "Read only", "type": "boolean" },
+                    { "key": "sudo_source", "label": "Sudo source", "type": "text" },
+                    {
+                        "key": "sudo_command",
+                        "label": "Sudo command",
+                        "type": "text",
+                        "visible_when": {
+                            "all_of": [
+                                { "field": "sudo_source", "one_of": ["custom"] },
+                                { "field": "read_only", "one_of": [false] }
+                            ]
+                        },
+                        "required_when": {
+                            "all_of": [
+                                { "field": "sudo_source", "one_of": ["custom"] },
+                                { "not": { "field": "read_only", "one_of": [true] } }
+                            ]
+                        }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.14");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        let provider = manifest.connection_provider("conditions.connection").unwrap().unwrap();
+        let visible_when = provider.fields[3].visible_when.as_ref().unwrap();
+        assert_eq!(visible_when.referenced_fields(), vec!["sudo_source", "read_only"]);
+        assert_eq!(visible_when.node_count(), 3);
+        assert!(matches!(visible_when, super::PluginFieldCondition::AllOf { .. }));
+    }
+
+    #[test]
+    fn rejects_malformed_composite_form_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    { "key": "mode", "label": "Mode", "type": "text" },
+                    {
+                        "key": "empty_all_of",
+                        "label": "Empty",
+                        "type": "text",
+                        "visible_when": { "all_of": [] }
+                    },
+                    {
+                        "key": "unknown_nested",
+                        "label": "Unknown",
+                        "type": "text",
+                        "required_when": { "any_of": [{ "field": "ghost", "one_of": ["x"] }] }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.14");
+        assert!(!compatibility.compatible);
+        assert!(compatibility.errors.iter().any(|error| error.contains("condition all_of cannot be empty")));
+        assert!(compatibility
+            .errors
+            .iter()
+            .any(|error| error.contains("required_when references unknown field 'ghost'")));
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_mixed_condition_shapes() {
+        // A clause may not smuggle composite keys, and a composite node may not
+        // smuggle `field`/`one_of`; both must fail to deserialize.
+        assert!(serde_json::from_value::<super::PluginFieldCondition>(serde_json::json!({
+            "field": "mode",
+            "one_of": ["custom"],
+            "all_of": [{ "field": "mode", "one_of": ["custom"] }]
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<super::PluginFieldCondition>(serde_json::json!({})).is_err());
+        assert!(serde_json::from_value::<super::PluginFieldCondition>(serde_json::json!({ "not": 1 })).is_err());
     }
 }

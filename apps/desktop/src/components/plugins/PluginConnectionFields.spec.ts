@@ -222,6 +222,69 @@ describe("PluginConnectionFields", () => {
     expect(document.querySelector("#kafka-connection-msk_region")).toBeNull();
   });
 
+  it("renders a field only while every clause of an all_of condition holds (sudo_source + read_only)", async () => {
+    // The SSH plugin cannot express "sudo_source = custom AND read_only =
+    // false" with one clause per field; all_of + a boolean literal covers it.
+    const ssh: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "ssh.connection",
+      label: "SSH",
+      database_type: "ssh",
+      fields: [
+        {
+          key: "read_only",
+          label: "Read only",
+          type: "boolean",
+          default: false,
+        },
+        {
+          key: "sudo_source",
+          label: "Sudo source",
+          type: "select",
+          default: "none",
+          options: [
+            { label: "None", value: "none" },
+            { label: "Custom", value: "custom" },
+          ],
+        },
+        {
+          key: "sudo_command",
+          label: "Sudo command",
+          type: "text",
+          visible_when: {
+            all_of: [
+              { field: "sudo_source", one_of: ["custom"] },
+              { field: "read_only", one_of: [false] },
+            ],
+          },
+          required_when: {
+            all_of: [
+              { field: "sudo_source", one_of: ["custom"] },
+              { field: "read_only", one_of: [false] },
+            ],
+          },
+        },
+      ],
+    };
+    const state = await mountContribution(ssh, {});
+
+    expect(document.querySelector("#ssh-connection-sudo_command")).toBeNull();
+
+    state.values = { sudo_source: "custom", read_only: false };
+    await nextTick();
+    expect(document.querySelector("#ssh-connection-sudo_command")).not.toBeNull();
+    expect(document.querySelector('label[for="ssh-connection-sudo_command"]')?.textContent).toContain("*");
+
+    // Read-only sessions ignore the sudo block entirely.
+    state.values = { sudo_source: "custom", read_only: true };
+    await nextTick();
+    expect(document.querySelector("#ssh-connection-sudo_command")).toBeNull();
+
+    state.values = { sudo_source: "none", read_only: false };
+    await nextTick();
+    expect(document.querySelector("#ssh-connection-sudo_command")).toBeNull();
+  });
+
   it("offers local SSH keys on private_key_path fields and fills the chosen path", async () => {
     const withKey: PluginConnectionProviderContribution = {
       type: "connection-provider",

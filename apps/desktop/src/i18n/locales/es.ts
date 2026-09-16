@@ -6942,7 +6942,7 @@ export default withEnglishFallback({
     executeModeCurrent: "Ejecutar sentencia en el cursor",
     defaultTransactionMode: "Modo de confirmación de transacción predeterminado",
     defaultTransactionModeDescription:
-      'El modo de transacción que se usa de forma predeterminada al abrir un nuevo editor SQL. Con "Transacción manual", los nuevos editores inician en modo de transacción manual y requieren confirmación o reversión manual; con "Confirmación automática", cada sentencia se confirma automáticamente. Solo se aplica a bases de datos que admiten transacciones (PostgreSQL, MySQL, Oracle, JDBC).',
+      'El modo de transacción que se usa de forma predeterminada al abrir un nuevo editor SQL. Con "Transacción manual", los nuevos editores inician en modo de transacción manual y requieren confirmación o reversión manual; con "Confirmación automática", cada sentencia se confirma automáticamente. Solo se aplica a bases de datos que admiten transacciones.',
     defaultTransactionModeAuto: "Confirmación automática",
     defaultTransactionModeManual: "Transacción manual",
     executeAllOnBlankLine: "Ejecutar todo el SQL desde líneas en blanco",

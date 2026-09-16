@@ -7106,7 +7106,7 @@ export default withEnglishFallback({
     executeModeCurrent: "İmleçteki ifadeyi çalıştır",
     defaultTransactionMode: "Varsayılan işlem commit modu",
     defaultTransactionModeDescription:
-      'Yeni bir SQL düzenleyici açıldığında varsayılan olarak kullanılan işlem modu. "Manuel işlem" ile yeni düzenleyiciler manuel işlem modunda başlar ve elle commit ya da rollback gerektirir; "Otomatik commit" ile her ifade otomatik olarak uygulanır. Yalnızca işlemleri destekleyen veritabanları için geçerlidir (PostgreSQL, MySQL, Oracle, JDBC).',
+      'Yeni bir SQL düzenleyici açıldığında varsayılan olarak kullanılan işlem modu. "Manuel işlem" ile yeni düzenleyiciler manuel işlem modunda başlar ve elle commit ya da rollback gerektirir; "Otomatik commit" ile her ifade otomatik olarak uygulanır. Yalnızca işlemleri destekleyen veritabanları için geçerlidir.',
     defaultTransactionModeAuto: "Otomatik commit",
     defaultTransactionModeManual: "Manuel işlem",
     executeAllOnBlankLine: "Boş satırlarda tüm SQL'i çalıştır",

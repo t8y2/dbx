@@ -6710,7 +6710,7 @@ export default withEnglishFallback({
     executeModeCurrent: "커서 위치의 구문 실행",
     defaultTransactionMode: "기본 트랜잭션 커밋 모드",
     defaultTransactionModeDescription:
-      '새 SQL 편집기를 열 때 기본적으로 사용되는 트랜잭션 모드입니다. "수동 트랜잭션"을 선택하면 새 편집기가 수동 트랜잭션 모드로 시작되어 수동으로 커밋 또는 롤백해야 합니다. "자동 커밋"을 선택하면 각 문이 자동으로 커밋됩니다. 트랜잭션을 지원하는 데이터베이스(PostgreSQL, MySQL, Oracle, JDBC)에만 적용됩니다.',
+      '새 SQL 편집기를 열 때 기본적으로 사용되는 트랜잭션 모드입니다. "수동 트랜잭션"을 선택하면 새 편집기가 수동 트랜잭션 모드로 시작되어 수동으로 커밋 또는 롤백해야 합니다. "자동 커밋"을 선택하면 각 문이 자동으로 커밋됩니다. 트랜잭션을 지원하는 데이터베이스에만 적용됩니다.',
     defaultTransactionModeAuto: "자동 커밋",
     defaultTransactionModeManual: "수동 트랜잭션",
     executeAllOnBlankLine: "빈 줄에서 모든 SQL 실행",

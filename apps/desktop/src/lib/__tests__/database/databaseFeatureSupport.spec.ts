@@ -163,6 +163,7 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
     expect(supportsTransaction("oceanbase-oracle")).toBe(true);
+    expect(supportsTransaction("dameng")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
@@ -175,7 +176,6 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("sqlite")).toBe(false);
     expect(supportsTransaction("clickhouse")).toBe(false);
     expect(supportsTransaction("sqlserver")).toBe(false);
-    expect(supportsTransaction("dameng")).toBe(false);
     expect(supportsTransaction("rqlite")).toBe(false);
     expect(supportsTransaction("agent")).toBe(false);
   });
@@ -201,6 +201,7 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("mysql", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "auto")).toBe(true);
   });
@@ -209,7 +210,6 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("redis", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("mongodb", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("sqlite", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("clickhouse", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "manual")).toBe(true);
   });

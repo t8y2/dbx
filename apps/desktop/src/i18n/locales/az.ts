@@ -7225,7 +7225,7 @@ export default withEnglishFallback({
     executeModeCurrent: "Kursorun olduğu əmri icra et",
     defaultTransactionMode: "Standart tranzaksiya təsdiqləmə rejimi",
     defaultTransactionModeDescription:
-      'Yeni SQL redaktoru açıldıqda standart olaraq istifadə olunan tranzaksiya rejimi. "Əl ilə tranzaksiya" seçildikdə yeni redaktorlar əl ilə tranzaksiya rejimində açılır və dəyişiklikləri əl ilə təsdiqləmək və ya geri qaytarmaq tələb olunur; "Avtomatik təsdiqləmə" seçildikdə hər əmr avtomatik təsdiqlənir. Yalnız tranzaksiyaları dəstəkləyən verilənlər bazalarına (PostgreSQL, MySQL, Oracle, JDBC) tətbiq olunur.',
+      'Yeni SQL redaktoru açıldıqda standart olaraq istifadə olunan tranzaksiya rejimi. "Əl ilə tranzaksiya" seçildikdə yeni redaktorlar əl ilə tranzaksiya rejimində açılır və dəyişiklikləri əl ilə təsdiqləmək və ya geri qaytarmaq tələb olunur; "Avtomatik təsdiqləmə" seçildikdə hər əmr avtomatik təsdiqlənir. Yalnız tranzaksiyaları dəstəkləyən verilənlər bazalarına tətbiq olunur.',
     defaultTransactionModeAuto: "Avtomatik təsdiqləmə",
     defaultTransactionModeManual: "Əl ilə tranzaksiya",
     executeAllOnBlankLine: "Boş sətirlərdən bütün SQL-i icra et",

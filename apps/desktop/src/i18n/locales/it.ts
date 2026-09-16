@@ -6942,7 +6942,7 @@ export default withEnglishFallback({
     executeModeCurrent: "Esegui istruzione al cursore",
     defaultTransactionMode: "Modalità di commit transazione predefinita",
     defaultTransactionModeDescription:
-      'La modalità di transazione utilizzata per impostazione predefinita quando si apre un nuovo editor SQL. Con "Transazione manuale", i nuovi editori iniziano in modalità di transazione manuale, richiedendo commit o rollback manuale; con "Commit automatico", ogni istruzione viene committata automaticamente. Si applica solo ai database che supportano le transazioni (PostgreSQL, MySQL, Oracle, JDBC).',
+      'La modalità di transazione utilizzata per impostazione predefinita quando si apre un nuovo editor SQL. Con "Transazione manuale", i nuovi editori iniziano in modalità di transazione manuale, richiedendo commit o rollback manuale; con "Commit automatico", ogni istruzione viene committata automaticamente. Si applica solo ai database che supportano le transazioni.',
     defaultTransactionModeAuto: "Commit automatico",
     defaultTransactionModeManual: "Transazione manuale",
     executeAllOnBlankLine: "Esegui tutto l'SQL dalle righe vuote",

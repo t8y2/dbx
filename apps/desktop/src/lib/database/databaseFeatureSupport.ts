@@ -257,7 +257,7 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET
  *  CURRENT_SCHEMA compensation in queryStore. Do not use for toolbar/dirty-bit

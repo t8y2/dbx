@@ -6966,7 +6966,7 @@ export default withEnglishFallback({
     executeModeCurrent: "カーソル位置の文を実行",
     defaultTransactionMode: "既定のトランザクションコミットモード",
     defaultTransactionModeDescription:
-      "新しい SQL エディタを開いたときに既定で使用するトランザクションモード。「手動トランザクション」を選択すると、新しいエディタは手動トランザクションモードで開始され、手動でコミットまたはロールバックします。「自動コミット」を選択すると、各ステートメントが自動的にコミットされます。トランザクションをサポートするデータベース（PostgreSQL、MySQL、Oracle、JDBC）のみに適用されます。",
+      "新しい SQL エディタを開いたときに既定で使用するトランザクションモード。「手動トランザクション」を選択すると、新しいエディタは手動トランザクションモードで開始され、手動でコミットまたはロールバックします。「自動コミット」を選択すると、各ステートメントが自動的にコミットされます。トランザクションをサポートするデータベースにのみ適用されます。",
     defaultTransactionModeAuto: "自動コミット",
     defaultTransactionModeManual: "手動トランザクション",
     executeAllOnBlankLine: "空行ではすべてのSQLを実行",

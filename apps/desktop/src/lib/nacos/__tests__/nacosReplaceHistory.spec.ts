@@ -89,6 +89,33 @@ describe("durable Nacos batch journal", () => {
     await expect(rollbackFromNacosHistory(entry.id, "main", target, backend)).rejects.toThrow("quota");
     expect(backend.publishConfig).not.toHaveBeenCalled();
   });
+  it("retains uncertain items across partial rollback retries without republishing already restored items", async () => {
+    const configs = ["one", "two", "three"].map((dataId) => ({ ...original, dataId }));
+    const rows = new Map(configs.map((item) => [item.dataId, item]));
+    const live = {
+      getConfig: async (key: { dataId: string }) => ({ ...rows.get(key.dataId)! }),
+      publishConfig: vi.fn(async (req: NacosConfigUpsert) => {
+        rows.set(req.dataId, { ...rows.get(req.dataId)!, ...req, md5: req.content === "mysql-old" ? "before" : "after" });
+      }),
+    };
+    const entry = await applyWithNacosHistory("main", target, { scope: "allNamespaces", namespace: "public", group: "", dataId: "" }, buildNacosContentReplacePlan(configs, "mysql-old", "mysql-new"), live);
+    let failOnce = true;
+    storage.saveNacosReplaceHistory.mockImplementation(async (candidate) => {
+      if (failOnce && candidate.state === "rollingBack" && candidate.rollback?.items.length === 2 && !candidate.inFlight) {
+        failOnce = false;
+        throw new Error("quota");
+      }
+      saved.set(candidate.id, structuredClone(candidate));
+    });
+    await expect(rollbackFromNacosHistory(entry.id, "main", target, live)).rejects.toThrow("quota");
+    expect(saved.get(entry.id)?.rollback?.restored).toBe(1);
+    expect(saved.get(entry.id)?.inFlight?.key).toBe(entry.plan.items[1].key);
+    const retried = await rollbackFromNacosHistory(entry.id, "main", target, live);
+    expect(retried.rollback?.restored).toBe(2);
+    expect(retried.uncertainItems).toEqual([{ key: entry.plan.items[1].key, phase: "rollback" }]);
+    await rollbackFromNacosHistory(entry.id, "main", target, live);
+    expect(live.publishConfig).toHaveBeenCalledTimes(6);
+  });
   it("binds target identity to endpoints but excludes credentials", () => {
     const connection = { id: "main", host: "localhost", port: 8848, external_config: { serverAddr: "http://localhost:8848", contextPath: "/nacos", auth: { password: "secret" } } };
     const identity = nacosHistoryTarget(connection);

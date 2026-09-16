@@ -20,7 +20,7 @@ const oldValue = `mysql-old-${runId}.invalid:3306`;
 const newValue = `mysql-new-${runId}.invalid:3306`;
 const keys = ["one.yaml", "two.properties"].map(name => ({ namespace: "", group, dataId: `${runId}-${name}` }));
 const created = [];
-const outputDir = process.env.DBX_TEST_OUTPUT || path.resolve("work/nacos-history-verification");
+const outputDir = process.env.DBX_TEST_OUTPUT || path.resolve("outputs/nacos-history-verification");
 await mkdir(outputDir, { recursive: true });
 const metadata = JSON.parse(await readFile("node_modules/.vite/deps/_metadata.json", "utf8"));
 const dependencyUrl = name => `/@fs/${path.resolve("node_modules/.vite/deps", metadata.optimized[name].file).replaceAll("\\", "/")}?v=${metadata.browserHash}`;
@@ -111,8 +111,8 @@ try {
   }, { connectionId, oldValue, newValue });
   assert.deepEqual(secureStorage, { count: 1, extractable: false, plaintext: false, foreign: false });
   await page.getByTestId("nacos-replace-history-rollback").click();
+  await page.getByRole("button", { name: "回滚已替换配置", exact: true }).last().waitFor();
   await page.screenshot({ path: path.join(outputDir, "rollback-confirmation.png") });
-  console.log("Confirmation buttons:", await page.getByRole("button").allTextContents());
   assert.equal((await request("/api/nacos/configs/get", { connectionId, key: keys[0] })).content, `url=${newValue}\nreplica=${newValue}`, "Rollback must wait for confirmation");
   await page.getByRole("button", { name: "回滚已替换配置", exact: true }).last().click();
   await page.getByText("回滚结果：已恢复 2 个，冲突 0 个，失败 0 个", { exact: true }).waitFor({ timeout: 60000 });

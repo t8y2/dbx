@@ -2164,8 +2164,11 @@ fn parse_replace_options(options_json: Option<&str>) -> Result<Option<bool>, Str
     Ok(options.upsert)
 }
 
+/// Unknown options are rejected rather than dropped, so a `collation` or `hint` the
+/// driver does not apply fails loudly instead of silently changing nothing. This
+/// matches `MongoReplaceOptions` and the legacy agent, which already reject them.
 #[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MongoUpdateOptions {
     upsert: Option<bool>,
     array_filters: Option<Vec<serde_json::Value>>,
@@ -3288,6 +3291,16 @@ mod tests {
 
         let value_error = json_update_to_modifications(&serde_json::json!("invalid")).unwrap_err();
         assert!(value_error.contains("object or pipeline array"));
+    }
+
+    #[test]
+    fn update_options_reject_unknown_fields_instead_of_dropping_them() {
+        let error = parse_update_options(Some(r#"{"upsert":true,"collation":{"locale":"en"}}"#)).unwrap_err();
+        assert!(error.contains("collation"), "{error}");
+        // Same rule as replace: an option the driver would not apply must not be silently ignored.
+        assert!(parse_replace_options(Some(r#"{"upsert":true,"collation":{"locale":"en"}}"#)).is_err());
+        assert!(parse_update_options(Some("{}")).is_ok());
+        assert!(parse_update_options(None).is_ok());
     }
 
     #[test]

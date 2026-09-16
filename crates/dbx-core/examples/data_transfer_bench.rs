@@ -70,6 +70,7 @@ fn run() -> Result<(), String> {
     let parsed = ParsedImportFile {
         columns: columns.clone(),
         rows: rows.clone(),
+        source_row_numbers: (1..=rows.len()).collect(),
         total_rows: rows.len(),
         effective_encoding: None,
     };

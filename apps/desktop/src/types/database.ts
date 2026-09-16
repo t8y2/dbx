@@ -1029,12 +1029,13 @@ export interface QueryResult {
   execution_error?: true;
   /** Set only for SQL Server informational messages emitted by the backend. */
   server_message?: true;
-  /** Oracle-only manual-transaction UX marker: set on a manual-transaction result
-   *  whose statement DBX proved to be an ordinary top-level read. Absent for
-   *  every non-Oracle execution and every unproven Oracle statement. */
+  /** Manual-transaction UX marker for sticky proven-read-only dialects (Oracle,
+   *  OceanBase-Oracle, MySQL, PostgreSQL): set on a manual-transaction result
+   *  whose statement DBX proved to be an ordinary read by that dialect's strict
+   *  heuristic. Absent for unproven statements and non-participating dialects. */
   manual_transaction_proven_read_only?: true;
-  /** Oracle-only manual-transaction UX marker: set on the synthetic successful
-   *  result of an empty/whitespace/comments-only manual script. */
+  /** Manual-transaction UX marker for the same dialects: set on the synthetic
+   *  successful result of an empty/whitespace/comments-only manual script. */
   manual_transaction_no_statement?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
@@ -1826,10 +1827,11 @@ export interface QueryTab {
   txnSessionId?: string;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
-  /** Oracle-only, non-persisted: whether the current manual Oracle session has
-   *  executed at least one statement DBX cannot prove read-only. Commit/Rollback
-   *  actions are hidden while a session is clean. Never cleared by a later read. */
-  oracleTxnPossiblyDirty?: boolean;
+  /** Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL),
+   *  not persisted: whether the current manual session has executed at least one
+   *  statement DBX cannot prove read-only. Commit/Rollback actions are hidden
+   *  while a session is clean. Never cleared by a later read. */
+  txnPossiblyDirty?: boolean;
 }
 
 export interface SavedSqlFolder {

@@ -21,6 +21,7 @@ import {
   supportsTableVacuum,
   supportsTransaction,
   usesOracleStickyTransactionState,
+  usesProvenReadOnlyStickyTransactionState,
   usesConnectionOnlyQueryTarget,
   usesTreeSchemaMode,
   schemaNodeHasLoadableName,
@@ -215,7 +216,7 @@ describe("defaultAutoCommitForDbType", () => {
 });
 
 describe("usesOracleStickyTransactionState", () => {
-  it("enables sticky manual-transaction state for Oracle family", () => {
+  it("marks only the Oracle family for schema-change compensation", () => {
     expect(usesOracleStickyTransactionState("oracle")).toBe(true);
     expect(usesOracleStickyTransactionState("oceanbase-oracle")).toBe(true);
   });
@@ -225,6 +226,31 @@ describe("usesOracleStickyTransactionState", () => {
     expect(usesOracleStickyTransactionState("postgres")).toBe(false);
     expect(usesOracleStickyTransactionState("jdbc")).toBe(false);
     expect(usesOracleStickyTransactionState(undefined)).toBe(false);
+  });
+});
+
+describe("usesProvenReadOnlyStickyTransactionState", () => {
+  it("enables the sticky toolbar for the Oracle family, MySQL and PostgreSQL", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("oceanbase-oracle")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("mysql")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
+  });
+
+  it("keeps databases without manual-transaction support on the legacy toolbar", () => {
+    expect(usesProvenReadOnlyStickyTransactionState("doris")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("jdbc")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState("redis")).toBe(false);
+    expect(usesProvenReadOnlyStickyTransactionState(undefined)).toBe(false);
+  });
+
+  it("only enables sticky state where manual mode is reachable", () => {
+    // The sticky UX gates commit/rollback in manual mode; a member without
+    // transaction support could never reach it. Guards against drift.
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres"]) {
+      expect(supportsTransaction(dbType)).toBe(true);
+    }
   });
 });
 

@@ -257,7 +257,9 @@ function removeFrames(connectionId) {
 }
 async function closeFrame(frame) {
   await run(async () => {
-    if (!(await ask("关闭此页面？未保存修改将丢失；最后一个关联页面关闭后会断开连接。"))) return;
+    // Closing a debug page is cheap — the plugin UI is stateless and rebuilds
+    // on reopen — so it closes immediately instead of behind a modal that
+    // locks the whole shell until answered.
     connections.value = (await api("frames/close", { id: frame.id })).connections;
     windows.delete(frame.id);
     frames.value = frames.value.filter((f) => f.id !== frame.id);
@@ -454,7 +456,19 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="relative min-h-0 flex-1">
-          <iframe v-for="f in frames" v-show="active === f.id" :key="f.id" :ref="(el) => (el ? windows.set(f.id, el) : windows.delete(f.id))" :srcdoc="f.html" sandbox="allow-scripts" allow="clipboard-write" referrerpolicy="no-referrer" :title="frameName(f)" class="absolute inset-0" @load="init(f)" />
+          <iframe
+            v-for="f in frames"
+            v-show="active === f.id"
+            :key="f.id"
+            :ref="(el) => (el ? windows.set(f.id, el) : windows.delete(f.id))"
+            :srcdoc="f.html"
+            sandbox="allow-scripts"
+            allow="clipboard-write"
+            referrerpolicy="no-referrer"
+            :title="frameName(f)"
+            class="absolute inset-0"
+            @load="init(f)"
+          />
           <div v-if="!frames.length" class="grid h-full place-items-center text-sm text-base-content/50">
             <div class="flex items-center gap-2"><Settings2 :size="18" />{{ t("尚未打开工作台") }}</div>
           </div>

@@ -6513,6 +6513,7 @@ export default withEnglishFallback({
     settingsTransferImportLoaded: "已載入設定，請點擊「套用」儲存",
     settingsTransferCategoryOther: "其他",
     qqGroup: "QQ 群",
+    feishuGroup: "飛書群",
     wechatGroup: "微信交流群",
     wechatGroupInvite: "騰訊文件邀請",
     openSource: "開源倉庫",

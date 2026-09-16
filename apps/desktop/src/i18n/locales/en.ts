@@ -7991,6 +7991,7 @@ export default {
     settingsTransferImportLoaded: "Settings loaded. Click Apply to save them.",
     settingsTransferCategoryOther: "Other",
     qqGroup: "QQ Group",
+    feishuGroup: "Feishu Group",
     wechatGroup: "WeChat Group",
     wechatGroupInvite: "Tencent Docs invite",
     openSource: "Open-source repository",

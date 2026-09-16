@@ -61,7 +61,7 @@ Account → Analytics → Read:
 ```sh
 curl -s "https://api.cloudflare.com/client/v4/accounts/<account_id>/analytics_engine/sql" \
   -H "Authorization: Bearer <token>" \
-  --data-urlencode "query=SELECT blob1 AS kind, blob2 AS plugin, blob3 AS version, SUM(_sample_interval) AS events FROM PLUGIN_STATS WHERE timestamp > NOW() - INTERVAL '7' DAY GROUP BY 1,2,3 ORDER BY events DESC"
+  --data-urlencode "query=SELECT blob1 AS kind, blob2 AS plugin, blob3 AS version, SUM(_sample_interval) AS events FROM DBX_PLUGIN_STATS WHERE timestamp > NOW() - INTERVAL '7' DAY GROUP BY 1,2,3 ORDER BY events DESC"
 ```
 
 At current volume sampling is 1:1, so `SUM(_sample_interval)` equals the event

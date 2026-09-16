@@ -5,7 +5,20 @@
   "assets": {
     "directory": "./out",
     "binding": "ASSETS",
-    "not_found_handling": "404-page"
+    "not_found_handling": "404-page",
+    "run_worker_first": [
+      "/api/*",
+      "/tr",
+      "/tr/*",
+      "/issue",
+      "/issue/",
+      "/issues",
+      "/issues/",
+      "/cn/issues",
+      "/cn/issues/",
+      "/en/issues",
+      "/en/issues/"
+    ]
   },
   "r2_buckets": [
     {

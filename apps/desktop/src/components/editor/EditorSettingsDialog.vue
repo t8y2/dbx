@@ -9510,6 +9510,24 @@ LIMIT 100;</pre
                     {{ t("settings.wechatGroupInvite") }}
                   </div>
                 </button>
+                <button
+                  type="button"
+                  class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  @click="openExternalUrl('https://applink.feishu.cn/client/chat/chatter/add_by_link?link_token=30cvb14f-a9b1-4b12-adb6-2ff6d476a227')"
+                >
+                  <div class="flex items-center gap-2 text-sm font-medium">
+                    <span class="flex h-7 w-7 items-center justify-center rounded-md bg-[#3370FF] text-white">
+                      <svg class="h-4 w-4" viewBox="164 204 762 617" fill="currentColor" aria-hidden="true">
+                        <path
+                          d="M559.915 530.453c-46.507-111.786-194.56-248.469-262.806-302.826h333.782c47.146 16.298 87.616 134.677 101.973 191.808-35.499 31.21-119.787 97.109-172.95 111.018zM632.021 452.992c-45.184 60.48-133.546 121.963-172.053 145.13l-2.88 24.278 235.947 63.637c32.213-25.962 103.061-87.296 128.96-124.928 4.394-6.378 68.992-135.914 79.402-151.552-18.24-11.306-42.56-18.261-104.277-21.738-82.56-4.331-116.437 20.864-165.099 65.173zM187.883 712.917V393.515C397.568 599.808 558.315 642.688 641.045 653.76c124.459 5.419 154.667-73.045 181.142-93.099-97.024 153.174-224.64 235.734-384.747 235.734-128.107 0-219.755-55.659-249.557-83.478z"
+                        />
+                      </svg>
+                    </span>
+                    {{ t("settings.feishuGroup") }}
+                    <ExternalLink class="ml-auto h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                  <div class="mt-1 text-sm text-primary">applink.feishu.cn</div>
+                </button>
                 <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://github.com/t8y2/dbx')">
                   <div class="flex items-center gap-2 text-sm font-medium">
                     <img src="https://cdn.simpleicons.org/github/181717" alt="GitHub" class="h-7 w-7 rounded-md bg-white p-1" />

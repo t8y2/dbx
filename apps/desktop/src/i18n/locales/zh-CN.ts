@@ -7967,6 +7967,7 @@ export default withEnglishFallback({
     settingsTransferImportLoaded: "已载入设置，请点击“应用”保存",
     settingsTransferCategoryOther: "其他",
     qqGroup: "QQ 群",
+    feishuGroup: "飞书群",
     wechatGroup: "微信交流群",
     wechatGroupInvite: "腾讯文档邀请",
     openSource: "开源仓库",

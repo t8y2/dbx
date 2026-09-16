@@ -13,16 +13,19 @@ import {
   ChevronUp,
   CircleHelp,
   Cloud,
+  Code,
   Copy,
   Download,
   ExternalLink,
   Eye,
   Filter,
+  Globe,
   GripVertical,
   Loader2,
   Moon,
   PackageSearch,
   Palette,
+  PanelLeft,
   Pencil,
   Plus,
   RefreshCw,
@@ -32,6 +35,7 @@ import {
   Sun,
   Star,
   SunMoon,
+  Table,
   Terminal,
   Trash2,
   Upload,
@@ -167,7 +171,8 @@ import {
   type WebDavConfig,
 } from "@/lib/backend/api";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
-import { SHORTCUT_DEFINITIONS, findShortcutConflict, isReservedShortcut, normalizeShortcutSettings, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import { SHORTCUT_DEFINITIONS, countShortcutConflictPairs, findCrossScopeShortcutConflicts, findShortcutConflict, isReservedShortcut, normalizeShortcutSettings, type ShortcutActionId, type ShortcutDefinition, type ShortcutScope } from "@/lib/editor/shortcutRegistry";
+import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -1514,12 +1519,24 @@ watch(
   { deep: true },
 );
 
-const shortcutConflicts = computed(() =>
-  SHORTCUT_DEFINITIONS.flatMap((definition) => {
+// 行 → 同作用域冲突对象（必顶阻断）。保留 map 形态是为了能算“重复对数”：
+// 行级列表会把同一对重复计两次（双向各一次），而摘要文案说的是“几组重复”。
+const shortcutConflictMap = computed(() => {
+  const conflicts: Partial<Record<ShortcutActionId, ShortcutActionId>> = {};
+  for (const definition of SHORTCUT_DEFINITIONS) {
     const conflict = findShortcutConflict(definition.id, editShortcuts.value[definition.id], editShortcuts.value);
-    return conflict ? [definition.id] : [];
-  }),
-);
+    if (conflict) conflicts[definition.id] = conflict;
+  }
+  return conflicts;
+});
+const shortcutConflicts = computed(() => Object.keys(shortcutConflictMap.value) as ShortcutActionId[]);
+// 行 → 跨作用域同键对象（**仅提示**，不进应用门禁）。不同作用域共用组合是
+// 有意的设计（find / focusSearch 默认都是 Mod+F，运行时按焦点路由），所以这里
+// 只用于展示；normalizeShortcutSettings 的占用判定依旧只看同作用域。
+const crossScopeShortcutConflicts = computed(() => findCrossScopeShortcutConflicts(editShortcuts.value));
+const crossScopeShortcutConflictIds = computed(() => Object.keys(crossScopeShortcutConflicts.value) as ShortcutActionId[]);
+const shortcutConflictPairCount = computed(() => countShortcutConflictPairs(shortcutConflictMap.value));
+const crossScopeShortcutPairCount = computed(() => countShortcutConflictPairs(crossScopeShortcutConflicts.value));
 const sqlShortcutConflicts = computed(() => findSqlShortcutConflicts(editSqlShortcuts.value, editShortcuts.value));
 const hasSqlShortcutConflicts = computed(() => sqlShortcutConflicts.value.length > 0);
 const shortcutSearchQuery = ref("");
@@ -1552,11 +1569,103 @@ const filteredShortcutDefinitions = computed(() => {
   const query = shortcutSearchQuery.value.trim().toLowerCase();
   if (!query) return SHORTCUT_DEFINITIONS;
   return SHORTCUT_DEFINITIONS.filter((definition) => {
-    const scope = t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`);
+    const scope = t(shortcutScopeLabelKey(definition.scope));
     const shortcut = formatShortcutPill(editShortcuts.value[definition.id]);
     return [definition.id, t(definition.labelKey), scope, shortcut].some((value) => value.toLowerCase().includes(query));
   });
 });
+
+// 二级归类：快捷键页签按作用域分组展示。顺序即运行时优先级——越外层先响应，
+// 用户读到的顺序与事件实际分发顺序一致。
+const SHORTCUT_SCOPE_ORDER: readonly ShortcutScope[] = ["global", "editor", "grid", "search", "sidebar"];
+
+function shortcutScopeLabelKey(scope: ShortcutScope): string {
+  return `settings.shortcutScope${scope[0].toUpperCase()}${scope.slice(1)}`;
+}
+
+function shortcutScopeHintKey(scope: ShortcutScope): string {
+  return `settings.shortcutScopeHint${scope[0].toUpperCase()}${scope.slice(1)}`;
+}
+
+function shortcutScopeIcon(scope: ShortcutScope) {
+  switch (scope) {
+    case "global":
+      return Globe;
+    case "editor":
+      return Code;
+    case "grid":
+      return Table;
+    case "search":
+      return Search;
+    default:
+      return PanelLeft;
+  }
+}
+
+interface ShortcutScopeGroup {
+  scope: ShortcutScope;
+  label: string;
+  hint: string;
+  definitions: ShortcutDefinition[];
+  unboundCount: number;
+  conflictCount: number;
+  crossScopeCount: number;
+}
+
+// 计数一律基于“当前可见行”（受搜索过滤影响）：组头是它下方那份列表的摘要，
+// 拿全局总数会导致搜索时组头数目与实际行数对不上。
+const shortcutScopeGroups = computed<ShortcutScopeGroup[]>(() =>
+  SHORTCUT_SCOPE_ORDER.map((scope) => {
+    const definitions = filteredShortcutDefinitions.value.filter((definition) => definition.scope === scope);
+    return {
+      scope,
+      label: t(shortcutScopeLabelKey(scope)),
+      hint: t(shortcutScopeHintKey(scope)),
+      definitions,
+      unboundCount: definitions.filter((definition) => !editShortcuts.value[definition.id]).length,
+      conflictCount: definitions.filter((definition) => shortcutConflictMap.value[definition.id]).length,
+      crossScopeCount: definitions.filter((definition) => (crossScopeShortcutConflicts.value[definition.id] ?? []).length > 0).length,
+    };
+  }).filter((group) => group.definitions.length > 0),
+);
+
+function isShortcutModified(definition: ShortcutDefinition): boolean {
+  return editShortcuts.value[definition.id] !== definition.defaultShortcut;
+}
+
+function shortcutDefinitionById(actionId: ShortcutActionId): ShortcutDefinition | undefined {
+  return SHORTCUT_DEFINITIONS.find((definition) => definition.id === actionId);
+}
+
+// 同作用域冲突的浮层文案：说清“与谁重复”与“为什么必须改”。
+function shortcutConflictTooltipText(definition: ShortcutDefinition): string {
+  const partnerId = shortcutConflictMap.value[definition.id];
+  const partner = partnerId ? shortcutDefinitionById(partnerId) : undefined;
+  if (!partner) return "";
+  return t("settings.shortcutConflictTooltip", { label: t(partner.labelKey), scope: t(shortcutScopeLabelKey(partner.scope)) });
+}
+
+// 跨作用域同键的浮层文案：列全对方动作及其作用域，并说明“无需处理”。
+function shortcutCrossScopeTooltipText(definition: ShortcutDefinition): string {
+  const others = crossScopeShortcutConflicts.value[definition.id] ?? [];
+  const targets = others
+    .map((actionId) => shortcutDefinitionById(actionId))
+    .filter((partner): partner is ShortcutDefinition => !!partner)
+    .map((partner) => `${t(shortcutScopeLabelKey(partner.scope))} · ${t(partner.labelKey)}`)
+    .join(t("settings.shortcutCrossScopeTooltipSeparator"));
+  if (!targets) return "";
+  return t("settings.shortcutCrossScopeTooltip", { targets });
+}
+
+function shortcutHasCrossScopeConflict(definition: ShortcutDefinition): boolean {
+  return (crossScopeShortcutConflicts.value[definition.id] ?? []).length > 0;
+}
+
+// 行级浮层的唯一入口：优先讲阻断性冲突（同作用域），其次才是跨作用域提示。
+// 返回空串时 LightTooltip 不展示（hasContent 为假），无需额外开关。
+function shortcutConflictHintText(definition: ShortcutDefinition): string {
+  return shortcutConflictTooltipText(definition) || shortcutCrossScopeTooltipText(definition);
+}
 const hasShortcutConflicts = computed(() => shortcutConflicts.value.length > 0);
 const shortcutsChanged = computed(() => JSON.stringify(editShortcuts.value) !== JSON.stringify(editEditorSettingsBase.value.shortcuts));
 const sqlShortcutsChanged = computed(() => JSON.stringify(editSqlShortcuts.value) !== JSON.stringify(editEditorSettingsBase.value.sqlShortcuts));
@@ -7523,81 +7632,131 @@ onUnmounted(() => {
             </section>
 
             <section v-else-if="activeSettingsTab === 'shortcuts'" data-settings-search-id="shortcuts" :class="['flex flex-col gap-2 py-2', settingsSearchTargetClass('shortcuts')]">
-              <div class="relative">
-                <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
+              <div class="flex items-center gap-2">
+                <div class="relative min-w-0 flex-1">
+                  <Search class="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input v-model="shortcutSearchQuery" autocomplete="off" :placeholder="t('settings.shortcutSearchPlaceholder')" class="h-9 pl-9 text-sm" />
+                </div>
+                <!-- 冲突摘只需计数，明细进浮层：不再用整条横幅占掉列表高度。 -->
+                <LightTooltip v-if="shortcutConflicts.length > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: shortcutConflicts.length, pairs: shortcutConflictPairCount })">
+                  <span class="inline-flex h-9 shrink-0 cursor-help items-center gap-1.5 rounded-md border border-destructive/25 bg-destructive/10 px-2 text-[11.5px] font-medium tabular-nums text-destructive">
+                    <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
+                    {{ t("settings.shortcutConflictBadge", { count: shortcutConflicts.length }) }}
+                  </span>
+                </LightTooltip>
+                <LightTooltip v-if="crossScopeShortcutConflictIds.length > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: crossScopeShortcutConflictIds.length, pairs: crossScopeShortcutPairCount })">
+                  <span class="inline-flex h-9 shrink-0 cursor-help items-center gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 text-[11.5px] font-medium tabular-nums text-warning">
+                    <span class="size-1.5 rounded-full bg-current" aria-hidden="true" />
+                    {{ t("settings.shortcutCrossScopeBadge", { count: crossScopeShortcutConflictIds.length }) }}
+                  </span>
+                </LightTooltip>
               </div>
-              <div class="overflow-hidden rounded-md border border-border/70 bg-background">
-                <div v-if="filteredShortcutDefinitions.length === 0" class="px-3 py-8 text-center text-sm text-muted-foreground">
-                  {{ t("settings.shortcutSearchNoResults") }}
-                </div>
-                <div v-for="definition in filteredShortcutDefinitions" :key="definition.id" class="settings-shortcut-row group -mt-px grid gap-2 border-t border-border/70 px-3 py-2 transition-colors first:mt-0 first:border-t-0 hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                  <div class="settings-shortcut-label min-w-0">
-                    <div class="flex min-w-0 items-center gap-2">
-                      <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
-                      <Badge variant="outline" class="h-5 shrink-0 rounded-md border-border/60 px-1.5 text-[11px] font-normal text-muted-foreground">
-                        {{ t(`settings.shortcutScope${definition.scope[0].toUpperCase()}${definition.scope.slice(1)}`) }}
-                      </Badge>
+
+              <div v-if="filteredShortcutDefinitions.length === 0" class="rounded-md border border-border/70 px-3 py-8 text-center text-sm text-muted-foreground">
+                {{ t("settings.shortcutSearchNoResults") }}
+              </div>
+
+              <!-- 二级归类：按作用域分组，组头吸顶。顺序即运行时优先级（越外层越先响应）。
+                   分组容器刻意不用 overflow-hidden —— 它会成为嵌套滚动容器，使组头吸顶失效；
+                   圆角改由组头（上）与末行（下）分别承担。 -->
+              <div v-else class="flex flex-col gap-2">
+                <section v-for="group in shortcutScopeGroups" :key="group.scope" class="rounded-md border border-border/70 bg-background">
+                  <header class="sticky top-0 z-10 flex items-center gap-2 rounded-t-md border-b border-border/70 bg-popover px-3 py-2">
+                    <component :is="shortcutScopeIcon(group.scope)" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    <h3 class="shrink-0 text-[13px] leading-none font-semibold">{{ group.label }}</h3>
+                    <span class="shrink-0 rounded-sm border border-border/80 px-1 font-mono text-[10px] leading-4 text-muted-foreground/75">{{ group.scope }}</span>
+                    <span class="shrink-0 text-[11px] tabular-nums text-muted-foreground">{{ t("settings.shortcutGroupCount", { count: group.definitions.length }) }}</span>
+                    <LightTooltip v-if="group.unboundCount > 0" :text="t('settings.shortcutGroupUnboundTooltip')">
+                      <span class="shrink-0 cursor-help text-[11px] tabular-nums text-muted-foreground/70">
+                        {{ t("settings.shortcutGroupUnbound", { count: group.unboundCount }) }}
+                      </span>
+                    </LightTooltip>
+                    <LightTooltip v-if="group.conflictCount > 0" :text="t('settings.shortcutConflictSummaryTooltip', { count: group.conflictCount, pairs: shortcutConflictPairCount })">
+                      <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-destructive"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.conflictCount }} </span>
+                    </LightTooltip>
+                    <LightTooltip v-if="group.crossScopeCount > 0" :text="t('settings.shortcutCrossScopeSummaryTooltip', { count: group.crossScopeCount, pairs: crossScopeShortcutPairCount })">
+                      <span class="inline-flex shrink-0 cursor-help items-center gap-1 text-[11px] font-medium tabular-nums text-warning"> <span class="size-[5px] rounded-full bg-current" aria-hidden="true" />{{ group.crossScopeCount }} </span>
+                    </LightTooltip>
+                    <span class="ml-auto hidden truncate text-[11px] text-muted-foreground xl:block">{{ group.hint }}</span>
+                  </header>
+                  <div
+                    v-for="(definition, index) in group.definitions"
+                    :key="definition.id"
+                    class="settings-shortcut-row group grid gap-2 border-t border-border/70 px-3 py-2 transition-colors hover:bg-muted/40 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                    :class="index === group.definitions.length - 1 ? 'rounded-b-md' : ''"
+                    :data-conflict="shortcutConflictMap[definition.id] ? 'true' : undefined"
+                    :data-cross-scope="shortcutHasCrossScopeConflict(definition) ? 'true' : undefined"
+                  >
+                    <div class="settings-shortcut-label min-w-0">
+                      <div class="flex min-w-0 items-center gap-2">
+                        <Label class="min-w-0 truncate leading-none">{{ t(definition.labelKey) }}</Label>
+                        <!-- scope 已由分组标题承载，行内不再重复散章 -->
+                        <LightTooltip v-if="isShortcutModified(definition)" :text="t('settings.shortcutModifiedTagTooltip')">
+                          <span class="shrink-0 cursor-help rounded-sm border border-border/90 px-1 text-[10px] leading-4 text-muted-foreground">
+                            {{ t("settings.shortcutModifiedTag") }}
+                          </span>
+                        </LightTooltip>
+                      </div>
+                    </div>
+                    <div class="settings-shortcut-actions min-w-0 text-right">
+                      <div class="settings-shortcut-controls flex items-center justify-end gap-1.5">
+                        <!-- 冲突解释改为悬停才出现：默认只留胶囊颜色这一条定位线索。 -->
+                        <LightTooltip side="left" :disabled="editingShortcutId === definition.id" :text="shortcutConflictHintText(definition)" content-class="max-w-[320px]">
+                          <input
+                            :data-shortcut-input="definition.id"
+                            :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
+                            :style="{
+                              width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
+                            }"
+                            readonly
+                            :aria-invalid="shortcutConflicts.includes(definition.id)"
+                            :placeholder="t('settings.shortcutPressShortcut')"
+                            class="settings-shortcut-pill h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/55 aria-invalid:text-destructive"
+                            :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
+                            @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
+                          />
+                        </LightTooltip>
+                        <Button
+                          v-if="editingShortcutId !== definition.id"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="settings-shortcut-action-button settings-shortcut-action-button--fix h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.shortcutPressShortcut')"
+                          @click="focusShortcutInput(definition.id)"
+                        >
+                          <Pencil class="h-4 w-4" />
+                        </Button>
+                        <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
+                          {{ t("settings.cancel") }}
+                        </Button>
+                        <Button
+                          v-if="editingShortcutId !== definition.id"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="settings-shortcut-action-button settings-shortcut-action-button--fix h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.reset')"
+                          @click="resetShortcut(definition.id)"
+                        >
+                          <RotateCcw class="h-4 w-4" />
+                        </Button>
+                        <Button
+                          v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                          :aria-label="t('settings.shortcutClear')"
+                          @click="clearShortcut(definition.id)"
+                        >
+                          <X class="h-4 w-4" />
+                        </Button>
+                        <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
+                      </div>
                     </div>
                   </div>
-                  <div class="settings-shortcut-actions min-w-0 space-y-1 text-right">
-                    <div class="settings-shortcut-controls flex items-center justify-end gap-1.5">
-                      <input
-                        :data-shortcut-input="definition.id"
-                        :value="editingShortcutId === definition.id ? '' : formatShortcutPill(editShortcuts[definition.id])"
-                        :style="{
-                          width: editingShortcutId === definition.id ? shortcutPressShortcutInputWidth : `${Math.max(4, formatShortcutPill(editShortcuts[definition.id]).length + 3)}ch`,
-                        }"
-                        readonly
-                        :aria-invalid="shortcutConflicts.includes(definition.id)"
-                        :placeholder="t('settings.shortcutPressShortcut')"
-                        class="h-7 w-auto min-w-12 max-w-64 shrink-0 cursor-default rounded-[6px] border border-transparent bg-muted px-2.5 text-center font-mono text-[13px] font-semibold text-foreground/75 shadow-inner outline-none selection:bg-transparent placeholder:text-muted-foreground aria-invalid:border-destructive/70 aria-invalid:text-destructive aria-invalid:ring-destructive/20"
-                        :class="editingShortcutId === definition.id ? 'max-w-64 cursor-text border-border/80 bg-background text-left text-foreground shadow-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35' : ''"
-                        @keydown="(event: KeyboardEvent) => onShortcutKeydown(definition.id, event)"
-                      />
-                      <Button
-                        v-if="editingShortcutId !== definition.id"
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                        :aria-label="t('settings.shortcutPressShortcut')"
-                        @click="focusShortcutInput(definition.id)"
-                      >
-                        <Pencil class="h-4 w-4" />
-                      </Button>
-                      <Button v-else type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-sm font-medium text-muted-foreground hover:text-foreground" @click="cancelShortcutEdit">
-                        {{ t("settings.cancel") }}
-                      </Button>
-                      <Button
-                        v-if="editingShortcutId !== definition.id"
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-                        :aria-label="t('settings.reset')"
-                        @click="resetShortcut(definition.id)"
-                      >
-                        <RotateCcw class="h-4 w-4" />
-                      </Button>
-                      <Button
-                        v-if="editingShortcutId !== definition.id && editShortcuts[definition.id]"
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        class="settings-shortcut-action-button h-7 w-7 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
-                        :aria-label="t('settings.shortcutClear')"
-                        @click="clearShortcut(definition.id)"
-                      >
-                        <X class="h-4 w-4" />
-                      </Button>
-                      <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
-                    </div>
-                    <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
-                      {{ t("settings.shortcutConflict") }}
-                    </p>
-                  </div>
-                </div>
+                </section>
               </div>
 
               <div class="mt-6 border-t border-border/70 pt-6" data-settings-search-id="sql-shortcuts">
@@ -9504,6 +9663,11 @@ LIMIT 100;</pre
             <Button variant="outline" @click="resetDefaultsForTab(activeSettingsTab as SettingsCategory)">
               {{ t("settings.resetDefaults") }}
             </Button>
+            <!-- 行内冲突说明收进浮层后，“应用为何被禁用”需要一处常驻解释。 -->
+            <span v-if="hasBlockingShortcutConflicts" class="inline-flex items-center gap-1.5 text-xs text-destructive">
+              <AlertTriangle class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {{ t("settings.shortcutConflictBlocksApply", { count: shortcutConflicts.length, pairs: shortcutConflictPairCount }) }}
+            </span>
             <div class="flex-1" />
             <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
@@ -9878,6 +10042,28 @@ LIMIT 100;</pre
 
 .settings-mcp-config-tabs:hover::-webkit-scrollbar-thumb {
   background: color-mix(in oklab, var(--muted-foreground) 38%, transparent);
+}
+
+/*
+ * 快捷键页签的分组与冲突呈现。
+ *
+ * 跨作用域同键只给一条细琥珀边作为定位线索（不做光晕）：不同作用域共用组合是
+ * 有意的设计（find / focusSearch 默认都是 Mod+F），把它渲染成错误会让用户去改
+ * 本来无需处理的键；光晕留给悬停，避免十几行同时发光。
+ *
+ * 写在这里而不是用 Tailwind 的 border-warning/45，是因为基类里的
+ * border-transparent 与它同为单类选择器，谁生效取决于样式表顺序而不是 class
+ * 书写顺序；aria-invalid 那条能工作是因为变体在生成顺序上排在基类之后。
+ * `:not([aria-invalid="true"])` 保证阻断性冲突（红）优先于提示（琥珀）。
+ */
+.settings-shortcut-row[data-cross-scope="true"] .settings-shortcut-pill:not([aria-invalid="true"]) {
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+
+/* 阻断性冲突行常显“改键 / 恢复默认”两个修复入口；清除按钮与普通行一致随悬停出现，
+   不在有问题的行上堆叠常驻控件。 */
+.settings-shortcut-row[data-conflict="true"] .settings-shortcut-action-button--fix {
+  opacity: 1;
 }
 
 html.dbx-legacy-webview .settings-shortcut-row:hover .settings-shortcut-action-button,

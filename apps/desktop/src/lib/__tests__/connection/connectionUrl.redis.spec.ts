@@ -13,17 +13,46 @@ describe("Redis connection URLs", () => {
     expect(parsed.urlParams).toBe("insecure=true");
   });
 
-  it("collapses a dirty path (redis-cli flags) to the db index the backend uses", () => {
-    // Literal spaces: WHATWG URL percent-encodes them into the path, which used
-    // to land verbatim in the database field and leak back out as %20 on copy.
-    const parsed = parseConnectionUrl("rediss://coupon@cache.example.com:6379/0 --tls --insecure?insecure=true");
+  it("treats the rediss scheme as TLS", () => {
+    expect(parseConnectionUrl("rediss://cache.example.com:6379/0").ssl).toBe(true);
+    expect(parseConnectionUrl("redis://cache.example.com:6379/0").ssl).toBe(false);
+  });
+
+  it("salvages pasted redis-cli --tls and --insecure flags from the path", () => {
+    const parsed = parseConnectionUrl("redis://coupon:secret@qas-cnapacdd-invisclub-cnn2.redis.rds.aliyuncs.com:6379/0 --tls --insecure");
+    expect(parsed.dbType).toBe("redis");
+    expect(parsed.host).toBe("qas-cnapacdd-invisclub-cnn2.redis.rds.aliyuncs.com");
+    expect(parsed.username).toBe("coupon");
+    expect(parsed.password).toBe("secret");
     expect(parsed.database).toBe("0");
+    expect(parsed.ssl).toBe(true);
     expect(parsed.urlParams).toBe("insecure=true");
   });
 
-  it("collapses an already percent-encoded dirty path the same way", () => {
+  it("salvages flags from an already percent-encoded dirty path", () => {
     const parsed = parseConnectionUrl("rediss://coupon@cache.example.com:6379/0%20--tls%20--insecure?insecure=true");
     expect(parsed.database).toBe("0");
+    expect(parsed.ssl).toBe(true);
+    // The explicit query param already carries insecure; it must not be duplicated.
+    expect(parsed.urlParams).toBe("insecure=true");
+  });
+
+  it("salvages --tls without --insecure", () => {
+    const parsed = parseConnectionUrl("redis://cache.example.com:6379/2 --tls");
+    expect(parsed.database).toBe("2");
+    expect(parsed.ssl).toBe(true);
+    expect(parsed.urlParams).toBe("");
+  });
+
+  it("salvages flags when the path carries no db index", () => {
+    const parsed = parseConnectionUrl("redis://cache.example.com:6379/--tls --insecure");
+    expect(parsed.database).toBeUndefined();
+    expect(parsed.ssl).toBe(true);
+    expect(parsed.urlParams).toBe("insecure=true");
+  });
+
+  it("collapses a non-numeric path with no flags to the db index the backend uses", () => {
+    expect(parseConnectionUrl("redis://cache.example.com:6379/mydb").database).toBe("0");
   });
 
   it("leaves the database unset when the URL has no path", () => {

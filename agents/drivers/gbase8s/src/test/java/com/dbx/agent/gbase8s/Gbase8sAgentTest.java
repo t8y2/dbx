@@ -168,6 +168,61 @@ class Gbase8sAgentTest {
     }
 
     @Test
+    void overrideLocaleParamsRewritesBothLocalesPreservingOthers() {
+        Assertions.assertEquals(
+            "GBASEDBTSERVER=gbase01;CLIENT_LOCALE=en_US.819;DB_LOCALE=en_US.819;NEWCODESET=UTF8,utf8,57372",
+            Gbase8sAgent.overrideLocaleParams(
+                "GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_CN.utf8;DB_LOCALE=zh_CN.utf8;NEWCODESET=UTF8,utf8,57372",
+                "en_US.819"
+            )
+        );
+        // Appends both when neither is present.
+        Assertions.assertEquals(
+            "GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_CN.57372;DB_LOCALE=zh_CN.57372",
+            Gbase8sAgent.overrideLocaleParams("GBASEDBTSERVER=gbase01", "zh_CN.57372")
+        );
+        // Blank collate is a no-op.
+        Assertions.assertEquals(
+            "DB_LOCALE=zh_CN.utf8",
+            Gbase8sAgent.overrideLocaleParams("DB_LOCALE=zh_CN.utf8", "  ")
+        );
+    }
+
+    @Test
+    void rewritesLocaleToTargetDatabaseCollateSoCrossLocaleDatabaseOpens() {
+        // The reported connection pins DB_LOCALE=zh_CN.utf8 for `dcss`; opening the differently
+        // locale `gbase8s` database (real collate en_US.819) must rewrite the locale to en_US.819.
+        ConnectParams params = new ConnectParams(
+            "192.168.5.65",
+            9088,
+            "dcss",
+            "gbasedbt",
+            "secret",
+            "GBASEDBTSERVER=gbaseserver;DB_LOCALE=zh_CN.utf8;CLIENT_LOCALE=zh_CN.utf8;NEWCODESET=UTF8,utf8,57372;DELIMIDENT=y",
+            "",
+            false
+        );
+
+        String url = Gbase8sAgent.buildUrl(
+            new ConnectParams(
+                params.getHost(),
+                params.getPort(),
+                "gbase8s",
+                params.getUsername(),
+                params.getPassword(),
+                Gbase8sAgent.overrideLocaleParams(params.getUrl_params(), "en_US.819"),
+                params.getConnection_string(),
+                false
+            )
+        );
+
+        Assertions.assertEquals(
+            "jdbc:gbasedbt-sqli://192.168.5.65:9088/gbase8s:GBASEDBTSERVER=gbaseserver;DB_LOCALE=en_US.819;CLIENT_LOCALE=en_US.819;NEWCODESET=UTF8,utf8,57372;DELIMIDENT=y",
+            url
+        );
+    }
+
+    @Test
     void omitsOwnerSchemasWhenTheDatabaseCannotUseThemInDml() {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();

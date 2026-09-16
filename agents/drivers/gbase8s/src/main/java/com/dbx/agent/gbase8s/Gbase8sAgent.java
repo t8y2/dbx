@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private static final long METADATA_CACHE_TTL_MILLIS = 10_000L;
@@ -47,6 +48,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private long tableCacheTimeMillis;
     private List<TableInfo> tableCache = Collections.emptyList();
     private ConnectParams databaseListParams;
+    private final Map<String, String> collateByDatabase = new ConcurrentHashMap<>();
 
     public Gbase8sAgent() {
         super(GBASE8S_PROFILE);
@@ -122,6 +124,79 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return super.openConnection(withResolvedDatabaseLocale(params));
+    }
+
+    /**
+     * Return a copy of {@code params} whose {@code CLIENT_LOCALE}/{@code DB_LOCALE} match the real
+     * collation of the target database, so one connection profile can open every database on the
+     * instance regardless of locale. Falls back to the configured parameters whenever the collation
+     * cannot be resolved (custom connection string, catalog unavailable, or lookup error).
+     */
+    private ConnectParams withResolvedDatabaseLocale(ConnectParams params) {
+        if (!params.getConnection_string().trim().isEmpty()) {
+            return params;
+        }
+        String database = params.getDatabase().trim().isEmpty() ? "sysmaster" : params.getDatabase().trim();
+        String collate = resolveCollate(params, database);
+        if (collate.isEmpty() || collate.equalsIgnoreCase(currentLocaleOf(params))) {
+            return params;
+        }
+        ConnectParams localized = new ConnectParams(
+            params.getHost(),
+            params.getPort(),
+            params.getDatabase(),
+            params.getUsername(),
+            params.getPassword(),
+            overrideLocaleParams(params.getUrl_params(), collate),
+            params.getConnection_string(),
+            params.isMysql_compat_mode(),
+            params.getJdbc_driver_class(),
+            params.getJdbc_driver_paths()
+        );
+        localized.setGbase_server(getGbaseServer(params));
+        return localized;
+    }
+
+    private String resolveCollate(ConnectParams params, String database) {
+        String key = params.getHost() + "|" + params.getPort() + "|" + getGbaseServer(params)
+            + "|" + database.toLowerCase(Locale.ROOT);
+        String cached = collateByDatabase.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        String collate = "";
+        try (Connection connection = super.openConnection(paramsForDatabase(params, "sysmaster"));
+             PreparedStatement stmt = connection.prepareStatement(
+                 "SELECT dbs_collate FROM sysmaster:sysdbslocale WHERE LOWER(dbs_dbsname) = ?")) {
+            stmt.setString(1, database.toLowerCase(Locale.ROOT));
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    collate = trim(rs.getString(1));
+                }
+            }
+        } catch (Exception ignored) {
+            // Keep the configured locale when the collation catalog is unreachable.
+        }
+        collateByDatabase.put(key, collate);
+        return collate;
+    }
+
+    private static String currentLocaleOf(ConnectParams params) {
+        for (String segment : params.getUrl_params().split(";")) {
+            int equals = segment.indexOf('=');
+            if (equals < 0) {
+                continue;
+            }
+            if (segment.substring(0, equals).trim().equalsIgnoreCase("DB_LOCALE")) {
+                return segment.substring(equals + 1).trim();
+            }
+        }
+        return "";
+    }
+
+    @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         super.afterConnect(params, connection);
         databaseListParams = paramsForDatabase(params, "sysmaster");
@@ -131,6 +206,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     @Override
     protected void afterDisconnect() {
         databaseListParams = null;
+        collateByDatabase.clear();
         clearMetadataCache();
     }
 
@@ -457,6 +533,57 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     private static boolean containsIgnoreCase(String value, String needle) {
         return value.toLowerCase(Locale.ROOT).contains(needle.toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * Force {@code CLIENT_LOCALE} and {@code DB_LOCALE} in a {@code ;}-separated JDBC parameter
+     * string to {@code collate}, leaving every other parameter (and their order) untouched.
+     *
+     * <p>A GBase 8s / Informix instance can host databases with different locales, and the JDBC
+     * driver rejects a connection whose {@code DB_LOCALE} does not match the target database's real
+     * locale with "database locale information mismatch" (数据库地点信息不匹配). A single connection
+     * profile only pins one locale, so reusing it to open a differently-locale database fails. The
+     * agent therefore resolves each database's real collation from {@code sysmaster.sysdbslocale}
+     * and rewrites both locale parameters to it, so every database under the connection opens with
+     * its own locale. Setting {@code CLIENT_LOCALE} to the same value keeps client and database
+     * codesets identical, which avoids the cross-codeset conversion the bundled client cannot load.
+     */
+    static String overrideLocaleParams(String jdbcParams, String collate) {
+        if (collate == null || collate.trim().isEmpty()) {
+            return jdbcParams;
+        }
+        String value = collate.trim();
+        List<String> segments = new ArrayList<>();
+        if (jdbcParams != null && !jdbcParams.isEmpty()) {
+            for (String segment : jdbcParams.split(";")) {
+                int equals = segment.indexOf('=');
+                String key = (equals >= 0 ? segment.substring(0, equals) : segment).trim();
+                if (key.equalsIgnoreCase("CLIENT_LOCALE")) {
+                    segments.add("CLIENT_LOCALE=" + value);
+                } else if (key.equalsIgnoreCase("DB_LOCALE")) {
+                    segments.add("DB_LOCALE=" + value);
+                } else {
+                    segments.add(segment);
+                }
+            }
+        }
+        boolean hasClient = false;
+        boolean hasDb = false;
+        for (String segment : segments) {
+            String key = segment.substring(0, Math.max(segment.indexOf('='), 0)).trim();
+            if (key.equalsIgnoreCase("CLIENT_LOCALE")) {
+                hasClient = true;
+            } else if (key.equalsIgnoreCase("DB_LOCALE")) {
+                hasDb = true;
+            }
+        }
+        if (!hasClient) {
+            segments.add("CLIENT_LOCALE=" + value);
+        }
+        if (!hasDb) {
+            segments.add("DB_LOCALE=" + value);
+        }
+        return String.join(";", segments);
     }
 
     private List<String> queryDatabaseNamesFromSysmaster() {

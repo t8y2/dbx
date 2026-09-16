@@ -481,8 +481,9 @@ function showDiff(item: NacosContentReplacePlanItem) {
     </DialogContent>
   </Dialog>
 
-  <NacosConfigDiffDialog v-model:open="diffOpen" :before="diffItem?.beforeContent ?? ''" :after="diffItem?.afterContent ?? ''" :format="diffItem?.configType" :show-confirm="false" />
+  <NacosConfigDiffDialog v-if="diffOpen" v-model:open="diffOpen" :before="diffItem?.beforeContent ?? ''" :after="diffItem?.afterContent ?? ''" :format="diffItem?.configType" :show-confirm="false" />
   <DangerConfirmDialog
+    v-if="confirmOpen"
     v-model:open="confirmOpen"
     :title="t(`nacos.replaceHistory.${confirmAction}Title`)"
     :message="t(`nacos.replaceHistory.${confirmAction}Confirm`)"

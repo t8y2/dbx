@@ -27,6 +27,7 @@ function installApiMocks() {
     saveEditorSettings: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     loadSidebarLayout: vi.fn().mockResolvedValue(null),
+    loadTableVGroups: vi.fn().mockResolvedValue({}),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     sessionCredentialStatus: vi.fn().mockResolvedValue(false),

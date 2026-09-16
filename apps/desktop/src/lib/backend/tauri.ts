@@ -98,6 +98,7 @@ import type {
   PluginRollbackResult,
   PluginTrustedKey,
   PluginUiAssetPayload,
+  TableVGroupLayout,
 } from "@/types/database";
 import type {
   DataGridColumnDistinctValuesSqlOptions,
@@ -2618,6 +2619,14 @@ export async function saveSidebarLayout(layout: import("@/types/database").Sideb
 
 export async function loadSidebarLayout(): Promise<import("@/types/database").SidebarLayout | null> {
   return invoke("load_sidebar_layout");
+}
+
+export async function saveTableVGroups(scopeKey: string, layout: TableVGroupLayout): Promise<void> {
+  return invoke("save_table_vgroups", { scopeKey, layout });
+}
+
+export async function loadTableVGroups(): Promise<Record<string, import("@/types/database").TableVGroupLayout>> {
+  return invoke("load_table_vgroups");
 }
 
 // --- Updates ---

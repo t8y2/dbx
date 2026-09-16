@@ -42,6 +42,7 @@ import type {
   JdbcMavenBundleInfo,
   JdbcPluginStatus,
   SidebarLayout,
+  TableVGroupLayout,
   SavedSqlFile,
   SavedSqlFolder,
   SavedSqlLibrary,
@@ -4862,6 +4863,14 @@ export async function saveSidebarLayout(layout: SidebarLayout): Promise<void> {
 
 export async function loadSidebarLayout(): Promise<SidebarLayout | null> {
   return get("/api/layout/sidebar");
+}
+
+export async function saveTableVGroups(scopeKey: string, layout: TableVGroupLayout): Promise<void> {
+  return post("/api/layout/table-vgroups", { scopeKey, layout });
+}
+
+export async function loadTableVGroups(): Promise<Record<string, TableVGroupLayout>> {
+  return get("/api/layout/table-vgroups");
 }
 
 export async function refreshConnections(): Promise<void> {

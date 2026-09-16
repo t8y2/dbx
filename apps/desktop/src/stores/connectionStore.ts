@@ -66,6 +66,24 @@ import {
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
 import {
+  applyTableVGroupsToChildren,
+  createTableVGroup as createTableVGroupOp,
+  deleteTableVGroups as deleteTableVGroupsOp,
+  emptyTableVGroupLayout,
+  findTableVGroupContainerNode,
+  moveTableToVGroup as moveTableToVGroupOp,
+  reorderTableVGroupEntry as reorderTableVGroupEntryOp,
+  renameTableVGroup as renameTableVGroupOp,
+  setTableVGroupsEnabled as setTableVGroupsEnabledOp,
+  stripTableVGroupsFromChildren,
+  tableVGroupPathForTable as tableVGroupPathForTableOp,
+  tableVGroupScopeKey,
+  toggleTableVGroupCollapsed as toggleTableVGroupCollapsedOp,
+  type TableVGroupDropPosition,
+  type TableVGroupLayout,
+  type TableVGroupScope,
+} from "@/lib/table/tableVGroup";
+import {
   buildConnectionConfigBundle,
   filterSidebarLayoutByConnectionIds,
   filterTunnelProfilesByIds,
@@ -597,6 +615,9 @@ export const useConnectionStore = defineStore("connection", () => {
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
+  const dirtyTableVGroupScopeKeys = new Set<string>();
+  let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
   const connectionGroupOptions = computed(() => connectionGroupDestinationRows(sidebarLayout.value));
   const selectedConnectionGroupId = computed(() => {
@@ -1785,6 +1806,9 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       children = children.map((child) => {
         const old = oldMap.get(child.id);
+        // Virtual group containers are rebuilt from the layout on every projection;
+        // stale copies must never override the freshly computed arrangement.
+        if (child.type === "table-vgroup") return child;
         if (old?.isLoading) {
           const isExpanded = old.isExpanded;
           const isLoading = old.isLoading;
@@ -1819,6 +1843,7 @@ export const useConnectionStore = defineStore("connection", () => {
       persistPinnedTreeNodeIds();
     }
     syncPinnedTreeState(children);
+    children = applyTableVGroupsToChildren(children, tableVGroupLayoutForNode(parent), parent);
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
     syncConfirmedEmptyTreeNodeId(parent);
@@ -8649,6 +8674,36 @@ export const useConnectionStore = defineStore("connection", () => {
     }, 300);
   }
 
+  function tableVGroupLayoutForNode(node: TreeNode): TableVGroupLayout | undefined {
+    const scopeKey = tableVGroupScopeKey(node);
+    return scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+  }
+
+  function reprojectTableVGroupScope(scope: TableVGroupScope, tableName?: string) {
+    const scopeKey = tableVGroupScopeKey(scope);
+    if (!scopeKey) return;
+    const container = findTableVGroupContainerNode(treeNodes.value, scope, tableName);
+    if (!container?.children) return;
+    container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
+  }
+
+  function updateTableVGroupLayout(scope: TableVGroupScope, nextLayout: TableVGroupLayout, tableName?: string) {
+    const scopeKey = tableVGroupScopeKey(scope);
+    if (!scopeKey) return;
+    tableVGroupLayouts.value = { ...tableVGroupLayouts.value, [scopeKey]: nextLayout };
+    dirtyTableVGroupScopeKeys.add(scopeKey);
+    if (tableVGroupPersistTimer) clearTimeout(tableVGroupPersistTimer);
+    tableVGroupPersistTimer = setTimeout(() => {
+      tableVGroupPersistTimer = null;
+      for (const key of dirtyTableVGroupScopeKeys) {
+        const layout = tableVGroupLayouts.value[key];
+        if (layout) api.saveTableVGroups(key, layout).catch(() => {});
+      }
+      dirtyTableVGroupScopeKeys.clear();
+    }, 300);
+    reprojectTableVGroupScope(scope, tableName);
+  }
+
   function rebuildTreeNodes() {
     const existingNodesMap = new Map<string, TreeNode>();
     const collectExisting = (nodes: TreeNode[]) => {
@@ -9173,7 +9228,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await settingsStore.initEditorSettings();
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
-        const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
+        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         await migrateTimeoutInheritance(saved);
         const loadedConnections = saved.map(normalizeConnection);
@@ -9187,6 +9242,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await persistConnections();
         }
         syncTimeoutInheritanceBackup();
+        tableVGroupLayouts.value = loadedTableVGroups ?? {};
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
         sidebarLayout.value = reconcileLayout(
@@ -9463,6 +9519,52 @@ export const useConnectionStore = defineStore("connection", () => {
     reorderSidebarEntries(draggedIds: string[], targetId: string, position: DropPosition, options?: ReorderEntriesOptions) {
       const layout = reorderEntriesOp(sidebarLayout.value, draggedIds, targetId, position, options);
       if (layout !== sidebarLayout.value) updateLayoutAndRebuild(layout);
+    },
+    tableVGroupLayouts,
+    tableVGroupLayoutFor(scope: TableVGroupScope) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      return scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+    },
+    createTableVGroup(scope: TableVGroupScope, name: string, parentGroupId?: string | null) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      if (!scopeKey) return null;
+      const result = createTableVGroupOp(tableVGroupLayouts.value[scopeKey] ?? emptyTableVGroupLayout(), name, parentGroupId);
+      updateTableVGroupLayout(scope, result.layout);
+      return result.groupId;
+    },
+    renameTableVGroup(scope: TableVGroupScope, groupId: string, name: string) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      const current = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      if (scopeKey && current) updateTableVGroupLayout(scope, renameTableVGroupOp(current, groupId, name));
+    },
+    deleteTableVGroups(scope: TableVGroupScope, groupIds: Iterable<string>) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      const current = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      if (scopeKey && current) updateTableVGroupLayout(scope, deleteTableVGroupsOp(current, groupIds));
+    },
+    moveTableToVGroup(scope: TableVGroupScope, tableName: string, groupId: string | null) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      const current = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      if (scopeKey && current) updateTableVGroupLayout(scope, moveTableToVGroupOp(current, tableName, groupId), tableName);
+    },
+    reorderTableVGroupEntry(scope: TableVGroupScope, draggedEntryId: string, targetEntryId: string, position: TableVGroupDropPosition) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      const current = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      if (scopeKey && current) updateTableVGroupLayout(scope, reorderTableVGroupEntryOp(current, draggedEntryId, targetEntryId, position));
+    },
+    toggleTableVGroupCollapsed(scope: TableVGroupScope, groupId: string) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      const current = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      if (scopeKey && current) updateTableVGroupLayout(scope, toggleTableVGroupCollapsedOp(current, groupId));
+    },
+    setTableVGroupsEnabled(scope: TableVGroupScope, enabled: boolean) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      const current = scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined;
+      if (scopeKey && current) updateTableVGroupLayout(scope, setTableVGroupsEnabledOp(current, enabled));
+    },
+    tableVGroupPathForTable(scope: TableVGroupScope, tableName: string) {
+      const scopeKey = tableVGroupScopeKey(scope);
+      return tableVGroupPathForTableOp(scopeKey ? tableVGroupLayouts.value[scopeKey] : undefined, tableName);
     },
   };
 });

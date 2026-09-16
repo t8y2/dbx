@@ -1090,6 +1090,10 @@ async fn main() {
         .route("/changelog", get(routes::update::fetch_changelog))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
+        .route(
+            "/layout/table-vgroups",
+            post(routes::layout::save_table_vgroups).get(routes::layout::load_table_vgroups),
+        )
         // App settings
         .route(
             "/app-settings/pinned-tree-node-ids",

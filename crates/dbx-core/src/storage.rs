@@ -778,6 +778,10 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         id INTEGER PRIMARY KEY CHECK (id = 1),
         layout_json TEXT NOT NULL
     )",
+    "CREATE TABLE IF NOT EXISTS table_vgroups (
+        scope_key TEXT PRIMARY KEY,
+        layout_json TEXT NOT NULL
+    )",
     "CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         settings_json TEXT NOT NULL
@@ -4447,6 +4451,42 @@ impl Storage {
             })
             .await?;
         json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+    }
+
+    pub async fn save_table_vgroups(&self, scope_key: &str, layout: &serde_json::Value) -> Result<(), String> {
+        let scope_key = scope_key.to_string();
+        let json = serde_json::to_string(layout).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT OR REPLACE INTO table_vgroups (scope_key, layout_json) VALUES (?1, ?2)",
+                params![scope_key, json],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_table_vgroups(&self) -> Result<serde_json::Value, String> {
+        self.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT scope_key, layout_json FROM table_vgroups").map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?;
+            let mut layouts = serde_json::Map::new();
+            for row in rows {
+                let (scope_key, json) = row.map_err(|e| e.to_string())?;
+                match serde_json::from_str::<serde_json::Value>(&json) {
+                    Ok(layout) => {
+                        layouts.insert(scope_key, layout);
+                    }
+                    Err(e) => warn!("Failed to deserialize table vgroups for scope {scope_key}: {e}"),
+                }
+            }
+            Ok(serde_json::Value::Object(layouts))
+        })
+        .await
     }
 }
 

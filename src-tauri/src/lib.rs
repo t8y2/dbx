@@ -1855,6 +1855,8 @@ pub fn run() {
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
             commands::connection::load_sidebar_layout,
+            commands::connection::save_table_vgroups,
+            commands::connection::load_table_vgroups,
             commands::plugins::list_plugins,
             commands::plugins::list_plugin_trusted_keys,
             commands::plugins::save_plugin_trusted_key,

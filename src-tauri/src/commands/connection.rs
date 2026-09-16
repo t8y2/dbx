@@ -1035,6 +1035,20 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+#[tauri::command]
+pub async fn save_table_vgroups(
+    state: State<'_, Arc<AppState>>,
+    scope_key: String,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_table_vgroups(&scope_key, &layout).await
+}
+
+#[tauri::command]
+pub async fn load_table_vgroups(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    state.storage.load_table_vgroups().await
+}
+
 fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
     db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
         .into_iter()

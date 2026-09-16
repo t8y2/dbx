@@ -83,6 +83,8 @@ bytes = "1"
 font-kit = { version = "0.14.3", optional = true }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 flate2 = "1"
+crc = "3"
+sha1 = "0.10"
 tar = "0.4"
 zstd = "0.13"
 sysinfo = { version = "0.32", features = ["system"] }

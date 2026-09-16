@@ -158,6 +158,39 @@ describe("useSidebarTreeExportRuntime", () => {
     expect(toastMock).toHaveBeenCalledWith("grid.exported");
   });
 
+  it.each(["bson", "bsonGzip"] as const)("exports an official-compatible %s collection dump", async (mode) => {
+    apiMock.exportMongodbQuery.mockImplementation(async (_request, onProgress) => {
+      onProgress({ exportId: "export-1", status: "done", documentsRead: 2, bytesWritten: 64, elapsedMs: 4 });
+      return { exportId: "export-1", documentsExported: 2, filePath: "orders.bson.gz", elapsedMs: 4 };
+    });
+    const activeNode = shallowRef({ id: "col-1", type: "mongo-collection", label: "orders", connectionId: "conn-1", database: "shop", children: [] } as TreeNode);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: vi.fn(() => ({ db_type: "mongodb" })),
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode,
+      connectionStore: connectionStore as never,
+      settingsStore: exportSettings() as never,
+      acceptedSelectionIds: () => null,
+    });
+
+    await runtime.exportMongoCollection(mode);
+
+    expect(apiMock.exportMongodbQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        database: "shop",
+        collection: "orders",
+        format: "bson",
+        gzip: mode === "bsonGzip",
+        filePath: mode === "bsonGzip" ? "orders.bson.gz" : "orders.bson",
+      }),
+      expect.any(Function),
+    );
+  });
+
   it("loads and joins every selected DDL in tree order", async () => {
     apiMock.getTableDdl.mockResolvedValueOnce("CREATE TABLE one (id INT)").mockResolvedValueOnce("CREATE VIEW two AS SELECT 1;");
     const first = { id: "table-1", type: "table", label: "one", connectionId: "conn-1", database: "db", schema: "main" } as TreeNode;

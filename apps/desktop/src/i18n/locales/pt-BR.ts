@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpPtBR as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementPtBR } from "./meilisearchManagement";
 import { redisGroupingPtBR as redisGrouping } from "./redisGrouping";
 import docs from "./docs/pt-BR";
@@ -83,6 +84,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "Prévia da conversão",
     description: "Converte o valor atual para visualizar ou copiar. O valor original e o rascunho permanecem inalterados.",

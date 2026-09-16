@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
 import docs from "./docs/ja";
 import { consulJaMessages } from "./consulJa";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -83,6 +84,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "変換プレビュー",
     description: "現在の値を変換して表示またはコピーします。元の値と編集中の内容は変更されません。",

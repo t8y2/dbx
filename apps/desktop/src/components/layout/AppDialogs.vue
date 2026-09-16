@@ -14,6 +14,7 @@ const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diag
 const DatabaseDocsDialog = defineAsyncComponent(() => import("@/components/docs/DatabaseDocsDialog.vue"));
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const MongoImportDialog = defineAsyncComponent(() => import("@/components/document/MongoImportDialog.vue"));
+const MongoDatabaseDumpDialog = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
@@ -301,6 +302,13 @@ watch(
     :prefill-table="dialogs.tableImportPrefillTable.value"
   />
   <MongoImportDialog v-model:open="dialogs.showMongoImportDialog.value" :connection-id="dialogs.mongoImportPrefillConnectionId.value" :database="dialogs.mongoImportPrefillDatabase.value" :collection="dialogs.mongoImportPrefillCollection.value" />
+  <MongoDatabaseDumpDialog
+    v-if="dialogs.showMongoDatabaseDumpDialog.value"
+    v-model:open="dialogs.showMongoDatabaseDumpDialog.value"
+    :connection-id="dialogs.mongoDatabaseDumpPrefillConnectionId.value"
+    :database="dialogs.mongoDatabaseDumpPrefillDatabase.value"
+    :mode="dialogs.mongoDatabaseDumpMode.value"
+  />
   <DataGenerateDialog
     v-if="dialogs.showTableDataGenerateDialog.value"
     v-model:open="dialogs.showTableDataGenerateDialog.value"

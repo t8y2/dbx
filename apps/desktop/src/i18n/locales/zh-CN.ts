@@ -3,6 +3,7 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
+import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
   cellTransform: {
@@ -5454,6 +5455,7 @@ export default withEnglishFallback({
       },
     },
   },
+  mongoDump,
   mongo: {
     documents: "{count} 个文档",
     addField: "添加字段",

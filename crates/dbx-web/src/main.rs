@@ -987,6 +987,25 @@ async fn main() {
         .route("/mongo/export/progress/{exportId}", get(routes::mongodb_import_export::export_progress))
         .route("/mongo/export/download/{exportId}", get(routes::mongodb_import_export::export_download))
         .route("/mongo/export/cancel", post(routes::mongodb_import_export::cancel_export))
+        .route("/mongo/dump/catalog", post(routes::mongodb_dump::catalog))
+        .route(
+            "/mongo/dump/source",
+            post(routes::mongodb_dump::prepare_source).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/dump/source/release", post(routes::mongodb_dump::release_source))
+        .route("/mongo/dump/upload-limit", get(routes::mongodb_dump::upload_limit))
+        .route(
+            "/mongo/dump/source/upload",
+            post(routes::mongodb_dump::upload_restore_source).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/dump/export", post(routes::mongodb_dump::start_dump))
+        .route("/mongo/dump/restore", post(routes::mongodb_dump::start_restore))
+        .route("/mongo/dump/progress/{taskId}", get(routes::mongodb_dump::progress))
+        .route("/mongo/dump/cancel", post(routes::mongodb_dump::cancel))
         // History
         .route("/history", get(routes::history::load_history).delete(routes::history::clear_history))
         .route("/history/save", post(routes::history::save_history))

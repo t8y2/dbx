@@ -1,5 +1,6 @@
 import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import docs from "./docs/zh-TW";
 import { consulZhTWMessages } from "./consulZhTW";
@@ -82,6 +83,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "轉換預覽",
     description: "將目前內容轉換後檢視或複製，不改變原值和編輯草稿。",

@@ -3,6 +3,7 @@ import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
+import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
 
 const consul = {
   ...consulUiMessages,
@@ -5479,6 +5480,7 @@ export default {
       },
     },
   },
+  mongoDump,
   mongo: {
     documents: "{count} documents",
     addField: "Add Field",

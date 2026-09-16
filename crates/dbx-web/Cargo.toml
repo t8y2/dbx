@@ -34,10 +34,14 @@ tracing = "0.1"
 async-stream = "0.3"
 futures = "0.3"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 chrono = "0.4"
 aes-gcm = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["multipart"] }

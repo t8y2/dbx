@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime as ChronoDateTime, NaiveDate, Utc};
+use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
 use mongodb::bson::{oid::ObjectId, Bson, DateTime, Decimal128, Document};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,7 @@ pub const MAX_BATCH_SIZE: usize = 5000;
 /// Rows sampled for CSV type inference, independent of the preview window so that the
 /// preview and the import always agree on column types.
 pub const TYPE_SAMPLE_ROWS: usize = 1000;
+const BSON_MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
 const TYPE_STRING: u8 = 1 << 0;
 const TYPE_BOOLEAN: u8 = 1 << 1;
@@ -45,6 +47,7 @@ pub enum MongoImportFormat {
     Csv,
     Json,
     Ndjson,
+    Bson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,14 +344,16 @@ struct CsvParseConfig {
 
 pub fn format_from_path(path: &str) -> Result<MongoImportFormat, String> {
     let lower = path.to_lowercase();
-    if lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".txt") {
+    if lower.ends_with(".bson") || lower.ends_with(".bson.gz") {
+        Ok(MongoImportFormat::Bson)
+    } else if lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".txt") {
         Ok(MongoImportFormat::Csv)
     } else if lower.ends_with(".ndjson") || lower.ends_with(".jsonl") {
         Ok(MongoImportFormat::Ndjson)
     } else if lower.ends_with(".json") {
         Ok(MongoImportFormat::Json)
     } else {
-        Err("Unsupported MongoDB import file type; use .csv, .json, or .ndjson".to_string())
+        Err("Unsupported MongoDB import file type; use .bson, .bson.gz, .csv, .json, or .ndjson".to_string())
     }
 }
 
@@ -1348,6 +1353,72 @@ fn file_size(path: &str) -> u64 {
     std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
 }
 
+fn open_bson_dump_reader(path: &str) -> Result<Box<dyn Read>, MongoImportIssue> {
+    let file = File::open(path).map_err(|error| MongoImportIssue::new("FILE_UNREADABLE", error.to_string()))?;
+    let reader = BufReader::new(file);
+    if path.to_lowercase().ends_with(".gz") {
+        Ok(Box::new(MultiGzDecoder::new(reader)))
+    } else {
+        Ok(Box::new(reader))
+    }
+}
+
+fn read_bson_dump_document<R: Read + ?Sized>(reader: &mut R, row: u64) -> Result<Option<Document>, MongoImportIssue> {
+    let mut length_bytes = [0u8; 4];
+    loop {
+        match reader.read(&mut length_bytes[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(MongoImportIssue::new("FILE_UNREADABLE", error.to_string()).with_row(row)),
+        }
+    }
+    reader.read_exact(&mut length_bytes[1..]).map_err(|error| {
+        MongoImportIssue::new("BSON_STRUCTURE", format!("Truncated BSON document length: {error}")).with_row(row)
+    })?;
+
+    let document_length = i32::from_le_bytes(length_bytes);
+    if document_length < 5 || document_length as usize > BSON_MAX_DOCUMENT_BYTES {
+        return Err(MongoImportIssue::new(
+            "BSON_STRUCTURE",
+            format!("Invalid BSON document length {document_length}; expected 5..={BSON_MAX_DOCUMENT_BYTES} bytes"),
+        )
+        .with_row(row));
+    }
+
+    let mut bytes = vec![0u8; document_length as usize];
+    bytes[..4].copy_from_slice(&length_bytes);
+    reader.read_exact(&mut bytes[4..]).map_err(|error| {
+        MongoImportIssue::new(
+            "BSON_STRUCTURE",
+            format!("Truncated BSON document; expected {document_length} bytes: {error}"),
+        )
+        .with_row(row)
+    })?;
+    let document = mongodb::bson::from_slice::<Document>(&bytes).map_err(|error| {
+        MongoImportIssue::new("BSON_STRUCTURE", format!("Invalid BSON document: {error}")).with_row(row)
+    })?;
+    Ok(Some(document))
+}
+
+fn parse_bson_preview(
+    path: &str,
+    preview_limit: usize,
+) -> Result<(Vec<ParsedMongoDocument>, u64, bool), MongoImportIssue> {
+    let mut reader = open_bson_dump_reader(path)?;
+    let mut documents = Vec::with_capacity(preview_limit.min(DEFAULT_PREVIEW_LIMIT));
+    let mut row = 1u64;
+    while documents.len() <= preview_limit {
+        let Some(document) = read_bson_dump_document(&mut *reader, row)? else {
+            return Ok((documents, row - 1, true));
+        };
+        documents.push(parsed_document(row, document, true));
+        row += 1;
+    }
+    documents.truncate(preview_limit);
+    Ok((documents, preview_limit as u64, false))
+}
+
 pub fn preview_mongodb_import_file(
     request: &MongoImportPreviewRequest,
 ) -> Result<MongoImportPreview, MongoImportIssue> {
@@ -1406,6 +1477,25 @@ pub fn preview_mongodb_import_file(
                 estimated_rows_exact,
             })
         }
+        MongoImportFormat::Bson => {
+            let (documents, estimated_rows, estimated_rows_exact) =
+                parse_bson_preview(&request.file_path, preview_limit)?;
+            Ok(MongoImportPreview {
+                source_ref: request.source_ref.clone(),
+                format: request.format,
+                detected_encoding: None,
+                file_name: file_name(&request.file_path),
+                file_path: request.file_path.clone(),
+                size_bytes: file_size(&request.file_path),
+                columns: columns_from_documents(&documents),
+                row_numbers: documents.iter().map(|document| document.row).collect(),
+                rows: documents.into_iter().map(|document| document.extended_json).collect(),
+                warnings: Vec::new(),
+                errors: Vec::new(),
+                estimated_rows: Some(estimated_rows),
+                estimated_rows_exact,
+            })
+        }
     }
 }
 
@@ -1419,6 +1509,7 @@ pub fn preview_mongodb_import_bytes(
         MongoImportFormat::Csv => "csv",
         MongoImportFormat::Json => "json",
         MongoImportFormat::Ndjson => "ndjson",
+        MongoImportFormat::Bson => "bson",
     };
     let dir = std::env::temp_dir().join(format!("dbx-mongo-import-preview-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).map_err(|error| MongoImportIssue::new("FILE_UNREADABLE", error.to_string()))?;
@@ -1517,6 +1608,20 @@ where
     Ok(())
 }
 
+fn stream_bson_file<F>(path: &str, mut on_document: F) -> Result<(), MongoImportIssue>
+where
+    F: FnMut(Result<ParsedMongoDocument, MongoImportIssue>) -> Result<(), MongoImportIssue>,
+{
+    let mut reader = open_bson_dump_reader(path)?;
+    let mut row = 1u64;
+    loop {
+        // A corrupt frame has no reliable next-document boundary, even when skipping row errors.
+        let Some(document) = read_bson_dump_document(&mut *reader, row)? else { return Ok(()) };
+        on_document(Ok(parsed_document(row, document, false)))?;
+        row += 1;
+    }
+}
+
 pub fn for_each_mongodb_import_document<F>(
     path: &str,
     format: MongoImportFormat,
@@ -1531,6 +1636,7 @@ where
         MongoImportFormat::Csv => stream_csv_file(path, options, on_document),
         MongoImportFormat::Json => stream_json_file(path, options, false, on_document),
         MongoImportFormat::Ndjson => stream_json_file(path, options, true, on_document),
+        MongoImportFormat::Bson => stream_bson_file(path, on_document),
     }
 }
 
@@ -1644,7 +1750,8 @@ where
 {
     let started_at = Instant::now();
     let batch_size = clamp_batch_size(if request.batch_size == 0 { DEFAULT_BATCH_SIZE } else { request.batch_size })?;
-    let require_bson_types = !matches!(request.parse_options.type_mode(), MongoImportTypeMode::String);
+    let require_bson_types = request.format == MongoImportFormat::Bson
+        || !matches!(request.parse_options.type_mode(), MongoImportTypeMode::String);
     on_progress(progress(
         &request.import_id,
         MongoImportPhase::Preparing,
@@ -1936,6 +2043,7 @@ pub fn mongodb_export_client_session_id(export_id: &str) -> String {
 pub enum MongoExportFormat {
     Csv,
     Ndjson,
+    Bson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1965,6 +2073,8 @@ pub struct MongoExportRequest {
     pub format: MongoExportFormat,
     #[serde(default = "default_true")]
     pub include_header: bool,
+    #[serde(default)]
+    pub gzip: bool,
     pub file_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
@@ -1999,7 +2109,7 @@ pub struct MongoExportSummary {
 
 fn temp_export_path(target: &Path) -> PathBuf {
     let name = target.file_name().and_then(|name| name.to_str()).unwrap_or("export");
-    target.with_file_name(format!(".{name}.dbx-export.tmp"))
+    target.with_file_name(format!(".{name}.{}.dbx-export.tmp", uuid::Uuid::new_v4()))
 }
 
 fn cleanup_temp(path: &Path) {
@@ -2221,6 +2331,9 @@ where
 {
     let started_at = Instant::now();
     on_progress(export_progress(&request.export_id, MongoExportStatus::Running, 0, 0, None, None, started_at));
+    if request.gzip && request.format != MongoExportFormat::Bson {
+        return Err("Gzip compression is only supported for BSON dump exports".to_string());
+    }
     if is_cancelled(&request.export_id).await {
         on_progress(export_progress(
             &request.export_id,
@@ -2273,6 +2386,9 @@ where
         }
         MongoExportFormat::Csv => {
             export_csv(&client, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
+        }
+        MongoExportFormat::Bson => {
+            export_bson(&client, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
         }
     };
 
@@ -2373,6 +2489,114 @@ where
     )
     .await?;
     writer.flush().map_err(|error| error.to_string())?;
+    if is_cancelled(&request.export_id).await {
+        return Err("Export cancelled".to_string());
+    }
+    Ok((documents_read, bytes_written))
+}
+
+enum BsonExportWriter {
+    Plain(BufWriter<File>),
+    Gzip(Box<GzEncoder<BufWriter<File>>>),
+}
+
+impl BsonExportWriter {
+    fn finish(self) -> Result<(), String> {
+        match self {
+            Self::Plain(mut writer) => writer.flush().map_err(|error| error.to_string()),
+            Self::Gzip(writer) => {
+                let mut writer = writer.finish().map_err(|error| error.to_string())?;
+                writer.flush().map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
+impl Write for BsonExportWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buf),
+            Self::Gzip(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Gzip(writer) => writer.flush(),
+        }
+    }
+}
+
+async fn export_bson<C, F>(
+    client: &mongodb::Client,
+    request: &MongoExportRequest,
+    temp: &Path,
+    total_documents: Option<u64>,
+    started_at: Instant,
+    is_cancelled: &mut C,
+    on_progress: &mut F,
+) -> Result<(u64, u64), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(MongoExportProgress),
+{
+    if is_cancelled(&request.export_id).await {
+        return Err("Export cancelled".to_string());
+    }
+    let file = File::create(temp).map_err(|error| error.to_string())?;
+    let buffered = BufWriter::new(file);
+    let mut writer = if request.gzip {
+        BsonExportWriter::Gzip(Box::new(GzEncoder::new(buffered, Compression::default())))
+    } else {
+        BsonExportWriter::Plain(buffered)
+    };
+    let mut documents_read = 0u64;
+    let mut bytes_written = 0u64;
+
+    let export = for_each_find_document(
+        client,
+        &request.database,
+        &request.collection,
+        request.filter.as_deref(),
+        request.projection.as_deref(),
+        request.sort.as_deref(),
+        request.collation.as_deref(),
+        DEFAULT_EXPORT_BATCH_SIZE,
+        |document| {
+            let bytes = mongodb::bson::to_vec(&document).map_err(|error| error.to_string())?;
+            writer.write_all(&bytes).map_err(|error| error.to_string())?;
+            bytes_written += bytes.len() as u64;
+            documents_read += 1;
+            if documents_read == 1 || documents_read.is_multiple_of(500) {
+                on_progress(export_progress(
+                    &request.export_id,
+                    MongoExportStatus::Running,
+                    documents_read,
+                    bytes_written,
+                    total_documents,
+                    None,
+                    started_at,
+                ));
+            }
+            Ok(())
+        },
+    );
+    {
+        tokio::pin!(export);
+        let mut poll_cancel = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                result = &mut export => { result?; break; }
+                _ = poll_cancel.tick() => {
+                    if is_cancelled(&request.export_id).await {
+                        return Err("Export cancelled".to_string());
+                    }
+                }
+            }
+        }
+    }
+    writer.finish()?;
     if is_cancelled(&request.export_id).await {
         return Err("Export cancelled".to_string());
     }
@@ -2551,6 +2775,112 @@ mod tests {
         }
 
         Ok(output)
+    }
+
+    fn bson_dump_bytes(documents: &[Document]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for document in documents {
+            output.extend_from_slice(&mongodb::bson::to_vec(document).unwrap());
+        }
+        output
+    }
+
+    #[test]
+    fn bson_export_writer_finishes_plain_and_gzip_dumps() {
+        let root = tempfile::tempdir().unwrap();
+        let documents = vec![doc! { "_id": 1, "name": "first" }, doc! { "_id": 2, "value": 42i64 }];
+        for expected in [Vec::new(), bson_dump_bytes(&documents)] {
+            for gzip in [false, true] {
+                let path = root.path().join(if gzip { "records.bson.gz" } else { "records.bson" });
+                let buffered = BufWriter::new(File::create(&path).unwrap());
+                let mut writer = if gzip {
+                    BsonExportWriter::Gzip(Box::new(GzEncoder::new(buffered, Compression::default())))
+                } else {
+                    BsonExportWriter::Plain(buffered)
+                };
+                writer.write_all(&expected).unwrap();
+                writer.finish().unwrap();
+
+                let bytes = std::fs::read(&path).unwrap();
+                let actual = if gzip {
+                    let mut decoded = Vec::new();
+                    MultiGzDecoder::new(bytes.as_slice()).read_to_end(&mut decoded).unwrap();
+                    decoded
+                } else {
+                    bytes
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bson_dump_preview_and_import_preserve_native_types() {
+        use mongodb::bson::spec::BinarySubtype;
+        use mongodb::bson::{Binary, DateTime};
+
+        let documents = vec![
+            doc! {
+                "_id": ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap(),
+                "createdAt": DateTime::from_millis(1_609_459_200_000),
+                "payload": Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2, 3] }),
+                "nested": { "count": 42i64 },
+            },
+            doc! { "_id": 2i32, "name": "second" },
+        ];
+        let bytes = bson_dump_bytes(&documents);
+        let preview =
+            preview_mongodb_import_bytes(&bytes, MongoImportFormat::Bson, &MongoImportParseOptions::default(), 10)
+                .unwrap();
+        assert_eq!(preview.rows.len(), 2);
+        assert_eq!(preview.estimated_rows, Some(2));
+        assert!(preview.estimated_rows_exact);
+        assert_eq!(preview.rows[0]["_id"]["$oid"], "507f1f77bcf86cd799439011");
+        assert!(preview.rows[0]["payload"].get("$binary").is_some());
+
+        let imported = execute_source(&bytes, "bson", MongoImportFormat::Bson, &MongoImportParseOptions::default());
+        assert_eq!(imported, preview.rows);
+    }
+
+    #[test]
+    fn gzip_bson_dump_import_matches_plain_dump() {
+        let documents = vec![doc! { "_id": 1i32, "name": "Ada" }, doc! { "_id": 2i32, "name": "Bob" }];
+        let plain = bson_dump_bytes(&documents);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let imported =
+            execute_source(&compressed, "bson.gz", MongoImportFormat::Bson, &MongoImportParseOptions::default());
+        assert_eq!(imported.len(), 2);
+        assert_eq!(imported[0]["name"], "Ada");
+        assert_eq!(imported[1]["name"], "Bob");
+    }
+
+    #[test]
+    fn bson_dump_rejects_truncated_and_invalid_lengths() {
+        let mut truncated = mongodb::bson::to_vec(&doc! { "name": "Ada" }).unwrap();
+        truncated.pop();
+        let error =
+            preview_mongodb_import_bytes(&truncated, MongoImportFormat::Bson, &MongoImportParseOptions::default(), 10)
+                .unwrap_err();
+        assert_eq!(error.code, "BSON_STRUCTURE");
+        assert_eq!(error.row, Some(1));
+
+        let error = preview_mongodb_import_bytes(
+            &(BSON_MAX_DOCUMENT_BYTES as i32 + 1).to_le_bytes(),
+            MongoImportFormat::Bson,
+            &MongoImportParseOptions::default(),
+            10,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "BSON_STRUCTURE");
+    }
+
+    #[test]
+    fn bson_dump_format_is_detected_from_plain_and_gzip_paths() {
+        assert_eq!(format_from_path("users.bson").unwrap(), MongoImportFormat::Bson);
+        assert_eq!(format_from_path("users.BSON.GZ").unwrap(), MongoImportFormat::Bson);
     }
 
     #[test]

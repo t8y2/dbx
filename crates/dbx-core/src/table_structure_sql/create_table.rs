@@ -3,7 +3,7 @@ use super::column_format::{
     is_mysql_character_data_type, is_mysql_timestamp_type, mysql_on_update_current_timestamp_clause,
     strip_inherited_mysql_column_charsets,
 };
-use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
+use super::comments::{build_sqlserver_column_comment_sql_for_profile, build_sqlserver_table_comment_sql_for_profile};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::foreign_keys::build_foreign_key_sql_for_new_table;
 use super::indexes::build_create_index_statements;
@@ -190,11 +190,12 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             } else if dialect == StructureDialect::ClickHouse {
                 statements.push(format!("ALTER TABLE {table} MODIFY COMMENT {};", quote_string(&table_comment)));
             } else if dialect == StructureDialect::SqlServer {
-                statements.extend(build_sqlserver_table_comment_sql(
+                statements.extend(build_sqlserver_table_comment_sql_for_profile(
                     &table,
                     options.schema.as_deref(),
                     &options.table_name,
                     &table_comment,
+                    options.driver_profile.as_deref(),
                 ));
             }
         }
@@ -234,12 +235,13 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
     if capabilities.comment && dialect == StructureDialect::SqlServer {
         for column in &active_columns {
             if !clean(&column.comment).is_empty() {
-                statements.extend(build_sqlserver_column_comment_sql(
+                statements.extend(build_sqlserver_column_comment_sql_for_profile(
                     &table,
                     options.schema.as_deref(),
                     &options.table_name,
                     &column.name,
                     &column.comment,
+                    options.driver_profile.as_deref(),
                 ));
             }
         }
@@ -264,6 +266,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
             false,
             capabilities.index_concurrent,
             true,
+            options.driver_profile.as_deref(),
         ));
     }
 

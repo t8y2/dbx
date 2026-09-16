@@ -744,6 +744,8 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
+  // SQL Server control-flow batches use line-oriented BEGIN/EXEC tokens inside one IF/ELSE statement.
+  if (isSqlServerIfElseControlFlowBatch(sql, statement, databaseType, parameterOptions)) return [statement];
 
   const lineStarts = topLevelSoftStatementLineStarts(sql, statement, databaseType, parameterOptions);
   if (lineStarts.length <= 1) return [statement];
@@ -847,6 +849,13 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   }
 
   return ranges.length > 0 ? ranges : [statement];
+}
+
+function isSqlServerIfElseControlFlowBatch(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  if (databaseType !== "sqlserver" || !startsWithSqlWords(sql, statement.from, ["IF"], databaseType, parameterOptions)) return false;
+
+  const words = topLevelWordsBefore(sql, statement.from, statement.to, 64, databaseType, parameterOptions);
+  return words.includes("ELSE") && words.includes("BEGIN") && words.includes("END");
 }
 
 function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): Array<{ hitFrom: number; from: number; keyword: string }> {

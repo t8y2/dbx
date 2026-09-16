@@ -1260,7 +1260,9 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
 
     for (idx, batch) in batches.iter().enumerate() {
         if cursor >= batch.start && cursor <= batch.end {
-            if profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&batch.text) {
+            if starts_with_sqlserver_control_flow_batch(&batch.text)
+                || (profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&batch.text))
+            {
                 return batch.text.clone();
             }
             let relative_cursor = sql[..cursor].encode_utf16().count() - sql[..batch.start].encode_utf16().count();
@@ -1269,7 +1271,9 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
 
         if cursor < batch.start {
             if let Some(prev) = idx.checked_sub(1).and_then(|prev_idx| batches.get(prev_idx)) {
-                if profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&prev.text) {
+                if starts_with_sqlserver_control_flow_batch(&prev.text)
+                    || (profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(&prev.text))
+                {
                     return prev.text.clone();
                 }
                 let relative_cursor = prev.text.encode_utf16().count();
@@ -1284,6 +1288,14 @@ fn find_sqlserver_statement_at_cursor(sql: &str, cursor_pos: usize) -> String {
     }
 
     batches.last().map(|batch| batch.text.clone()).unwrap_or_else(|| sql.trim().to_string())
+}
+
+fn starts_with_sqlserver_control_flow_batch(sql: &str) -> bool {
+    let tokens = first_sql_tokens(sql, 128);
+    tokens.first().is_some_and(|token| token.eq_ignore_ascii_case("IF"))
+        && tokens.iter().any(|token| token.eq_ignore_ascii_case("ELSE"))
+        && tokens.iter().any(|token| token.eq_ignore_ascii_case("BEGIN"))
+        && tokens.iter().any(|token| token.eq_ignore_ascii_case("END"))
 }
 
 fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
@@ -4757,6 +4769,24 @@ END";
             super::find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SqlServer),
             "ALTER PROC dbo.usp_demo\nAS\nBEGIN\n  UPDATE dbo.users SET name = name;\nEND"
         );
+    }
+
+    #[test]
+    fn sqlserver_current_statement_keeps_if_else_control_flow_batch() {
+        let sql = "\
+IF EXISTS (SELECT 1 FROM ::fn_listextendedproperty('MS_Description','USER','dbo','TABLE','Categories','COLUMN','CategoryID'))
+BEGIN
+  EXEC sp_updateextendedproperty @name=N'MS_Description', @value=N'test', @level0type=N'USER', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'Categories', @level2type=N'COLUMN', @level2name=N'CategoryID'
+END
+ELSE
+BEGIN
+  EXEC sp_addextendedproperty @name=N'MS_Description', @value=N'test', @level0type=N'USER', @level0name=N'dbo', @level1type=N'TABLE', @level1name=N'Categories', @level2type=N'COLUMN', @level2name=N'CategoryID'
+END";
+        let update_cursor = sql[..sql.find("sp_updateextendedproperty").unwrap()].encode_utf16().count();
+        let add_cursor = sql[..sql.find("sp_addextendedproperty").unwrap()].encode_utf16().count();
+
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, update_cursor, DatabaseType::SqlServer), sql);
+        assert_eq!(super::find_statement_at_cursor_for_database(sql, add_cursor, DatabaseType::SqlServer), sql);
     }
 
     #[test]

@@ -13,7 +13,6 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
@@ -312,8 +311,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             );
             pinned.setGbase_server(base.getGbase_server());
         }
-        try (Connection connection = DriverManager.getConnection(
-                 buildUrl(pinned), pinned.getUsername(), pinned.getPassword());
+        try (Connection connection = super.openConnection(pinned);
              Statement stmt = connection.createStatement()) {
             stmt.execute(stripTrailingSemicolon(statement));
         } catch (Exception e) {

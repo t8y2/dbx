@@ -13,7 +13,6 @@ import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -121,7 +120,12 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
-        return buildUrl(withResolvedDatabaseLocale(params));
+        return buildUrl(params);
+    }
+
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return super.openConnection(withResolvedDatabaseLocale(params));
     }
 
     /**
@@ -163,8 +167,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             return cached;
         }
         String collate = "";
-        try (Connection connection = DriverManager.getConnection(
-                 buildUrlForDatabase(params, "sysmaster"), params.getUsername(), params.getPassword());
+        try (Connection connection = super.openConnection(paramsForDatabase(params, "sysmaster"));
              PreparedStatement stmt = connection.prepareStatement(
                  "SELECT dbs_collate FROM sysmaster:sysdbslocale WHERE LOWER(dbs_dbsname) = ?")) {
             stmt.setString(1, database.toLowerCase(Locale.ROOT));

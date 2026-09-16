@@ -232,14 +232,15 @@ pub struct ExecuteMultiResult {
     pub error: Option<crate::backend_error::BackendError>,
     #[serde(skip_serializing_if = "is_false")]
     pub server_message: bool,
-    /// Oracle-only manual-transaction UX metadata: true only for a statement
-    /// proven to be an ordinary top-level read. Absent/false for every other
-    /// Oracle statement and every non-Oracle execution. Not part of the
-    /// reusable database-result model (`db::QueryResult`).
+    /// Manual-transaction UX metadata for sticky proven-read-only dialects
+    /// (Oracle, OceanBase-Oracle, MySQL, PostgreSQL): true only for a statement
+    /// proven to be an ordinary read by that dialect's strict heuristic.
+    /// Absent/false for unproven statements and non-participating dialects.
+    /// Not part of the reusable database-result model (`db::QueryResult`).
     #[serde(skip_serializing_if = "is_false")]
     pub manual_transaction_proven_read_only: bool,
-    /// Oracle-only manual-transaction UX metadata: true on the synthetic
-    /// successful result when the manual-execution splitter found zero
+    /// Manual-transaction UX metadata for the same dialects: true on the
+    /// synthetic successful result when the manual-execution splitter found zero
     /// statements (empty/whitespace/comments-only script). Lets the frontend
     /// treat it as a no-op rather than an unproven statement.
     #[serde(skip_serializing_if = "is_false")]
@@ -5378,6 +5379,45 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
     }
 }
 
+/// Compute per-execution-statement proven-read-only markers for the sticky
+/// manual-transaction UX (#7122 Oracle, #9018 MySQL/PostgreSQL). The user-facing
+/// classification SQL is split with the same dialect-aware splitter as the
+/// execution SQL and paired by count/position; any mismatch is fail-closed (no
+/// markers). Oracle/OceanBase-Oracle keep the lexical classifier, MySQL and
+/// PostgreSQL use the strict `sql_risk` proof; every other dialect is unproven.
+fn classify_manual_transaction_statements(
+    database_type: Option<DatabaseType>,
+    execution_statement_count: usize,
+    classification_sql: Option<&str>,
+) -> Vec<bool> {
+    let Some(database_type) = database_type.filter(|database_type| {
+        matches!(
+            database_type,
+            DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Mysql | DatabaseType::Postgres
+        )
+    }) else {
+        return Vec::new();
+    };
+    let Some(classification_sql) = classification_sql else {
+        return Vec::new();
+    };
+    let user_statements = crate::sql::split_sql_statements_for_database(classification_sql, database_type);
+    let paired = user_statements.len() == execution_statement_count && !user_statements.is_empty();
+    if !paired {
+        return Vec::new();
+    }
+    user_statements
+        .iter()
+        .map(|statement| match database_type {
+            DatabaseType::Mysql | DatabaseType::Postgres => {
+                crate::sql_risk::prove_read_only_for_database(statement, database_type)
+                    == crate::sql_risk::ReadProof::ProvenReadOnly
+            }
+            _ => is_oracle_proven_read_only_statement(statement),
+        })
+        .collect()
+}
+
 async fn begin_transaction_session(
     state: &AppState,
     connection_id: &str,
@@ -5688,7 +5728,7 @@ pub async fn execute_in_manual_transaction_with_options(
         },
     );
     if statements.is_empty() {
-        // Oracle-only UX marker: the no-op is Core's decision that the script
+        // Sticky-dialect UX marker: the no-op is Core's decision that the script
         // (empty/whitespace/comments-only) has no statements, so the frontend
         // must not treat it as an unproven statement. Every other database
         // receives the plain empty result.
@@ -5696,7 +5736,10 @@ pub async fn execute_in_manual_transaction_with_options(
             empty_query_result(0),
             options.table_data_preview,
         );
-        if matches!(db_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
+        if matches!(
+            db_type,
+            Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Mysql | DatabaseType::Postgres)
+        ) {
             result = result.with_manual_transaction_no_statement();
         }
         return Ok(vec![result]);
@@ -5752,30 +5795,14 @@ pub async fn execute_in_manual_transaction_with_options(
     let row_limit = options.max_rows.unwrap_or(MAX_ROWS).max(1);
     let mut results = Vec::with_capacity(statements.len());
 
-    // Oracle-only classification pairing. The core splits both the execution
+    // Sticky-dialect classification pairing. The core splits both the execution
     // SQL and, when present, the user-facing classification SQL with the same
-    // Oracle-aware splitter. A marker is emitted only when both lists have the
+    // dialect-aware splitter. A marker is emitted only when both lists have the
     // same non-zero count and every paired user statement is proven read-only;
     // any mismatch is fail-closed (no marker). This is deliberately a
     // trust-boundary count/position pairing, not a SQL-equivalence parser.
-    let classification: Vec<bool> = if let Some(dialect) =
-        db_type.filter(|db_type| matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
-    {
-        match options.classification_sql.as_deref() {
-            Some(classification_sql) => {
-                let user_statements = crate::sql::split_sql_statements_for_database(classification_sql, dialect);
-                let paired = user_statements.len() == statements.len() && !user_statements.is_empty();
-                if paired {
-                    user_statements.iter().map(|statement| is_oracle_proven_read_only_statement(statement)).collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
+    let classification: Vec<bool> =
+        classify_manual_transaction_statements(db_type, statements.len(), options.classification_sql.as_deref());
 
     let mut conn = connection.lock().await;
     for (i, statement) in statements.iter().enumerate() {
@@ -10495,7 +10522,46 @@ for line in sys.stdin:
     /// Spawns a fake Python agent and registers a manual transaction session in
     /// the app state so `execute_in_manual_transaction_with_options` can run
     /// end to end without a live database.
+    #[test]
+    fn manual_transaction_classification_pairs_statements_and_fails_closed() {
+        // MySQL/PostgreSQL route through the strict sql_risk proof.
+        assert_eq!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1")), vec![true]);
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users")),
+            vec![true]
+        );
+        // Mixed script: every statement is classified individually.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 2, Some("SELECT 1; DELETE FROM t")),
+            vec![true, false]
+        );
+        // Session-state writes fail the proof (SELECT ... INTO @var).
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1 INTO @x")),
+            vec![false]
+        );
+        // Count mismatch, missing classification SQL, non-participating dialects
+        // and unknown connections are all fail-closed (no markers).
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 3, Some("SELECT 1")).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, None).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Doris), 1, Some("SELECT 1")).is_empty());
+        assert!(classify_manual_transaction_statements(None, 1, Some("SELECT 1")).is_empty());
+        // Oracle keeps its lexical classifier and its pairing behavior.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT * FROM EMP")),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::OceanbaseOracle), 1, Some("DELETE FROM EMP")),
+            vec![false]
+        );
+    }
+
+    /// Spawns a fake Python agent and registers a manual transaction session in
+    /// the app state so `execute_in_manual_transaction_with_options` can run
+    /// end to end without a live database.
     #[cfg(unix)]
+    #[tokio::test]
     async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
         use std::io::Write;
 

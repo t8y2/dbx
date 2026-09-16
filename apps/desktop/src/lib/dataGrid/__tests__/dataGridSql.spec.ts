@@ -14,4 +14,22 @@ describe("normalizeDataGridSaveError", () => {
     expect(normalizeDataGridSaveError("mysql", new Error("save failed"))).toBe("save failed");
     expect(normalizeDataGridSaveError("hive", new Error("Error 10294: update is disabled"))).toContain("Hive UPDATE/DELETE");
   });
+
+  it("prefers the Error message over a backend envelope without detail", () => {
+    const sqlError = Object.assign(new Error("Duplicate entry '1' for key 'PRIMARY'"), {
+      backendError: {
+        version: 1,
+        code: "DBX-JDBC-4001",
+        messageKey: "backendErrors.jdbc.sqlFailed",
+        messageParams: { stage: "execute" },
+        source: "jdbc_agent",
+        operationOutcome: "unknown",
+      },
+    });
+    expect(normalizeDataGridSaveError("mysql", sqlError)).toBe("Duplicate entry '1' for key 'PRIMARY'");
+  });
+
+  it("extracts messages from nested backendError envelopes", () => {
+    expect(normalizeDataGridSaveError("mysql", { backendError: { message: "Connection refused" } })).toBe("Connection refused");
+  });
 });

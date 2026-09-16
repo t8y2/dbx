@@ -169,24 +169,10 @@ export function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptio
 }
 
 function formatDataGridSaveError(error: unknown): string {
-  const message = formatError(error);
-  if (message !== "[object Object]" || !error || typeof error !== "object") {
-    return message;
+  if (error instanceof Error && error.message) {
+    return error.message;
   }
-
-  for (const key of ["error", "backendError"] as const) {
-    const nestedError: unknown = (error as Record<string, unknown>)[key];
-    if (nestedError === undefined || nestedError === error) {
-      continue;
-    }
-
-    const nestedMessage = formatError(nestedError);
-    if (nestedMessage !== "[object Object]") {
-      return nestedMessage;
-    }
-  }
-
-  return message;
+  return formatError(error);
 }
 
 export function normalizeDataGridSaveError(databaseType: DatabaseType | undefined, error: unknown): string {

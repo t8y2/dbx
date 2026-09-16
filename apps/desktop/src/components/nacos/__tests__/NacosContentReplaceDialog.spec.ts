@@ -16,7 +16,7 @@ const api = vi.hoisted(() => ({
 const history = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("@/lib/nacos/nacosReplaceHistoryStorage", () => ({
   saveNacosReplaceHistory: vi.fn(async (entry) => {
-    history.set(entry.id, structuredClone(entry));
+    history.set(entry.id, JSON.parse(JSON.stringify(entry)));
   }),
   listNacosReplaceHistory: vi.fn(async () => [...history.values()]),
   getNacosReplaceHistory: vi.fn(async (id) => structuredClone(history.get(id))),
@@ -67,7 +67,9 @@ function input(testId: string, value: string) {
 
 async function click(testId: string) {
   await nextTick();
-  (document.body.querySelector(`[data-testid=${testId}]`) as HTMLButtonElement).click();
+  const element = document.body.querySelector(`[data-testid=${testId}]`) as HTMLButtonElement;
+  if (element.getAttribute("role") === "tab") element.dispatchEvent(new MouseEvent("mousedown", { button: 0, ctrlKey: false, bubbles: true }));
+  else element.click();
   await nextTick();
   await nextTick();
 }

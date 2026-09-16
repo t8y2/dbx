@@ -60,6 +60,13 @@ export interface NacosContentReplaceApi {
 export interface NacosContentReplaceExecutionOptions extends NacosContentReplaceApi {
   signal?: AbortSignal;
   onProgress?: (completed: number, total: number) => void;
+  onBeforeItem?: (item: NacosContentReplacePlanItem) => Promise<void>;
+  onItemResult?: (item: NacosContentReplaceResultItem) => Promise<void>;
+}
+
+export interface NacosContentRollbackOptions extends NacosContentReplaceApi {
+  onBeforeItem?: (item: NacosContentReplaceResultItem) => Promise<void>;
+  onItemResult?: (item: NacosContentRollbackReport["items"][number]) => Promise<void>;
 }
 
 export function nacosConfigIdentity(config: Pick<NacosConfigItem, "namespace" | "group" | "dataId">): string {
@@ -170,6 +177,7 @@ export async function applyNacosContentReplacePlan(plan: NacosContentReplacePlan
 
   for (const item of plan.items) {
     if (options.signal?.aborted) break;
+    await options.onBeforeItem?.(item);
     try {
       const current = await options.getConfig(configKey(item));
       if (!configMatchesPreview(item, current)) {
@@ -196,6 +204,8 @@ export async function applyNacosContentReplacePlan(plan: NacosContentReplacePlan
         resultItems.push({ ...item, status: "failed", message });
       }
     } finally {
+      // Journal errors must escape the API-error handler and stop subsequent writes.
+      await options.onItemResult?.(resultItems[resultItems.length - 1]);
       options.onProgress?.(resultItems.length, plan.items.length);
     }
   }
@@ -210,13 +220,14 @@ export async function applyNacosContentReplacePlan(plan: NacosContentReplacePlan
   };
 }
 
-export async function rollbackNacosContentReplace(report: NacosContentReplaceReport, options: NacosContentReplaceApi): Promise<NacosContentRollbackReport> {
+export async function rollbackNacosContentReplace(report: NacosContentReplaceReport, options: NacosContentRollbackOptions): Promise<NacosContentRollbackReport> {
   const items: NacosContentRollbackReport["items"] = [];
   let restored = 0;
   let conflicts = 0;
   let failed = 0;
 
   for (const item of report.items.filter((candidate) => candidate.status === "replaced")) {
+    await options.onBeforeItem?.(item);
     try {
       const current = await options.getConfig(configKey(item));
       if (!configMatchesApplied(item, current)) {
@@ -236,6 +247,8 @@ export async function rollbackNacosContentReplace(report: NacosContentReplaceRep
     } catch (error) {
       failed += 1;
       items.push({ ...configKey(item), key: item.key, status: "failed", message: errorMessage(error) });
+    } finally {
+      await options.onItemResult?.(items[items.length - 1]);
     }
   }
 

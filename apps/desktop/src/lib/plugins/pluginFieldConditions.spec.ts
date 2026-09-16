@@ -150,7 +150,7 @@ describe("pluginFieldIsVisible", () => {
         },
       }),
     };
-    const read: (key: string) => PluginFormFieldValue = (key) => fields[key]?.default;
+    const read: (key: string) => PluginFormFieldValue = (key) => fields[key]?.default ?? undefined;
     const resolve: (key: string) => PluginFormField | undefined = (key) => fields[key];
 
     expect(pluginFieldIsVisible(fields.target, read, resolve)).toBe(true);
@@ -168,7 +168,7 @@ describe("pluginFieldIsVisible", () => {
       read_only: field({ key: "read_only", default: false, visible_when: { field: "mode", one_of: ["local"] } }),
       writable_options: field({ key: "writable_options", visible_when: { not: { field: "read_only", one_of: [true] } } }),
     };
-    const read: (key: string) => PluginFormFieldValue = (key) => fields[key]?.default;
+    const read: (key: string) => PluginFormFieldValue = (key) => fields[key]?.default ?? undefined;
     const resolve: (key: string) => PluginFormField | undefined = (key) => fields[key];
 
     expect(pluginFieldIsVisible(fields.writable_options, read, resolve)).toBe(false);
@@ -187,12 +187,12 @@ describe("pluginFieldIsVisible", () => {
       oauth_token_source: field({ key: "oauth_token_source", default: "msk_iam", visible_when: { field: "sasl_mechanism", one_of: ["OAUTHBEARER"] } }),
       msk_region: field({ key: "msk_region", visible_when: { field: "oauth_token_source", one_of: ["msk_iam"] } }),
     };
-    const read: (key: string) => PluginFormFieldValue = (key) => fields[key]?.default;
+    const read: (key: string) => PluginFormFieldValue = (key) => fields[key]?.default ?? undefined;
     const resolve: (key: string) => PluginFormField | undefined = (key) => fields[key];
 
     expect(pluginFieldIsVisible(fields.msk_region, read, resolve)).toBe(false);
     // Turning OAUTHBEARER on makes the whole chain visible again.
-    const readOauth: (key: string) => PluginFormFieldValue = (key) => (key === "sasl_mechanism" ? "OAUTHBEARER" : key === "security_protocol" ? "SASL_SSL" : fields[key]?.default);
+    const readOauth: (key: string) => PluginFormFieldValue = (key) => (key === "sasl_mechanism" ? "OAUTHBEARER" : key === "security_protocol" ? "SASL_SSL" : (fields[key]?.default ?? undefined));
     expect(pluginFieldIsVisible(fields.oauth_token_source, readOauth, resolve)).toBe(true);
     expect(pluginFieldIsVisible(fields.msk_region, readOauth, resolve)).toBe(true);
   });

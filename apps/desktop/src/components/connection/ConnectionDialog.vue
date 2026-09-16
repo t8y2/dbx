@@ -3610,7 +3610,7 @@ const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
 
 function pluginFieldValue(field: PluginFormField): PluginFormFieldValue {
   if (field.binding === "name") return form.value.name;
-  return pluginFormValues.value[field.key] ?? field.default;
+  return pluginFormValues.value[field.key] ?? field.default ?? undefined;
 }
 
 function pluginFieldHasValue(field: PluginFormField): boolean {

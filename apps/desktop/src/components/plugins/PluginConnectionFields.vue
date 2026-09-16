@@ -29,7 +29,7 @@ const formValues = computed(() => props.modelValue);
 /** Value of any sibling field by key (condition evaluation reads current form values). */
 function readFieldValue(key: string): PluginFormFieldValue {
   const field = props.contribution.fields.find((candidate) => candidate.key === key);
-  return field ? (formValues.value[key] ?? field.default) : undefined;
+  return field ? (formValues.value[key] ?? field.default ?? undefined) : undefined;
 }
 const resolveSiblingField: PluginFieldResolver = (key) => props.contribution.fields.find((candidate) => candidate.key === key);
 function fieldVisible(field: PluginFormField): boolean {
@@ -43,7 +43,18 @@ const visibleFields = computed(() => props.contribution.fields.filter((field) =>
 const isConnectionDialogLayout = computed(() => props.layout === "connection-dialog");
 
 function fieldValue(field: PluginFormField): PluginFormFieldValue {
-  return formValues.value[field.key] ?? field.default ?? defaultValueFor(field);
+  // `null` is "unset": hosts used to hydrate untouched fields with a null
+  // default, and a null reaching an input must not look like a stored value.
+  const raw = formValues.value[field.key];
+  const value = raw ?? field.default ?? defaultValueFor(field);
+  return value === null ? undefined : value;
+}
+
+/** Text/number inputs render any primitive as text; `null` stays empty. */
+function fieldInputValue(field: PluginFormField): string | number {
+  const value = fieldValue(field);
+  if (typeof value === "boolean") return String(value);
+  return value ?? "";
 }
 
 function updateField(field: PluginFormField, value: PluginFormFieldValue) {
@@ -207,7 +218,7 @@ function applyLocalSshKey(field: PluginFormField, event: Event) {
             </SelectContent>
           </Select>
           <div v-else-if="isLocalSshKeyField(field)" class="flex items-center gap-1.5">
-            <Input :id="fieldId(field)" type="text" :model-value="fieldValue(field) as string | number | undefined" :placeholder="field.placeholder" class="min-w-0 flex-1" @update:model-value="updateTextField(field, $event)" />
+            <Input :id="fieldId(field)" type="text" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" class="min-w-0 flex-1" @update:model-value="updateTextField(field, $event)" />
             <select
               class="h-9 w-40 shrink-0 rounded-md border border-input bg-transparent px-2 text-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
               :disabled="localSshKeys.length === 0"
@@ -219,7 +230,7 @@ function applyLocalSshKey(field: PluginFormField, event: Event) {
               <option v-for="key in localSshKeys" :key="key.path" :value="key.path" :title="key.path">{{ localSshKeyLabel(key) }}</option>
             </select>
           </div>
-          <Input v-else :id="fieldId(field)" :type="field.type === 'number' ? 'number' : 'text'" :model-value="fieldValue(field) as string | number | undefined" :placeholder="field.placeholder" @update:model-value="updateTextField(field, $event)" />
+          <Input v-else :id="fieldId(field)" :type="field.type === 'number' ? 'number' : 'text'" :model-value="fieldInputValue(field)" :placeholder="field.placeholder" @update:model-value="updateTextField(field, $event)" />
         </template>
         <PasswordInput v-else-if="field.type === 'password'" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" @update:model-value="updateField(field, $event)" />
         <PasswordTextarea v-else-if="field.type === 'textarea' && field.binding === 'secret'" :id="fieldId(field)" :model-value="String(fieldValue(field) ?? '')" :placeholder="field.placeholder" @update:model-value="updateField(field, $event)" />

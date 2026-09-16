@@ -111,6 +111,39 @@ describe("PluginConnectionFields", () => {
     expect(state.values).toEqual({ password: "secret", host: "db.internal" });
   });
 
+  it('renders a null value as an empty field instead of the text "null"', async () => {
+    // Hosts before the manifest serialization fix hydrated untouched fields with
+    // `null`, and a null reaching an <input> is coerced to the string "null" by
+    // the DOM — a password field then looked non-empty without any user input.
+    const provider: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "null.connection",
+      label: "Nulls",
+      database_type: "nulls",
+      fields: [
+        { key: "sudo_password", label: "Sudo password", type: "password", binding: "secret" },
+        { key: "sudo_command", label: "Sudo command", type: "text", binding: "config" },
+        { key: "set_env", label: "Env", type: "textarea", binding: "config" },
+      ],
+    };
+    const state = await mountContribution(provider, {
+      sudo_password: null,
+      sudo_command: null,
+      set_env: null,
+    } as unknown as Record<string, PluginFormFieldValue>);
+
+    expect(document.querySelector<HTMLInputElement>("#null-connection-sudo_password")?.value).toBe("");
+    expect(document.querySelector<HTMLInputElement>("#null-connection-sudo_command")?.value).toBe("");
+    expect(document.querySelector<HTMLTextAreaElement>("#null-connection-set_env")?.value).toBe("");
+
+    // Editing still emits a real value, so a null never survives the dialog.
+    const command = document.querySelector<HTMLInputElement>("#null-connection-sudo_command")!;
+    command.value = "sudo -n true";
+    command.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    expect(state.values.sudo_command).toBe("sudo -n true");
+  });
+
   it("can hide host-owned common bindings", async () => {
     contribution.fields[0].binding = "host";
     await mountFields({}, ["host"]);

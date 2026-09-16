@@ -222,6 +222,8 @@ Field bindings:
 
 Password fields default to `secret` when `binding` is omitted. DBX validates required values and value types before calling the plugin. The plugin receives the hydrated connection only in its backend lifecycle request; the workbench UI receives a connection ID and non-secret navigation context.
 
+Absent optional fields stay absent: when DBX hands the manifest to its own UI it omits `description`, `placeholder`, `default`, and `binding` for fields that do not declare them, and `"default": null` means "no default" exactly like omitting the key. Treat a missing value as unset — never as an empty string, and never as the literal text `null`, which is not a storable plugin value.
+
 #### Conditional fields
 
 A field may declare `visible_when` and `required_when`. A leaf clause matches when the referenced sibling field holds a non-empty value listed in `one_of`; listed values may be strings, numbers, or booleans and are compared by canonical string form, so `false` and `"false"` both match a boolean `false`. Clauses compose with `all_of`, `any_of`, and `not`:

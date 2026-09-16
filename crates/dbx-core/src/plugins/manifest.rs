@@ -116,9 +116,9 @@ pub struct PluginEngines {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginEntrypoints {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<PluginBackendEntrypoint>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<PluginUiEntrypoint>,
 }
 
@@ -169,7 +169,7 @@ pub struct PluginDriverManifest {
     pub id: String,
     pub label: String,
     pub kind: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<String>,
 }
 
@@ -248,17 +248,17 @@ pub struct PluginFormFieldDefinition {
     pub label: String,
     #[serde(rename = "type")]
     pub field_type: PluginFormFieldType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     #[serde(default)]
     pub required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<PluginFormFieldOption>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<PluginFormFieldBinding>,
     /// Plugin method returning `{ options: [{ value, label }] }`; the host
     /// connection form fetches it and renders the field as a dynamic select.
@@ -503,18 +503,18 @@ pub struct PluginFormFieldOption {
 #[serde(deny_unknown_fields)]
 pub struct PluginConnectionProviderContribution {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub database_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
     pub fields: Vec<PluginFormFieldDefinition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workbench: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<PluginConnectionCapability>,
@@ -541,17 +541,17 @@ pub enum PluginConnectionCapability {
 pub struct PluginConnectionActionContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<PluginConnectionActionVariant>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<PluginConnectionActionWhen>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub close_on_success: bool,
     #[serde(default = "default_action_requires_valid_form", skip_serializing_if = "is_true")]
     pub requires_valid_form: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -590,9 +590,9 @@ pub enum PluginConnectionActionWhen {
 pub struct PluginWorkbenchContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }
 
@@ -604,9 +604,9 @@ pub struct PluginWorkbenchContribution {
 pub struct PluginContextMenuContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     /// Menu surface the item belongs to; currently only `connection`.
     #[serde(default)]
@@ -620,9 +620,9 @@ pub struct PluginContextMenuContribution {
 pub struct PluginResultViewContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }
 
@@ -632,13 +632,13 @@ pub struct PluginFilesystemProviderContribution {
     pub id: String,
     pub label: String,
     pub schemes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<PluginFilesystemCapability>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_uri: Option<String>,
 }
 
@@ -1900,6 +1900,55 @@ mod tests {
         assert!(errors.iter().any(|error| error.contains("label cannot be empty")));
         assert!(errors.iter().any(|error| error.contains("invalid or duplicate id")));
         assert!(errors.iter().any(|error| error.contains("timeout_ms must be between")));
+    }
+
+    /// The manifest the frontend receives is a re-serialization of the parsed
+    /// manifest, so an absent optional must stay absent. Emitting `null`
+    /// instead made the connection form treat "no default" as a real `null`
+    /// value: untouched fields showed a literal "null" and a save persisted the
+    /// four-character string "null" into `connection_secrets`.
+    #[test]
+    fn serialized_form_fields_omit_absent_optionals() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.nulls",
+            "name": "Nulls",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "nulls.connection",
+                "label": "Nulls",
+                "database_type": "nulls",
+                "fields": [
+                    { "key": "sudo_password", "label": "Sudo password", "type": "password", "binding": "secret" },
+                    { "key": "with_default", "label": "With default", "type": "text", "default": "root" },
+                    { "key": "explicit_null", "label": "Explicit null", "type": "text", "default": null },
+                    { "key": "mode", "label": "Mode", "type": "text" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        let fields = serialized["contributions"][0]["fields"].as_array().unwrap();
+
+        // A field that declares nothing optional carries none of those keys, so
+        // the frontend can never mistake "absent" for a `null` value.
+        for key in ["default", "binding", "description", "placeholder"] {
+            assert!(fields[3].get(key).is_none(), "bare field must not serialize `{key}`: {}", fields[3]);
+        }
+        // Declared values survive the round trip; an explicit `null` default
+        // means "no default" and normalizes to an absent key rather than a
+        // value the form would try to render.
+        assert_eq!(fields[0]["binding"], "secret");
+        assert_eq!(fields[1]["default"], "root");
+        assert!(fields[2].get("default").is_none());
+        // Provider-level optionals follow the same rule.
+        assert!(serialized["contributions"][0].get("icon").is_none());
+        assert!(serialized["contributions"][0].get("workbench").is_none());
+        assert!(serialized["contributions"][0].get("filesystem_provider").is_none());
     }
 
     #[test]

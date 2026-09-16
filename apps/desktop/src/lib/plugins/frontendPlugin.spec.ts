@@ -324,6 +324,55 @@ describe("FrontendPluginRegistry", () => {
     expect(values).not.toHaveProperty("host");
   });
 
+  it("treats a host-serialized null default as unset instead of a value", () => {
+    // Hosts before the manifest serialization fix sent `"default": null` for
+    // every field that declares no default, so an untouched password field
+    // turned into the four-character string "null" once it was saved.
+    const provider = connectionProvider({
+      fields: [
+        { key: "sudo_password", label: "Sudo password", type: "password", binding: "secret", default: null },
+        { key: "mode", label: "Mode", type: "text", binding: "config", default: null },
+        { key: "read_only", label: "Read only", type: "boolean", binding: "config", default: false },
+      ],
+    });
+
+    expect(initialPluginFormValues(provider)).toEqual({ read_only: false });
+
+    const config = buildPluginConnectionConfig("io.dbx.ssh", provider, {
+      sudo_password: null,
+      mode: null,
+      read_only: false,
+    } as unknown as Record<string, string>);
+
+    expect(config.connection_secrets?.sudo_password).toBeUndefined();
+    expect(config.external_config).toEqual({ read_only: false });
+  });
+
+  it("ignores the 'null' secret placeholder older hosts persisted and keeps real secrets", () => {
+    const provider = connectionProvider({
+      fields: [
+        { key: "sudo_password", label: "Sudo password", type: "password", binding: "secret" },
+        { key: "totp_secret", label: "TOTP secret", type: "textarea", binding: "secret" },
+        { key: "sudo_source", label: "Sudo source", type: "text", binding: "config" },
+      ],
+    });
+    const existing = buildPluginConnectionConfig("io.dbx.ssh", provider, {});
+    existing.connection_secrets = { sudo_password: "null", totp_secret: "JBSWY3DPEHPK3PXP" };
+    existing.external_config = { sudo_source: "custom", stale: null };
+
+    const values = pluginConnectionFormValues(provider, existing);
+
+    expect(values.sudo_password).toBeUndefined();
+    expect(values.totp_secret).toBe("JBSWY3DPEHPK3PXP");
+    expect(values.stale).toBeUndefined();
+    expect(values.sudo_source).toBe("custom");
+
+    // Saving without touching anything drops the placeholder for good.
+    const saved = buildPluginConnectionConfig("io.dbx.ssh", provider, values, existing);
+    expect(saved.connection_secrets?.sudo_password).toBeUndefined();
+    expect(saved.connection_secrets?.totp_secret).toBe("JBSWY3DPEHPK3PXP");
+  });
+
   it("maps provider fields into common, config, and secret storage", () => {
     const provider: PluginConnectionProviderContribution = {
       type: "connection-provider",

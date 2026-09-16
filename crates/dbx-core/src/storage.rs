@@ -15,11 +15,11 @@ use crate::ai::{
     AiRunStatus,
 };
 use crate::connection_secrets::{
-    plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX,
-    CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY,
-    MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
-    NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
-    PLUGIN_CONNECTION_SECRET_PREFIX,
+    is_absent_plugin_secret, plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY,
+    CASSANDRA_TLS_SECRET_PREFIX, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY,
+    MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+    MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX,
+    NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -3312,11 +3312,33 @@ async fn load_plugin_connection_secrets(
                 .query_map(params![connection_id, like], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
                 .map_err(|error| error.to_string())?;
             let mut secrets = HashMap::new();
+            let mut stale_keys = Vec::new();
             for row in rows {
                 let (key, secret) = row.map_err(|error| error.to_string())?;
                 if let Some(key) = key.strip_prefix(PLUGIN_CONNECTION_SECRET_PREFIX) {
+                    // Hosts before the manifest serialization fix persisted the
+                    // four characters "null" for every plugin secret the user
+                    // never filled in. Drop those rows instead of handing them
+                    // to the plugin as a credential.
+                    if is_absent_plugin_secret(&secret) {
+                        warn!(
+                            "[plugin-secrets] dropping 'null' placeholder stored for '{}' on connection {}",
+                            key, connection_id
+                        );
+                        stale_keys.push(key.to_string());
+                        continue;
+                    }
                     secrets.insert(key.to_string(), secret);
                 }
+            }
+            drop(statement);
+            for key in stale_keys {
+                let storage_key = format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}");
+                conn.execute(
+                    "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2",
+                    params![connection_id, storage_key],
+                )
+                .map_err(|error| error.to_string())?;
             }
             Ok(secrets)
         })
@@ -6728,6 +6750,60 @@ mod tests {
 
         let loaded = storage.load_connections().await.unwrap();
         assert_eq!(loaded[0].connection_secrets.get("access_token").map(String::as_str), Some("plugin-secret"));
+    }
+
+    /// Regression: hosts before the manifest serialization fix stored the four
+    /// characters "null" for every plugin secret the user left empty (the
+    /// manifest's absent default was serialized as JSON `null` and the form
+    /// stringified it). Loading must drop those placeholders so the plugin is
+    /// not handed "null" as a sudo/TOTP/key credential, while real secrets are
+    /// hydrated unchanged.
+    #[tokio::test]
+    async fn load_connections_drops_null_placeholder_plugin_secrets() {
+        let path = temp_db_path("plugin-null-secret");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = mq_connection("plugin-connection", "");
+        config.name = "SSH plugin".to_string();
+        config.db_type = DatabaseType::Plugin;
+        config.driver_profile = Some("plugin".to_string());
+        config.plugin_id = Some("io.dbx.ssh".to_string());
+        config.plugin_connection_provider = Some("io.dbx.ssh.connection".to_string());
+        config.plugin_connection_type = Some("ssh".to_string());
+        config.connection_secrets.insert("sudo_password".to_string(), "null".to_string());
+        config.connection_secrets.insert("totp_secret".to_string(), "".to_string());
+        config.connection_secrets.insert("private_key_passphrase".to_string(), "real-passphrase".to_string());
+
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        // A legacy build stored the same placeholder under a key that the
+        // sanitized config only lists with an empty value.
+        storage
+            .set_secret("plugin-connection", &plugin_connection_secret_key("totp_secret").unwrap(), "null")
+            .await
+            .unwrap();
+
+        let loaded = storage.load_connections().await.unwrap();
+        let secrets = &loaded[0].connection_secrets;
+        assert_eq!(secrets.get("sudo_password").map(String::as_str), None);
+        assert_eq!(secrets.get("totp_secret").map(String::as_str), None);
+        assert_eq!(secrets.get("private_key_passphrase").map(String::as_str), Some("real-passphrase"));
+        assert_eq!(
+            storage
+                .get_secret("plugin-connection", &plugin_connection_secret_key("sudo_password").unwrap())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .get_secret("plugin-connection", &plugin_connection_secret_key("totp_secret").unwrap())
+                .await
+                .unwrap(),
+            None
+        );
+        // The next load stays clean instead of resurrecting the placeholder.
+        assert_eq!(storage.load_connections().await.unwrap()[0].connection_secrets, *secrets);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

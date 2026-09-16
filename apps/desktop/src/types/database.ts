@@ -325,7 +325,9 @@ export interface PluginFormField {
   description?: string;
   placeholder?: string;
   required?: boolean;
-  default?: PluginFormFieldValue;
+  /** Declared default. Hosts older than the manifest serialization fix send
+   * `null` for "no default", which the form treats as unset. */
+  default?: PluginFormFieldValue | null;
   options?: PluginFormFieldOption[];
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
    * select rendering; falls back to the declared type when unavailable. */

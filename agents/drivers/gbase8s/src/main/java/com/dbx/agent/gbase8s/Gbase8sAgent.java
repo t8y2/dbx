@@ -267,21 +267,42 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        Matcher directive = sql == null ? null : CREATE_DATABASE_LOCALE_DIRECTIVE.matcher(sql);
-        if (directive != null && directive.matches()) {
-            String locale = directive.group(1).trim();
-            String statement = directive.group(2).trim();
-            if (statement.regionMatches(true, 0, "CREATE DATABASE", 0, "CREATE DATABASE".length())) {
-                runCreateDatabaseWithLocale(statement, locale);
-                clearMetadataCache();
-                return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
-            }
+        CreateDatabaseLocaleDirective directive = parseCreateDatabaseLocaleDirective(sql);
+        if (directive != null) {
+            runCreateDatabaseWithLocale(directive.statement(), directive.locale());
+            clearMetadataCache();
+            return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
         }
         QueryResult result = super.executeQuery(sql, schema, options);
         if (mayChangeMetadata(sql)) {
             clearMetadataCache();
         }
         return result;
+    }
+
+    /**
+     * A {@code CREATE DATABASE} statement plus the DB_LOCALE carried by its leading directive
+     * comment. Package visible so the routing decision is directly testable without a live
+     * connection.
+     */
+    record CreateDatabaseLocaleDirective(String locale, String statement) {
+    }
+
+    /**
+     * Parse {@code sql} as a directive-prefixed {@code CREATE DATABASE} (as emitted by the Rust
+     * admin-SQL layer), returning {@code null} for anything else so it falls through to the
+     * normal query path.
+     */
+    static CreateDatabaseLocaleDirective parseCreateDatabaseLocaleDirective(String sql) {
+        Matcher directive = sql == null ? null : CREATE_DATABASE_LOCALE_DIRECTIVE.matcher(sql);
+        if (directive == null || !directive.matches()) {
+            return null;
+        }
+        String statement = directive.group(2).trim();
+        if (!statement.regionMatches(true, 0, "CREATE DATABASE", 0, "CREATE DATABASE".length())) {
+            return null;
+        }
+        return new CreateDatabaseLocaleDirective(directive.group(1).trim(), statement);
     }
 
     /**

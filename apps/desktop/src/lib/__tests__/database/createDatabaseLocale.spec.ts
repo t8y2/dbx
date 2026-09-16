@@ -3,9 +3,11 @@ import { supportsCreateDatabaseCharset, supportsCreateDatabaseLocale } from "@/l
 import { DEFAULT_GBASE8S_DATABASE_LOCALE, GBASE8S_DATABASE_LOCALES } from "@/lib/database/createDatabaseCharsetOptions";
 
 describe("GBase 8s / Informix create-database locale support", () => {
-  it("offers a locale picker for the Informix family", () => {
+  it("offers a locale picker only for the gbase8s profile", () => {
     expect(supportsCreateDatabaseLocale("gbase", "gbase8s")).toBe(true);
-    expect(supportsCreateDatabaseLocale("informix", undefined)).toBe(true);
+    // Plain Informix's agent has no directive handling, so the locale picker must stay hidden
+    // there until InformixAgent implements it; showing it would silently ignore the choice.
+    expect(supportsCreateDatabaseLocale("informix", undefined)).toBe(false);
   });
 
   it("does not treat GBase 8a or MySQL as locale-picking", () => {

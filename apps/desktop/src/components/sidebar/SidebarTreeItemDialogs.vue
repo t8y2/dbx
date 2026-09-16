@@ -538,7 +538,9 @@ watch(
             </template>
           </SearchableSelect>
         </div>
-        <div class="grid gap-1.5">
+        <!-- The gbase8s locale path has no collations; only show the picker when the selected
+             charset actually has collation options (MySQL always does). -->
+        <div v-if="createDatabaseCollationOptionsForCharset(createDatabaseCharset, createDatabaseCollationsByCharset).length > 0" class="grid gap-1.5">
           <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createDatabaseCollation") }}</label>
           <SearchableSelect
             v-model="createDatabaseCollation"

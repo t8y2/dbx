@@ -1648,6 +1648,8 @@ export default withEnglishFallback({
     searchResults: "Cerca per numero, nome o SQL",
     noMatchingResults: "Nessun risultato corrispondente",
     removeRun: "Rimuovi esecuzione {n}",
+    renameResultRun: "Rinomina scheda dei risultati",
+    resultRunName: "Nome della scheda dei risultati",
     pinResultRun: "Fissa scheda risultato",
     unpinResultRun: "Sblocca scheda risultato",
     unpinAllResultRuns: "Sblocca tutte le schede risultato",

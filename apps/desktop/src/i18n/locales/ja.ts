@@ -1667,6 +1667,8 @@ export default withEnglishFallback({
     searchResults: "番号、名前、SQL で検索",
     noMatchingResults: "一致する結果はありません",
     removeRun: "実行 {n} を削除",
+    renameResultRun: "結果タブの名前を変更",
+    resultRunName: "結果タブ名",
     pinResultRun: "結果タブを固定",
     unpinResultRun: "結果タブの固定を解除",
     unpinAllResultRuns: "すべての結果タブの固定を解除",

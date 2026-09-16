@@ -1596,6 +1596,8 @@ export default withEnglishFallback({
     searchResults: "搜索编号、名称或 SQL",
     noMatchingResults: "没有匹配的结果",
     removeRun: "删除执行 {n}",
+    renameResultRun: "重命名结果标签",
+    resultRunName: "结果标签名称",
     pinResultRun: "固定结果标签",
     unpinResultRun: "取消固定结果标签",
     unpinAllResultRuns: "取消固定所有结果标签",

@@ -7,12 +7,16 @@ export interface QueryResultSourceLabelOptions {
   databaseType?: DatabaseType;
 }
 
-export function queryResultNameFromPreamble(preamble: string): string | undefined {
+const HASH_COMMENT_DATABASE_TYPES = new Set<DatabaseType>(["mysql"]);
+
+export function queryResultNameFromPreamble(preamble: string, options: Pick<QueryResultSourceLabelOptions, "databaseType"> = {}): string | undefined {
   let name: string | undefined;
   let fallback: string | undefined;
   const withoutBlockComments = preamble.replace(/\/\*[\s\S]*?\*\//g, "");
   for (const line of withoutBlockComments.split(/\r?\n/)) {
-    const comment = line.match(/^\s*--\s*(.*)$/)?.[1]?.trim();
+    const commentMatch = line.match(/^\s*(--|#)\s*(.*)$/);
+    if (commentMatch?.[1] === "#" && !HASH_COMMENT_DATABASE_TYPES.has(options.databaseType!)) continue;
+    const comment = commentMatch?.[2]?.trim();
     if (!comment) continue;
 
     const nameMatch = comment.match(/^name\s*:\s*(.*)$/i);

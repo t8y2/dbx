@@ -1650,6 +1650,8 @@ export default withEnglishFallback({
     searchResults: "Buscar por número, nombre o SQL",
     noMatchingResults: "No hay resultados coincidentes",
     removeRun: "Eliminar ejecución {n}",
+    renameResultRun: "Renombrar pestaña de resultados",
+    resultRunName: "Nombre de la pestaña de resultados",
     pinResultRun: "Fijar pestaña de resultado",
     unpinResultRun: "Desfijar pestaña de resultado",
     unpinAllResultRuns: "Desfijar todas las pestañas de resultado",

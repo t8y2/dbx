@@ -346,7 +346,16 @@ function preservedResultIndex(results: QueryResult[], currentIndex: number | und
   return currentIndex;
 }
 
-function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType, sourceOffset?: number, parameterOptions?: SqlParameterOptions, executedSql?: string): { results: QueryResult[]; sqlServerUseDatabase?: string } {
+function annotateQueryResultSources(
+  results: QueryResult[],
+  sql: string,
+  database: string | undefined,
+  databaseType?: DatabaseType,
+  sourceOffset?: number,
+  parameterOptions?: SqlParameterOptions,
+  executedSql?: string,
+  sourceDocumentSql?: string,
+): { results: QueryResult[]; sqlServerUseDatabase?: string } {
   const statements = splitSqlStatementRanges(sql, databaseType, parameterOptions);
   // The backend positions errors against the SQL it actually received. When the
   // sent SQL was rewritten (pagination wrapper, injected hidden keys…), record
@@ -354,6 +363,7 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
   // back onto `sourceStatement`.
   const executedStatements = executedSql && executedSql !== sql ? splitSqlStatementRanges(executedSql, databaseType, parameterOptions) : undefined;
   const alignedExecutedStatements = executedStatements && executedStatements.length === statements.length ? executedStatements : undefined;
+  const documentStatements = sourceDocumentSql && sourceOffset !== undefined ? splitSqlStatementRanges(sourceDocumentSql, databaseType, parameterOptions) : [];
   let statementIndex = 0;
   let sourceDatabase = database;
   let sqlServerUseDatabase: string | undefined;
@@ -377,7 +387,15 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
         });
       }
     }
-    const customName = queryResultNameFromPreamble(sql.slice(statement.hitFrom, statement.from));
+    const documentStatement =
+      sourceOffset === undefined
+        ? undefined
+        : documentStatements.find((candidate) => {
+            const sourceFrom = sourceOffset + statement.from;
+            return candidate.from === sourceFrom || (sourceFrom >= candidate.from && sourceFrom <= candidate.to);
+          });
+    const preamble = documentStatement ? sourceDocumentSql!.slice(documentStatement.hitFrom, documentStatement.from) : sql.slice(statement.hitFrom, statement.from);
+    const customName = queryResultNameFromPreamble(preamble, { databaseType });
     if (customName) result.sourceLabel = customName;
     const successfulUseDatabase = databaseType === "sqlserver" && result.execution_error !== true ? sqlServerUseDatabaseFromStatement(statement.sql) : undefined;
     if (successfulUseDatabase) {
@@ -1765,6 +1783,17 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultRuns[runIndex] = run;
     void persistResultRun(tab, run);
     return run.pinned === true;
+  }
+
+  function renameResultRun(id: string, runId: string, title: string): boolean {
+    const trimmed = title.trim();
+    if (!trimmed) return false;
+    const tab = tabs.value.find((item) => item.id === id);
+    const run = tab?.resultRuns?.find((item) => item.id === runId);
+    if (!tab || !run) return false;
+    run.title = trimmed;
+    void persistResultRun(tab, run);
+    return true;
   }
 
   function unpinAllResultRuns(id: string): number {
@@ -7110,6 +7139,7 @@ export const useQueryStore = defineStore("query", () => {
         options?.sourceOffset,
         sqlStatementParameterOptions,
         sqlToExecute,
+        options?.sourceOffset === undefined ? undefined : tab.sql,
       );
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
       reconcileBatchSqlResults(tab, executionId, results);
@@ -8674,6 +8704,7 @@ export const useQueryStore = defineStore("query", () => {
     toggleResultAutoSave,
     setActiveResultRun,
     toggleResultRunPinned,
+    renameResultRun,
     unpinAllResultRuns,
     closeOtherResultRuns,
     closeResultRunsToLeft,

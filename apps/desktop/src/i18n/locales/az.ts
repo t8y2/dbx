@@ -1547,6 +1547,8 @@ export default withEnglishFallback({
     searchResults: "Nömrə, ad və ya SQL üzrə axtar",
     noMatchingResults: "Uyğun nəticə yoxdur",
     removeRun: "{n} nömrəli icranı çıxar",
+    renameResultRun: "Nəticə sekmesini adlandır",
+    resultRunName: "Nəticə sekmesinin adı",
     pinResultRun: "Nəticə vərəqini sabitlə",
     unpinResultRun: "Nəticə vərəqinin sabitlənməsini ləğv et",
     unpinAllResultRuns: "Bütün nəticə vərəqlərinin sabitlənməsini ləğv et",

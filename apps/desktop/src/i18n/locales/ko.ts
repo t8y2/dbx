@@ -1563,6 +1563,8 @@ export default withEnglishFallback({
     searchResults: "번호, 이름 또는 SQL 검색",
     noMatchingResults: "일치하는 결과가 없습니다",
     removeRun: "실행 {n} 제거",
+    renameResultRun: "결과 탭 이름 변경",
+    resultRunName: "결과 탭 이름",
     pinResultRun: "결과 탭 고정",
     unpinResultRun: "결과 탭 고정 해제",
     unpinAllResultRuns: "모든 결과 탭 고정 해제",

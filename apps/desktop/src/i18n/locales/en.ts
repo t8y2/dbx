@@ -1681,6 +1681,8 @@ export default {
     searchResults: "Search number, name or SQL",
     noMatchingResults: "No matching results",
     removeRun: "Remove run {n}",
+    renameResultRun: "Rename result tab",
+    resultRunName: "Result tab name",
     pinResultRun: "Pin result tab",
     unpinResultRun: "Unpin result tab",
     unpinAllResultRuns: "Unpin all result tabs",

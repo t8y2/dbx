@@ -1649,6 +1649,8 @@ export default withEnglishFallback({
     searchResults: "搜尋編號、名稱或 SQL",
     noMatchingResults: "沒有符合的結果",
     removeRun: "移除執行 {n}",
+    renameResultRun: "重新命名結果分頁",
+    resultRunName: "結果分頁名稱",
     pinResultRun: "釘選結果分頁",
     unpinResultRun: "取消釘選結果分頁",
     unpinAllResultRuns: "取消釘選所有結果分頁",

@@ -12,6 +12,12 @@ describe("queryResultNameFromPreamble", () => {
     expect(queryResultNameFromPreamble("-- older comment\n/*\n-- Name: block\n*/\n-- 当前时间\n")).toBe("当前时间");
     expect(queryResultNameFromPreamble("/* -- block only */\n--   \n")).toBeUndefined();
   });
+
+  it("accepts hash comments for MySQL without treating them as portable SQL comments", () => {
+    expect(queryResultNameFromPreamble("# MySQL report\nSELECT 1", { databaseType: "mysql" })).toBe("MySQL report");
+    expect(queryResultNameFromPreamble("# temporary table\nSELECT 1", { databaseType: "sqlserver" })).toBeUndefined();
+    expect(queryResultNameFromPreamble("# portable comment\nSELECT 1")).toBeUndefined();
+  });
 });
 
 describe("queryResultSourceLabel", () => {

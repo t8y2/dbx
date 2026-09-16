@@ -1548,6 +1548,8 @@ export default withEnglishFallback({
     searchResults: "Numara, ad veya SQL ile ara",
     noMatchingResults: "Eşleşen sonuç yok",
     removeRun: "{n} numaralı çalıştırmayı kaldır",
+    renameResultRun: "Sonuç sekmesini yeniden adlandır",
+    resultRunName: "Sonuç sekmesi adı",
     pinResultRun: "Sonuç sekmesini sabitle",
     unpinResultRun: "Sonuç sekmesinin sabitlemesini kaldır",
     unpinAllResultRuns: "Tüm sonuç sekmelerinin sabitlemesini kaldır",

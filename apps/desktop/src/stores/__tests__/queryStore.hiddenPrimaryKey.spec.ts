@@ -1172,9 +1172,6 @@ describe("queryStore hidden primary key editing", () => {
     await store.executeTabSql(tabId, "SELECT name FROM users");
 
     // MySQL is a sticky proven-read-only dialect (#9018): the call now ends
-    // with the user-facing classification SQL, but still opts out of
-    // table-data preview.
-    // MySQL is a sticky proven-read-only dialect (#9018): the call now ends
     // with the user-facing classification SQL (9th argument), but still opts
     // out of table-data preview. Every slot stays asserted — the spec's mocks
     // are fixed, so database/schema/row-limit/cursor args must not drift.

@@ -1255,6 +1255,7 @@ mod tests {
             "SELECT id FROM users INTO @current_id LIMIT 1",
             "SELECT * FROM users INTO OUTFILE '/tmp/x'",
             "SELECT * FROM users FOR UPDATE",
+            "SELECT * FROM users FOR SHARE",
             "SELECT * FROM users LOCK IN SHARE MODE",
             "SELECT SLEEP(10)",
             "SELECT GET_LOCK('x', 1)",
@@ -1298,6 +1299,12 @@ mod tests {
             "WITH w AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM w",
             "SELECT * INTO new_t FROM t",
             "SELECT * FROM t FOR UPDATE",
+            // FOR SHARE parses into query.locks like FOR UPDATE; the other two
+            // PG lock strengths (FOR NO KEY UPDATE / FOR KEY SHARE) fail the
+            // parse itself in sqlparser 0.62 and stay Unproven fail-closed.
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * FROM t FOR NO KEY UPDATE",
+            "SELECT * FROM t FOR KEY SHARE",
             "SELECT nextval('seq')",
             "SELECT setval('seq', 1)",
             "SELECT pg_sleep(1)",

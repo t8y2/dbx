@@ -145,7 +145,13 @@ export function connectionSupportsUrlCopy(config: ConnectionUrlCopyConfig | unde
 }
 
 function effectiveDatabase(config: ConnectionUrlCopyConfig, options?: ConnectionUrlCopyOptions): string {
-  return options?.database?.trim() || config.database?.trim() || "";
+  const database = options?.database?.trim() || config.database?.trim() || "";
+  // Mirror dbx-core `redis_database_index()`: a Redis database is a numeric
+  // index; anything else (e.g. redis-cli flags pasted into the field) fails
+  // to parse on the backend and silently falls back to 0, so the copied URL
+  // must show the index the connection actually uses.
+  if (database && config.db_type === "redis" && !/^[+-]?\d+$/.test(database)) return "0";
+  return database;
 }
 
 function queryHasParam(params: string, keys: string[]): boolean {

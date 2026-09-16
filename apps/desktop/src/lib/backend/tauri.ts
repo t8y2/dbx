@@ -4757,6 +4757,7 @@ export interface SqlFileRequest {
   filePath: string;
   continueOnError: boolean;
   selectedTables?: SqlFileTable[];
+  partCooldownMs?: number;
 }
 
 export interface SqlFileTable {
@@ -4775,6 +4776,8 @@ export interface SqlFilePreview {
   preview: string;
   canExecuteWithoutSelectedDatabase: boolean;
   establishesDatabaseContext?: boolean;
+  packageFilePaths?: string[];
+  packagePartCount?: number;
 }
 
 export interface SqlFileProgress {

@@ -386,7 +386,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
+      filters: [{ name: "SQL package", extensions: ["sql", "gz", "zip"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -539,16 +539,18 @@ async function startExecution() {
 
     try {
       executionStarted.value = true;
+      const executionPaths = previews.value.flatMap((item) => item.packageFilePaths ?? [item.filePath]);
       await executeSqlFiles(
         {
           executionId: batchId,
           connectionId: connectionId.value,
           database: database.value.trim(),
-          filePath: previews.value[0]!.filePath,
+          filePath: executionPaths[0]!,
           continueOnError: continueOnError.value,
           ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
+          partCooldownMs: previews.value.some((item) => item.packageFilePaths) ? 500 : 0,
         },
-        previews.value.map((item) => item.filePath),
+        executionPaths,
       );
       const terminal = await terminalProgress;
       if (terminal.status === "error") {
@@ -656,7 +658,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,.sql.gz,text/sql,application/gzip" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
             <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
@@ -696,6 +698,7 @@ watch(
                   <span>{{ previewLineSummary(activePreview) }}</span>
                   <span class="h-3 w-px bg-border" />
                   <span>{{ formatBytes(activePreview.sizeBytes) }}</span>
+                  <span v-if="activePreview.packagePartCount">{{ t("sqlFile.packageParts", { count: activePreview.packagePartCount }) }}</span>
                 </div>
               </div>
               <div class="sql-file-preview-viewer flex max-w-full overflow-auto bg-muted/15 text-xs rounded-b-md border border-t-0" :class="previews.length === 1 ? 'min-h-56 max-h-[min(46vh,420px)]' : 'min-h-0 max-h-[min(46vh,420px)]'">

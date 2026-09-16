@@ -6030,6 +6030,7 @@ export default withEnglishFallback({
     selectDatabase: "Seleziona database",
     databasePlaceholder: "Nome database",
     options: "Opzioni",
+    packageParts: "{count} parti SQL",
     continueOnError: "Continua in caso di errore",
     runInBackground: "Esegui in background",
     cancelling: "Annullamento in corso...",

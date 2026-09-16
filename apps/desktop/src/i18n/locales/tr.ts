@@ -6144,6 +6144,7 @@ export default withEnglishFallback({
     selectDatabase: "Veritabanı seç",
     databasePlaceholder: "Veritabanı adı",
     options: "Seçenekler",
+    packageParts: "{count} SQL bölümü",
     continueOnError: "Hatada devam et",
     runInBackground: "Arka planda çalıştır",
     cancelling: "İptal ediliyor...",

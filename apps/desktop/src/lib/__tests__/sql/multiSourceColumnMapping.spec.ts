@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeEditableQueryEditability, resolveSourceColumnsByOrdinal } from "@/lib/sql/sqlAnalysis";
+import { analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, resolveSourceColumnsByOrdinal } from "@/lib/sql/sqlAnalysis";
 
 /**
  * Result columns resolve by projection ordinal, each carrying its source
@@ -7,6 +7,27 @@ import { analyzeEditableQueryEditability, resolveSourceColumnsByOrdinal } from "
  * per-source comments instead of first-source-wins on name clashes.
  */
 describe("multi-source result column mapping", () => {
+  it("expands a bare star in a joined result for display metadata", () => {
+    const analysis = analyzeSelectStructureForDisplay("SELECT * FROM orders a JOIN users b ON a.user_id = b.id");
+    expect(analysis?.selectStar).toBe(true);
+
+    const resolved = resolveSourceColumnsByOrdinal(
+      "oracle",
+      analysis!,
+      [
+        { source: analysis!.sources![0]!, columns: [{ name: "ID" }, { name: "USER_ID" }] },
+        { source: analysis!.sources![1]!, columns: [{ name: "ID" }, { name: "NAME" }] },
+      ],
+      4,
+    );
+    expect(resolved).toEqual([
+      { sourceKey: "a:0", sourceColumn: "ID" },
+      { sourceKey: "a:0", sourceColumn: "USER_ID" },
+      { sourceKey: "b:1", sourceColumn: "ID" },
+      { sourceKey: "b:1", sourceColumn: "NAME" },
+    ]);
+  });
+
   it("parses a JOIN as multi-source with per-source columns", () => {
     const result = analyzeEditableQueryEditability("SELECT a.id, a.user_id, b.name FROM orders a JOIN users b ON a.user_id = b.id");
     expect(result.editable).toBe(true);

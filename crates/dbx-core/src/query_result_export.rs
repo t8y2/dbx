@@ -1173,6 +1173,7 @@ async fn try_export_postgres_query_result_stream(
     let setup_sql = safe_postgres_temp_setup_sql(&request.setup_sql).unwrap_or_default();
     let stream_result = crate::db::postgres::stream_select_query_with_cancel(
         &pool,
+        Some(request.database_type),
         request.schema.as_deref(),
         &setup_sql,
         &request.sql,

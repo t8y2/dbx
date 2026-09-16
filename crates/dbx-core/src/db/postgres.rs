@@ -29,6 +29,7 @@ use tokio_postgres::{AsyncMessage, NoTls, Row, SimpleQueryMessage, Socket};
 use tokio_util::sync::CancellationToken;
 
 use super::file_validator::validate_file_path;
+use crate::models::connection::DatabaseType;
 use crate::query::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
@@ -7765,6 +7766,7 @@ pub async fn execute_query_in_read_only_transaction_with_rollback(
 
 pub async fn stream_select_query_with_cancel(
     pool: &Pool,
+    db_type: Option<DatabaseType>,
     schema: Option<&str>,
     setup_sql: &[String],
     sql: &str,
@@ -7861,7 +7863,7 @@ pub async fn stream_select_query_with_cancel(
     };
 
     if schema_was_set {
-        let reset_result = reset_postgres_search_path(&client, budget.cleanup_timeout, start).await;
+        let reset_result = reset_postgres_search_path(&client, db_type, budget.cleanup_timeout, start).await;
         match (result, reset_result) {
             (Ok(rows), Ok(())) => Ok(rows),
             (Err(query_err), Ok(())) => Err(query_err),
@@ -7874,11 +7876,12 @@ pub async fn stream_select_query_with_cancel(
 }
 
 pub async fn execute_query_with_schema(pool: &Pool, schema: &str, sql: &str) -> Result<QueryResult, String> {
-    execute_query_with_schema_and_max_rows(pool, schema, sql, None).await
+    execute_query_with_schema_and_max_rows(pool, None, schema, sql, None).await
 }
 
 pub async fn execute_query_with_schema_and_max_rows(
     pool: &Pool,
+    db_type: Option<DatabaseType>,
     schema: &str,
     sql: &str,
     max_rows: Option<usize>,
@@ -7920,12 +7923,13 @@ pub async fn execute_query_with_schema_and_max_rows(
         result.is_ok()
     );
 
-    let reset_result = reset_postgres_search_path(&client, super::connection_timeout(), start).await;
+    let reset_result = reset_postgres_search_path(&client, db_type, super::connection_timeout(), start).await;
     merge_postgres_query_and_reset_result(result, reset_result)
 }
 
 pub async fn execute_query_with_schema_and_max_rows_and_cancel(
     pool: &Pool,
+    db_type: Option<DatabaseType>,
     schema: &str,
     sql: &str,
     max_rows: Option<usize>,
@@ -7991,17 +7995,31 @@ pub async fn execute_query_with_schema_and_max_rows_and_cancel(
         result.is_ok()
     );
 
-    let reset_result = reset_postgres_search_path(&client, budget.cleanup_timeout, start).await;
+    let reset_result = reset_postgres_search_path(&client, db_type, budget.cleanup_timeout, start).await;
     merge_postgres_query_and_reset_result(result, reset_result)
+}
+
+/// GaussDB/openGauss reject PostgreSQL's `RESET search_path` syntax, so the
+/// post-query schema cleanup must re-issue `SET search_path TO DEFAULT` for
+/// those engines. Every other backend — and an unknown (`None`) type — keeps
+/// the historical `RESET search_path` behavior.
+pub(crate) fn reset_search_path_sql(db_type: Option<DatabaseType>) -> &'static str {
+    match db_type {
+        Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss) => "SET search_path TO DEFAULT",
+        _ => "RESET search_path",
+    }
 }
 
 async fn reset_postgres_search_path(
     client: &deadpool_postgres::Client,
+    db_type: Option<DatabaseType>,
     timeout_duration: Duration,
     start: Instant,
 ) -> Result<(), String> {
     let reset_start = Instant::now();
-    match execute_postgres_infra_statement(client, "RESET search_path", timeout_duration, "schema.reset").await {
+    match execute_postgres_infra_statement(client, reset_search_path_sql(db_type), timeout_duration, "schema.reset")
+        .await
+    {
         Ok(_) => {
             log::info!(
                 "[postgres][execute_with_schema:reset-search-path:done] elapsed_ms={} total_ms={}",
@@ -10557,6 +10575,14 @@ mod tests {
             postgres_set_search_path_sql("tenant\"; RESET search_path; --", PostgresSearchPathContext::Query,),
             "SET search_path TO \"tenant\"\"; RESET search_path; --\", pg_catalog, public"
         );
+    }
+
+    #[test]
+    fn postgres_reset_search_path_sql_selects_dialect_compatible_statement() {
+        assert_eq!(reset_search_path_sql(Some(DatabaseType::Gaussdb)), "SET search_path TO DEFAULT");
+        assert_eq!(reset_search_path_sql(Some(DatabaseType::OpenGauss)), "SET search_path TO DEFAULT");
+        assert_eq!(reset_search_path_sql(Some(DatabaseType::Postgres)), "RESET search_path");
+        assert_eq!(reset_search_path_sql(None), "RESET search_path");
     }
 
     #[test]
@@ -13893,6 +13919,7 @@ mod tests {
         let mut streamed_rows = Vec::new();
         let streaming_result = stream_select_query_with_cancel(
             &pool,
+            None,
             Some(&schema),
             &[],
             &query_sql,

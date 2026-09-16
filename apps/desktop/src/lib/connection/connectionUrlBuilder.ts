@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
+import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 
 /**
  * Builds copy-ready connection strings (standard URL / JDBC URL / libpq DSN /
@@ -146,11 +147,9 @@ export function connectionSupportsUrlCopy(config: ConnectionUrlCopyConfig | unde
 
 function effectiveDatabase(config: ConnectionUrlCopyConfig, options?: ConnectionUrlCopyOptions): string {
   const database = options?.database?.trim() || config.database?.trim() || "";
-  // Mirror dbx-core `redis_database_index()`: a Redis database is a numeric
-  // index; anything else (e.g. redis-cli flags pasted into the field) fails
-  // to parse on the backend and silently falls back to 0, so the copied URL
-  // must show the index the connection actually uses.
-  if (database && config.db_type === "redis" && !/^[+-]?\d+$/.test(database)) return "0";
+  // A Redis database is a numeric index; dirty values resolve to the index the
+  // backend actually connects with (see effectiveRedisDatabaseIndex).
+  if (database && config.db_type === "redis") return effectiveRedisDatabaseIndex(database);
   return database;
 }
 

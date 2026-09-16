@@ -49,6 +49,7 @@ import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from ".
 import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisKeyTemplates, redisKeyTemplatesToTextarea } from "@/lib/redis/redisKeyTemplates";
+import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -2637,7 +2638,9 @@ watch(
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
-        database: config.database,
+        // Show the index the backend actually connects with; legacy dirty values
+        // (e.g. redis-cli flags in the field) are healed when the form is saved.
+        database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
@@ -2886,6 +2889,7 @@ const transportPathSegments = computed(() => {
 
 function defaultDatabaseForProfile() {
   if (form.value.db_type === "redshift") return "dev";
+  if (form.value.db_type === "redis") return "0";
   if (form.value.db_type === "gaussdb") return "postgres";
   if (form.value.db_type === "kwdb") return "defaultdb";
   if (form.value.db_type === "databend") return "default";
@@ -4404,6 +4408,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.redis_key_separator = config.redis_key_separator?.trim() ?? ":";
     const scanSize = Number(config.redis_scan_page_size);
     config.redis_scan_page_size = Number.isFinite(scanSize) && scanSize >= REDIS_SCAN_PAGE_SIZE_MIN && scanSize <= REDIS_SCAN_PAGE_SIZE_MAX ? Math.round(scanSize) : REDIS_SCAN_PAGE_SIZE_DEFAULT;
+    {
+      // A Redis database is a numeric index; dirty values (e.g. redis-cli flags
+      // pasted into the field) are stored as the index the backend connects with.
+      const database = normalizeRedisDatabaseValue(config.database);
+      config.database = database;
+      form.value.database = database || "";
+    }
     {
       const templates = normalizeRedisKeyTemplates(redisKeyTemplatesText.value);
       config.redis_key_templates = templates.length > 0 ? templates : undefined;

@@ -70,6 +70,7 @@ import {
 import { AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR } from "@/lib/ai/aiTableReferenceDrop";
 import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
@@ -515,6 +516,13 @@ function hostForDisplay(host: string): string {
   return `[${host}]`;
 }
 
+// A Redis database is a numeric index; dirty stored values (e.g. redis-cli flags
+// pasted into the field) resolve to the index the backend actually connects with.
+function tooltipDatabaseValue(config: ConnectionConfig): string {
+  const database = cleanTooltipValue(config.database);
+  return config.db_type === "redis" && database ? effectiveRedisDatabaseIndex(database) : database;
+}
+
 function connectionTooltipUrl(config: ConnectionConfig): string {
   const explicit = cleanTooltipValue(config.connection_string);
   if (explicit) return redactedConnectionString(explicit);
@@ -532,7 +540,7 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
   const port = Number(config.port) > 0 ? `:${config.port}` : "";
   const user = cleanTooltipValue(config.username);
   const userInfo = user ? `${encodeURIComponent(user)}@` : "";
-  const database = cleanTooltipValue(config.database);
+  const database = tooltipDatabaseValue(config);
   const encodedDatabase = config.db_type === "spanner" ? encodeSpannerResourcePath(database) : encodeURIComponent(database);
   const path = database ? `/${encodedDatabase}` : "";
   const params = cleanTooltipValue(config.url_params);
@@ -568,7 +576,7 @@ const detailTooltip = computed(() => {
       { label: "URL", value: connectionTooltipUrl(config), multiline: true },
       ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0], values: hostValues } as DetailTooltipRow] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) } as DetailTooltipRow]),
       { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
-      { label: t("connection.database"), value: cleanTooltipValue(config.database) },
+      { label: t("connection.database"), value: tooltipDatabaseValue(config) },
       { label: t("connection.user"), value: cleanTooltipValue(config.username) },
       { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
       { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },

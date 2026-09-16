@@ -1,6 +1,7 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/database/h2Connection";
 import { damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -754,6 +755,9 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
 
   const isMeilisearch = profile.type === "meilisearch";
   const defaultPort = isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+  // A Redis URL path is a numeric db index; dirty paths (e.g. redis-cli flags
+  // pasted after the index) collapse to what the backend actually connects with.
+  const pathDatabase = profile.type === "redis" ? normalizeRedisDatabaseValue(databaseFromPath(parsed.pathname)) : databaseFromPath(parsed.pathname);
 
   return {
     ...(name ? { name } : {}),
@@ -765,7 +769,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: jdbcCredentials?.username ?? decodeUrlPart(parsed.username),
     password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
     ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),

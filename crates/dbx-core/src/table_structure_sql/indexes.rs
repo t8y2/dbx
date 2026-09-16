@@ -424,6 +424,7 @@ pub(super) fn build_drop_index_sql(
     format!("DROP INDEX {};", quote_ident(dialect, index_name))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_create_index_statements(
     database_type: Option<DatabaseType>,
     dialect: StructureDialect,

@@ -118,16 +118,6 @@ pub(crate) fn build_sqlserver_table_comment_sql_for_profile(
     build_sqlserver_extended_property_comment_sql(&exists, &levels, new_comment, procedure_prefix)
 }
 
-pub(super) fn build_sqlserver_index_comment_sql(
-    qualified_table: &str,
-    schema: Option<&str>,
-    table_name: &str,
-    index_name: &str,
-    new_comment: &str,
-) -> Vec<String> {
-    build_sqlserver_index_comment_sql_for_profile(qualified_table, schema, table_name, index_name, new_comment, None)
-}
-
 pub(super) fn build_sqlserver_index_comment_sql_for_profile(
     qualified_table: &str,
     schema: Option<&str>,
@@ -263,8 +253,14 @@ mod tests {
 
     #[test]
     fn sqlserver_index_comment_uses_index_extended_property_identity() {
-        let statements =
-            build_sqlserver_index_comment_sql("[dbo].[orders]", None, "orders", "ix_owner's", "index comment");
+        let statements = build_sqlserver_index_comment_sql_for_profile(
+            "[dbo].[orders]",
+            None,
+            "orders",
+            "ix_owner's",
+            "index comment",
+            None,
+        );
 
         assert_eq!(statements.len(), 1);
         let sql = &statements[0];

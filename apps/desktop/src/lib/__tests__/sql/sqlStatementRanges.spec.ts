@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { executionCandidateForMode } from "@/lib/sql/sqlExecutionTarget";
-import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
+import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, stripMysqlClientDisplayCommand, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
 
 function indexOf(sql: string, needle: string, occurrence = 1): number {
   let from = 0;
@@ -376,6 +376,20 @@ BEGIN
   END;
 END;
 SELECT 3 FROM DUMMY;`;
+
+describe("stripMysqlClientDisplayCommand", () => {
+  it("removes a trailing MySQL CLI vertical-output command", () => {
+    expect(stripMysqlClientDisplayCommand("SHOW CREATE FUNCTION fun_grade \\G")).toBe("SHOW CREATE FUNCTION fun_grade");
+    expect(stripMysqlClientDisplayCommand("SHOW CREATE FUNCTION fun_grade \\G;")).toBe("SHOW CREATE FUNCTION fun_grade;");
+    expect(stripMysqlClientDisplayCommand("SELECT 1\\G\n")).toBe("SELECT 1\n");
+  });
+
+  it("does not rewrite ordinary SQL or a command inside a line comment", () => {
+    expect(stripMysqlClientDisplayCommand("SELECT '\\G'")).toBe("SELECT '\\G'");
+    expect(stripMysqlClientDisplayCommand("SELECT 1 -- keep \\G")).toBe("SELECT 1 -- keep \\G");
+    expect(stripMysqlClientDisplayCommand("SELECT 1 # keep \\G")).toBe("SELECT 1 # keep \\G");
+  });
+});
 
 describe("splitSqlStatementRanges", () => {
   it("splits multiple top-level statements", () => {

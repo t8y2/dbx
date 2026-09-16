@@ -32,6 +32,22 @@ export function supportsExecutionTargetPicker(databaseType?: DatabaseType): bool
   return !!databaseType && (databaseType === "redis" || isHttpJsonRestDatabaseType(databaseType) || !NON_SQL_EXECUTION_TARGET_TYPES.has(databaseType));
 }
 
+/** Remove the MySQL CLI's trailing vertical-output command before execution. */
+export function stripMysqlClientDisplayCommand(sql: string): string {
+  const trimmed = sql.trimEnd();
+  const hasTrailingSemicolon = trimmed.endsWith(";");
+  const withoutTrailingSemicolon = hasTrailingSemicolon ? trimmed.slice(0, -1).trimEnd() : trimmed;
+  if (!withoutTrailingSemicolon.endsWith("\\G") && !withoutTrailingSemicolon.endsWith("\\g")) return sql;
+
+  const markerStart = withoutTrailingSemicolon.length - 2;
+  const lineStart = withoutTrailingSemicolon.lastIndexOf("\n", markerStart - 1) + 1;
+  const linePrefix = withoutTrailingSemicolon.slice(lineStart, markerStart);
+  if (linePrefix.includes("--") || linePrefix.includes("#")) return sql;
+
+  const executableSql = withoutTrailingSemicolon.slice(0, markerStart).trimEnd();
+  return `${executableSql}${hasTrailingSemicolon ? ";" : ""}${sql.slice(trimmed.length)}`;
+}
+
 export function hasMultipleExecutionTargets(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
   if (databaseType === "redis") {
     return redisExecutableCommandCount(sql) > 1;

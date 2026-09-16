@@ -26,6 +26,7 @@ import com.mongodb.client.model.CollationMaxVariable;
 import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
 import com.mongodb.client.model.InsertManyOptions;
+import com.mongodb.client.model.ReplaceOptions;
 import com.mongodb.client.model.UpdateOptions;
 import com.mongodb.client.result.UpdateResult;
 import java.io.BufferedReader;
@@ -1682,6 +1683,56 @@ public final class MongoAgent {
         return true;
     }
 
+    private static Object replaceDocument(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String filterJson = params.get("filter_json").getAsString();
+        String replacementJson = params.get("replacement_json").getAsString();
+        String optionsJson = params.has("options_json") && !params.get("options_json").isJsonNull()
+            ? params.get("options_json").getAsString()
+            : null;
+
+        var col = c.getDatabase(database).getCollection(collection);
+        Document filter = documentForWrite(filterJson);
+        Document replacement = documentForWrite(replacementJson);
+        requireReplacementDocument(replacement);
+        ReplaceOptions options = replaceOptionsForWrite(optionsJson);
+        var result = col.replaceOne(filter, replacement, options);
+        return Collections.singletonMap("modified_count", result.getModifiedCount());
+    }
+
+    /** replaceOne swaps the whole document; update operators here mean updateOne was intended. */
+    static void requireReplacementDocument(Document doc) {
+        for (String key : doc.keySet()) {
+            if (key.startsWith("$")) {
+                throw new IllegalArgumentException(
+                    "Replacement document must not contain update operators such as " + key);
+            }
+        }
+    }
+
+    static ReplaceOptions replaceOptionsForWrite(String optionsJson) {
+        ReplaceOptions result = new ReplaceOptions();
+        if (optionsJson == null || optionsJson.trim().isEmpty()) {
+            return result;
+        }
+        Document options = Document.parse(optionsJson);
+        for (String key : options.keySet()) {
+            if (!"upsert".equals(key)) {
+                throw new IllegalArgumentException("Unsupported replace option: " + key);
+            }
+        }
+        Object rawUpsert = options.get("upsert");
+        if (rawUpsert != null) {
+            if (!(rawUpsert instanceof Boolean)) {
+                throw new IllegalArgumentException("upsert must be a boolean");
+            }
+            result.upsert((Boolean) rawUpsert);
+        }
+        return result;
+    }
+
     static void requireBulkUpdateOperatorDocument(Document doc) {
         if (!isUpdateOperatorDocument(doc)) {
             // updateOne/updateMany are shell-style bulk updates here; replacements stay on the
@@ -1865,6 +1916,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS -> insertDocuments(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
+            case AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT -> replaceDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
             case AgentProtocol.MONGO_METHOD_RUN_COMMAND -> runCommand(params);

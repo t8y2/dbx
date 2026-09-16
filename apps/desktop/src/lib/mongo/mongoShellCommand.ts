@@ -48,6 +48,7 @@ const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   update: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
   updateOne: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
   updateMany: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  replaceOne: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
   deleteOne: { expects: "a filter", roles: ["filter"] },
   deleteMany: { expects: "a filter", roles: ["filter"] },
   findOneAndUpdate: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
@@ -76,6 +77,7 @@ const SUPPORTED_COLLECTION_METHODS = [
   "insertMany",
   "updateOne",
   "updateMany",
+  "replaceOne",
   "deleteOne",
   "deleteMany",
   "findOneAndUpdate",
@@ -157,6 +159,11 @@ function diagnoseMongoCommand(source: string): string | null {
 
   const tail = source.slice(closeIndex + 1).trim();
   if (tail) return `Unexpected text after ${method}(...): "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
+  if (method === "replaceOne" && args[1]) {
+    const replacement = parseMongoObjectArgument(args[1]);
+    const operator = replacement ? Object.keys(JSON.parse(replacement) as Record<string, unknown>).find((key) => key.startsWith("$")) : undefined;
+    if (operator) return `replaceOne() replaces the whole document, so it must not contain update operators such as ${operator}; use updateOne() to modify fields.`;
+  }
   return `${method}() expects ${shapeSpec.expects}.`;
 }
 
@@ -256,7 +263,7 @@ export interface MongoDistinctCommand {
   filter?: string;
 }
 
-type MongoWriteKind = "runCommand" | "insert" | "update" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
+type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
@@ -273,6 +280,7 @@ export type MongoCommand =
   | ({ kind: "runCommand" } & MongoRunCommand)
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean }
+  | { kind: "replace"; collection: string; filter: string; replacement: string; options?: string }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
   | { kind: "createIndex"; collection: string; keys: string; options?: string }
   | { kind: "dropIndex"; collection: string; index: string }
@@ -742,6 +750,20 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     if (!docs) return null;
     const value = JSON.parse(docs);
     return value !== null && typeof value === "object" ? { kind: "insert", collection: insert.collection, docsJson: docs } : null;
+  }
+
+  const replaceOne = parseCollectionMethodTarget(source, "replaceOne");
+  if (replaceOne) {
+    const args = parseMethodArgs(source, replaceOne.methodCallIndex);
+    if (!args || args.length < 2 || args.length > 3) return null;
+    const filter = normalizeJsonArgument(args[0]);
+    const replacement = parseMongoObjectArgument(args[1]);
+    if (!filter || !replacement) return null;
+    // A replacement is a whole document; `{$set: ...}` here means updateOne() was intended.
+    if (Object.keys(JSON.parse(replacement) as Record<string, unknown>).some((key) => key.startsWith("$"))) return null;
+    const options = args[2]?.trim() ? normalizeJsonArgument(args[2]) : undefined;
+    if (args[2]?.trim() && !options) return null;
+    return { kind: "replace", collection: replaceOne.collection, filter, replacement, ...(options ? { options } : {}) };
   }
 
   for (const method of ["updateOne", "updateMany"] as const) {
@@ -1516,6 +1538,7 @@ function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
 function mongoWriteFilter(command: MongoWriteCommand): string | null {
   switch (command.kind) {
     case "update":
+    case "replace":
     case "delete":
     case "findOneAndUpdate":
     case "findOneAndReplace":

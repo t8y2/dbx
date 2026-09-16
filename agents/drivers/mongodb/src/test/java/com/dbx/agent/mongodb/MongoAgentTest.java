@@ -1008,6 +1008,50 @@ class MongoAgentTest {
     }
 
     @Test
+    void replaceDocumentMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"replace_document\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"filter_json\":\"{\\\"_id\\\":1}\","
+                + "\"replacement_json\":\"{\\\"name\\\":\\\"new\\\"}\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(11, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_REPLACE_DOCUMENT));
+    }
+
+    @Test
+    void parsesReplaceOptions() {
+        assertTrue(MongoAgent.replaceOptionsForWrite("{\"upsert\":true}").isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite("{\"upsert\":false}").isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite(null).isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite("{}").isUpsert());
+
+        IllegalArgumentException unsupported = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.replaceOptionsForWrite("{\"arrayFilters\":[]}")
+        );
+        assertEquals("Unsupported replace option: arrayFilters", unsupported.getMessage());
+        IllegalArgumentException notBoolean = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.replaceOptionsForWrite("{\"upsert\":\"yes\"}")
+        );
+        assertEquals("upsert must be a boolean", notBoolean.getMessage());
+    }
+
+    @Test
+    void rejectsReplacementDocumentsWithUpdateOperators() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.requireReplacementDocument(Document.parse("{\"$set\":{\"a\":1}}"))
+        );
+        assertEquals("Replacement document must not contain update operators such as $set", error.getMessage());
+        // A plain document, including one with nested `$`-keys inside values, is fine.
+        MongoAgent.requireReplacementDocument(Document.parse("{\"name\":\"new\",\"meta\":{\"$ref\":\"x\"}}"));
+    }
+
+    @Test
     void rejectsUnsupportedUpdateOptions() {
         IllegalArgumentException error = assertThrows(
             IllegalArgumentException.class,

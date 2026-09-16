@@ -1860,6 +1860,26 @@ impl DbxBackend for WebBackend {
                     .map_err(|error| format!("Invalid MongoDB insert response: {error}"))?;
                 Ok(affected_query_result(affected_rows_from_value(&value)))
             }
+            MongoCommand::Replace { collection, filter, replacement, options } => {
+                let value: Value = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/replace-document",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "filterJson": filter,
+                            "replacementJson": replacement,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB replace response: {error}"))?;
+                Ok(affected_query_result(affected_rows_from_value(&value)))
+            }
             MongoCommand::Update { collection, filter, update, options, many } => {
                 let value: Value = self
                     .request(

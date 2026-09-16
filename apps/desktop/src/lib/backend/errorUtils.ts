@@ -4,6 +4,19 @@
 
 export type BackendErrorParam = string | number | boolean;
 
+/**
+ * Driver-reported SQL error position, relative to the statement text that was
+ * actually sent to the database. `line`/`column` are 1-based and counted in
+ * Unicode scalar values; `offset` is the 0-based scalar-value index.
+ *
+ * Currently only populated by the native PostgreSQL driver.
+ */
+export interface SqlErrorPosition {
+  line: number;
+  column: number;
+  offset: number;
+}
+
 export interface BackendError {
   version: 1;
   code: string;
@@ -20,6 +33,7 @@ export interface BackendError {
   detail?: string;
   diagnostics?: Record<string, unknown>;
   helpUrl?: string;
+  errorPosition?: SqlErrorPosition;
 }
 
 export const MANUAL_TRANSACTION_SESSION_EXPIRED_CODE = "DBX-TXN-1001";
@@ -27,20 +41,25 @@ export const MANUAL_TRANSACTION_SESSION_EXPIRED_CODE = "DBX-TXN-1001";
 const MAX_FALLBACK_CHARS = 64 * 1024;
 const MAX_ERROR_PARSE_DEPTH = 16;
 const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
+// Rust-side transport suffix carrying a driver cursor position. It is stripped
+// before a structured envelope is built, but metadata/catalog errors can surface
+// as raw strings, so strip it here so it never reaches the UI.
+const SQL_ERROR_POSITION_MARKER_PATTERN = /\nDBX_SQL_ERROR_POSITION:\d+/g;
 
 export function sanitizeBackendErrorMessage(message: string): string {
-  const markerIndex = message.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
-  if (markerIndex < 0) return message;
+  const withoutPositionMarker = message.replace(SQL_ERROR_POSITION_MARKER_PATTERN, "");
+  const markerIndex = withoutPositionMarker.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
+  if (markerIndex < 0) return withoutPositionMarker;
 
-  const rawData = message.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
+  const rawData = withoutPositionMarker.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
   try {
     const data: unknown = JSON.parse(rawData);
-    if (!data || typeof data !== "object" || Array.isArray(data)) return message;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return withoutPositionMarker;
   } catch {
-    return message;
+    return withoutPositionMarker;
   }
 
-  return message.slice(0, markerIndex).trimEnd();
+  return withoutPositionMarker.slice(0, markerIndex).trimEnd();
 }
 
 function isBackendError(value: unknown): value is BackendError {
@@ -79,7 +98,27 @@ function isBackendError(value: unknown): value is BackendError {
     }
   }
   if (candidate.detail !== undefined && typeof candidate.detail !== "string") return false;
+  // Optional driver-reported position. Malformed values are rejected so a
+  // corrupted envelope never drives a wrong editor jump, while a missing field
+  // stays valid (all non-PostgreSQL errors and older backends).
+  if (candidate.errorPosition !== undefined) {
+    if (!isValidErrorPosition(candidate.errorPosition)) return false;
+  }
   return Object.values(candidate.messageParams).every((param) => typeof param === "string" || typeof param === "boolean" || (typeof param === "number" && Number.isFinite(param)));
+}
+
+function isValidErrorPosition(value: unknown): value is SqlErrorPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const { line, column, offset } = value as Record<string, unknown>;
+  return isPositiveInt(line) && isPositiveInt(column) && isNonNegativeInt(offset);
+}
+
+function isPositiveInt(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function isNonNegativeInt(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
 
 export function normalizeBackendError(error: unknown): BackendError | null {

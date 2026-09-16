@@ -1083,6 +1083,13 @@ export interface QueryResult {
   /** Absolute offsets in the editor document at execution time. */
   sourceFrom?: number;
   sourceTo?: number;
+  /**
+   * Frontend-internal: the statement text actually sent for this result when it
+   * differs from `sourceStatement` (pagination wrapping, hidden-key rewrites…).
+   * Backend SQL error positions are relative to this text, so it is needed to
+   * map an error row/column back onto the user's original statement.
+   */
+  executedStatement?: string;
   /** Database server messages (notices, warnings) emitted while producing this result. Omitted when empty. */
   messages?: QueryMessage[];
 }

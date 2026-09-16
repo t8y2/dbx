@@ -230,6 +230,20 @@ describe("backend error translation", () => {
     expect(sanitizeBackendErrorMessage(message)).toBe(message);
   });
 
+  test("strips the SQL error-position transport suffix from raw messages", () => {
+    const message = 'ERROR: relation "missing" does not exist\nDBX_SQL_ERROR_POSITION:15';
+    const expected = 'ERROR: relation "missing" does not exist';
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+    expect(formatError(new Error(message))).toBe(expected);
+  });
+
+  test("strips the position suffix that precedes appended context text", () => {
+    const message = "ERROR: boom\nDBX_SQL_ERROR_POSITION:7; cleanup failed";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe("ERROR: boom; cleanup failed");
+  });
+
   test("normalizes Error and structural message objects before translation", () => {
     const t = translatorFor("zh-CN");
     const message = "file does not exist: /tmp/missing.sqlite";
@@ -323,6 +337,44 @@ describe("backend error translation", () => {
         source: "jdbcAgent",
         operationOutcome: "unknown",
         ...override,
+      }),
+    ).toBeNull();
+  });
+
+  test("accepts an optional driver-reported error position", () => {
+    const error = normalizeBackendError({
+      version: 1,
+      code: "DBX-JDBC-4001",
+      messageKey: "backendErrors.jdbc.sqlFailed",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown",
+      detail: 'ERROR: relation "missing" does not exist',
+      errorPosition: { line: 2, column: 6, offset: 12 },
+    });
+
+    expect(error?.errorPosition).toEqual({ line: 2, column: 6, offset: 12 });
+
+    const t = translatorFor("zh-CN");
+    expect(translateBackendError(t, error)).toBe(`${t("backendErrors.jdbc.sqlFailed", { stage: "execute" })}\n\nERROR: relation "missing" does not exist`);
+  });
+
+  test.each([
+    ["zero line", { line: 0, column: 1, offset: 0 }],
+    ["negative column", { line: 1, column: -1, offset: 0 }],
+    ["non-integer offset", { line: 1, column: 1, offset: 1.5 }],
+    ["string line", { line: "1", column: 1, offset: 0 }],
+    ["array position", [1, 1, 0]],
+  ])("rejects a malformed error position with %s", (_name, errorPosition) => {
+    expect(
+      normalizeBackendError({
+        version: 1,
+        code: "DBX-JDBC-4001",
+        messageKey: "backendErrors.jdbc.sqlFailed",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+        errorPosition,
       }),
     ).toBeNull();
   });

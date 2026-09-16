@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database.ts";
 import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databaseCapabilities.ts";
+import { DATABASE_SCHEMA_QUALIFIED_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
@@ -38,6 +39,14 @@ export interface BuildTableSelectSqlOptions {
 }
 
 const DATABASE_QUALIFIED_TABLE_TYPES = new Set<DatabaseType>(["mysql", "clickhouse", "doris", "starrocks", "goldendb"]);
+
+// `includeDatabaseName === false` drops the schema qualifier — the "database
+// name" on schema-aware engines — except for databases that can only address
+// objects through their full qualified name (`catalog.schema.table` /
+// `database.schema.table`), where dropping it would break the query.
+function dropsSchemaQualifier(databaseType: DatabaseType | undefined, includeDatabaseName?: boolean): boolean {
+  return includeDatabaseName === false && databaseType !== undefined && !DATABASE_SCHEMA_QUALIFIED_TYPES.has(databaseType);
+}
 
 function sqlStatementSpans(sql: string, dialectId: string): Array<{ start: number; end: number }> {
   const spans: Array<{ start: number; end: number }> = [];
@@ -193,6 +202,7 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   }
   if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres" || databaseType === "kingbase") && identifierQuote != null) {
     const quotedTable = quoteTableData(tableName);
+    if (dropsSchemaQualifier(databaseType, includeDatabaseName)) return quotedTable;
     const trimmedSchema = schema?.trim();
     if (trimmedSchema) {
       return `${quoteTableData(trimmedSchema)}.${quotedTable}`;
@@ -201,6 +211,7 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   }
   if (databaseType === "jdbc" && jdbcDriverProfileUsesSchemaQualification(driverProfile)) {
     const quotedTable = quoteTableData(tableName);
+    if (dropsSchemaQualifier(databaseType, includeDatabaseName)) return quotedTable;
     const trimmedSchema = schema?.trim();
     return trimmedSchema ? `${quoteTableData(trimmedSchema)}.${quotedTable}` : quotedTable;
   }
@@ -223,6 +234,7 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
   }
   if (databaseType === "informix" && identifierQuote != null) {
     const quotedTable = quoteTableData(tableName);
+    if (dropsSchemaQualifier(databaseType, includeDatabaseName)) return quotedTable;
     const trimmedSchema = schema?.trim();
     return trimmedSchema ? `${quoteTableData(trimmedSchema)}.${quotedTable}` : quotedTable;
   }
@@ -232,6 +244,12 @@ export function qualifiedTableName(options: Pick<BuildTableSelectSqlOptions, "da
       if (linked) {
         return quoteIdentifiers === false ? [linked.server, linked.catalog, linked.schema, tableName].map((name) => quoteTableIdentifierIfNeeded(databaseType, name)).join(".") : sqlServerLinkedTableName(linked, tableName);
       }
+    }
+    // The schema qualifier is the "database name" on schema-aware engines
+    // (Oracle's SYSTEM, PG's public, ...). `dropsSchemaQualifier` keeps it
+    // for databases whose queries would not resolve without it.
+    if (dropsSchemaQualifier(databaseType, includeDatabaseName)) {
+      return quoteTable(tableName);
     }
     return `${quoteTable(schema)}.${quoteTable(tableName)}`;
   }

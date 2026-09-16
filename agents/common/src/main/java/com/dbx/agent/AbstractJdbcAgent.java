@@ -255,13 +255,19 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeTransaction(List<String> statements, String schema) {
-        return TransactionExecutor.executeUpdateStatements(
-            requireConnected(),
-            statements,
-            schema,
-            this::setSchemaSQL,
-            this::resetSchemaSQL
-        );
+        Connection conn = requireConnected();
+        return unchecked(() -> {
+            if (!conn.getAutoCommit()) {
+                throw new IllegalStateException("Cannot start a one-shot transaction while a manual transaction is open");
+            }
+            return TransactionExecutor.executeUpdateStatements(
+                conn,
+                statements,
+                schema,
+                this::setSchemaSQL,
+                this::resetSchemaSQL
+            );
+        });
     }
 
     @Override
@@ -377,7 +383,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         JdbcExecutor executor,
         boolean succeeded,
         boolean requiresSessionAffinity,
-        boolean evictAfterRequest
+        boolean evictAfterRequest,
+        boolean endsSessionAffinity,
+        boolean preservesSchemaContext
     ) {
         if (poolRegistry == null) {
             return;
@@ -389,7 +397,12 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
         if (succeeded && requiresSessionAffinity) {
             sessionAffinity = true;
-            JdbcSchemaSwitcher.forget(connection);
+            if (!preservesSchemaContext) {
+                JdbcSchemaSwitcher.forget(connection);
+            }
+        }
+        if (succeeded && endsSessionAffinity) {
+            sessionAffinity = false;
         }
         if (pooledLease == null) {
             connection = null;
@@ -441,7 +454,57 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
         try {
             String quote = connection.getMetaData().getIdentifierQuoteString();
-            return quote == null || quote.trim().isEmpty() ? "" : quote.trim();
+            if (quote == null || quote.trim().isEmpty()) {
+                return "";
+            }
+            return sanitizeInformixFamilyBacktickQuote(params, connection, quote.trim());
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    // GBase 8s and other Informix-family JDBC drivers report "`" from
+    // getIdentifierQuoteString() even though their servers reject backtick-quoted
+    // identifiers with "illegal character in statement" outside MySQL compatibility
+    // mode (SQLMODE=mysql). An empty quote makes clients emit unquoted identifiers,
+    // which both SQL modes accept.
+    private static String sanitizeInformixFamilyBacktickQuote(ConnectParams params, Connection connection, String quote) {
+        if (!"`".equals(quote) || !isInformixFamilyJdbc(params, connection) || isInformixFamilyMysqlCompat(params, connection)) {
+            return quote;
+        }
+        return "";
+    }
+
+    private static boolean isInformixFamilyJdbc(ConnectParams params, Connection connection) {
+        StringBuilder identity = new StringBuilder();
+        appendJdbcIdentity(identity, params.getConnection_string());
+        appendJdbcIdentity(identity, params.getJdbc_driver_class());
+        List<String> driverPaths = params.getJdbc_driver_paths();
+        if (driverPaths != null) {
+            for (String path : driverPaths) {
+                appendJdbcIdentity(identity, path);
+            }
+        }
+        appendJdbcIdentity(identity, connectionUrl(connection));
+        String normalized = identity.toString().toLowerCase(Locale.ROOT);
+        return normalized.contains("jdbc:gbasedbt")
+            || normalized.contains("jdbc:informix")
+            || normalized.contains("com.gbasedbt")
+            || normalized.contains("com.informix");
+    }
+
+    private static boolean isInformixFamilyMysqlCompat(ConnectParams params, Connection connection) {
+        if (params.isMysql_compat_mode()) {
+            return true;
+        }
+        String identity = (params.getConnection_string() + "\n" + connectionUrl(connection)).toLowerCase(Locale.ROOT);
+        return identity.contains("sqlmode=mysql");
+    }
+
+    private static String connectionUrl(Connection connection) {
+        try {
+            String url = connection.getMetaData().getURL();
+            return url == null ? "" : url;
         } catch (Exception ignored) {
             return "";
         }

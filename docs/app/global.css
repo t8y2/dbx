@@ -927,14 +927,11 @@ a {
 .landing-inline-link {
   min-height: 28px;
   color: var(--color-landing-blue);
-  transition:
-    color 0.16s ease,
-    transform 0.16s ease;
+  transition: color 0.16s ease;
 }
 
 .landing-inline-link:hover {
   color: color-mix(in srgb, var(--color-landing-sky) 70%, white);
-  transform: translateX(2px);
 }
 
 /* Workflow card */

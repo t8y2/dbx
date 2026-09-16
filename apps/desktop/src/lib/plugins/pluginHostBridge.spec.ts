@@ -291,6 +291,7 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("window.dbxPlugin");
     expect(document).toContain("get locale() { return locale; }");
     expect(document).toContain("openFilesystem");
+    expect(document).toContain("saveFile");
     expect(document).toContain("document.dispatchEvent(new CustomEvent('dbx-plugin-env'");
     expect(document).toContain("shortcut: 'closeTab'");
     expect(document).toContain("connect-src 'none'");
@@ -375,7 +376,61 @@ describe("PluginHostBridge", () => {
     expect(messages[0]).toMatchObject({ type: "init", theme: { appearance: "dark", tokens: { "--color-background": "#09090b" } } });
 
     bridge.updateTheme({ appearance: "light", tokens: {} });
-    expect(messages[1]).toMatchObject({ type: "env", locale: "en", theme: { appearance: "light" } });
+    expect(messages[1]).toMatchObject({ type: "env", locale: "en", theme: { appearance: "light", tokens: {} } });
+  });
+
+  it("routes host.saveFile transfers through the host save dialog and reports cancellation", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const saveFile = vi.fn().mockResolvedValueOnce({ path: "/tmp/report.csv" }).mockResolvedValueOnce(null);
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      saveFile,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "save1", method: "host.saveFile", params: { fileName: "report.csv", contentType: "text/csv" }, data: new Uint8Array([1, 2, 3]).buffer },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(saveFile).toHaveBeenCalledWith("sample", { fileName: "report.csv", contentType: "text/csv" }, new Uint8Array([1, 2, 3]));
+    expect(messages[0]).toMatchObject({ type: "response", id: "save1", result: { path: "/tmp/report.csv" } });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "save2", method: "host.saveFile", params: { dataBase64: "AQID" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(saveFile).toHaveBeenLastCalledWith("sample", {}, new Uint8Array([1, 2, 3]));
+    expect(messages[1]).toMatchObject({ type: "response", id: "save2", result: null });
+  });
+
+  it("rejects host.saveFile without payload or host support", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "empty", method: "host.saveFile", params: { fileName: "x.bin" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "empty", error: "host.saveFile requires transferred binary data or dataBase64" });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "unsupported", method: "host.saveFile", params: { dataBase64: "AQID" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(messages[1]).toMatchObject({ id: "unsupported", error: "Host file saving is unavailable" });
   });
 });
 

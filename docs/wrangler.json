@@ -4,7 +4,8 @@
   "main": "./worker.ts",
   "assets": {
     "directory": "./out",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    "not_found_handling": "404-page"
   },
   "r2_buckets": [
     {

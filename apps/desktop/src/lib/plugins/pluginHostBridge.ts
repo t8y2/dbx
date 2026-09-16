@@ -6,6 +6,9 @@ const HOST_MESSAGE_SOURCE = "dbx-host";
 const BRIDGE_VERSION = 1;
 const MAX_BRIDGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
+// Distinct from the sidecar binary cap: saved files go straight from the
+// plugin iframe to disk and never traverse plugin frames.
+const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
 
 export interface PluginBridgeTheme {
   appearance: "light" | "dark";
@@ -21,6 +24,15 @@ export interface PluginWorkbenchContext {
   [key: string]: unknown;
 }
 
+export interface PluginSaveFileRequest {
+  fileName?: string;
+  contentType?: string;
+}
+
+export interface PluginSaveFileResult {
+  path: string;
+}
+
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
@@ -29,6 +41,8 @@ export interface PluginHostBridgeApi {
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   closeTab?(): Promise<void> | void;
+  /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
+  saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
 }
 
 interface PluginRequestMessage {
@@ -179,6 +193,19 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.openFilesystem params");
       await this.api.openFilesystem(this.plugin.manifest.id, requireProtocolName(input.providerId, "filesystem provider"), isRecord(input.context) ? input.context : undefined);
       return null;
+    }
+    if (method === "host.saveFile") {
+      const input = isRecord(params) ? params : {};
+      // The sandboxed iframe cannot trigger downloads (WKWebView cancels blob
+      // navigations without a host download handler), so plugins hand the bytes
+      // to the host, which runs the native save dialog and the disk write.
+      let bytes: Uint8Array;
+      if (binary instanceof ArrayBuffer) bytes = new Uint8Array(binary);
+      else if (typeof input.dataBase64 === "string") bytes = new Uint8Array(base64ToBytes(requireBase64(input.dataBase64)));
+      else throw new Error("host.saveFile requires transferred binary data or dataBase64");
+      if (bytes.byteLength > MAX_BRIDGE_SAVE_BYTES) throw new Error(`Plugin save payload exceeds ${MAX_BRIDGE_SAVE_BYTES} bytes`);
+      if (!this.api.saveFile) throw new Error("Host file saving is unavailable");
+      return this.api.saveFile(this.plugin.manifest.id, { fileName: optionalTrimmedString(input.fileName), contentType: optionalTrimmedString(input.contentType) }, bytes);
     }
     throw new Error(`Unsupported plugin host method '${method}'`);
   }
@@ -460,6 +487,12 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       },
       openWorkbench: (contributionId, childContext) => request('host.openWorkbench', { contributionId, context: childContext }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
+      saveFile: (options = {}, data) => {
+        if (data === undefined) return request('host.saveFile', options);
+        if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
+        const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.buffer : new Uint8Array(data).buffer);
+        return request('host.saveFile', options, { transfer: bytes });
+      },
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
@@ -552,6 +585,10 @@ function bytesToBase64(bytes: Uint8Array): string {
 function requireBase64(value: unknown): string {
   if (typeof value !== "string" || value.length > MAX_BRIDGE_PAYLOAD_BYTES * 2 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("Binary payload must be base64");
   return value;
+}
+
+function optionalTrimmedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function requireSafeAssetPath(value: unknown): string {

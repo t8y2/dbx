@@ -17,6 +17,18 @@ export interface MarketplacePluginListing {
   status: MarketplacePluginStatus;
 }
 
+/**
+ * Returns the homepage only when it points somewhere different from the
+ * source repository. Marketplace metadata often repeats the repository URL in
+ * both fields, which otherwise renders two identical links.
+ */
+export function marketplaceHomepageUrl(source?: string, homepage?: string): string | undefined {
+  const normalizedSource = normalizeExternalUrl(source);
+  const normalizedHomepage = normalizeExternalUrl(homepage);
+  if (!normalizedHomepage || normalizedHomepage === normalizedSource) return undefined;
+  return homepage?.trim() || undefined;
+}
+
 export function buildMarketplacePluginListings(results: readonly PluginRepositoryCatalogResult[], installedPlugins: readonly InstalledPlugin[], locale: string): MarketplacePluginListing[] {
   const installedById = new Map(installedPlugins.map((plugin) => [plugin.manifest.id, plugin]));
   return results
@@ -48,8 +60,24 @@ export function selectMarketplaceArtifact(artifacts: readonly PluginMarketplaceA
   return artifacts.find((candidate) => candidate.target === target) || artifacts.find((candidate) => candidate.target === UNIVERSAL_PLUGIN_TARGET);
 }
 
-function listingRepositoryCanVerify(repository: PluginRepository): boolean {
+export function listingRepositoryCanVerify(repository: PluginRepository): boolean {
   return repository.kind === "official" || repository.kind === "enterprise";
+}
+
+const INSTALL_BEACON_URL = "https://dbxio.com/api/plugins/install";
+
+// Fire-and-forget install beacon for marketplace statistics; never blocks or fails the install.
+export function beaconPluginInstall(pluginId: string, version: string): void {
+  try {
+    void fetch(INSTALL_BEACON_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ id: pluginId, version }),
+      keepalive: true,
+    }).catch(() => undefined);
+  } catch {
+    // Statistics are best-effort.
+  }
 }
 
 export function filterMarketplacePluginListings(listings: readonly MarketplacePluginListing[], query: string, repositoryId: string): MarketplacePluginListing[] {
@@ -87,4 +115,17 @@ function parseVersion(version: string): [number, number, number, string] | null 
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?/.exec(version);
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] || "~"];
+}
+
+function normalizeExternalUrl(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    parsed.hash = "";
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return trimmed.replace(/\/+$/, "").toLowerCase();
+  }
 }

@@ -23,6 +23,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.Set;
 
 public final class Db2Agent extends AbstractJdbcAgent {
@@ -45,6 +46,13 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return buildUrl(params);
+    }
+
+    @Override
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = super.buildConnectionProperties(params);
+        properties.setProperty("db2.jcc.charsetDecoderEncoder", "3");
+        return properties;
     }
 
     @Override

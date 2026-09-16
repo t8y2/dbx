@@ -57,6 +57,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install dev-host dependencies for plugin-cli packing
+        run: npm ci --prefix plugins/sdk/dev-host
+
       - name: Set package versions
         id: version
         env:
@@ -916,39 +919,66 @@ jobs:
   publish-homebrew-formula:
     name: Publish Homebrew formula
     runs-on: ubuntu-latest
-    needs: [prepare, publish-cli, publish-mcp-server]
+    needs: [prepare, publish-cli-github-release]
     steps:
-      - name: Download CLI npm tarball and compute SHA256
+      - name: Download native CLI archives and compute SHA256
         id: cli-hash
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          VERSION="${VERSION}"
-          NPM_TARBALL="cli-${VERSION}.tgz"
-          NPM_URL="https://registry.npmjs.org/@dbx-app/cli/-/${NPM_TARBALL}"
-
-          # Poll npm until the package is available (CDN propagation delay)
-          for i in $(seq 1 12); do
-            if curl -fsSLI "${NPM_URL}" >/dev/null 2>&1; then
-              echo "Package found on attempt ${i}"
-              break
-            fi
-            echo "Waiting for npm CDN (attempt ${i}/12)..."
-            sleep 10
+          mkdir -p release-assets
+          ASSETS=(
+            "CLI-SHA256SUMS"
+            "dbx-cli-darwin-arm64.tar.gz"
+            "dbx-cli-darwin-x64.tar.gz"
+            "dbx-cli-linux-arm64-gnu.tar.gz"
+            "dbx-cli-linux-x64-gnu.tar.gz"
+          )
+          for ASSET in "${ASSETS[@]}"; do
+            gh release download "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${ASSET}" \
+              --dir release-assets \
+              --clobber
           done
 
-          curl -fsSL -o "${NPM_TARBALL}" "${NPM_URL}"
-          CLI_SHA256=$(sha256sum "${NPM_TARBALL}" | cut -d ' ' -f 1)
+          (
+            cd release-assets
+            sha256sum --check --ignore-missing CLI-SHA256SUMS
+          )
+
+          hash_for() {
+            awk -v f="$1" '$2 == f {print $1}' release-assets/CLI-SHA256SUMS
+          }
+
+          SHA_DARWIN_ARM64="$(hash_for dbx-cli-darwin-arm64.tar.gz)"
+          SHA_DARWIN_X64="$(hash_for dbx-cli-darwin-x64.tar.gz)"
+          SHA_LINUX_ARM64="$(hash_for dbx-cli-linux-arm64-gnu.tar.gz)"
+          SHA_LINUX_X64="$(hash_for dbx-cli-linux-x64-gnu.tar.gz)"
+
+          for HASH_NAME in SHA_DARWIN_ARM64 SHA_DARWIN_X64 SHA_LINUX_ARM64 SHA_LINUX_X64; do
+            if [ -z "${!HASH_NAME}" ]; then
+              echo "::error::Missing SHA256 entry for ${HASH_NAME} in CLI-SHA256SUMS"
+              exit 1
+            fi
+          done
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "sha256=${CLI_SHA256}" >> "$GITHUB_OUTPUT"
-          echo "  cli version: ${VERSION}"
-          echo "  sha256: ${CLI_SHA256}"
+          echo "sha_darwin_arm64=${SHA_DARWIN_ARM64}" >> "$GITHUB_OUTPUT"
+          echo "sha_darwin_x64=${SHA_DARWIN_X64}" >> "$GITHUB_OUTPUT"
+          echo "sha_linux_arm64=${SHA_LINUX_ARM64}" >> "$GITHUB_OUTPUT"
+          echo "sha_linux_x64=${SHA_LINUX_X64}" >> "$GITHUB_OUTPUT"
 
       - name: Push formula to homebrew-tap
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           CLI_VERSION: ${{ steps.cli-hash.outputs.version }}
-          CLI_SHA256: ${{ steps.cli-hash.outputs.sha256 }}
+          SHA_DARWIN_ARM64: ${{ steps.cli-hash.outputs.sha_darwin_arm64 }}
+          SHA_DARWIN_X64: ${{ steps.cli-hash.outputs.sha_darwin_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.cli-hash.outputs.sha_linux_arm64 }}
+          SHA_LINUX_X64: ${{ steps.cli-hash.outputs.sha_linux_x64 }}
         run: |
           git clone --depth 1 \
             "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/t8y2/homebrew-tap.git" \
@@ -956,32 +986,52 @@ jobs:
           cd homebrew-tap
           mkdir -p Formula
 
+          # The formula installs the prebuilt native binary from the packages
+          # release. Installing the npm tarball instead breaks within the
+          # Homebrew --min-release-age cooldown: the platform binary is an npm
+          # optionalDependency, so during the cooldown npm silently skips it
+          # and brew ships a non-working CLI (t8y2/homebrew-tap#2).
           cat > Formula/dbx-cli.rb <<'RUBY_EOF'
           class DbxCli < Formula
             desc "Command-line interface for DBX database connections, schema, and safe queries"
             homepage "https://github.com/t8y2/dbx"
-            url "https://registry.npmjs.org/@dbx-app/cli/-/cli-__CLI_VERSION__.tgz"
-            sha256 "__CLI_SHA256__"
+            version "__CLI_VERSION__"
             license "Apache-2.0"
 
-              depends_on "node"
+            on_macos do
+              if Hardware::CPU.intel?
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-darwin-x64.tar.gz"
+                sha256 "__SHA_DARWIN_X64__"
+              else
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-darwin-arm64.tar.gz"
+                sha256 "__SHA_DARWIN_ARM64__"
+              end
+            end
+            on_linux do
+              if Hardware::CPU.intel?
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-linux-x64-gnu.tar.gz"
+                sha256 "__SHA_LINUX_X64__"
+              else
+                url "https://github.com/t8y2/dbx/releases/download/packages-v#{version}/dbx-cli-linux-arm64-gnu.tar.gz"
+                sha256 "__SHA_LINUX_ARM64__"
+              end
+            end
 
             def install
-              system "npm", "install", *std_npm_args
-              bin.install_symlink libexec.glob("bin/*")
-
+              bin.install "dbx"
             end
 
             test do
-              assert_path_exists bin/"dbx"
-              system bin/"dbx", "doctor"
+              assert_match version.to_s, shell_output("#{bin}/dbx --version")
             end
           end
           RUBY_EOF
 
-          sed -i 's/^          //' Formula/dbx-cli.rb
           sed -i "s/__CLI_VERSION__/${CLI_VERSION}/g" Formula/dbx-cli.rb
-          sed -i "s/__CLI_SHA256__/${CLI_SHA256}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_DARWIN_ARM64__/${SHA_DARWIN_ARM64}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_DARWIN_X64__/${SHA_DARWIN_X64}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_LINUX_ARM64__/${SHA_LINUX_ARM64}/g" Formula/dbx-cli.rb
+          sed -i "s/__SHA_LINUX_X64__/${SHA_LINUX_X64}/g" Formula/dbx-cli.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

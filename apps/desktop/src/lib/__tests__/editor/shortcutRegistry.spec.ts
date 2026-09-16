@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   closeOtherTabsDefaultShortcut,
   DEFAULT_SHORTCUT_SETTINGS,
-  SHORTCUT_DEFINITIONS,
   findShortcutConflict,
   formatShortcut,
+  isReservedShortcut,
+  MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
   normalizeShortcutSettings,
   selectionOccurrenceDefaultShortcut,
+  SHORTCUT_DEFINITIONS,
   shortcutToCodeMirrorKey,
   toggleAiPanelDefaultShortcut,
   type ShortcutActionId,
@@ -361,5 +363,72 @@ describe("shortcutRegistry editor actions", () => {
 
   it("converts multi-stroke shortcuts for CodeMirror keymaps", () => {
     expect(shortcutToCodeMirrorKey("Ctrl+K Ctrl+C")).toBe("Ctrl-k Ctrl-c");
+  });
+
+  it("reserves only the macOS Hide combinations that the app menu owns", () => {
+    expect(MACOS_RESERVED_SHORTCUTS).toEqual(new Set(["Mod+H", "Alt+Mod+H"]));
+    // Meta+H and Mod+H are the same key on macOS; Shift+Mod+H is NOT reserved
+    // because no menu key equivalent uses the shifted form.
+    expect(isReservedShortcut("Mod+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Meta+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Cmd+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Alt+Mod+H", "MacIntel")).toBe(true);
+    // eventToShortcut 记录的 ⌥⌘H 顺序是 Mod+Alt+H（修饰键顺序不同），比较必须不敏感于顺序。
+    expect(isReservedShortcut("Mod+Alt+H", "MacIntel")).toBe(true);
+    expect(isReservedShortcut("Meta+Alt+H", "MacIntel")).toBe(true);
+    // 反例：Ctrl+H / Control+H 是同一物理组合（CodeMirror 的 deleteCharBackward），
+    // 不是 DBX 应用菜单的 accelerator，绝不能误判为保留键。
+    expect(isReservedShortcut("Ctrl+H", "MacIntel")).toBe(false);
+    expect(isReservedShortcut("Control+H", "MacIntel")).toBe(false);
+    expect(isReservedShortcut("Shift+Mod+H", "MacIntel")).toBe(false);
+    expect(isReservedShortcut("Mod+R", "MacIntel")).toBe(false);
+    // On Windows/Linux Mod expands to Ctrl, so Ctrl+H stays a legitimate replace alias.
+    expect(isReservedShortcut("Mod+H", "Win32")).toBe(false);
+    expect(isReservedShortcut("Mod+H", "Linux x86_64")).toBe(false);
+  });
+
+  it("repairs a mac-synced reserved replace/find shortcut to the platform default", () => {
+    // 云同步把 Windows 上的 Ctrl+H 当作 replace 显式配置带到 macOS，此处应修复
+    // 为该动作在 macOS 上的平台默认值 Mod+R（而不是清空），确保 ⌘H 不被劫持。
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ replace: "Meta+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ replace: "Alt+Mod+H" }, "MacIntel").replace).toBe("Mod+R");
+    // eventToShortcut 记录的 ⌥⌘H 是 Mod+Alt+H，两个顺序都必须修复到平台默认值。
+    expect(normalizeShortcutSettings({ replace: "Mod+Alt+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ find: "Mod+H" }, "MacIntel").find).toBe("Mod+F");
+    // ⌃H 不是保留键：手工编辑或同步进来的 ⌃H 绑定原样保留，绝不修复。
+    expect(normalizeShortcutSettings({ replace: "Ctrl+H" }, "MacIntel").replace).toBe("Ctrl+H");
+    // 未保留的 Shift+Mod+H 原样保留，其他动作的默认值不受影响。
+    expect(normalizeShortcutSettings({ replace: "Shift+Mod+H" }, "MacIntel").replace).toBe("Shift+Mod+H");
+    expect(normalizeShortcutSettings({ replace: "Mod+R" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "MacIntel").find).toBe("Mod+F");
+    // Windows/Linux 上 Mod+H = Ctrl+H 必须原样保留（正常的替换键）。
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "Win32").replace).toBe("Mod+H");
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "Linux x86_64").replace).toBe("Mod+H");
+  });
+
+  it("clears a reserved-key repair when the platform default is already occupied by an explicit config", () => {
+    // find 的平台默认值是 Mod+F。若用户把 formatSql 显式配置为 Mod+F、而 find 又被
+    // 云同步/旧配置带入 macOS 保留键 ⌘H，修复会把 find 还原成 Mod+F，恰好抢占
+    // formatSql——QueryEditor.vue 的 keymap 里 find 绑定注册在 formatSql 之前，
+    // 先匹配先执行，formatSql 就永远不可达了。用户显式配置必须赢，因此被占用的
+    // 修复动作只能清空（"" = 未绑定），而不是把默认值强加回去。
+    const findOccupied = normalizeShortcutSettings({ find: "Mod+H", formatSql: "Mod+F" }, "MacIntel");
+    expect(findOccupied.find).toBe("");
+    expect(findOccupied.formatSql).toBe("Mod+F");
+    // 同理由 replace 的平台默认值 Mod+R 与显式配置的 formatSql 冲突时清空 replace。
+    const replaceOccupied = normalizeShortcutSettings({ replace: "Mod+H", formatSql: "Mod+R" }, "MacIntel");
+    expect(replaceOccupied.replace).toBe("");
+    expect(replaceOccupied.formatSql).toBe("Mod+R");
+    // 无占用时仍按原逻辑修复到平台默认值。
+    expect(normalizeShortcutSettings({ replace: "Mod+H" }, "MacIntel").replace).toBe("Mod+R");
+    expect(normalizeShortcutSettings({ find: "Mod+H" }, "MacIntel").find).toBe("Mod+F");
+    // 占用者仅来自默认（未显式配置）时不清空；⌃H 不是保留键，也原样保留。
+    expect(normalizeShortcutSettings({ find: "Mod+H", replace: "Ctrl+H" }, "MacIntel").find).toBe("Mod+F");
+    expect(normalizeShortcutSettings({ replace: "Ctrl+H" }, "MacIntel").replace).toBe("Ctrl+H");
+    // 非 mac 平台 Mod+H = Ctrl+H 不是保留键，原样保留且不触发清空。
+    const windows = normalizeShortcutSettings({ find: "Mod+H", formatSql: "Mod+F" }, "Win32");
+    expect(windows.find).toBe("Mod+H");
+    expect(windows.formatSql).toBe("Mod+F");
   });
 });

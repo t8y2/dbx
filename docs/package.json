@@ -4,6 +4,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "dev": "next dev",
+    "preview": "node scripts/preview-server.mjs",
     "content:check": "node scripts/verify-doc-content.mjs",
     "prebuild": "node scripts/verify-doc-content.mjs",
     "build": "next build",

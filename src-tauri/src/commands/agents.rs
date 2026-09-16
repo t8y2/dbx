@@ -219,7 +219,7 @@ pub async fn import_agents_from_zip(
     state: State<'_, Arc<AppState>>,
     path: String,
     operation_id: Option<String>,
-) -> Result<u32, String> {
+) -> Result<serde_json::Value, String> {
     let am = &state.agent_manager;
     let package_path = std::path::PathBuf::from(&path);
     let plan = inspect_offline_package(&package_path)?;
@@ -233,7 +233,7 @@ pub async fn import_agents_from_zip(
     dbx_core::jdbc::import_offline_jdbc_payload(state.plugins.root_dir(), &package_path)?;
     let count = result.drivers_installed.len() as u32;
     emit_agent_progress(&app, &operation_id, AgentProgressEvent::step("done"));
-    Ok(count)
+    Ok(serde_json::json!({ "count": count, "jreCount": result.jre_installed.len() }))
 }
 
 #[tauri::command]

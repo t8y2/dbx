@@ -2522,6 +2522,7 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
   bottom: 0;
   width: 7px;
   cursor: col-resize;
+  touch-action: none;
   z-index: 10;
   background: transparent;
 }

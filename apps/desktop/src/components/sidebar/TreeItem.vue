@@ -73,6 +73,7 @@ import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
+import { isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { encodeSpannerResourcePath } from "@/lib/connection/spannerResourcePath";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -1041,6 +1042,17 @@ function clearTableSearchQuery() {
   updateTableSearchQuery("");
 }
 
+function onTableSearchControlKeydown(event: KeyboardEvent) {
+  if (isFocusSearchShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    event.preventDefault();
+    const control = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    const input = control?.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
+    input?.focus();
+    input?.select();
+  }
+  event.stopPropagation();
+}
+
 // --- Connection Group Management ---
 const isRenamingGroup = ref(false);
 
@@ -1504,7 +1516,7 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" class="tree-table-search-control flex h-7 items-center gap-1.5 py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown.stop>
+  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control flex h-7 items-center gap-1.5 py-0.5 pr-2" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
     <div class="relative min-w-0 flex-1">
       <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
       <Input

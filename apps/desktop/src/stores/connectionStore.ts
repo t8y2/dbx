@@ -2272,7 +2272,7 @@ export const useConnectionStore = defineStore("connection", () => {
     });
   }
 
-  function invalidateMetadataCachesForNode(node: TreeNode) {
+  function invalidateMetadataCachesForNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean }) {
     if (!node.connectionId) return;
     const tableName = node.tableName || (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" ? node.label : undefined);
     const match = {
@@ -2282,7 +2282,9 @@ export const useConnectionStore = defineStore("connection", () => {
       tableName,
     };
     invalidateMetadataCaches(match);
-    void invalidateObjectDdlCache(match);
+    // Connection-node refresh already awaited a strict object-cache invalidation;
+    // skip the fire-and-forget duplicate so no late async deletion trails it.
+    if (!options?.skipObjectCacheInvalidation) void invalidateObjectDdlCache(match);
   }
 
   function invalidateMetadataCache(connectionId: string, database?: string, schema?: string, tableName?: string) {
@@ -7054,9 +7056,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function refreshTreeNode(node: TreeNode) {
+  async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean }) {
     invalidateCompletionCachesForNode(node);
-    invalidateMetadataCachesForNode(node);
+    invalidateMetadataCachesForNode(node, options);
     if (objectTypesForGroupNode(node.type)) {
       clearLoadedChildrenCache(node.id, { deletePersisted: false });
       await loadObjectGroupChildren(node, { force: true });
@@ -7067,7 +7069,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const parentId = objectGroupRefreshParentId(node);
     const parentNode = parentId ? findNode(treeNodes.value, parentId) : null;
     if (parentNode) {
-      await refreshTreeNode(parentNode);
+      await refreshTreeNode(parentNode, options);
       return;
     }
 
@@ -7117,6 +7119,18 @@ export const useConnectionStore = defineStore("connection", () => {
         activeTreeRefreshGenerations.delete(node.id);
       }
     }
+  }
+
+  /**
+   * Connection-node refresh: fully invalidate the connection's object caches
+   * (DDL + object metadata, memory and persisted) and surface deletion
+   * failures before the tree reload runs. Tree-reload failures propagate
+   * unmarked and keep the original connect-failure handling.
+   */
+  async function refreshConnectionTreeNode(node: TreeNode): Promise<void> {
+    if (node.type !== "connection" || !node.connectionId) return refreshTreeNode(node);
+    await invalidateObjectDdlCache({ connectionId: node.connectionId }, { strict: true });
+    await refreshTreeNode(node, { skipObjectCacheInvalidation: true });
   }
 
   async function refreshTreeNodeForTableNameFilter(node: TreeNode, scopeKey: string, revision: number) {
@@ -9223,6 +9237,7 @@ export const useConnectionStore = defineStore("connection", () => {
     collapseAllTreeNodes,
     refreshSidebarObjectPagination,
     refreshTreeNode,
+    refreshConnectionTreeNode,
     refreshDatabaseTreeNode,
     refreshObjectListTreeNode,
     connectedIds,

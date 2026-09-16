@@ -14,7 +14,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { DEFAULT_QUERY_RESULT_MAX_ROWS, normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { DEFAULT_QUERY_TIMEOUT_SECS, normalizeConnectTimeoutSecs, normalizeQueryTimeoutSecs } from "@/lib/connection/timeoutLimits";
-import { needsTabNavigationHistoryShortcutMigration, normalizeShortcutSettings, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { needsTabNavigationHistoryShortcutMigration, normalizeShortcutSettings, isReservedShortcut, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import type { SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
@@ -1357,10 +1357,15 @@ function normalizeSqlShortcuts(value: unknown, existing?: SqlShortcutAction[]): 
     if (!item || typeof item !== "object" || typeof item.id !== "string" || !item.id || typeof item.label !== "string" || !item.label || typeof item.shortcut !== "string" || typeof item.sql !== "string") {
       continue;
     }
+    const shortcut = item.shortcut.trim();
+    // SQL 快捷键走 createQueryEditorSqlShortcutDomHandler：匹配后 preventDefault，
+    // 与普通动作一样会重新劫持 macOS 的 ⌘H。此处直接丢弃保留组合——SQL 快捷键
+    // 没有“平台默认值”这一概念（它是用户自定义模板的专属触发键），清空即视为未绑定。
+    const normalizedShortcut = isReservedShortcut(shortcut) ? "" : shortcut;
     valid.push({
       id: item.id,
       label: item.label,
-      shortcut: item.shortcut.trim(),
+      shortcut: normalizedShortcut,
       sql: item.sql,
       enabled: item.enabled !== false,
     });

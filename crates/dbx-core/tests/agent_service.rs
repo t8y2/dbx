@@ -14,6 +14,106 @@ fn test_manager(name: &str) -> AgentManager {
     AgentManager::new_with_base_dir(dir)
 }
 
+fn write_standalone_jre(path: &std::path::Path, version: &str, java: Option<&[u8]>) {
+    let encoder = zstd::stream::write::Encoder::new(std::fs::File::create(path).unwrap(), 0).unwrap();
+    let mut archive = tar::Builder::new(encoder);
+    let mut append = |name: &str, bytes: &[u8]| {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append_data(&mut header, name, bytes).unwrap();
+    };
+    append("dbx-jre/release", format!("JAVA_VERSION=\"{version}\"\n").as_bytes());
+    if let Some(java) = java {
+        append(if cfg!(windows) { "dbx-jre/bin/java.exe" } else { "dbx-jre/bin/java" }, java);
+    }
+    archive.into_inner().unwrap().finish().unwrap();
+}
+
+#[tokio::test]
+async fn standalone_jre_import_works_without_registry_and_with_renamed_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("agent-offline-upload.tar.zst");
+    let binary = current_platform_native_binary();
+    write_standalone_jre(&package, "21.0.12.1", Some(&binary));
+    let plan = inspect_offline_package(&package).unwrap();
+    assert!(plan.includes_jre);
+    assert!(plan.driver_keys.is_empty());
+    let manager = AgentManager::new_with_base_dir(dir.path().join("agents"));
+    let result = import_agents_from_package(&manager, &package, |_| {}).await.unwrap();
+    assert_eq!(result.jre_installed, vec!["21"]);
+    assert!(result.drivers_installed.is_empty());
+    assert!(manager.is_jre_installed("21"));
+    assert_eq!(manager.load_state().jre_versions["21"], "21.0.12.1");
+}
+
+#[tokio::test]
+async fn standalone_jre_invalid_package_preserves_existing_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = AgentManager::new_with_base_dir(dir.path().join("agents"));
+    let package = dir.path().join("upload.tar.zst");
+    write_standalone_jre(&package, "21.0.12.1", Some(&current_platform_native_binary()));
+    import_agents_from_package(&manager, &package, |_| {}).await.unwrap();
+    for (version, java) in
+        [("21.0.13", None), ("../../outside", Some(b"bad".as_slice())), ("21.0.13", Some(b"bad".as_slice()))]
+    {
+        write_standalone_jre(&package, version, java);
+        assert!(inspect_offline_package(&package).is_err());
+        assert!(import_agents_from_package(&manager, &package, |_| {}).await.is_err());
+        assert_eq!(manager.load_state().jre_versions["21"], "21.0.12.1");
+        assert!(manager.is_jre_installed("21"));
+    }
+    write_standalone_jre(&package, "21.0.13", Some(&current_platform_native_binary()));
+    import_agents_from_package(&manager, &package, |_| {}).await.unwrap();
+    assert_eq!(manager.load_state().jre_versions["21"], "21.0.13");
+}
+
+#[test]
+fn standalone_jre_rejects_wrong_cpu_architecture() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("upload.tar.zst");
+    write_standalone_jre(&package, "21.0.12.1", Some(&native_binary_for_arch(!cfg!(target_arch = "aarch64"))));
+    assert!(inspect_offline_package(&package).unwrap_err().contains("does not support platform"));
+}
+
+#[test]
+fn standalone_jre_rejects_links_outside_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("upload.tar.zst");
+    let encoder = zstd::stream::write::Encoder::new(std::fs::File::create(&package).unwrap(), 0).unwrap();
+    let mut archive = tar::Builder::new(encoder);
+    let release = b"JAVA_VERSION=\"21.0.12.1\"\n";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(release.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append_data(&mut header, "dbx-jre/release", release.as_slice()).unwrap();
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    archive.append_link(&mut header, "dbx-jre/lib/escape", "../../outside").unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+    assert!(inspect_offline_package(&package).unwrap_err().contains("non-regular entry"));
+    assert!(!dir.path().join("outside").exists());
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_TEST_JRE_PACKAGE containing an official package for the current platform"]
+async fn standalone_jre_official_package_runs_java_after_import() {
+    let package = std::path::PathBuf::from(std::env::var("DBX_TEST_JRE_PACKAGE").unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let manager = AgentManager::new_with_base_dir(dir.path().join("agents"));
+    assert!(inspect_offline_package(&package).unwrap().includes_jre);
+    let result = import_agents_from_package(&manager, &package, |_| {}).await.unwrap();
+    let key = &result.jre_installed[0];
+    let java = manager.jre_dir(key).join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+    let output = std::process::Command::new(java).arg("-version").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    println!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
 fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistry {
     let mut drivers = std::collections::HashMap::new();
     drivers.insert(

@@ -170,7 +170,7 @@ test("table-data toolbar refresh keeps page size independent from SQL editor set
   assert.match(dataGrid, /watch\([\s\S]*\(\) => settingsStore\.editorSettings\.pageSize,[\s\S]*if \(pageSizePreference\.value !== "results"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
   assert.match(dataGrid, /settingsStore\.updateEditorSettings\(dataGridPageSizeSettingsPatch\(pageSizePreference\.value, normalizedSize\)\)/);
   assert.match(dataGrid, /const resetToFirstPage = hasPendingConditionInputs\(\);/);
-  assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, resetToFirstPage \? 0 : \(currentPage\.value - 1\) \* pageSize\.value, "refresh"\)/);
+  assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, resetToFirstPage \? 0 : \(currentPage\.value - 1\) \* pageSize\.value, intent\)/);
 });
 
 test("standalone result views use the same compact toolbar breakpoint", () => {
@@ -243,7 +243,9 @@ test("embedded result toolbar cannot scroll vertically", () => {
 test("DataGrid marks toolbar refresh separately from current-result reloads", () => {
   const dataGrid = source(dataGridPath);
 
-  assert.match(dataGrid, /emit\("reload", props\.sql,[^;]+"refresh"\);/);
+  assert.match(dataGrid, /async function onToolbarRefresh\(\)\s*\{\s*await reloadTableData\("refresh"\);/);
+  assert.match(dataGrid, /refresh: \(\) => reloadTableData\("auto-refresh"\)/);
+  assert.match(dataGrid, /async function reloadTableData\(intent: DataGridReloadIntent\)[\s\S]*?emit\("reload", props\.sql,[^;]+intent\);/);
   assert.match(dataGrid, /function onToolbarRollback\(\)[\s\S]*?emit\("reload", props\.sql,[^;]+\);/);
 });
 

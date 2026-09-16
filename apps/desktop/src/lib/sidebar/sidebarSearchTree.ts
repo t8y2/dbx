@@ -84,15 +84,18 @@ export function filterLocallySearchedTables(nodes: TreeNode[], options: { enable
     const indexed = options.indexedResults[node.id];
     // matchSidebarLabel compares case-insensitively internally and needs the
     // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
+    // Table comments participate in matching, mirroring the global sidebar
+    // search and the backend's name-or-comment metadata filter.
+    const entryMatches = (name: string, comment?: string | null) => !!matchSidebarLabel(name, query) || (!!comment && !!matchSidebarLabel(comment, query));
     const matchingChildren =
       indexed === null
-        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && entryMatches(child.label, child.comment))
         : indexed
           ? reuseLiveSidebarTreeNodes(
-              buildSidebarIndexedTableNodes({ parentNodeId: node.id, nodeType: node.type, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, entries: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }),
+              buildSidebarIndexedTableNodes({ parentNodeId: node.id, nodeType: node.type, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, entries: indexed.filter((entry) => entryMatches(entry.name, entry.comment)) }),
               children,
             )
-          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && entryMatches(child.label, child.comment));
     return { ...node, children: matchingChildren };
   });
 }

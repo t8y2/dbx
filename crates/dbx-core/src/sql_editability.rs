@@ -1104,6 +1104,18 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_oracle_num_column_and_alias_as_editable() {
+        for sql in ["select id, num from users", "select id, amount as num from users"] {
+            let result = analyze_editable_query_editability(sql);
+            assert!(result.editable, "{sql}");
+            assert_eq!(result.reason, None, "{sql}");
+            let analysis = result.analysis.unwrap();
+            assert_eq!(analysis.table_name, "users", "{sql}");
+            assert_eq!(analysis.columns.last().unwrap().result_name, "num", "{sql}");
+        }
+    }
+
+    #[test]
     fn recognizes_sql_server_top_selects_as_editable() {
         for sql in [
             "SELECT TOP 2 name, note FROM dbo.users ORDER BY name",

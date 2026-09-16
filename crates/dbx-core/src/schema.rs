@@ -11239,7 +11239,7 @@ mod ddl_tests {
         let ddl = render_postgres_table_ddl("public", "aaa_1", &columns, &[], &foreign_keys, None);
 
         assert!(ddl.contains(
-            "CONSTRAINT \"aaa_1\" FOREIGN KEY (\"a\", \"b\", \"c\") REFERENCES \"aaa_2\"(\"a\", \"b\", \"c\")"
+            "CONSTRAINT \"aaa_1\" FOREIGN KEY (\"a\", \"b\", \"c\") REFERENCES \"public\".\"aaa_2\"(\"a\", \"b\", \"c\")"
         ));
         assert_eq!(ddl.matches("CONSTRAINT \"aaa_1\" FOREIGN KEY").count(), 1);
     }
@@ -12734,11 +12734,14 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
         }
         let columns = fk_group.iter().map(|fk| pg_ident(&fk.column)).collect::<Vec<_>>().join(", ");
         let ref_columns = fk_group.iter().map(|fk| pg_ident(&fk.ref_column)).collect::<Vec<_>>().join(", ");
+        let referenced_schema =
+            first_fk.ref_schema.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(schema);
+        let referenced_table = format!("{}.{}", pg_ident(referenced_schema), pg_ident(&first_fk.ref_table));
         definition_lines.push(format!(
             "  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
             pg_ident(&first_fk.name),
             columns,
-            pg_ident(&first_fk.ref_table),
+            referenced_table,
             ref_columns
         ));
     }

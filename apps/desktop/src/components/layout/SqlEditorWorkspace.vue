@@ -34,7 +34,7 @@ const emit = defineEmits<
   ContentAreaSurfaceEmits & {
     "locate-tab": [tab: QueryTab];
     "toggle-zen-mode": [];
-    "start-resize": [event: MouseEvent];
+    "start-resize": [event: PointerEvent];
     "toggle-collapse": [];
     "detach-tab": [tab: QueryTab];
   }
@@ -66,10 +66,10 @@ defineExpose({
     // A data-mode cell-detail dialog is portaled to body too but belongs to
     // the group's grid — indistinguishable in the DOM, hence the gate.
     if (element?.closest("[data-shared-result-surface]") || (showSharedResult.value && element?.closest("[data-cell-detail-editor-root]"))) {
-      return resultSurfaceRef.value?.focusSearch() ?? false;
+      return resultSurfaceRef.value?.focusSearch(element) ?? false;
     }
     const group = groupForElement(element) ?? activeEditorGroup();
-    return group?.focusSearch() ?? false;
+    return group?.focusSearch(element) ?? false;
   },
   openGoToColumn: () => activeEditorGroup()?.openGoToColumn() ?? false,
   refreshData: (target: Element | null = null) => {
@@ -114,6 +114,7 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const isVerticalTabLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
+const verticalTabsWithSuppressedContent = computed(() => props.contentSuppressed && isVerticalTabLayout.value);
 const globalTabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
 const workspaceTabBarPortal = createGroupTabBarPortal(isVerticalTabLayout);
 // A special page owns navigation while active. Otherwise side tabs stay
@@ -254,19 +255,25 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
   }
   return false;
 }
+function handleFocusErrorOffset(tabId: string, offset: number): boolean {
+  for (const group of groupRefs.values()) {
+    if (group.focusErrorPosition(tabId, offset)) {
+      return true;
+    }
+  }
+  return false;
+}
 </script>
 
 <template>
-  <!-- contentSuppressed (plugin workbench tab active): the App.vue wrapper is
-       flex-none with indefinite height, so h-full/flex-1 here would collapse
-       the workspace to 0 and clip the group tab strips (overflow-hidden).
-       Size to content instead — same contract as EditorGroup's suppressed
-       h-auto; normal mode keeps h-full/flex-1 to fill the column. -->
-  <div class="sql-editor-workspace relative flex min-h-0 min-w-0 overflow-hidden" :class="[contentSuppressed ? 'h-auto' : 'h-full flex-1', workspaceClass, settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row']">
+  <div
+    class="sql-editor-workspace relative flex min-h-0 min-w-0 overflow-hidden"
+    :class="[verticalTabsWithSuppressedContent ? 'h-full flex-none' : contentSuppressed ? 'h-auto' : 'h-full flex-1', workspaceClass, settingsStore.editorSettings.tabPlacement === 'right' ? 'flex-row-reverse' : 'flex-row']"
+  >
     <div v-show="isVerticalTabLayout && showTabNavigation !== false" data-workspace-tab-navigation class="flex min-h-0 shrink-0 flex-col overflow-hidden" :style="tabNavigationStyle">
       <div v-for="group in queryStore.groups" :key="group.id" :ref="(element) => setTabBarTarget(group.id, element)" :data-workspace-tab-target="group.id" class="flex min-h-0 min-w-0 flex-1" @pointerdown.capture="queryStore.focusGroup(group.id)" @focusin="queryStore.focusGroup(group.id)" />
     </div>
-    <div data-workspace-content class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <div data-workspace-content class="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" :class="{ hidden: verticalTabsWithSuppressedContent }">
       <!-- Suppressed mode: a plugin workbench tab owns the layout. Render the
            groups' tab strips directly (no Splitpanes, no shared result pane) so
            App.vue's always-mounted plugin layer can fill the remaining column
@@ -347,6 +354,11 @@ function handleFocusStatement(tabId: string, range: StatementRange | null): bool
               @focus-statement="
                 (tabId: string, range: { from: number; to: number } | null) => {
                   handleFocusStatement(tabId, range);
+                }
+              "
+              @focus-error-offset="
+                (tabId: string, offset: number) => {
+                  handleFocusErrorOffset(tabId, offset);
                 }
               "
             />

@@ -125,6 +125,11 @@ pub struct BackendError {
     diagnostics: Option<BackendErrorDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     help_url: Option<String>,
+    /// Driver-reported SQL error position, when the adapter provides one
+    /// (currently native PostgreSQL). Optional field, added without bumping the
+    /// envelope version; clients that do not understand it simply ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_position: Option<crate::sql_error_position::SqlErrorPosition>,
 }
 
 impl BackendError {
@@ -270,6 +275,14 @@ impl BackendError {
         )
     }
 
+    /// Create a SQL failure envelope while retaining bounded native driver detail
+    /// and a driver-reported error position.
+    pub fn from_sql_detail_with_position(message: &str, position: crate::sql_error_position::SqlErrorPosition) -> Self {
+        let mut error = Self::from_sql_detail(message);
+        error.error_position = Some(position);
+        error
+    }
+
     /// Adapt a DuckDB worker error while retaining both the native detail and
     /// the worker protocol code for diagnostics at the public boundary.
     pub fn from_duckdb_worker_error(code: &str, message: &str) -> Self {
@@ -350,6 +363,10 @@ impl BackendError {
         self.diagnostics.as_ref()
     }
 
+    pub fn error_position(&self) -> Option<crate::sql_error_position::SqlErrorPosition> {
+        self.error_position
+    }
+
     fn new(
         entry: &'static CatalogEntry,
         source: BackendErrorSource,
@@ -372,6 +389,7 @@ impl BackendError {
             detail,
             diagnostics,
             help_url: entry.help_url.map(str::to_string),
+            error_position: None,
         }
     }
 }
@@ -673,6 +691,8 @@ fn bounded_text(value: &str, max_bytes: usize) -> String {
 }
 
 fn bounded_detail(message: &str) -> Option<String> {
+    let stripped = crate::sql_error_position::strip_marker(message);
+    let message = stripped.as_str();
     if message.trim().is_empty() {
         return None;
     }
@@ -684,7 +704,10 @@ fn bounded_detail(message: &str) -> Option<String> {
 fn bounded_native_detail(message: &str) -> Option<String> {
     // This path is only for typed native SQL failures. Do not infer or rewrite
     // SQL content here; preserving the driver's diagnostic is the contract.
-    let trimmed = message.trim();
+    // The position transport suffix is stripped because it is surfaced through
+    // the structured `errorPosition` field, not as message text.
+    let stripped = crate::sql_error_position::strip_marker(message);
+    let trimmed = stripped.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -1139,6 +1162,34 @@ mod tests {
         assert_eq!(payload["source"], "jdbcAgent");
         assert_eq!(payload["origin"]["subsystem"], "database");
         assert_eq!(payload["origin"]["adapter"], "native");
+    }
+
+    #[test]
+    fn sql_error_with_position_exposes_typed_error_position_and_keeps_v1_detail() {
+        let position = crate::sql_error_position::SqlErrorPosition { line: 2, column: 6, offset: 12 };
+        let payload = serde_json::to_value(BackendError::from_sql_detail_with_position(
+            "ERROR: relation \"missing\" does not exist",
+            position,
+        ))
+        .unwrap();
+
+        assert_eq!(payload["code"], "DBX-JDBC-4001");
+        assert_eq!(payload["detail"], "ERROR: relation \"missing\" does not exist");
+        assert_eq!(payload["errorPosition"]["line"], 2);
+        assert_eq!(payload["errorPosition"]["column"], 6);
+        assert_eq!(payload["errorPosition"]["offset"], 12);
+        assert_eq!(payload["origin"]["adapter"], "native");
+
+        // SQL errors without a position must not emit the optional field.
+        let plain = serde_json::to_value(BackendError::from_sql_detail("ERROR: nope")).unwrap();
+        assert!(plain.get("errorPosition").is_none());
+    }
+
+    #[test]
+    fn detail_sanitizers_strip_the_position_transport_marker() {
+        let message = format!("ERROR: relation does not exist{}", crate::sql_error_position::encode_marker(15));
+        assert_eq!(bounded_native_detail(&message).as_deref(), Some("ERROR: relation does not exist"));
+        assert_eq!(bounded_detail(&message).as_deref(), Some("ERROR: relation does not exist"));
     }
 
     #[test]

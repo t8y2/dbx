@@ -2,6 +2,7 @@ import * as api from "@/lib/backend/api";
 import { ActiveCacheReadTracker } from "./activeCacheReadTracker";
 import type { MetadataCacheInvalidation } from "./metadataResultCache";
 import type { ObjectDdlRequest } from "./objectDdlCache";
+import { toObjectCacheInvalidationError, type ObjectCacheInvalidationOptions } from "./objectCacheInvalidationError";
 import { getMetadataRuntimeCache, invalidateMetadataRuntimeCachePrefix, recordMetadataCacheL2Hit, recordMetadataCacheRemoteMiss, setMetadataRuntimeCache } from "./metadataRuntimeCache";
 
 const OBJECT_METADATA_CACHE_PREFIX = "object-meta:v1";
@@ -41,14 +42,6 @@ async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<
   }
 }
 
-async function deleteSchemaCachePrefixSafe(prefix: string): Promise<void> {
-  try {
-    await api.deleteSchemaCachePrefix(prefix);
-  } catch {
-    // Cache invalidation is best effort when running with a reduced backend.
-  }
-}
-
 export type ObjectMetadataFacet = "columns" | "indexes" | "foreign-keys" | "constraints" | "triggers" | "comment" | "owner";
 
 function cacheSegment(value: string | undefined): string {
@@ -81,7 +74,9 @@ function decodeEnvelope<T>(payload: unknown): { hit: true; value: T } | undefine
 }
 
 async function waitForPendingInvalidations(cacheKey: string): Promise<void> {
-  const pending = [...pendingInvalidations.entries()].filter(([prefix]) => cacheKey.startsWith(prefix)).map(([, promise]) => promise);
+  // Readers only wait for pending deletions to settle; the failure itself is
+  // reported by the caller that started the invalidation.
+  const pending = [...pendingInvalidations.entries()].filter(([prefix]) => cacheKey.startsWith(prefix)).map(([, promise]) => promise.catch(() => undefined));
   if (pending.length) await Promise.all(pending);
 }
 
@@ -116,7 +111,9 @@ function invalidatePersistedPrefix(prefix: string): Promise<void> {
   if (existing) return existing;
   const deletion = (async () => {
     await waitForPendingWrites(prefix);
-    await deleteSchemaCachePrefixSafe(prefix);
+    // Deletion failures propagate so strict callers can observe them;
+    // best-effort callers catch at their own boundary.
+    await api.deleteSchemaCachePrefix(prefix);
   })().finally(() => {
     if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
   });
@@ -134,7 +131,8 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
     invalidateMetadataRuntimeCachePrefix(cacheKey);
     const priorInvalidations = waitForPendingInvalidations(cacheKey);
     const deletion = invalidatePersistedPrefix(cacheKey);
-    await Promise.all([priorInvalidations, deletion]);
+    // A failed prefix deletion must not fail the force load itself.
+    await Promise.allSettled([priorInvalidations, deletion]);
   } else {
     await waitForPendingInvalidations(cacheKey);
   }
@@ -188,13 +186,22 @@ export async function loadObjectMetadataFacet<T>(request: ObjectDdlRequest, face
   return { value: await entry.promise, cacheStatus: "remote" };
 }
 
-export async function invalidateObjectMetadataCache(match: MetadataCacheInvalidation): Promise<void> {
+export async function invalidateObjectMetadataCache(match: MetadataCacheInvalidation, options?: ObjectCacheInvalidationOptions): Promise<void> {
   const prefix = invalidationPrefix(match);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...inFlightLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateInFlightLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);
 
-  return invalidatePersistedPrefix(prefix);
+  const deletion = invalidatePersistedPrefix(prefix);
+  if (!options?.strict) {
+    await deletion.catch(() => undefined);
+    return;
+  }
+  try {
+    await deletion;
+  } catch (error) {
+    throw toObjectCacheInvalidationError(error, prefix);
+  }
 }
 
 /** Invalidate active loads for a disconnected connection without deleting its persisted snapshot. */

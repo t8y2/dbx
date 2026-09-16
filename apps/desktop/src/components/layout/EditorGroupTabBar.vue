@@ -107,7 +107,7 @@ const emit = defineEmits<{
   "activate-tab": [tabId: string];
   "locate-tab": [tab: QueryTab];
   "toggle-zen-mode": [];
-  "start-resize": [event: MouseEvent];
+  "start-resize": [event: PointerEvent];
   "toggle-collapse": [];
   "detach-tab": [tab: QueryTab];
   "activate-settings": [];
@@ -1778,7 +1778,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
       </div>
     </div>
     <!-- Dragging any pane's handle resizes the shared vertical width; every pane follows. -->
-    <div v-if="isVerticalLayout && !isTabBarCollapsed" class="panel-resize-handle" :class="settingsStore.editorSettings.tabPlacement === 'right' ? 'panel-resize-handle--left' : 'panel-resize-handle--right'" @mousedown="emit('start-resize', $event)" />
+    <div v-if="isVerticalLayout && !isTabBarCollapsed" class="panel-resize-handle" :class="settingsStore.editorSettings.tabPlacement === 'right' ? 'panel-resize-handle--left' : 'panel-resize-handle--right'" @pointerdown="emit('start-resize', $event)" />
     <Dialog v-model:open="tabGroupEditorOpen">
       <DialogContent class="sm:max-w-[400px]">
         <DialogHeader>

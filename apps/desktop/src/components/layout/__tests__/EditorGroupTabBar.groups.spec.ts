@@ -255,7 +255,7 @@ describe("EditorGroupTabBar vertical placement", () => {
     expect(workspaceSource).toContain("@start-resize=\"emit('start-resize', $event)\"");
     expect(groupSource).toContain(':tab-bar-width="tabBarWidth"');
     // Dragging any pane's handle drives the shared resize handler.
-    expect(source).toContain("@mousedown=\"emit('start-resize', $event)\"");
+    expect(source).toContain("@pointerdown=\"emit('start-resize', $event)\"");
     expect(source).toContain("@click=\"emit('toggle-collapse')\"");
   });
 

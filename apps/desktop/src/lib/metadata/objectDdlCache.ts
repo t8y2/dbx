@@ -3,6 +3,7 @@ import { ActiveCacheReadTracker } from "./activeCacheReadTracker";
 import type { ObjectSourceKind } from "@/types/database";
 import type { MetadataCacheInvalidation } from "./metadataResultCache";
 import { invalidateObjectMetadataCache } from "./objectMetadataCache";
+import { toObjectCacheInvalidationError, type ObjectCacheInvalidationOptions } from "./objectCacheInvalidationError";
 import { getMetadataRuntimeCache, invalidateMetadataRuntimeCachePrefix, recordMetadataCacheL2Hit, recordMetadataCacheRemoteMiss, setMetadataRuntimeCache } from "./metadataRuntimeCache";
 
 const OBJECT_DDL_CACHE_PREFIX = "object-ddl:v1";
@@ -56,14 +57,6 @@ async function saveSchemaCacheSafe(cacheKey: string, payload: unknown): Promise<
   }
 }
 
-async function deleteSchemaCachePrefixSafe(prefix: string): Promise<void> {
-  try {
-    await api.deleteSchemaCachePrefix(prefix);
-  } catch {
-    // Cache invalidation is best effort when running with a reduced backend.
-  }
-}
-
 function cacheSegment(value: string | undefined): string {
   return encodeURIComponent(value ?? "");
 }
@@ -94,7 +87,9 @@ function decodeCachedDdl(payload: unknown): string | null {
 }
 
 async function waitForPendingInvalidations(cacheKey: string): Promise<void> {
-  const pending = [...pendingInvalidations.entries()].filter(([prefix]) => cacheKey.startsWith(prefix)).map(([, promise]) => promise);
+  // Readers only wait for pending deletions to settle; the failure itself is
+  // reported by the caller that started the invalidation.
+  const pending = [...pendingInvalidations.entries()].filter(([prefix]) => cacheKey.startsWith(prefix)).map(([, promise]) => promise.catch(() => undefined));
   if (pending.length) await Promise.all(pending);
 }
 
@@ -129,7 +124,9 @@ function invalidatePersistedPrefix(prefix: string): Promise<void> {
   if (existing) return existing;
   const deletion = (async () => {
     await waitForPendingWrites(prefix);
-    await deleteSchemaCachePrefixSafe(prefix);
+    // Deletion failures propagate so strict callers can observe them;
+    // best-effort callers catch at their own boundary.
+    await api.deleteSchemaCachePrefix(prefix);
   })().finally(() => {
     if (pendingInvalidations.get(prefix) === deletion) pendingInvalidations.delete(prefix);
   });
@@ -174,7 +171,8 @@ export async function loadObjectDdl(request: ObjectDdlRequest, options?: { force
     invalidateMetadataRuntimeCachePrefix(cacheKey);
     const priorInvalidations = waitForPendingInvalidations(cacheKey);
     const deletion = invalidatePersistedPrefix(cacheKey);
-    await Promise.all([priorInvalidations, deletion]);
+    // A failed prefix deletion must not fail the force load itself.
+    await Promise.allSettled([priorInvalidations, deletion]);
   } else {
     await waitForPendingInvalidations(cacheKey);
   }
@@ -203,14 +201,22 @@ export async function loadObjectDdl(request: ObjectDdlRequest, options?: { force
   return { ddl: await loadRemoteDdl(request, cacheKey, options?.force === true), cacheStatus: "remote" };
 }
 
-export async function invalidateObjectDdlCache(match: MetadataCacheInvalidation): Promise<void> {
+export async function invalidateObjectDdlCache(match: MetadataCacheInvalidation, options?: ObjectCacheInvalidationOptions): Promise<void> {
   const prefix = invalidationPrefix(match);
   activeCacheReads.invalidatePrefix(prefix);
   for (const cacheKey of [...remoteLoads.keys()]) if (cacheKey.startsWith(prefix)) invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(prefix);
 
   const deletion = invalidatePersistedPrefix(prefix);
-  await Promise.all([deletion, invalidateObjectMetadataCache(match)]);
+  const metadataInvalidation = invalidateObjectMetadataCache(match, options);
+  // Wait for both namespace deletions to settle before deciding, so a strict
+  // caller never reports failure while the other deletion is still in flight.
+  const [ddlSettled, metaSettled] = await Promise.allSettled([deletion, metadataInvalidation]);
+  if (!options?.strict) return;
+  // Judge by settled status, never by the rejection reason's value: a bare
+  // Promise.reject() has reason undefined and must still count as a failure.
+  if (ddlSettled.status === "rejected") throw toObjectCacheInvalidationError(ddlSettled.reason, prefix);
+  if (metaSettled.status === "rejected") throw toObjectCacheInvalidationError(metaSettled.reason, prefix);
 }
 
 export async function invalidateObjectDdl(request: ObjectDdlRequest): Promise<void> {
@@ -218,7 +224,7 @@ export async function invalidateObjectDdl(request: ObjectDdlRequest): Promise<vo
   activeCacheReads.invalidatePrefix(cacheKey);
   invalidateRemoteLoad(cacheKey);
   invalidateMetadataRuntimeCachePrefix(cacheKey);
-  await Promise.all([
+  await Promise.allSettled([
     invalidatePersistedPrefix(cacheKey),
     invalidateObjectMetadataCache({
       connectionId: request.connectionId,

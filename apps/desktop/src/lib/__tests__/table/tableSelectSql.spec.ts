@@ -141,6 +141,32 @@ describe("qualifiedTableName — schema-aware JDBC profiles", () => {
   });
 });
 
+describe("qualifiedTableName — includeDatabaseName on quoted-identifier paths (#9110)", () => {
+  it("drops the schema qualifier for JDBC-reported Postgres-family connections", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "public", tableName: "Users", includeDatabaseName: false })).toBe('"Users"');
+  });
+
+  it("keeps the schema qualifier by default for quoted-identifier connections", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "public", tableName: "Users" })).toBe('public."Users"');
+  });
+
+  it("drops the schema qualifier for kingbase JDBC connections", () => {
+    expect(qualifiedTableName({ databaseType: "kingbase", identifierQuote: '"', schema: "app", tableName: "orders", includeDatabaseName: false })).toBe('"orders"');
+  });
+
+  it("drops the schema qualifier for generic JDBC profiles that qualify schemas", () => {
+    expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", identifierQuote: '"', schema: "MY_SCHEMA", tableName: "ORDER", includeDatabaseName: false })).toBe('"ORDER"');
+  });
+
+  it("drops the schema qualifier for native Informix connections", () => {
+    expect(qualifiedTableName({ databaseType: "informix", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke", includeDatabaseName: false })).toBe("connection_smoke");
+  });
+
+  it("keeps the qualifier for databases that require fully qualified names", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "users", includeDatabaseName: false })).toBe("[dbo].[users]");
+  });
+});
+
 describe("qualifiedTableName — GBase 8s", () => {
   it("omits the metadata owner for GBase 8s table data", () => {
     expect(qualifiedTableName({ databaseType: "informix", driverProfile: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");

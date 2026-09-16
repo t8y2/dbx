@@ -429,8 +429,8 @@ GO`;
 
     await execution.tryExecute();
 
-    expect(activeOutputView.value).toBe("result");
     expect(activeTab.value?.result?.rows).toEqual([["x"]]);
+    expect(activeOutputView.value).toBe("messages");
   });
 
   it("keeps a SQL Server data result selected when a trailing message result exists", async () => {

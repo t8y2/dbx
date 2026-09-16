@@ -134,8 +134,8 @@ test("prioritizes common read helpers and keeps destructive helpers last", () =>
   const getCollectionMethodLabels = labels('db.getCollection("order-events").');
 
   assert.deepEqual(labels("").slice(0, 5), ["db.collection.find", "db.collection.aggregate", "db.getCollection", "use", "db.version"]);
-  assert.deepEqual(methodLabels.slice(0, 5), ["find", "findOne", "aggregate", "countDocuments", "distinct"]);
-  assert.deepEqual(getCollectionMethodLabels.slice(0, 5), ["find", "findOne", "aggregate", "countDocuments", "distinct"]);
+  assert.deepEqual(methodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
+  assert.deepEqual(getCollectionMethodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(methodLabels.slice(-3), ["dropIndex", "dropIndexes", "drop"]);
   assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count"]);
 });
@@ -246,6 +246,14 @@ test("treats $in, $nin and $all elements as values rather than sub-filters", () 
   // `$or` / `$and` arrays still hold sub-filters, so their objects complete fields.
   assert.ok(labels("db.users.find({ $or: [{ ").includes("name"));
   assert.equal(labels("db.users.find({ $or: [{ ").includes("$oid"), false);
+});
+
+test("offers the newly supported count and database commands", () => {
+  assert.ok(labels("db.users.estim", { fields }).includes("estimatedDocumentCount"));
+  const dbLevel = labels("db.");
+  assert.ok(dbLevel.includes("stats"));
+  assert.ok(dbLevel.includes("serverStatus"));
+  assert.ok(labels("").includes("db.stats"));
 });
 
 test("offers the newer shell value constructors", () => {
@@ -491,8 +499,9 @@ test("suggests only helpers the shell parser accepts", () => {
   assert.ok(methodLabels.includes("count"));
   assert.ok(methodLabels.includes("drop"));
   assert.ok(methodLabels.includes("distinct"));
+  assert.ok(methodLabels.includes("estimatedDocumentCount"));
   // Suggesting a helper DBX cannot run just hands the user a command that fails.
-  for (const unsupported of ["bulkWrite", "estimatedDocumentCount", "replaceOne"]) {
+  for (const unsupported of ["bulkWrite", "replaceOne", "renameCollection"]) {
     assert.equal(methodLabels.includes(unsupported), false, `${unsupported} is not executable`);
   }
   // Cursor methods are not collection methods.

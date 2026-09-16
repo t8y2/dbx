@@ -108,6 +108,17 @@ export function staticAssetCacheControl(pathname: string): string | null {
   return null;
 }
 
+// Plugin detail pages are statically exported only for catalog ids known at build
+// time (for SEO). dbx-store merges do not rebuild the site, so plugin pages the
+// snapshot missed fall back to the /plugins/detail shell, which renders the plugin
+// client-side from the live catalog. The pretty URL is preserved.
+export function pluginDetailShellRequest(url: URL, request: Request): Request | null {
+  if (request.method !== "GET") return null;
+  const match = url.pathname.match(/^\/(en|cn)\/plugins\/([^/]+)\/?$/);
+  if (!match || match[2] === "detail") return null;
+  return new Request(`${url.origin}/${match[1]}/plugins/detail?id=${encodeURIComponent(match[2])}`, { method: "GET" });
+}
+
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -635,6 +646,11 @@ export default {
     if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout();
     if (url.pathname === "/api/contributor-avatar" && request.method === "GET") return contributorAvatar(request);
     const response = await env.ASSETS.fetch(request);
+    if (response.status === 404) {
+      const shellRequest = pluginDetailShellRequest(url, request);
+      const shellResponse = shellRequest ? await env.ASSETS.fetch(shellRequest) : null;
+      if (shellResponse && shellResponse.status < 400) return shellResponse;
+    }
     const cacheControl = staticAssetCacheControl(url.pathname);
     if (!cacheControl || response.status < 200 || response.status >= 400) return response;
 

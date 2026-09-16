@@ -162,6 +162,7 @@ import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFor
 import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { isObjectCacheInvalidationError } from "@/lib/metadata/objectCacheInvalidationError";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import {
   defaultPasteTableMode,
@@ -2191,6 +2192,19 @@ function openElasticsearchIndexMetadata(kind: ElasticsearchIndexMetadataKind) {
 
 async function refresh() {
   const node = activeNode.value;
+  if (node.type === "connection" && node.connectionId) {
+    try {
+      await connectionStore.refreshConnectionTreeNode(node);
+    } catch (e: any) {
+      if (isObjectCacheInvalidationError(e)) {
+        toast(t("connection.objectCacheRefreshFailed", { message: translateBackendError(t, e) }), 5000);
+        return;
+      }
+      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      openDriverStoreForInstallError(e?.message || String(e), node);
+    }
+    return;
+  }
   try {
     await connectionStore.refreshTreeNode(node);
   } catch (e: any) {
@@ -4479,6 +4493,8 @@ function createView() {
           identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
           schema: node.schema,
           tableName: viewName,
+          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
         });
   const tabId = queryStore.createTab(node.connectionId, node.database, t("contextMenu.createView"), "query", node.schema, undefined, node.catalog);
   queryStore.updateSql(tabId, `CREATE VIEW ${viewSqlName} AS\nSELECT\n  *\nFROM table_name;\n`);

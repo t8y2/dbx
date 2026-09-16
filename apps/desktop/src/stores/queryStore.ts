@@ -8,6 +8,7 @@ import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, ObjectSource, ObjectSourceKind, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
+import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition } from "@/lib/sql/errorPosition";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, resolveMetadataColumnName, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
@@ -38,7 +39,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -345,8 +346,14 @@ function preservedResultIndex(results: QueryResult[], currentIndex: number | und
   return currentIndex;
 }
 
-function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType, sourceOffset?: number, parameterOptions?: SqlParameterOptions): { results: QueryResult[]; sqlServerUseDatabase?: string } {
+function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType, sourceOffset?: number, parameterOptions?: SqlParameterOptions, executedSql?: string): { results: QueryResult[]; sqlServerUseDatabase?: string } {
   const statements = splitSqlStatementRanges(sql, databaseType, parameterOptions);
+  // The backend positions errors against the SQL it actually received. When the
+  // sent SQL was rewritten (pagination wrapper, injected hidden keys…), record
+  // each statement's executed text so the error mapper can project the position
+  // back onto `sourceStatement`.
+  const executedStatements = executedSql && executedSql !== sql ? splitSqlStatementRanges(executedSql, databaseType, parameterOptions) : undefined;
+  const alignedExecutedStatements = executedStatements && executedStatements.length === statements.length ? executedStatements : undefined;
   let statementIndex = 0;
   let sourceDatabase = database;
   let sqlServerUseDatabase: string | undefined;
@@ -357,6 +364,19 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
     const statement = statements[sourceIndex];
     if (!statement) continue;
     annotateQueryResultSource(result, statement.sql, sourceDatabase, databaseType, sourceOffset === undefined ? undefined : { from: sourceOffset + statement.from, to: sourceOffset + statement.to });
+    const executedStatement = alignedExecutedStatements?.[sourceIndex]?.sql;
+    if (executedStatement && executedStatement !== statement.sql) {
+      result.executedStatement = executedStatement;
+      if (isSqlErrorPositionDebugEnabled()) {
+        logSqlErrorPosition("executed-statement-drift", {
+          statementIndex: sourceIndex,
+          sourceStatement: statement.sql,
+          executedStatement,
+          resultIsError: result.execution_error === true,
+          errorPosition: result.error?.errorPosition ?? null,
+        });
+      }
+    }
     const customName = queryResultNameFromPreamble(sql.slice(statement.hitFrom, statement.from));
     if (customName) result.sourceLabel = customName;
     const successfulUseDatabase = databaseType === "sqlserver" && result.execution_error !== true ? sqlServerUseDatabaseFromStatement(statement.sql) : undefined;
@@ -366,6 +386,22 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
     }
   }
   return { results, sqlServerUseDatabase };
+}
+
+/**
+ * Annotate the synthesized error result of a thrown single-statement execution
+ * so the row/column locate flow can map the backend position back to the editor.
+ *
+ * The core returns per-statement error results for batches, but a
+ * single-statement failure aborts the whole execute-multi command, leaving the
+ * frontend to synthesize the error result here. Only annotated when the error
+ * actually carries a position and the submission is a single statement (a
+ * multi-statement thrown error's position cannot be attributed to one statement).
+ */
+function annotateSingleStatementErrorResult(errorResult: QueryResult, sourceSql: string, databaseType: DatabaseType | undefined, sourceOffset: number | undefined, parameterOptions: SqlParameterOptions | undefined, executedSql: string | undefined): void {
+  if (!errorResult.error?.errorPosition) return;
+  if (splitSqlStatementRanges(sourceSql, databaseType, parameterOptions).length !== 1) return;
+  annotateQueryResultSources([errorResult], sourceSql, undefined, databaseType, sourceOffset, parameterOptions, executedSql);
 }
 
 const NON_STREAMING_BATCH_DATABASE_TYPES = new Set<DatabaseType>(["sqlserver", "turso", "cloudflare-d1"]);
@@ -4578,7 +4614,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab?.txnSessionId) return;
     const dbType = effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId));
-    if (dbType === "oracle") tab.oracleTxnPossiblyDirty = true;
+    if (usesOracleStickyTransactionState(dbType)) tab.oracleTxnPossiblyDirty = true;
   }
 
   /** Reset only the Oracle sticky-dirty bit. Used when a session continues but
@@ -5764,7 +5800,7 @@ export const useQueryStore = defineStore("query", () => {
           };
         }
 
-        if (!allEditableColumnsWriteable(metadataAnalysis, tab.result.columns)) {
+        if (!allEditableColumnsWriteable(metadataAnalysis, tab.result.columns, undefined, dbType)) {
           return {
             queryAnalysis: undefined,
             querySourceColumns: undefined,
@@ -6175,6 +6211,11 @@ export const useQueryStore = defineStore("query", () => {
     let producedResult = false;
     const resumedExecutionTarget = batchResume?.batch.executionTarget;
     const executionConnectionId = resumedExecutionTarget?.connectionId ?? options?.executionTarget?.connectionId ?? tab.connectionId;
+    // Captured for the catch below: a single-statement failure aborts the whole
+    // execute-multi command (the core only returns per-statement error results
+    // for batches), so the synthesized error result must be annotated here for
+    // the row/column locate flow. These locals live inside the try block.
+    let errorLocateContext: { databaseType: DatabaseType | undefined; parameterOptions: SqlParameterOptions | undefined; sourceOffset: number | undefined; executedSql: string | undefined } | undefined;
     try {
       await waitForTabSessionReset(id);
       const connStore = useConnectionStore();
@@ -6880,6 +6921,13 @@ export const useQueryStore = defineStore("query", () => {
         useAgentResultSession = conn?.db_type === "sqlserver" && conn?.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
       }
 
+      errorLocateContext = {
+        databaseType: effectiveDbType,
+        parameterOptions: sqlStatementParameterOptions,
+        sourceOffset: options?.sourceOffset,
+        executedSql: sqlToExecute,
+      };
+
       const executionSchema = connectionQueryExecutionSchema(conn, targetDatabase, targetSchema, tab.mode === "data");
       // Jumping to a non-zero offset without a live cursor session: the plan
       // could not rewrite the SQL for these engines, so a plain execution
@@ -7009,7 +7057,7 @@ export const useQueryStore = defineStore("query", () => {
           executionDispatched = true;
           // Only an initial manual execution classifies the user SQL (Oracle-only).
           // A later cursor-page fetch must neither set nor clear the sticky bit.
-          const isInitialOracleManualExecution = effectiveDbType === "oracle" && !options?.pagination?.sessionId;
+          const isInitialOracleManualExecution = usesOracleStickyTransactionState(effectiveDbType) && !options?.pagination?.sessionId;
           const classificationSql = isInitialOracleManualExecution ? queryBaseSql : undefined;
           let manualTransactionRecoveryAttempted = false;
           executionPromise = (async () => {
@@ -7051,6 +7099,7 @@ export const useQueryStore = defineStore("query", () => {
         effectiveDbType,
         options?.sourceOffset,
         sqlStatementParameterOptions,
+        sqlToExecute,
       );
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
       reconcileBatchSqlResults(tab, executionId, results);
@@ -7059,14 +7108,14 @@ export const useQueryStore = defineStore("query", () => {
       // must neither set nor clear the bit, and the Core no-op (empty script)
       // must neither set nor clear it. Otherwise any result that is not proven
       // read-only dirties the session monotonically.
-      if (tab.autoCommit === false && effectiveDbType === "oracle" && !options?.pagination?.sessionId && tab.txnSessionId) {
+      if (tab.autoCommit === false && usesOracleStickyTransactionState(effectiveDbType) && !options?.pagination?.sessionId && tab.txnSessionId) {
         const rawResults = annotatedResults.results;
         const isCoreNoOp = rawResults.length > 0 && rawResults.every((result) => result.manual_transaction_no_statement === true);
         if (!isCoreNoOp && rawResults.some((result) => result.manual_transaction_proven_read_only !== true)) {
           tab.oracleTxnPossiblyDirty = true;
         }
       }
-      const successfulOracleSchemaChanges = effectiveDbType === "oracle" ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
+      const successfulOracleSchemaChanges = usesOracleStickyTransactionState(effectiveDbType) ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
       const successfulSapHanaSchemaChanges = effectiveDbType === "saphana" ? results.filter((result) => result.execution_error !== true && isSapHanaSetSchemaStatement(result.sourceStatement)).length : 0;
       const sqlServerUseDatabase = effectiveDbType === "sqlserver" ? annotatedResults.sqlServerUseDatabase : undefined;
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
@@ -7297,7 +7346,7 @@ export const useQueryStore = defineStore("query", () => {
           clearOracleTxnPossiblyDirty(tab);
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = false;
-        } else if (tab.txnSessionId && executionDispatched && !options?.pagination?.sessionId && effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)) === "oracle") {
+        } else if (tab.txnSessionId && executionDispatched && !options?.pagination?.sessionId && usesOracleStickyTransactionState(effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)))) {
           // Frontend timeout/cancel or mid-script failure: the statement may still
           // have executed server-side while the manual session survives, so keep
           // the sticky dirty state fail-closed instead of a clean toolbar on a
@@ -7319,6 +7368,7 @@ export const useQueryStore = defineStore("query", () => {
           return false;
         }
         const errorResult = toErrorResult(e);
+        annotateSingleStatementErrorResult(errorResult, queryBaseSql, errorLocateContext?.databaseType, errorLocateContext?.sourceOffset, errorLocateContext?.parameterOptions, errorLocateContext?.executedSql);
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;

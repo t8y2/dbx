@@ -2,7 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
-import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type PluginSaveFileRequest, type PluginSaveFileResult, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
@@ -71,10 +72,50 @@ function createBridge() {
       openWorkbench: async (pluginId, contributionId, context) => emit("openWorkbench", pluginId, contributionId, context),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       closeTab: () => emit("closeTab"),
+      saveFile: (_pluginId, request, data) => savePluginFile(request, data),
     },
     appLocale.value,
     currentBridgeTheme(),
   );
+}
+
+/** Keep a plugin-supplied name from smuggling path separators or traversal into the save dialog. */
+function safeFileName(value: string | undefined): string {
+  const base = (value || "").split(/[\\/]/).pop() || "";
+  // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+  const cleaned = base.replace(/[\u0000-\u001f<>:"|?*]+/g, "").trim();
+  return cleaned && cleaned !== "." && cleaned !== ".." ? cleaned : "download.bin";
+}
+
+/**
+ * Native save dialog + disk write for plugin downloads. The sandboxed iframe
+ * cannot trigger downloads itself (WKWebView cancels blob-anchor navigations
+ * when no host download handler is registered), so the bytes travel through
+ * the bridge and the host persists them. Resolves null when the user cancels.
+ */
+async function savePluginFile(request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null> {
+  const fileName = safeFileName(request.fileName);
+  if (isTauriRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeFile } = await import("@tauri-apps/plugin-fs");
+    const extension = fileName.includes(".") ? (fileName.split(".").pop() as string) : "";
+    const path = await save({
+      defaultPath: fileName,
+      filters: extension ? [{ name: extension.toUpperCase(), extensions: [extension] }] : undefined,
+    });
+    if (!path) return null;
+    await writeFile(path, data);
+    return { path };
+  }
+  // Web host: the sandboxed iframe cannot download, but the host page can.
+  // Transferred buffers are plain ArrayBuffers (SharedArrayBuffer cannot cross postMessage).
+  const url = URL.createObjectURL(new Blob([data.buffer as ArrayBuffer], { type: request.contentType || "application/octet-stream" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  return { path: fileName };
 }
 
 function localUiAssetPath(source: string): string | undefined {

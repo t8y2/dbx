@@ -418,11 +418,11 @@ export function useSqlExecution(deps: {
     if (sqlServerMessageResultIndex !== undefined && sqlServerMessageResultIndex >= 0) {
       focusSqlServerDataResult(tab.id, executionDatabaseType, tab);
       if (executionTabStillActive) {
-        deps.activeOutputView.value = "result";
+        deps.activeOutputView.value = tab.result?.server_message === true ? "messages" : "result";
       }
     } else if (executionDatabaseType === "sqlserver" && tab.result?.server_message === true) {
       if (executionTabStillActive) {
-        deps.activeOutputView.value = "result";
+        deps.activeOutputView.value = "messages";
       }
     } else if (tab.result && !tab.result.columns.length && !tab.results?.some((result) => result.columns.length > 0)) {
       if (executionTabStillActive) {
@@ -607,7 +607,7 @@ export function useSqlExecution(deps: {
       // 跳动（闪烁/竞态）。worker 结果已由 captureMultiDbExecutionWorkerResult 记录
       // 到 source tab 的 result run 并通过 projectResultRun 投影显示，无需再切主视图。
       if (!workerId && deps.activeTab.value?.id === tab.id) {
-        deps.activeOutputView.value = success && (latest.result?.columns.length || latest.results?.some((result) => result.columns.length)) ? "result" : "summary";
+        deps.activeOutputView.value = success && latest.result?.server_message === true ? "messages" : success && (latest.result?.columns.length || latest.results?.some((result) => result.columns.length)) ? "result" : "summary";
       }
       return finish(success ? { status: "success", errorMessage } : { status: "failed", errorMessage });
     } catch (error) {

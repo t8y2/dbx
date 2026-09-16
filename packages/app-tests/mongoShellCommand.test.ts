@@ -936,6 +936,31 @@ test("parseMongoAggregateCommand parses db collection aggregate", () => {
   });
 });
 
+test("parseMongoAggregateCommand drops the no-op cursor methods mongosh and Compass append", () => {
+  const expected = { collection: "orders", pipeline: '[{"$match": {"a": 1}}]' };
+  for (const source of [
+    "db.orders.aggregate([{$match: {a: 1}}]).toArray()",
+    "db.orders.aggregate([{$match: {a: 1}}]).pretty()",
+    "db.orders.aggregate([{$match: {a: 1}}]).toArray().pretty()",
+    "db.orders.aggregate([{$match: {a: 1}}])\n  .toArray()",
+    "db.orders.aggregate([{$match: {a: 1}}]).toArray();",
+  ]) {
+    assert.deepEqual(parseMongoAggregateCommand(source), expected, source);
+  }
+  assert.deepEqual(parseMongoAggregateCommand("db.orders.aggregate([], {allowDiskUse: true}).toArray()"), {
+    collection: "orders",
+    pipeline: "[]",
+    options: '{"allowDiskUse": true}',
+  });
+});
+
+test("parseMongoAggregateCommand still rejects cursor methods that would change the result", () => {
+  for (const source of ["db.orders.aggregate([]).limit(5)", "db.orders.aggregate([]).sort({a: 1})", "db.orders.aggregate([]).toArray().limit(5)", "db.orders.aggregate([]).toArray(1)"]) {
+    assert.equal(parseMongoAggregateCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), /Chaining .* is not supported/, source);
+  }
+});
+
 test("parseMongoAggregateCommand accepts an empty pipeline", () => {
   assert.deepEqual(parseMongoAggregateCommand("db.products.aggregate([])"), {
     collection: "products",
@@ -1134,6 +1159,70 @@ test("parseMongoAggregateCommand rejects non-array pipelines and invalid options
   assert.equal(parseMongoAggregateCommand("db.products.aggregate([], {explain: true"), null);
   assert.equal(parseMongoAggregateCommand("db.products.aggregate([]).limit(10)"), null);
   assert.equal(parseMongoAggregateCommand("db.products.aggregate([], {}, true)"), null);
+});
+
+test("parseMongoCountDocumentsCommand reads estimatedDocumentCount as a metadata-backed count", () => {
+  // The driver already takes the metadata fast path for a filterless legacy count().
+  const expected = { collection: "orders", filter: "{}", mode: "legacy" };
+  for (const source of ["db.orders.estimatedDocumentCount()", 'db["orders"].estimatedDocumentCount()', "db.getCollection('orders').estimatedDocumentCount();"]) {
+    assert.deepEqual(parseMongoCountDocumentsCommand(source), expected, source);
+  }
+
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.estimatedDocumentCount({a: 1})"), null);
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.estimatedDocumentCount().limit(5)"), null);
+  // count() and countDocuments() keep their own modes.
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.countDocuments({})")?.mode, "accurate");
+  assert.equal(parseMongoCountDocumentsCommand("db.orders.count()")?.mode, "legacy");
+});
+
+test("parseMongoRunCommand reads db.stats() and db.serverStatus() as run commands", () => {
+  assert.deepEqual(parseMongoRunCommand("db.stats()"), { commandJson: '{"dbStats":1}' });
+  assert.deepEqual(parseMongoRunCommand("db . serverStatus ( ) ;"), { commandJson: '{"serverStatus":1}' });
+  assert.deepEqual(parseMongoRunCommand("DB.STATS()"), { commandJson: '{"dbStats":1}' });
+
+  for (const source of ["db.stats(1)", "db.serverStatus({})"]) {
+    assert.equal(parseMongoRunCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), /takes no arguments|expects no arguments/, source);
+  }
+
+  // db.collection.stats() is still collection stats, not a run command.
+  assert.equal(parseMongoRunCommand("db.orders.stats()"), null);
+  assert.equal(parseMongoCommand("db.orders.stats()")?.command.kind, "collectionStats");
+});
+
+test("describeMongoCommandParseFailure names an unsupported value constructor and where it is", () => {
+  const message = describeMongoCommandParseFailure('db.reports.updateOne({a: 1}, {$set: {t: Foo("x")}}, {upsert: true})');
+  assert.match(message, /Unsupported value Foo\(\.\.\.\) in the update argument of updateOne\(\)/);
+  assert.match(message, /ObjectId, ISODate, new Date, NumberLong/);
+
+  assert.match(describeMongoCommandParseFailure("db.c.find({a: new Bar()})"), /Unsupported value new Bar\(\.\.\.\) in the filter argument of find\(\)/);
+  // Text inside a string is not a constructor call.
+  assert.match(describeMongoCommandParseFailure('db.c.find({a: "Foo(1)", b: })'), /filter argument of find\(\) is not a valid document/);
+});
+
+test("describeMongoCommandParseFailure explains the argument shape a known method expects", () => {
+  assert.equal(describeMongoCommandParseFailure("db.c.insertOne({a: 1}, {writeConcern: {w: 1}})"), "insertOne() expects one document.");
+  assert.equal(describeMongoCommandParseFailure("db.c.deleteOne({a: 1}, {collation: {locale: 'en'}})"), "deleteOne() expects a filter.");
+  assert.equal(describeMongoCommandParseFailure("db.c.updateOne({a: 1})"), "updateOne() expects a filter, an update, and optional options.");
+  assert.equal(describeMongoCommandParseFailure("db.runCommand()"), "runCommand() expects one command document.");
+  assert.equal(describeMongoCommandParseFailure("db.version(1)"), "version() expects no arguments.");
+  assert.equal(describeMongoCommandParseFailure("db.c.find({a: 1}).count"), 'Unexpected text after find(...): ".count".');
+});
+
+test("describeMongoCommandParseFailure names unsupported methods and points at alternatives", () => {
+  const replaceOne = describeMongoCommandParseFailure("db.c.replaceOne({a: 1}, {b: 2})");
+  assert.match(replaceOne, /^Collection method replaceOne\(\) is not supported\. Supported collection methods: find, findOne/);
+  // Bracket and getCollection targets are recognised too.
+  assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
+  assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
+
+  assert.match(describeMongoCommandParseFailure('db.createCollection("c")'), /db\.createCollection\(\) is not supported; collections are created on first insert/);
+  assert.match(describeMongoCommandParseFailure('db.getSiblingDB("other").c.find({})'), /use <database>/);
+  assert.match(describeMongoCommandParseFailure("db.adminCommand({ping: 1})"), /use db\.runCommand/);
+  assert.match(describeMongoCommandParseFailure("show collections"), /listed in the sidebar/);
+
+  // Leading comments do not hide the command shape.
+  assert.match(describeMongoCommandParseFailure("// note\ndb.c.bulkWrite([])"), /bulkWrite\(\) is not supported/);
 });
 
 test("describeMongoCommandParseFailure reports unclosed delimiters and shell hints", () => {

@@ -53,6 +53,7 @@ import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLa
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
@@ -613,7 +614,7 @@ async function mountConfigEditor() {
       basicSetup,
       EditorState.allowMultipleSelections.of(true),
       trimmedSelectionLayer(),
-      Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: "Mod-h", run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
+      Prec.highest(keymap.of([{ key: "Mod-f", run: () => configSearchPanelRef.value?.openSearch() ?? false, preventDefault: true }, { key: replaceFallbackKey(), run: () => configSearchPanelRef.value?.openReplace() ?? false, preventDefault: true }, indentWithTab])),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       EditorView.domEventHandlers({
         wheel(event, eventView) {

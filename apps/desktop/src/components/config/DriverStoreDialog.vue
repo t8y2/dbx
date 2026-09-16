@@ -744,9 +744,9 @@ async function importOfflineZip() {
   activeAgentOperationId.value = uuid();
   resetAgentInstallProgress();
   try {
-    const count = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
+    const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
     await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
-    toast(t("driverStore.offlineImportSuccess", { count }));
+    toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
   } catch (e: any) {
     toast(t("driverStore.offlineImportFailed", { error: backendError(e) }));
   } finally {
@@ -776,9 +776,9 @@ async function importDriverFile(driver: AgentDriverInfo) {
       activeAgentOperationId.value = uuid();
       resetAgentInstallProgress();
       try {
-        const count = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
+        const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
         await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
-        toast(t("driverStore.offlineImportSuccess", { count }));
+        toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
       } finally {
         activeAgentOperationId.value = null;
         resetAgentInstallProgress();
@@ -1547,7 +1547,7 @@ watch(driverStoreTab, (tab) => {
             <!-- Driver List -->
             <div class="relative">
               <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input v-model="agentDriverSearch" class="h-8 pl-8 text-xs" :placeholder="t('driverStore.searchDrivers')" />
+              <Input data-driver-store-agent-search v-model="agentDriverSearch" class="h-8 pl-8 text-xs" :placeholder="t('driverStore.searchDrivers')" />
             </div>
             <!-- Global update section — always above category navigation -->
             <div v-if="globalUpdatableDrivers.length > 0" class="rounded-lg border divide-y">
@@ -1972,7 +1972,7 @@ watch(driverStoreTab, (tab) => {
               </div>
               <div class="relative">
                 <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="jdbcDriverSearch" class="h-8 pl-8 text-xs" :placeholder="t('driverStore.searchJdbcDrivers')" />
+                <Input data-driver-store-jdbc-search v-model="jdbcDriverSearch" class="h-8 pl-8 text-xs" :placeholder="t('driverStore.searchJdbcDrivers')" />
               </div>
               <div class="flex items-center gap-2">
                 <Input v-model="jdbcDriverPathInput" class="flex-1" :placeholder="t('settings.jdbcDriverPathPlaceholder')" @keydown.enter.prevent="importJdbcDriverPathInput" />

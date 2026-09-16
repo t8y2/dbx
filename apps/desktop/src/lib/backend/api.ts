@@ -420,6 +420,7 @@ export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
 export const pendingOpenConnectionLinks = forward("pendingOpenConnectionLinks");
 export const pendingOpenAiConfigLinks = forward("pendingOpenAiConfigLinks");
+export const pendingOpenPluginInstallLinks = forward("pendingOpenPluginInstallLinks");
 export const readExternalSqlFile = forward("readExternalSqlFile");
 export const readExternalSqlFileSnapshot = forward("readExternalSqlFileSnapshot");
 export const inspectExternalSqlFile = forward("inspectExternalSqlFile");
@@ -1033,6 +1034,8 @@ export type {
   TableImportProgress,
   MongoImportFormat,
   MongoImportTypeMode,
+  MongoImportInferredType,
+  MongoImportColumn,
   MongoImportIssue,
   MongoImportParseOptions,
   MongoImportPreviewRequest,

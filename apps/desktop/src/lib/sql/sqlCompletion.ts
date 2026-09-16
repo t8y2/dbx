@@ -456,6 +456,44 @@ const MANTICORESEARCH_SQL_KEYWORDS = ["FACET", "MATCH", "SHOW", "SHOW META", "SH
 
 const SQLITE_SQL_KEYWORDS = ["AUTOINCREMENT", "INTEGER", "BLOB", "BOOLEAN", "WITHOUT ROWID", "VACUUM", "PRAGMA", "JSON_EXTRACT", "JSON_SET", "STRFTIME"];
 
+// DuckDB extends the common SQL grammar with analytical clauses, relation
+// reshaping statements, and a few shorthand forms. Keep these scoped to
+// DuckDB so database-specific completion does not leak into other dialects.
+const DUCKDB_SQL_KEYWORDS = [
+  "ASOF",
+  "ANTI",
+  "COLUMNS",
+  "COPY",
+  "DESCRIBE",
+  "EXCLUDE",
+  "EXPORT",
+  "FILTER",
+  "GROUP BY ALL",
+  "IMPORT",
+  "LATERAL",
+  "LIST",
+  "MAP",
+  "PIVOT",
+  "PIVOT_LONGER",
+  "PIVOT_WIDER",
+  "POSITIONAL",
+  "QUALIFY",
+  "READ_CSV",
+  "READ_JSON",
+  "READ_PARQUET",
+  "REPLACE",
+  "SAMPLE",
+  "SEMI",
+  "SHOW",
+  "STRUCT",
+  "SUMMARIZE",
+  "TABLESAMPLE",
+  "UNION BY NAME",
+  "UNPIVOT",
+  "USING SAMPLE",
+  "WINDOW",
+];
+
 const SQLSERVER_SQL_KEYWORDS = [
   "TOP",
   "IDENTITY",
@@ -585,7 +623,7 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   oracle: ORACLE_SQL_KEYWORDS,
   "oceanbase-oracle": ORACLE_SQL_KEYWORDS,
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
-  duckdb: ["COMMENT"],
+  duckdb: ["COMMENT", ...DUCKDB_SQL_KEYWORDS],
   clickhouse: ["COMMENT"],
   doris: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "AGGREGATE KEY", "UNIQUE KEY", "PRIMARY KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW", "EXPLODE", "ARRAY", "MAP", "STRUCT", "BITMAP", "HLL"],
   starrocks: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW"],
@@ -1622,13 +1660,14 @@ class SqlCompletionProvider {
     }
 
     const emptyTableNameCompletion = !context.prefix && (context.suggestTables || context.exclusiveTableSuggestions);
-    if (!pendingJoinKeyword && !emptyTableNameCompletion && !context.tableAliasAfterCursor && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable) {
+    if (!pendingJoinKeyword && !emptyTableNameCompletion && !context.tableAliasAfterCursor && context.referencedTables.length > 0 && !context.suggestColumns && !context.insertTable && supportsTableAliases(this.databaseType)) {
       this.items.push(...buildAliasItems(context, this.databaseType, this.input.keywordCase));
     }
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
-      this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, this.databaseType, this.input.keywordCase, this.input.currentSchema));
-      this.items.push(...buildTableItems(context, completionTables, this.dialect, !!this.input.autoAliasTables && context.autoAliasTableCompletions, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
+      const autoAliasTables = !!this.input.autoAliasTables && context.autoAliasTableCompletions && supportsTableAliases(this.databaseType);
+      this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, autoAliasTables, this.databaseType, this.input.keywordCase, this.input.currentSchema));
+      this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table"));
       }
@@ -5237,6 +5276,12 @@ function activeSqlKeywords(databaseType?: DatabaseType): string[] {
 
 function isOracleLikeDatabase(databaseType?: DatabaseType): boolean {
   return databaseType === "oracle" || databaseType === "oceanbase-oracle";
+}
+
+// CQL has no table alias syntax, so Cassandra must never receive `table AS alias`
+// or standalone alias suggestions.
+function supportsTableAliases(databaseType?: DatabaseType): boolean {
+  return databaseType !== "cassandra";
 }
 
 function buildJoinModifierKeywordItems(prefix: string, keywordCase?: SqlKeywordCase): SqlCompletionItem[] {

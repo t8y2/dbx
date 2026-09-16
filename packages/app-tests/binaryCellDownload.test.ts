@@ -108,6 +108,33 @@ test("binaryCellUtf8Text only returns strict printable text", () => {
   assert.equal(binaryCellUtf8Text("0x4869", "varchar", "mysql"), null);
 });
 
+// 群反馈：MySQL varbinary 里以 GBK 写入的中文（Navicat 按连接字符集直接显示）。
+// UTF-8 严格解码失败后，仅 MySQL 的 binary/varbinary 在显示/复制路径回退严格 GBK；
+// BLOB 与编辑写回路径保持纯 UTF-8（与 coerceMysqlBlobTextValue 同闸门）。
+test("MySQL varbinary text preview falls back to strict GBK after UTF-8", () => {
+  // "2026年5月22日 星期五 9：30" 的 GBK 编码（26 字节；UTF-8 编码为 33 字节）。
+  const gbkHex = "0x32303236c4ea35d4c23232c8d520d0c7c6dacee52039a3ba3330";
+  assert.equal(binaryCellDisplayText(gbkHex, "VARBINARY(255)", undefined, "mysql"), "2026年5月22日 星期五 9：30");
+  assert.equal(binaryCellClipboardText(gbkHex, "VARBINARY(255)", "mysql"), "2026年5月22日 星期五 9：30");
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "VARBINARY(255)", undefined, "mysql"), "中文");
+  assert.equal(binaryCellClipboardText("0xd6d0cec4", "VARBINARY(128)", "mysql"), "中文");
+  // UTF-8 优先：两种编码都能表达时结果一致。
+  assert.equal(binaryCellDisplayText("0xe4b8ade69687", "VARBINARY(128)", undefined, "mysql"), "中文");
+
+  // GBK 回退仅限 MySQL 连接。
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "VARBINARY(255)", undefined, "sqlserver"), "VARBINARY [4 bytes]");
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "VARBINARY(255)", undefined, undefined), "VARBINARY [4 bytes]");
+
+  // MySQL BLOB 不参与 GBK 回退（保持与编辑路径的显示/编辑一致性）。
+  assert.equal(binaryCellDisplayText("0xd6d0cec4", "LONGBLOB", undefined, "mysql"), "BLOB [4 bytes]");
+  assert.equal(binaryCellUtf8Text("0xd6d0cec4", "LONGBLOB", "mysql"), null);
+
+  // 非法 GBK 序列、以及解码落在 Unicode 私用区的（真实文本不含 PUA）仍回退标签 / 保持 hex。
+  assert.equal(binaryCellDisplayText("0xfffe", "VARBINARY(2)", undefined, "mysql"), "VARBINARY [2 bytes]");
+  assert.equal(binaryCellDisplayText("0xffff", "VARBINARY(2)", undefined, "mysql"), "VARBINARY [2 bytes]");
+  assert.equal(binaryCellClipboardText("0xffff", "VARBINARY(2)", "mysql"), null);
+});
+
 // issue #7471：MySQL VARBINARY 的文本 payload 复制为原始字符串，任意二进制保持 0x/hex 无损。
 test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbitrary bytes", () => {
   // Case 1: ASCII VARBINARY（issue 示例 abc → 0x616263）。
@@ -125,8 +152,9 @@ test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbi
   assert.equal(binaryCellClipboardText("0x", "VARBINARY(0)", "mysql"), "");
   assert.equal(binaryCellClipboardText("0x68690a", "VARBINARY(3)", "mysql"), "hi\n");
 
-  // Case 5: arbitrary binary（非法 UTF-8 / 含 NUL / 含控制字符）保持 null → 复制端沿用 0x/hex，绝不产生 � 或丢字节。
-  assert.equal(binaryCellClipboardText("0xdeadbeef", "VARBINARY(4)", "mysql"), null);
+  // Case 5: 无法解码的 arbitrary binary（含 NUL / 含控制字符 / 非法序列）保持 null → 复制端沿用 0x/hex，绝不产生 � 或丢字节。
+  // 0xdeadbeef 例外：恰好全部组成合法 GBK 序列，随 GBK 回退按解码文本复制（与网格显示一致）。
+  assert.equal(binaryCellClipboardText("0xdeadbeef", "VARBINARY(4)", "mysql"), "蕲撅");
   assert.equal(binaryCellClipboardText("0xfffe", "VARBINARY(2)", "mysql"), null);
   assert.equal(binaryCellClipboardText("0x0061", "VARBINARY(2)", "mysql"), null); // 含 NUL
   assert.equal(binaryCellClipboardText("0x0102", "VARBINARY(2)", "mysql"), null); // 控制字符

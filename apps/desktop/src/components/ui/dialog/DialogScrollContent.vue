@@ -32,6 +32,10 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
           (event) => {
             const originalEvent = event.detail.originalEvent;
             const target = originalEvent.target as HTMLElement;
+            if (target.closest('[role=menu], [role=listbox], [data-slot=select-content]')) {
+              event.preventDefault();
+              return;
+            }
             if (originalEvent.offsetX > target.clientWidth || originalEvent.offsetY > target.clientHeight) {
               event.preventDefault();
             }

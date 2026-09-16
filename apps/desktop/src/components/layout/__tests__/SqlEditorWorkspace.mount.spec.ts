@@ -87,6 +87,7 @@ vi.mock("@/components/layout/QueryResultSurface.vue", () => ({
 
 import SqlEditorWorkspace from "../SqlEditorWorkspace.vue";
 import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import type { QueryTab } from "@/types/database";
 
 function tab(id: string): QueryTab {
@@ -338,6 +339,7 @@ describe("SqlEditorWorkspace mount contract", () => {
 
   it("keeps group tab strips mounted and drops the splitpanes workspace while suppressed", async () => {
     const store = useQueryStore();
+    const settingsStore = useSettingsStore();
     store.tabs = [tab("tab-a"), { ...tab("tab-b"), mode: "plugin-workbench" } as unknown as ReturnType<typeof tab>];
     store.activeTabId = "tab-b";
     store.groups = [
@@ -347,6 +349,7 @@ describe("SqlEditorWorkspace mount contract", () => {
     store.focusedGroupId = "g2";
     store.orientation = "vertical";
     store.sizes = [50, 50];
+    settingsStore.editorSettings.tabPlacement = "left";
 
     const host = createHost();
     const app = createApp(SqlEditorWorkspace, {
@@ -376,14 +379,13 @@ describe("SqlEditorWorkspace mount contract", () => {
     expect(groups[1]?.getAttribute("data-group-id")).toBe("g2");
     expect(groups[1]?.getAttribute("data-content-suppressed")).toBe("true");
 
-    // The App.vue wrapper is flex-none with indefinite height while a plugin
-    // tab is active: the workspace must size to its strip content, or the
-    // h-full/flex-1 fill contract collapses it to zero height and clips the
-    // strips away (overflow-hidden) — the "plugin tab bar vanishes" regression.
+    // Vertical plugin tabs share the row with the plugin workbench, so their
+    // workspace must keep the full-height contract while content is suppressed.
     const workspaceRoot = host.querySelector<HTMLElement>(".sql-editor-workspace");
-    expect(workspaceRoot?.classList.contains("h-auto")).toBe(true);
-    expect(workspaceRoot?.classList.contains("h-full")).toBe(false);
-    expect(workspaceRoot?.classList.contains("flex-1")).toBe(false);
+    expect(workspaceRoot?.classList.contains("h-full")).toBe(true);
+    expect(workspaceRoot?.classList.contains("flex-none")).toBe(true);
+    expect(workspaceRoot?.classList.contains("h-auto")).toBe(false);
+    expect(host.querySelector<HTMLElement>("[data-workspace-content]")?.classList.contains("hidden")).toBe(true);
 
     app.unmount();
     host.remove();

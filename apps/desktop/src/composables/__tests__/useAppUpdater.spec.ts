@@ -101,7 +101,8 @@ describe("silent update lifecycle", () => {
     const updater = mount({ prepareForUpdate: prepare });
     await updater.initialize();
     await updater.installDownloadedUpdate();
-    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    // Only the startup recheck runs (same latest version keeps the cache); installing never needs fresh metadata or a re-download.
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
     expect(mocks.downloadUpdate).not.toHaveBeenCalled();
     expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
     expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(mocks.installDownloadedUpdate.mock.invocationCallOrder[0]);
@@ -290,5 +291,72 @@ describe("silent update lifecycle", () => {
     pendingCancel.resolve();
     await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledTimes(2));
     expect(updater.updateDownloaded.value).toBe(true);
+  });
+
+  it("replaces a downloaded update when a newer version is released", async () => {
+    const newer = { ...info, latest_version: "1.2.0", release_name: "v1.2.0" };
+    const replacement = { ...cache, version: "1.2.0" };
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.checkForUpdates.mockResolvedValue(newer);
+    mocks.downloadUpdate.mockResolvedValue(replacement);
+    const updater = mount();
+    await updater.initialize();
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalled());
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.2.0", expect.any(String), "Changes");
+    expect(updater.updateDownloaded.value).toBe(true);
+    expect(updater.updateInfo.value?.latest_version).toBe("1.2.0");
+    expect(updater.phase.value).toBe("ready");
+  });
+
+  it("keeps a downloaded update when the released version is not newer", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.checkForUpdates.mockResolvedValue({ ...info, latest_version: "1.1.0" });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+    expect(mocks.checkForUpdates).toHaveBeenCalled();
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(updater.phase.value).toBe("ready");
+    expect(updater.updateDownloaded.value).toBe(true);
+  });
+
+  it("keeps a downloaded update when the remote reports an older version", async () => {
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    expect(updater.updateDownloaded.value).toBe(true);
+    mocks.checkForUpdates.mockResolvedValue({ ...info, latest_version: "1.0.5" });
+    await updater.checkUpdates({ silent: true });
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+    expect(updater.phase.value).toBe("ready");
+  });
+
+  it("does not disturb an installation that starts while a recheck is in flight", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const gate = deferred<typeof info>();
+    mocks.checkForUpdates.mockReturnValue(gate.promise);
+    const release = vi.fn();
+    const updater = mount({ prepareForUpdate: async () => release });
+    await updater.initialize();
+    await updater.installDownloadedUpdate();
+    gate.resolve(info);
+    await flush();
+    expect(updater.phase.value).toBe("restart");
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the ready package when discarding a superseded update fails", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.checkForUpdates.mockResolvedValue({ ...info, latest_version: "1.2.0" });
+    mocks.discardDownloadedUpdate.mockRejectedValue(new Error("file busy"));
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(updater.updateDownloaded.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("file busy");
   });
 });

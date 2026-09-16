@@ -700,6 +700,17 @@ fn open_ai_config_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
     show_main_window(app);
 }
 
+fn open_plugin_install_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
+    if links.is_empty() {
+        return;
+    }
+    if let Some(state) = app.try_state::<commands::deep_link::DeepLinkOpenState>() {
+        state.push_plugin_install_links(links.clone());
+    }
+    let _ = app.emit("dbx-open-plugin-install-links", links);
+    show_main_window(app);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocaleFamily {
     Azerbaijani,
@@ -1446,6 +1457,8 @@ pub fn run() {
             open_connection_deep_links(app, links);
             let ai_config_links = commands::deep_link::ai_config_deep_links_from_args(args.clone());
             open_ai_config_deep_links(app, ai_config_links);
+            let plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(args.clone());
+            open_plugin_install_deep_links(app, plugin_install_links);
 
             let paths = commands::external_sql::sql_file_paths_from_args(args.clone(), std::path::Path::new(&cwd));
             if !paths.is_empty() {
@@ -1660,6 +1673,8 @@ pub fn run() {
             open_connection_deep_links(app.handle(), startup_links);
             let startup_ai_config_links = commands::deep_link::ai_config_deep_links_from_args(&startup_args);
             open_ai_config_deep_links(app.handle(), startup_ai_config_links);
+            let startup_plugin_install_links = commands::deep_link::plugin_install_deep_links_from_args(&startup_args);
+            open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
             commands::mcp_bridge::start(app_handle, state, data_dir);
@@ -2036,6 +2051,7 @@ pub fn run() {
             commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::deep_link::pending_open_ai_config_links,
+            commands::deep_link::pending_open_plugin_install_links,
             commands::table_import::preview_table_import_file,
             commands::table_import::import_table_file,
             commands::table_import::cancel_table_import,
@@ -2653,6 +2669,13 @@ pub fn run() {
                     .filter_map(|url| commands::deep_link::ai_config_deep_link_from_arg(&url))
                     .collect();
                 open_ai_config_deep_links(app_handle, ai_config_links);
+
+                let plugin_install_links: Vec<String> = urls
+                    .iter()
+                    .map(|url| url.to_string())
+                    .filter_map(|url| commands::deep_link::plugin_install_deep_link_from_arg(&url))
+                    .collect();
+                open_plugin_install_deep_links(app_handle, plugin_install_links);
 
                 let paths: Vec<String> = urls
                     .iter()

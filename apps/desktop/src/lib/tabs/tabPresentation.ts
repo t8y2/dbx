@@ -8,6 +8,7 @@ import { executableStatementRanges, splitSqlStatementRanges, sqlStatementParamet
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import type { SqlErrorPosition } from "@/lib/backend/errorUtils";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
@@ -361,7 +362,7 @@ export function tabularResultItems(results: QueryResult[] | undefined): { result
   if (!results) return [];
   return results
     .map((result, index) => ({ result, index }))
-    .filter((item) => item.result.columns.length > 0)
+    .filter((item) => item.result.columns.length > 0 && item.result.server_message !== true)
     .map((item, ordinal) => {
       const label = queryResultStatementLabel(item.result);
       const displayLabel = label ? middleEllipsis(label) : undefined;
@@ -416,6 +417,8 @@ export interface ExecutionSummaryItem {
   sourceTo?: number;
   status: "pending" | "running" | "success" | "error" | "skipped" | "cancelled";
   error?: string;
+  /** Backend-reported error row/column, when the driver provides one. */
+  errorPosition?: SqlErrorPosition;
   returnedColumns: number;
   returnedRows: number;
   affectedRows: number;
@@ -446,6 +449,7 @@ export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" |
         sourceTo: item.to,
         status: item.status,
         error: item.error,
+        errorPosition: item.errorDetails?.errorPosition ?? result?.error?.errorPosition,
         returnedColumns: result?.columns.length ?? 0,
         returnedRows,
         affectedRows,
@@ -467,6 +471,7 @@ export function executionSummaryItems(tab: Pick<QueryTab, "result" | "results" |
       sourceTo: result.sourceTo,
       status: isError ? "error" : "success",
       error: isError ? String(result.rows[0]?.[0] ?? "") : undefined,
+      errorPosition: result.error?.errorPosition,
       returnedColumns: result.columns.length,
       returnedRows: result.rows.length,
       affectedRows: result.affected_rows,

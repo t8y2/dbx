@@ -69,6 +69,7 @@ import type {
   DriverStoreUsage,
   DriverRuntimeSummary,
   UpgradeAllAgentDriversResult,
+  AgentOfflineImportResult,
   AgentUpdateBlocker,
   AgentOfflineExportPreview,
   AgentOfflineExportResult,
@@ -861,7 +862,7 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   await post("/api/agents/invalidate-registry-cache", {});
 }
 
-export async function importAgentsFromZip(fileOrPath: string | File, operationId?: string): Promise<number> {
+export async function importAgentsFromZip(fileOrPath: string | File, operationId?: string): Promise<AgentOfflineImportResult> {
   if (typeof fileOrPath === "string") {
     throw new Error("Offline package import in web mode requires a File object, not a file path");
   }
@@ -873,8 +874,8 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
     body: formData,
   });
   if (!res.ok) throw await backendResponseError(res);
-  const result: { count: number } = await res.json();
-  return result.count;
+  const result: AgentOfflineImportResult = await res.json();
+  return { count: result.count, jreCount: result.jreCount ?? 0 };
 }
 
 export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
@@ -2488,6 +2489,10 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
 }
 
 export async function pendingOpenAiConfigLinks(): Promise<string[]> {
+  return [];
+}
+
+export async function pendingOpenPluginInstallLinks(): Promise<string[]> {
   return [];
 }
 

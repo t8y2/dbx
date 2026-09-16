@@ -803,6 +803,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "MERGE" && isMergeActionContinuation(sql, statement.from, lineStart.from, lineStart.keyword, databaseType, parameterOptions)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "ALTER" && isClickHouseAlterTableUpdateContinuation(sql, boundaries[boundaries.length - 1].from, lineStart.from, lineStart.keyword, databaseType)) {
       // ClickHouse mutations use UPDATE as the first ALTER TABLE action, not as
       // a standalone statement. Keep this dialect-specific to preserve soft boundaries elsewhere.
@@ -1066,6 +1070,12 @@ function isMysqlAlterTableTruncatePartitionContinuation(sql: string, statementFr
   if (databaseType !== "mysql" || keyword !== "TRUNCATE") return false;
   if (!startsWithSqlWords(sql, statementFrom, ["ALTER", "TABLE"], databaseType)) return false;
   return nextSqlWord(sql, lineStartFrom + keyword.length, databaseType) === "PARTITION";
+}
+
+function isMergeActionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  if (keyword !== "INSERT" || !startsWithSqlWords(sql, statementFrom, ["MERGE"], databaseType, parameterOptions)) return false;
+  const words = topLevelWordsBefore(sql, statementFrom, lineStartFrom, 5, databaseType, parameterOptions);
+  return words[words.length - 1] === "THEN" && words.includes("WHEN") && words.includes("MATCHED");
 }
 
 function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean {
@@ -1399,7 +1409,10 @@ function startsLineComment(sql: string, pos: number, databaseType?: DatabaseType
 }
 
 function startsHashLineComment(sql: string, pos: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  if (databaseType === "sqlserver" || sql[pos] !== "#") return false;
+  // `#` is a MySQL-family line-comment marker. Oracle-family engines also allow
+  // it in unquoted identifiers (for example `V$DATAFILE.FILE#`), so treating it
+  // as a comment there truncates otherwise valid statements.
+  if ((databaseType !== undefined && ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType)) || databaseType === "sqlserver" || sql[pos] !== "#") return false;
   return readSqlBracedParameterAt(sql, pos, parameterOptions)?.syntax !== "mybatis";
 }
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SHORTCUT_SETTINGS } from "@/lib/editor/shortcutRegistry";
 import { enabledSqlShortcutActions, findSqlShortcutConflicts, hasSqlShortcutConflicts, resolveSqlShortcutTemplate } from "@/lib/sql/sqlShortcutActions";
 import type { SqlShortcutAction } from "@/types/database";
@@ -28,6 +28,10 @@ describe("resolveSqlShortcutTemplate", () => {
     expect(resolveSqlShortcutTemplate("SELECT * FROM ${table}", "x$'y")).toBe("SELECT * FROM x$'y");
     expect(resolveSqlShortcutTemplate("${table} ${table}", "$`1")).toBe("$`1 $`1");
   });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("enabledSqlShortcutActions", () => {
@@ -61,6 +65,11 @@ describe("findSqlShortcutConflicts", () => {
 });
 
 describe("normalizeSqlShortcuts", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
   it("preserves a single shortcut through normalizeEditorSettings", async () => {
     const { normalizeEditorSettings } = await import("@/stores/settingsStore");
     const source = [action("count", "Mod+Shift+C", { label: "Count rows", sql: "SELECT COUNT(*) FROM ${table}" })];
@@ -83,6 +92,28 @@ describe("normalizeSqlShortcuts", () => {
     }).sqlShortcuts;
     expect(normalized).toHaveLength(2);
     expect(normalized.map((item) => item.id)).toEqual(["a", "b"]);
+  });
+
+  it("drops a macOS-reserved shortcut so legacy/synced SQL shortcuts cannot hijack ⌘H", async () => {
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const { normalizeEditorSettings } = await import("@/stores/settingsStore");
+    // normalizeSqlShortcuts has no notion of a per-action "default", so clearing
+    // the binding is the repair: an unbound action simply never fires.
+    const normalized = normalizeEditorSettings({
+      sqlShortcuts: [action("h", "Mod+H"), action("ok", "Mod+Shift+K")],
+    }).sqlShortcuts;
+    expect(normalized.find((item) => item.id === "h")?.shortcut).toBe("");
+    expect(normalized.find((item) => item.id === "ok")?.shortcut).toBe("Mod+Shift+K");
+    expect(normalized).toHaveLength(2);
+  });
+
+  it("keeps Ctrl+H on non-mac platforms where it is a legitimate SQL shortcut", async () => {
+    vi.stubGlobal("navigator", { platform: "Win32" });
+    const { normalizeEditorSettings } = await import("@/stores/settingsStore");
+    const normalized = normalizeEditorSettings({
+      sqlShortcuts: [action("h", "Mod+H")],
+    }).sqlShortcuts;
+    expect(normalized.find((item) => item.id === "h")?.shortcut).toBe("Mod+H");
   });
 
   it("blocks saving when canonical duplicates conflict at validation time", () => {

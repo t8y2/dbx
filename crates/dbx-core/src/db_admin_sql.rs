@@ -274,8 +274,17 @@ pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> Result<St
 }
 
 fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result<String, String> {
-    if !supports_create_database_target(options.database_type) {
+    if !supports_create_database_target(options.database_type, options.driver_profile.as_deref()) {
         return Err(format!("Creating databases is not supported for {}.", database_label(options.database_type)));
+    }
+    if is_informix_family(options.database_type, options.driver_profile.as_deref()) {
+        // Informix / GBase 8s accept only a bare `CREATE DATABASE <name>`. The new database
+        // inherits the instance default locale, and the MySQL `CHARACTER SET`/`COLLATE`
+        // clauses are invalid syntax here. Database names are ordinary identifiers, so quote
+        // them with the Informix rule (unquoted for simple identifiers) rather than the
+        // default double-quote path that `DatabaseType::Gbase` would otherwise take.
+        let name = quote_table_identifier(Some(DatabaseType::Informix), &options.name);
+        return Ok(format!("CREATE DATABASE {name};"));
     }
     let name = quote_table_identifier(options.database_type, &options.name);
     let charset = clean_sql_option(options.charset.as_deref());
@@ -288,7 +297,25 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     Ok(format!("CREATE DATABASE {name} CHARACTER SET {charset}{collate_clause};"))
 }
 
-pub fn supports_create_database_target(database_type: Option<DatabaseType>) -> bool {
+/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s
+/// (which shares `DatabaseType::Gbase` with the MySQL-based GBase 8a and is only distinguishable
+/// through the `gbase8s` driver profile). Informix-family servers accept `CREATE DATABASE` but
+/// have no `CREATE SCHEMA <name>` statement (a "schema" is the table owner), so the create
+/// targets differ from the rest of the `Gbase` family.
+fn is_informix_family(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+    match database_type {
+        Some(DatabaseType::Informix) => true,
+        Some(DatabaseType::Gbase) => driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")),
+        _ => false,
+    }
+}
+
+pub fn supports_create_database_target(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+    // Informix / GBase 8s create namespaces with `CREATE DATABASE`, so they are valid targets
+    // even though they are absent from the explicit list below.
+    if is_informix_family(database_type, driver_profile) {
+        return true;
+    }
     matches!(
         database_type,
         Some(
@@ -341,7 +368,6 @@ pub fn supports_create_schema_target(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Trino
                 | DatabaseType::PrestoSql
                 | DatabaseType::H2
-                | DatabaseType::Informix
                 | DatabaseType::Xugu
                 | DatabaseType::Oscar
                 | DatabaseType::Iris
@@ -1404,6 +1430,74 @@ mod tests {
         })
         .unwrap_err()
         .contains("Creating databases is not supported"));
+    }
+
+    #[test]
+    fn builds_informix_family_create_database_without_mysql_clause() {
+        // GBase 8s shares DatabaseType::Gbase with GBase 8a and is only identified by the
+        // gbase8s driver profile; it must emit a bare, unquoted CREATE DATABASE.
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Gbase),
+                driver_profile: Some("gbase8s".to_string()),
+                target: None,
+                parent: None,
+                name: "app_db".to_string(),
+                charset: Some("utf8mb4".to_string()),
+                collation: Some("utf8mb4_unicode_ci".to_string()),
+            })
+            .unwrap(),
+            "CREATE DATABASE app_db;"
+        );
+        // Standalone Informix behaves the same.
+        assert_eq!(
+            build_create_database_sql(CreateDatabaseSqlOptions {
+                database_type: Some(DatabaseType::Informix),
+                driver_profile: None,
+                target: None,
+                parent: None,
+                name: "app_db".to_string(),
+                charset: None,
+                collation: None,
+            })
+            .unwrap(),
+            "CREATE DATABASE app_db;"
+        );
+    }
+
+    #[test]
+    fn gbase8a_is_not_a_create_database_target() {
+        assert!(build_create_database_sql(CreateDatabaseSqlOptions {
+            database_type: Some(DatabaseType::Gbase),
+            driver_profile: Some("gbase8a".to_string()),
+            target: None,
+            parent: None,
+            name: "app_db".to_string(),
+            charset: None,
+            collation: None,
+        })
+        .unwrap_err()
+        .contains("Creating databases is not supported"));
+    }
+
+    #[test]
+    fn rejects_create_schema_for_informix_effective_dialect() {
+        // The frontend collapses GBase 8s to the Informix dialect for schema DDL; Informix has no
+        // CREATE SCHEMA <name>, so it must be rejected rather than emitting invalid SQL.
+        assert!(build_create_schema_sql(SchemaNameSqlOptions {
+            database_type: Some(DatabaseType::Informix),
+            name: "app".to_string(),
+        })
+        .unwrap_err()
+        .contains("Creating schemas is not supported"));
+    }
+
+    #[test]
+    fn create_database_target_distinguishes_gbase_profiles() {
+        assert!(supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8s")));
+        assert!(!supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8a")));
+        assert!(!supports_create_database_target(Some(DatabaseType::Gbase), None));
+        assert!(supports_create_database_target(Some(DatabaseType::Informix), None));
     }
 
     #[test]

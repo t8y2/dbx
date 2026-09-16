@@ -2120,6 +2120,50 @@ pub async fn update_documents(
     Ok(result.modified_count)
 }
 
+/// replaceOne(filter, replacement[, { upsert }]): the whole document is swapped, so
+/// unlike update there are no array filters to apply.
+pub async fn replace_document(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<u64, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let replacement_value: serde_json::Value =
+        serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    if let Some(operator) = replacement.keys().find(|key| key.starts_with('$')) {
+        return Err(format!("Replacement document must not contain update operators such as {operator}"));
+    }
+    let upsert = parse_replace_options(options_json)?;
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.replace_one(filter, replacement);
+    if let Some(upsert) = upsert {
+        action = action.upsert(upsert);
+    }
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(result.modified_count)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoReplaceOptions {
+    upsert: Option<bool>,
+}
+
+fn parse_replace_options(options_json: Option<&str>) -> Result<Option<bool>, String> {
+    let Some(raw) = options_json.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let options: MongoReplaceOptions =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid replace options: {e}"))?;
+    Ok(options.upsert)
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MongoUpdateOptions {

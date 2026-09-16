@@ -70,6 +70,7 @@ public final class AgentProtocol {
     public static final String MONGO_METHOD_INSERT_DOCUMENTS = "insert_documents";
     public static final String MONGO_METHOD_UPDATE_DOCUMENT = "update_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENTS = "update_documents";
+    public static final String MONGO_METHOD_REPLACE_DOCUMENT = "replace_document";
     public static final String MONGO_METHOD_DELETE_DOCUMENT = "delete_document";
     public static final String MONGO_METHOD_DELETE_DOCUMENTS = "delete_documents";
     public static final String MONGO_METHOD_RUN_COMMAND = "run_command";
@@ -127,6 +128,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_MONGO_CLONE_COLLECTION = "mongo_clone_collection";
     public static final String CAPABILITY_MONGO_RUN_COMMAND = "mongo_run_command";
     public static final String CAPABILITY_MONGO_INSERT_DOCUMENTS = "mongo_insert_documents";
+    public static final String CAPABILITY_MONGO_REPLACE_DOCUMENT = "mongo_replace_document";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
     public static final String CAPABILITY_STRUCTURED_ERROR_V1 = "structured_error_v1";
 
@@ -162,7 +164,8 @@ public final class AgentProtocol {
         CAPABILITY_MONGO_DROP_DATABASE,
         CAPABILITY_MONGO_CLONE_COLLECTION,
         CAPABILITY_MONGO_RUN_COMMAND,
-        CAPABILITY_MONGO_INSERT_DOCUMENTS
+        CAPABILITY_MONGO_INSERT_DOCUMENTS,
+        CAPABILITY_MONGO_REPLACE_DOCUMENT
     ));
 
     public static final List<String> MULTI_SESSION_CAPABILITIES;
@@ -226,6 +229,7 @@ public final class AgentProtocol {
         mongoCapabilities.add(CAPABILITY_MONGO_CLONE_COLLECTION);
         mongoCapabilities.add(CAPABILITY_MONGO_RUN_COMMAND);
         mongoCapabilities.add(CAPABILITY_MONGO_INSERT_DOCUMENTS);
+        mongoCapabilities.add(CAPABILITY_MONGO_REPLACE_DOCUMENT);
         MONGO_LEGACY_CAPABILITIES = Collections.unmodifiableList(mongoCapabilities);
 
         List<String> mongoMultiSessionCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
@@ -233,6 +237,7 @@ public final class AgentProtocol {
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_CLONE_COLLECTION);
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_RUN_COMMAND);
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_INSERT_DOCUMENTS);
+        mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_REPLACE_DOCUMENT);
         MONGO_LEGACY_MULTI_SESSION_CAPABILITIES = Collections.unmodifiableList(mongoMultiSessionCapabilities);
 
         List<String> jdbcCapabilities = new java.util.ArrayList<>(MULTI_SESSION_CAPABILITIES);
@@ -274,6 +279,7 @@ public final class AgentProtocol {
         MONGO_METHOD_INSERT_DOCUMENTS,
         MONGO_METHOD_UPDATE_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENTS,
+        MONGO_METHOD_REPLACE_DOCUMENT,
         MONGO_METHOD_DELETE_DOCUMENT,
         MONGO_METHOD_DELETE_DOCUMENTS,
         MONGO_METHOD_RUN_COMMAND

@@ -804,6 +804,45 @@ pub async fn mongo_update_documents_core(
     }
 }
 
+pub async fn mongo_replace_document_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::replace_document(client, database, collection, filter_json, replacement_json, options_json)
+                .await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoReplaceDocument) {
+                return Err(
+                    "MongoDB Legacy Agent does not support replaceOne; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            let result: serde_json::Value = client
+                .mongo_replace_document(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "filter_json": filter_json,
+                    "replacement_json": replacement_json,
+                    "options_json": options_json,
+                }))
+                .await?;
+            Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
 pub async fn mongo_delete_document_core(
     state: &AppState,
     connection_id: &str,
@@ -1029,6 +1068,19 @@ pub async fn execute_mongo_command_core(
         }
         MongoCommand::Insert { collection, documents } => {
             let affected = mongo_insert_documents_core(state, connection_id, database, collection, documents).await?;
+            Ok(affected_query_result(affected))
+        }
+        MongoCommand::Replace { collection, filter, replacement, options } => {
+            let affected = mongo_replace_document_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                replacement,
+                options.as_deref(),
+            )
+            .await?;
             Ok(affected_query_result(affected))
         }
         MongoCommand::Update { collection, filter, update, options, many } => {

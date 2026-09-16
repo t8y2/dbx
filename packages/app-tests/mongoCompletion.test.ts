@@ -500,8 +500,9 @@ test("suggests only helpers the shell parser accepts", () => {
   assert.ok(methodLabels.includes("drop"));
   assert.ok(methodLabels.includes("distinct"));
   assert.ok(methodLabels.includes("estimatedDocumentCount"));
+  assert.ok(methodLabels.includes("replaceOne"));
   // Suggesting a helper DBX cannot run just hands the user a command that fails.
-  for (const unsupported of ["bulkWrite", "replaceOne", "renameCollection"]) {
+  for (const unsupported of ["bulkWrite", "renameCollection", "mapReduce"]) {
     assert.equal(methodLabels.includes(unsupported), false, `${unsupported} is not executable`);
   }
   // Cursor methods are not collection methods.

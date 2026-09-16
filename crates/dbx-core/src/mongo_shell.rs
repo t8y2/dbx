@@ -66,6 +66,8 @@ pub enum MongoCommand {
     },
     #[serde(rename = "update")]
     Update { collection: String, filter: String, update: String, options: Option<String>, many: bool },
+    #[serde(rename = "replace")]
+    Replace { collection: String, filter: String, replacement: String, options: Option<String> },
     #[serde(rename = "delete")]
     Delete { collection: String, filter: String, many: bool },
     #[serde(rename = "createIndex")]
@@ -98,6 +100,7 @@ impl MongoCommand {
                 | Self::CreateUser { .. }
                 | Self::Insert { .. }
                 | Self::Update { .. }
+                | Self::Replace { .. }
                 | Self::Delete { .. }
                 | Self::CreateIndex { .. }
                 | Self::DropIndexes { .. }
@@ -117,6 +120,7 @@ impl MongoCommand {
     pub fn has_empty_filter(&self) -> bool {
         match self {
             Self::Update { filter, .. }
+            | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
             | Self::FindOneAndUpdate { filter, .. }
             | Self::FindOneAndReplace { filter, .. }
@@ -128,6 +132,7 @@ impl MongoCommand {
     pub fn has_effectively_unbounded_filter(&self) -> bool {
         match self {
             Self::Update { filter, .. }
+            | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
             | Self::FindOneAndUpdate { filter, .. }
             | Self::FindOneAndReplace { filter, .. }
@@ -607,6 +612,22 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             return Err("MongoDB insert() requires a document or document array.".to_string());
         }
         return Ok(MongoCommand::Insert { collection, documents });
+    }
+
+    if let Some((args, tail)) = method_call(source, prefix_end, "replaceOne") {
+        if !tail.is_empty() || !(2..=3).contains(&args.len()) {
+            return Err(
+                "MongoDB replaceOne() requires a filter, a replacement document, and optional options.".to_string()
+            );
+        }
+        let replacement = normalized_json(&args[1])?;
+        require_replacement_document(&replacement)?;
+        return Ok(MongoCommand::Replace {
+            collection,
+            filter: normalized_json(&args[0])?,
+            replacement,
+            options: args.get(2).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?,
+        });
     }
 
     for (method, many) in [("updateOne", false), ("updateMany", true)] {
@@ -1348,6 +1369,19 @@ fn parse_use_database(source: &str) -> Option<String> {
     Some(database.to_string())
 }
 
+/// A replacement is a whole document; `{$set: ...}` here almost always means updateOne() was intended.
+fn require_replacement_document(replacement: &str) -> Result<(), String> {
+    let Some(Value::Object(document)) = parse_json_value(replacement) else {
+        return Err("MongoDB replaceOne() replacement must be a document.".to_string());
+    };
+    match document.keys().find(|key| key.starts_with('$')) {
+        Some(operator) => Err(format!(
+            "MongoDB replaceOne() replacement must not contain update operators such as {operator}; use updateOne() to modify fields."
+        )),
+        None => Ok(()),
+    }
+}
+
 fn is_empty_object(value: &str) -> bool {
     parse_json_value(value).is_some_and(|value| value.as_object().is_some_and(|object| object.is_empty()))
 }
@@ -1863,6 +1897,51 @@ mod tests {
 
         // db.collection.stats() still parses as collection stats, not a run command.
         assert!(matches!(parse("db.orders.stats()").unwrap(), MongoCommand::CollectionStats { .. }));
+    }
+
+    #[test]
+    fn parses_replace_one_as_a_filtered_write() {
+        let command = parse(
+            r#"db.orders.replaceOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {name: "new", tags: []}, {upsert: true})"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::Replace {
+                collection: "orders".to_string(),
+                filter: r#"{"_id":{"$oid":"507f1f77bcf86cd799439011"}}"#.to_string(),
+                replacement: r#"{"name":"new","tags":[]}"#.to_string(),
+                options: Some(r#"{"upsert":true}"#.to_string()),
+            }
+        );
+        assert!(command.is_mutating());
+        assert!(!command.is_dangerous());
+        assert!(!command.has_empty_filter());
+        assert_eq!(validate_safety(&command, true, false, false), Ok(()));
+        assert_eq!(validate_safety(&command, false, false, false), Err(MongoSafetyError::WritesDisabled));
+
+        let without_options = parse("db.orders.replaceOne({a: 1}, {b: 2})").unwrap();
+        assert!(matches!(without_options, MongoCommand::Replace { options: None, .. }));
+
+        // An empty filter replaces an arbitrary document, so it is guarded like an update.
+        let unbounded = parse("db.orders.replaceOne({}, {b: 2})").unwrap();
+        assert!(unbounded.has_empty_filter());
+        assert_eq!(validate_safety(&unbounded, true, false, false), Err(MongoSafetyError::EmptyFilter));
+    }
+
+    #[test]
+    fn rejects_replace_one_with_operators_or_the_wrong_shape() {
+        let error = parse("db.orders.replaceOne({a: 1}, {$set: {b: 2}})").unwrap_err();
+        assert!(error.contains("$set") && error.contains("updateOne"), "{error}");
+
+        for source in [
+            "db.orders.replaceOne({a: 1})",
+            "db.orders.replaceOne({a: 1}, {b: 2}, {upsert: true}, 4)",
+            "db.orders.replaceOne({a: 1}, [{b: 2}])",
+            "db.orders.replaceOne({a: 1}, {b: 2}).limit(1)",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 
     #[test]

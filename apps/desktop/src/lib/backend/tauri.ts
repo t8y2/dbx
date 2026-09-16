@@ -4440,6 +4440,18 @@ export async function documentUpdateDocument(connectionId: string, database: str
   });
 }
 
+export async function mongoReplaceDocument(connectionId: string, database: string, collection: string, filterJson: string, replacementJson: string, optionsJson?: string): Promise<{ affected_rows: number }> {
+  const affectedRows = await invoke<number>("mongo_replace_document", {
+    connectionId,
+    database,
+    collection,
+    filterJson,
+    replacementJson,
+    optionsJson,
+  });
+  return { affected_rows: affectedRows };
+}
+
 export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean, optionsJson?: string): Promise<{ affected_rows: number }> {
   const affectedRows = await invoke<number>("mongo_update_documents", {
     connectionId,

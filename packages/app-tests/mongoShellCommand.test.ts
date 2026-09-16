@@ -672,6 +672,45 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand reads replaceOne as a filtered replace", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.orders.replaceOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {name: "new", tags: []}, {upsert: true})'), {
+    kind: "replace",
+    collection: "orders",
+    filter: '{"_id": {"$oid":"507f1f77bcf86cd799439011"}}',
+    replacement: '{"name": "new", "tags": []}',
+    options: '{"upsert": true}',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db["my-coll"].replaceOne({a: 1}, {b: 2});'), {
+    kind: "replace",
+    collection: "my-coll",
+    filter: '{"a": 1}',
+    replacement: '{"b": 2}',
+  });
+
+  for (const source of ["db.orders.replaceOne({a: 1})", "db.orders.replaceOne({a: 1}, {b: 2}, {upsert: true}, 4)", "db.orders.replaceOne({a: 1}, [{b: 2}])", "db.orders.replaceOne({a: 1}, {$set: {b: 2}})"]) {
+    assert.equal(parseMongoWriteCommand(source), null, source);
+  }
+  assert.match(describeMongoCommandParseFailure("db.orders.replaceOne({a: 1}, {$set: {b: 2}})"), /must not contain update operators such as \$set; use updateOne\(\)/);
+});
+
+test("evaluateMongoWriteSafety guards an unbounded replaceOne like an update", () => {
+  const bounded = parseMongoWriteCommand("db.orders.replaceOne({a: 1}, {b: 2})")!;
+  const unbounded = parseMongoWriteCommand("db.orders.replaceOne({}, {b: 2})")!;
+  const policy = { allowWrites: true, allowDangerous: false } as Parameters<typeof evaluateMongoWriteSafety>[1];
+  assert.equal(evaluateMongoWriteSafety(bounded, policy).allowed, true);
+  assert.equal(evaluateMongoWriteSafety(unbounded, policy).allowed, false);
+  assert.equal(evaluateMongoWriteSafety(bounded, { ...policy, allowWrites: false }).allowed, false);
+});
+
+test("normalizeRustMongoCommand passes a replace command through unchanged", () => {
+  assert.deepEqual(normalizeRustMongoCommand({ kind: "replace", collection: "orders", filter: '{"a":1}', replacement: '{"b":2}', options: null }), {
+    kind: "replace",
+    collection: "orders",
+    filter: '{"a":1}',
+    replacement: '{"b":2}',
+  });
+});
+
 test("parseMongoWriteCommand unwraps EJSON.deserialize values", () => {
   assert.deepEqual(parseMongoWriteCommand('db.products.updateOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {$set: {price: EJSON.deserialize({"$numberDecimal":"12.34"}), payload: EJSON.deserialize({"$binary":{"base64":"AQI=","subType":"00"}})}})'), {
     kind: "update",
@@ -1210,8 +1249,8 @@ test("describeMongoCommandParseFailure explains the argument shape a known metho
 });
 
 test("describeMongoCommandParseFailure names unsupported methods and points at alternatives", () => {
-  const replaceOne = describeMongoCommandParseFailure("db.c.replaceOne({a: 1}, {b: 2})");
-  assert.match(replaceOne, /^Collection method replaceOne\(\) is not supported\. Supported collection methods: find, findOne/);
+  const bulkWrite = describeMongoCommandParseFailure("db.c.bulkWrite([{insertOne: {document: {a: 1}}}])");
+  assert.match(bulkWrite, /^Collection method bulkWrite\(\) is not supported\. Supported collection methods: find, findOne/);
   // Bracket and getCollection targets are recognised too.
   assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);

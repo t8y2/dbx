@@ -6642,6 +6642,7 @@ export const useQueryStore = defineStore("query", () => {
               }
               case "insert":
               case "update":
+              case "replace":
               case "delete":
               case "createIndex":
               case "createUser":
@@ -6664,6 +6665,9 @@ export const useQueryStore = defineStore("query", () => {
                   allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "update") {
                   const result = await api.mongoUpdateDocuments(executionConnectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.update, mongoCommand.many, mongoCommand.options);
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt))));
+                } else if (mongoCommand.kind === "replace") {
+                  const result = await api.mongoReplaceDocument(executionConnectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.replacement, mongoCommand.options);
                   allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "createIndex") {
                   const result = await api.mongoCreateIndex(executionConnectionId, currentDatabase, mongoCommand.collection, mongoCommand.keys, mongoCommand.options);

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
-import { cacheObjectBrowserRows, clearObjectBrowserRowsCache, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import { cacheObjectBrowserRows, clearObjectBrowserRowsCache, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, getCachedObjectBrowserRowsForScaffold, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 
 const row: ObjectBrowserRow = {
   id: "table:users",
@@ -94,6 +94,17 @@ describe("objectBrowserRowsCache", () => {
     expect(getCachedObjectBrowserRows(isolatedScope)).toEqual([row]);
   });
 
+  it("rejects old write tokens after their bounded generation state is evicted", () => {
+    const staleScope = { connectionId: "stale", database: "db", schema: "public" };
+    const staleToken = createObjectBrowserRowsCacheWriteToken(staleScope);
+    for (let index = 0; index < 128; index += 1) {
+      createObjectBrowserRowsCacheWriteToken({ connectionId: `c${index}`, database: "db", schema: "public" });
+    }
+
+    expect(cacheObjectBrowserRows(staleToken, [row])).toBeUndefined();
+    expect(getCachedObjectBrowserRows(staleScope)).toBeUndefined();
+  });
+
   it("preserves the original object list freshness when statistics update cached rows", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
@@ -115,5 +126,44 @@ describe("objectBrowserRowsCache", () => {
 
     expect(invalidateObjectBrowserRowsCache({ ...scope, tableName: "users" })).toBe(1);
     expect(getCachedObjectBrowserRows(scope)).toBeUndefined();
+  });
+
+  describe("scaffold reads (allowStale)", () => {
+    it("returns a fresh hit marked stale=false before the TTL", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+      const scope = { connectionId: "c1", database: "db", schema: "public" };
+      cacheRows(scope);
+
+      const hit = getCachedObjectBrowserRowsForScaffold(scope);
+      expect(hit).toBeDefined();
+      expect(hit!.rows).toEqual([row]);
+      expect(hit!.stale).toBe(false);
+      expect(hit!.ageMs).toBe(0);
+      expect(hit!.cachedAt).toBe(Date.now());
+    });
+
+    it("surfaces an expired entry as a stale scaffold instead of refusing it", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-28T00:00:00Z"));
+      const scope = { connectionId: "c1", database: "db", schema: "public" };
+      cacheRows(scope);
+
+      vi.advanceTimersByTime(30_001);
+      const hit = getCachedObjectBrowserRowsForScaffold(scope);
+      expect(hit).toBeDefined();
+      expect(hit!.rows).toEqual([row]);
+      expect(hit!.stale).toBe(true);
+      expect(hit!.ageMs).toBeGreaterThan(30_000);
+    });
+
+    it("returns undefined when no scaffold is available (uncached or invalidated)", () => {
+      const scope = { connectionId: "c1", database: "db", schema: "public" };
+      expect(getCachedObjectBrowserRowsForScaffold(scope)).toBeUndefined();
+
+      cacheRows(scope);
+      invalidateObjectBrowserRowsCache({ connectionId: "c1", database: "db", schema: "public" });
+      expect(getCachedObjectBrowserRowsForScaffold(scope)).toBeUndefined();
+    });
   });
 });

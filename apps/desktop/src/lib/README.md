@@ -25,3 +25,18 @@ Regression coverage belongs in:
 
 - `src/lib/__tests__/schema/schemaDiffTableFilter.spec.ts`
 - `src/lib/__tests__/schema/schemaDiffMetadataLoad.spec.ts`
+
+## Schema Diff Deployment Safety
+
+Schema Diff review and execution must preserve these invariants:
+
+- Review groups preserve the original top-level object hierarchy. A modified table with dropped or rebuilt indexes, columns, foreign keys, or triggers appears once in the delete group at table level, while final SQL review lists the exact destructive operations.
+- A table and its nested differences are one selection unit because the backend returns one aggregated `syncSql` block per table. Clearing a nested object must clear the table so hidden sibling DDL cannot execute.
+- Final deploy SQL is scanned again after user edits. Any `DROP`, `TRUNCATE`, or `ALTER ... DROP` operation must be listed in the final confirmation.
+- The core deploy endpoint rejects destructive Schema Diff SQL unless the request carries explicit destructive confirmation. UI classification is never the only safety boundary.
+
+Regression coverage belongs in:
+
+- `packages/app-tests/schemaDiff.test.ts`
+- `crates/dbx-core/src/query.rs`
+- `src-tauri/src/commands/query.rs`

@@ -1,0 +1,31 @@
+schemaVersion: 1
+order: 580
+dbType: bigquery
+rustVariant: Bigquery
+label: Google BigQuery
+runtimeMode: agent
+mcpMode: bridge
+agentKey: bigquery
+driverStoreVisible: true
+driverStoreOrder: 28
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

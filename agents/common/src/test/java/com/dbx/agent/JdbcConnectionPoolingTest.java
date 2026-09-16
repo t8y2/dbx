@@ -850,6 +850,27 @@ class JdbcConnectionPoolingTest {
         }
     }
 
+    @RepeatedTest(5)
+    void unsupportedNetworkTimeoutDoesNotPoisonIdentity() throws Exception {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        String url = h2Url("unsupported_network_timeout");
+        try (Connection ignored = openH2(url, physicalOpens)) {
+            // Keep H2 bootstrap outside the setup classification watchdog.
+        }
+        physicalOpens.set(0);
+        try (JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(shortTimeoutPoolSettings(1, 32))) {
+            for (int attempt = 0; attempt < 2; attempt++) {
+                try (JdbcConnectionPoolRegistry.Lease lease = registry.borrow(
+                    "unsupported-network-timeout",
+                    () -> unsupportedNetworkTimeoutConnection(openH2(url, physicalOpens))
+                )) {
+                    assertTrue(lease.connection().isValid(1));
+                }
+            }
+            assertEquals(1, physicalOpens.get());
+        }
+    }
+
     @Test
     void blockedSetupAfterKnownFailurePoisonsCurrentAttemptGeneration() throws Exception {
         AtomicInteger connectionAttempts = new AtomicInteger();
@@ -1117,6 +1138,55 @@ class JdbcConnectionPoolingTest {
             assertEquals(1, physicalOpens.get());
         } finally {
             worker.shutdownNow();
+        }
+    }
+
+    @Test
+    void validationSkipsBusySharedPoolWithoutWaiting() throws Exception {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("busy_validation");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 1)) {
+            openSession(server, requestIds, "cursor-owner");
+            openSession(server, requestIds, "validation-session");
+
+            JsonObject pageParams = sessionParams("cursor-owner");
+            pageParams.addProperty("sql", "SELECT X FROM SYSTEM_RANGE(1, 3)");
+            pageParams.addProperty("pageSize", 1);
+            JsonObject firstPage = result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_EXECUTE_QUERY_PAGE,
+                pageParams
+            ));
+            assertTrue(firstPage.get("has_more").getAsBoolean());
+            String querySessionId = firstPage.get("session_id").getAsString();
+
+            long startedAtNanos = System.nanoTime();
+            JsonObject validation = result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_VALIDATE_SESSION,
+                sessionParams("validation-session")
+            ));
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos);
+            assertTrue(elapsedMillis < 200L, () -> "busy validation took " + elapsedMillis + "ms");
+            assertTrue(validation.get("ok").getAsBoolean());
+            assertEquals(1, physicalOpens.get());
+
+            JsonObject closeParams = sessionParams("cursor-owner");
+            closeParams.addProperty("sessionId", querySessionId);
+            assertTrue(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_CLOSE_QUERY_SESSION,
+                closeParams
+            ).get("result").getAsBoolean());
+            assertEquals(
+                2,
+                query(server, requestIds, "validation-session", "SELECT 2", null)
+                    .getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt()
+            );
         }
     }
 
@@ -1800,6 +1870,65 @@ class JdbcConnectionPoolingTest {
     }
 
     @Test
+    void interactiveTransactionPinsConnectionUntilCommit() {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("manual_transaction");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 2)) {
+            openSession(server, requestIds, "transaction");
+            query(server, requestIds, "transaction", "CREATE TABLE ITEMS (ID INT)", null);
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION,
+                sessionParams("transaction")
+            ));
+            query(server, requestIds, "transaction", "INSERT INTO ITEMS VALUES (1)", null);
+
+            openSession(server, requestIds, "observer");
+            JsonObject beforeCommit = query(server, requestIds, "observer", "SELECT COUNT(*) FROM ITEMS", null);
+            assertEquals(0, beforeCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt());
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
+                sessionParams("transaction")
+            ));
+            JsonObject afterCommit = query(server, requestIds, "observer", "SELECT COUNT(*) FROM ITEMS", null);
+            assertEquals(1, afterCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt());
+        }
+    }
+
+    @Test
+    void interactiveTransactionRestoresSchemaBeforeReturningConnection() {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("manual_transaction_schema");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 2)) {
+            openSession(server, requestIds, "transaction-schema");
+            query(server, requestIds, "transaction-schema", "CREATE SCHEMA IF NOT EXISTS APP", null);
+
+            JsonObject beginParams = sessionParams("transaction-schema");
+            beginParams.addProperty("schema", "APP");
+            result(request(server, requestIds, AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION, beginParams));
+            JsonObject inTransaction = query(server, requestIds, "transaction-schema", "SELECT CURRENT_SCHEMA", null);
+            assertEquals("APP", inTransaction.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
+                sessionParams("transaction-schema")
+            ));
+            openSession(server, requestIds, "schema-observer");
+            JsonObject afterCommit = query(server, requestIds, "schema-observer", "SELECT CURRENT_SCHEMA", null);
+            assertEquals("PUBLIC", afterCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
+        }
+    }
+
+    @Test
     void affinityDetectionCoversCommonSessionStateStatements() {
         assertTrue(JdbcConnectionAffinity.requiresSessionAffinity("SET search_path TO app"));
         assertTrue(JdbcConnectionAffinity.requiresSessionAffinity("-- comment\nUSE sales"));
@@ -2126,6 +2255,23 @@ class JdbcConnectionPoolingTest {
                 if ("setNetworkTimeout".equals(method.getName()) && blockNetworkTimeout.get()) {
                     networkTimeoutStarted.countDown();
                     awaitUninterruptibly(releaseNetworkTimeout);
+                }
+                try {
+                    return method.invoke(delegate, args);
+                } catch (InvocationTargetException error) {
+                    throw error.getCause();
+                }
+            }
+        );
+    }
+
+    private static Connection unsupportedNetworkTimeoutConnection(Connection delegate) {
+        return (Connection) Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[] {Connection.class},
+            (proxy, method, args) -> {
+                if ("setNetworkTimeout".equals(method.getName())) {
+                    throw new SQLException("Does not support setNetworkTimeout");
                 }
                 try {
                     return method.invoke(delegate, args);

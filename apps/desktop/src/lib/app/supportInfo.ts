@@ -7,6 +7,10 @@ export interface AppSupportInfoLabels {
   runtimeWeb: string;
   operatingSystem: string;
   architecture: string;
+  userAgent: string;
+  databaseTypes: string;
+  localDriverVersions: string;
+  aiProviders: string;
   unknown: string;
 }
 
@@ -35,6 +39,10 @@ export function formatSupportInfoOperatingSystem(info: AppSupportInfo, unknownLa
   return [name, version].filter(Boolean).join(" ");
 }
 
+export function collectBrowserSupportInfo(): string {
+  return typeof navigator === "undefined" ? "" : navigator.userAgent?.trim() || "";
+}
+
 export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupportInfoLabels): AppSupportInfoRow[] {
   return [
     {
@@ -61,7 +69,13 @@ export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupport
 }
 
 export function formatAppSupportInfoForClipboard(info: AppSupportInfo, labels: AppSupportInfoLabels): string {
-  return buildAppSupportInfoRows(info, labels)
-    .map((row) => `${row.label}: ${row.value}`)
-    .join("\n");
+  const rows = buildAppSupportInfoRows(info, labels).map((row) => `${row.label}: ${row.value}`);
+  const extraRows: Array<[string, string | null | undefined]> = [];
+  if (info.userAgent?.trim()) extraRows.push([labels.userAgent, info.userAgent]);
+  if (info.databaseTypes?.length) extraRows.push([labels.databaseTypes, info.databaseTypes.join(", ")]);
+  if (info.localDriverVersions?.length) {
+    extraRows.push([labels.localDriverVersions, info.localDriverVersions.map((driver) => `${driver.dbType} ${driver.version}`).join(", ")]);
+  }
+  if (info.aiProviders?.length) extraRows.push([labels.aiProviders, info.aiProviders.join(", ")]);
+  return rows.concat(extraRows.map(([label, value]) => `${label}: ${value?.trim() || labels.unknown}`)).join("\n");
 }

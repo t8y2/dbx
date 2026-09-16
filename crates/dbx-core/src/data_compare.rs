@@ -62,6 +62,8 @@ pub struct DataCompareFromTablesOptions {
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_columns: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degradation_threshold: Option<DegradationThreshold>,
@@ -356,6 +358,11 @@ pub async fn prepare_data_compare_from_tables(
     let sampling_strategy = options.sampling_strategy.clone().unwrap_or(SamplingStrategy::Hybrid);
     let enable_checksum = options.enable_checksum.unwrap_or(true);
 
+    // Cross-database comparison matches columns case-insensitively, so `columns` holds
+    // target-side names while the source side needs its own names in the same order.
+    let source_column_names = aligned_source_column_names(&options.columns, options.source_columns.as_ref());
+    let source_key_columns = aligned_source_key_columns(&options.columns, &source_column_names, &options.key_columns);
+
     let (source_rows, target_rows, sampling_rate, verification_method) = match &degradation_level {
         DegradationLevel::Full => {
             let (src, tgt) = tokio::try_join!(
@@ -365,8 +372,8 @@ pub async fn prepare_data_compare_from_tables(
                     &options.source_database,
                     &options.source_schema,
                     &options.source_table,
-                    &options.columns,
-                    &options.key_columns,
+                    &source_column_names,
+                    &source_key_columns,
                     source_database_type,
                     fetch_batch_size,
                 ),
@@ -392,8 +399,8 @@ pub async fn prepare_data_compare_from_tables(
                     &options.source_database,
                     &options.source_schema,
                     &options.source_table,
-                    &options.columns,
-                    &options.key_columns,
+                    &source_column_names,
+                    &source_key_columns,
                     source_database_type,
                     &sampling_strategy,
                     threshold.sample_size,
@@ -735,13 +742,29 @@ fn collect_compare_rows(
     for row in rows {
         let key = key_for_row(&row, key_columns, column_indexes);
         if items.contains_key(&key) {
-            return Err(format!("Duplicate {label} key: {key}"));
+            return Err(duplicate_key_error(label, key_columns, &key));
         }
         order.push(key.clone());
         items.insert(key, normalize_row_len(row, columns.len()));
     }
 
     Ok((items, order))
+}
+
+/// Formats a duplicate-key error so the user can tell which side (source or
+/// target) failed, which columns make up the key and which key value repeated.
+///
+/// Single-column keys render as `Duplicate source key for column(s) [id]: "1"`;
+/// composite keys render as `Duplicate target key for column(s) [a, b]: ["1", "2"]`.
+fn duplicate_key_error(label: &str, key_columns: &[String], key: &str) -> String {
+    let columns = key_columns.join(", ");
+    let key_display = if key_columns.len() > 1 {
+        let values = key.split('\u{001f}').collect::<Vec<_>>();
+        format!("[{}]", values.join(", "))
+    } else {
+        key.to_string()
+    };
+    format!("Duplicate {label} key for column(s) [{columns}]: {key_display}")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1028,6 +1051,27 @@ fn first_count(rows: &[Vec<Value>]) -> Result<u64, String> {
         _ => None,
     }
     .ok_or_else(|| format!("COUNT query returned non-numeric value: {value}"))
+}
+
+/// Data compare matches columns case-insensitively across databases that store
+/// identifiers with different case conventions (e.g. SQL Server keeps the created
+/// case while Oracle stores upper case). `columns` carries target-side names, so
+/// the source side is queried with its own names in the same positional order.
+fn aligned_source_column_names(columns: &[String], source_columns: Option<&Vec<String>>) -> Vec<String> {
+    match source_columns {
+        Some(source_columns) if source_columns.len() == columns.len() => source_columns.clone(),
+        _ => columns.to_vec(),
+    }
+}
+
+fn aligned_source_key_columns(columns: &[String], source_columns: &[String], key_columns: &[String]) -> Vec<String> {
+    key_columns
+        .iter()
+        .map(|key| match columns.iter().position(|column| column == key) {
+            Some(index) => source_columns[index].clone(),
+            None => key.clone(),
+        })
+        .collect()
 }
 
 fn build_data_compare_select_sql(
@@ -1382,6 +1426,42 @@ impl Default for DegradationChain {
     }
 }
 
+fn uses_oracle_rownum_sampling(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+}
+
+fn build_limited_sampling_select_sql(
+    database_type: DatabaseType,
+    table: &str,
+    select_columns: &str,
+    order_by: Option<&str>,
+    row_limit: usize,
+) -> String {
+    match pagination_strategy(Some(database_type), PaginationContext::BoundedRead) {
+        TablePaginationStrategy::Rownum if uses_oracle_rownum_sampling(database_type) => {
+            if let Some(order_by) = order_by {
+                format!(
+                    "SELECT {select_columns} FROM (SELECT {select_columns} FROM {table} ORDER BY {order_by}) WHERE ROWNUM <= {row_limit}"
+                )
+            } else {
+                format!("SELECT {select_columns} FROM {table} WHERE ROWNUM <= {row_limit}")
+            }
+        }
+        TablePaginationStrategy::SqlServerTop => {
+            let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+            format!("SELECT TOP ({row_limit}) {select_columns} FROM {table}{order}")
+        }
+        _ => {
+            let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
+            format!("SELECT {select_columns} FROM {table}{order} LIMIT {row_limit}")
+        }
+    }
+}
+
+fn build_rownum_sampling_union_sql(select_columns: &str, parts: &[String]) -> String {
+    format!("SELECT {select_columns} FROM ({})", parts.join(" UNION ALL "))
+}
+
 fn build_sampling_select_sql(
     database_type: DatabaseType,
     schema: &str,
@@ -1442,7 +1522,7 @@ fn build_sampling_select_sql(
         },
         SamplingStrategy::ExtremeValues => {
             if key_columns.is_empty() {
-                return format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}");
+                return build_limited_sampling_select_sql(database_type, &table, &select_columns, None, sample_size);
             }
             let order_keys = key_columns
                 .iter()
@@ -1457,18 +1537,31 @@ fn build_sampling_select_sql(
 
             let head_count = sample_size / 2;
             let tail_count = sample_size - head_count;
+            let head =
+                build_limited_sampling_select_sql(database_type, &table, &select_columns, Some(&asc_order), head_count);
+            let tail = build_limited_sampling_select_sql(
+                database_type,
+                &table,
+                &select_columns,
+                Some(&desc_order),
+                tail_count,
+            );
+
+            if uses_oracle_rownum_sampling(database_type) {
+                return build_rownum_sampling_union_sql(&select_columns, &[head, tail]);
+            }
 
             format!(
                 "SELECT {select_columns} FROM ( \
-                 (SELECT {select_columns} FROM {table} ORDER BY {asc_order} LIMIT {head_count}) \
+                 ({head}) \
                  UNION ALL \
-                 (SELECT {select_columns} FROM {table} ORDER BY {desc_order} LIMIT {tail_count}) \
+                 ({tail}) \
                  ) AS _extreme_sample"
             )
         }
         SamplingStrategy::Hybrid => {
             if key_columns.is_empty() {
-                return format!("SELECT {select_columns} FROM {table} LIMIT {sample_size}");
+                return build_limited_sampling_select_sql(database_type, &table, &select_columns, None, sample_size);
             }
             let order_keys = key_columns
                 .iter()
@@ -1504,7 +1597,13 @@ fn build_sampling_select_sql(
                     format!("(SELECT {select_columns} FROM {table} ORDER BY rand() LIMIT {random_count})")
                 }
                 DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng => {
-                    format!("(SELECT {select_columns} FROM (SELECT {select_columns} FROM {table} ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= {random_count})")
+                    build_limited_sampling_select_sql(
+                        database_type,
+                        &table,
+                        &select_columns,
+                        Some("DBMS_RANDOM.VALUE"),
+                        random_count,
+                    )
                 }
                 DatabaseType::Iris => {
                     format!("(SELECT TOP {random_count} {select_columns} FROM {table} ORDER BY RAND())")
@@ -1519,14 +1618,27 @@ fn build_sampling_select_sql(
                     format!("(SELECT {select_columns} FROM {table} LIMIT {random_count})")
                 }
             };
+            let head =
+                build_limited_sampling_select_sql(database_type, &table, &select_columns, Some(&asc_order), head_count);
+            let tail = build_limited_sampling_select_sql(
+                database_type,
+                &table,
+                &select_columns,
+                Some(&desc_order),
+                tail_count,
+            );
+
+            if uses_oracle_rownum_sampling(database_type) {
+                return build_rownum_sampling_union_sql(&select_columns, &[random_part, head, tail]);
+            }
 
             format!(
                 "SELECT {select_columns} FROM ( \
                  {random_part} \
                  UNION ALL \
-                 (SELECT {select_columns} FROM {table} ORDER BY {asc_order} LIMIT {head_count}) \
+                 ({head}) \
                  UNION ALL \
-                 (SELECT {select_columns} FROM {table} ORDER BY {desc_order} LIMIT {tail_count}) \
+                 ({tail}) \
                  ) AS _hybrid_sample"
             )
         }
@@ -1632,6 +1744,7 @@ pub async fn verify_data(state: &AppState, options: VerifyDataOptions) -> Result
         target_table: options.target_table,
         columns: options.columns,
         key_columns: options.key_columns,
+        source_columns: None,
         fetch_batch_size: options.fetch_batch_size,
         degradation_threshold: Some(degradation_threshold),
         sampling_strategy: Some(sampling_strategy),
@@ -2283,7 +2396,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_row_keys() {
+    fn rejects_duplicate_row_keys_with_key_column_context() {
         let err = compare_data_rows(CompareDataRowsOptions {
             columns: vec!["id".to_string(), "name".to_string()],
             key_columns: vec!["id".to_string()],
@@ -2292,7 +2405,38 @@ mod tests {
         })
         .expect_err("duplicate source keys should fail");
 
-        assert!(err.contains("Duplicate source key"));
+        assert!(err.contains("Duplicate source key for column(s) [id]: 1"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_target_keys_with_key_column_context() {
+        let err = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["id".to_string(), "name".to_string()],
+            key_columns: vec!["id".to_string()],
+            source_rows: vec![vec![json!(1), json!("Ada")]],
+            target_rows: vec![vec![json!(1), json!("Ada")], vec![json!(1), json!("Ada Clone")]],
+        })
+        .expect_err("duplicate target keys should fail");
+
+        assert!(err.contains("Duplicate target key for column(s) [id]: 1"), "{err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_composite_keys_with_both_columns_named() {
+        let err = compare_data_rows(CompareDataRowsOptions {
+            columns: vec!["tenant_id".to_string(), "user_id".to_string(), "name".to_string()],
+            key_columns: vec!["tenant_id".to_string(), "user_id".to_string()],
+            source_rows: vec![
+                vec![json!("A"), json!(1001), json!("Ada")],
+                vec![json!("A"), json!(1001), json!("Ada Clone")],
+            ],
+            target_rows: vec![vec![json!("A"), json!(1001), json!("Ada")]],
+        })
+        .expect_err("duplicate composite source keys should fail");
+
+        assert!(err.contains("Duplicate source key"), "{err}");
+        assert!(err.contains("[tenant_id, user_id]"), "{err}");
+        assert!(err.contains("[\"A\", 1001]"), "{err}");
     }
 
     #[test]
@@ -2389,8 +2533,116 @@ mod tests {
                 25,
                 0,
             ),
-            "SELECT \"ID\", \"NAME\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC FETCH FIRST 25 ROWS ONLY"
+            "SELECT \"ID\", \"NAME\" FROM (SELECT \"ID\", \"NAME\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC) WHERE ROWNUM <= 25"
         );
+    }
+
+    #[test]
+    fn builds_backend_table_select_sql_for_oracle11g_rownum_offset_pages() {
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Oracle,
+                "APP",
+                "EVENTS",
+                &["ID".to_string(), "NAME".to_string()],
+                &["ID".to_string()],
+                25,
+                50,
+            ),
+            "SELECT \"ID\", \"NAME\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"NAME\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC) dbx_inner WHERE ROWNUM <= 75) WHERE \"__dbx_row_num\" > 50"
+        );
+    }
+
+    #[test]
+    fn builds_oracle_rownum_pages_with_composite_key_and_long_projection() {
+        let columns = ["ID".to_string(), "TENANT_ID".to_string(), "NAME".to_string(), "CREATED_AT".to_string()];
+        let key_columns = ["ID".to_string(), "TENANT_ID".to_string()];
+
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Oracle,
+                "APP",
+                "EVENTS",
+                &columns,
+                &key_columns,
+                25,
+                0,
+            ),
+            "SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC, \"TENANT_ID\" ASC) WHERE ROWNUM <= 25"
+        );
+        assert_eq!(
+            build_data_compare_select_sql(
+                DatabaseType::Oracle,
+                "APP",
+                "EVENTS",
+                &columns,
+                &key_columns,
+                25,
+                50,
+            ),
+            "SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC, \"TENANT_ID\" ASC) dbx_inner WHERE ROWNUM <= 75) WHERE \"__dbx_row_num\" > 50"
+        );
+    }
+
+    #[test]
+    fn builds_oracle_hybrid_sampling_sql_without_limit_or_as_alias() {
+        let sql = build_sampling_select_sql(
+            DatabaseType::Oracle,
+            "APP",
+            "EVENTS",
+            &["ID".to_string(), "TENANT_ID".to_string(), "NAME".to_string(), "CREATED_AT".to_string()],
+            &["ID".to_string(), "TENANT_ID".to_string()],
+            &SamplingStrategy::Hybrid,
+            10,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY DBMS_RANDOM.VALUE) WHERE ROWNUM <= 5 UNION ALL SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" ASC, \"TENANT_ID\" ASC) WHERE ROWNUM <= 2 UNION ALL SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM (SELECT \"ID\", \"TENANT_ID\", \"NAME\", \"CREATED_AT\" FROM \"APP\".\"EVENTS\" ORDER BY \"ID\" DESC, \"TENANT_ID\" DESC) WHERE ROWNUM <= 3)"
+        );
+        assert!(!sql.contains(" LIMIT "));
+        assert!(!sql.contains(" AS _hybrid_sample"));
+    }
+
+    #[test]
+    fn builds_oracle_family_hybrid_sampling_sql_with_rownum() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let sql = build_sampling_select_sql(
+                database_type,
+                "APP",
+                "EVENTS",
+                &["ID".to_string(), "TENANT_ID".to_string()],
+                &["ID".to_string(), "TENANT_ID".to_string()],
+                &SamplingStrategy::Hybrid,
+                10,
+            );
+
+            assert!(!sql.contains(" LIMIT "), "{database_type:?}: {sql}");
+            assert!(!sql.contains(" AS _hybrid_sample"), "{database_type:?}: {sql}");
+            assert_eq!(sql.matches("ROWNUM <= ").count(), 3, "{database_type:?}: {sql}");
+        }
+    }
+
+    #[test]
+    fn builds_sqlserver_hybrid_sampling_sql_with_top_for_cross_database_source() {
+        let sql = build_sampling_select_sql(
+            DatabaseType::SqlServer,
+            "dbo",
+            "EVENTS",
+            &["id".to_string(), "tenant_id".to_string(), "name".to_string()],
+            &["id".to_string(), "tenant_id".to_string()],
+            &SamplingStrategy::Hybrid,
+            10,
+        );
+
+        assert!(sql.contains("TABLESAMPLE (5 ROWS)"));
+        assert!(sql.contains(
+            "SELECT TOP (2) [id], [tenant_id], [name] FROM [dbo].[EVENTS] ORDER BY [id] ASC, [tenant_id] ASC"
+        ));
+        assert!(sql.contains(
+            "SELECT TOP (3) [id], [tenant_id], [name] FROM [dbo].[EVENTS] ORDER BY [id] DESC, [tenant_id] DESC"
+        ));
+        assert!(!sql.contains(" LIMIT "));
     }
 
     #[test]
@@ -2467,5 +2719,32 @@ mod tests {
         let snapshot = metrics.snapshot();
         let up = snapshot.iter().find(|e| e.name == "dbx_auto_upgrade_total").unwrap();
         assert_eq!(up.value, crate::risk_metrics::MetricValue::Counter(1));
+    }
+
+    #[test]
+    fn aligned_source_column_names_keep_source_case_in_positional_order() {
+        let columns = vec!["SNID".to_string(), "NAME".to_string()];
+        let source_columns = vec!["snid".to_string(), "name".to_string()];
+
+        let aligned = aligned_source_column_names(&columns, Some(&source_columns));
+        assert_eq!(aligned, source_columns);
+
+        let fallback = aligned_source_column_names(&columns, None);
+        assert_eq!(fallback, columns);
+
+        let mismatched = aligned_source_column_names(&columns, Some(&vec!["snid".to_string()]));
+        assert_eq!(mismatched, columns);
+    }
+
+    #[test]
+    fn aligned_source_key_columns_map_keys_by_position() {
+        let columns = vec!["SNID".to_string(), "NAME".to_string()];
+        let source_columns = vec!["snid".to_string(), "name".to_string()];
+
+        let keys = aligned_source_key_columns(&columns, &source_columns, &["NAME".to_string()]);
+        assert_eq!(keys, vec!["name".to_string()]);
+
+        let unknown = aligned_source_key_columns(&columns, &source_columns, &["missing".to_string()]);
+        assert_eq!(unknown, vec!["missing".to_string()]);
     }
 }

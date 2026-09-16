@@ -8,8 +8,10 @@ import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import VChart from "vue-echarts";
 import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
-import type { MqSystemKind, TopicRef, TopicInfo, TopicStats, BacklogStats, PeekedMessage } from "@/types/mq";
-import { mqGetTopicStats, mqGetBacklog, mqPeekMessages } from "@/lib/backend/api";
+import type { MqSystemKind, TopicRef, TopicInfo, TopicStats, BacklogStats } from "@/types/mq";
+import { mqGetTopicStats, mqGetBacklog } from "@/lib/backend/api";
+import { extractKafkaPartitionRows, isKafkaStatsPayload, type KafkaPartitionStatsRow } from "@/lib/mq/kafkaTopicStats";
+import MessageBrowser from "./MessageBrowser.vue";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
 
@@ -23,8 +25,8 @@ interface Props {
 
 interface MetricPoint {
   time: string;
-  msgRateIn: number;
-  msgRateOut: number;
+  msgRateIn: number | null;
+  msgRateOut: number | null;
   backlogSize: number;
   msgBacklog: number;
   consumerLagMs: number;
@@ -53,17 +55,10 @@ interface RocketMqPartitionStatsRow {
   messageCount: number;
 }
 
-interface KafkaPartitionStatsRow {
-  partition: number;
-  beginOffset: number;
-  endOffset: number;
-  messageCount: number;
-  leader: number;
-  replicas: number[];
-  isr: number[];
-}
-
 const props = defineProps<Props>();
+const emit = defineEmits<{
+  "navigate-tab": [payload: { tab: "messages"; topic?: TopicInfo }];
+}>();
 const { t } = useI18n();
 
 const stats = ref<TopicStats>();
@@ -73,14 +68,20 @@ const error = ref<string>();
 const autoRefresh = ref(true);
 const refreshInterval = ref(5); // seconds
 const selectedPartitionName = ref<string>();
-const kafkaMessageSql = ref("");
-const kafkaMessageLoading = ref(false);
-const kafkaMessageError = ref<string>();
-const kafkaMessages = ref<PeekedMessage[]>([]);
 
 let refreshTimer: number | undefined;
 const history = ref<MetricPoint[]>([]);
 const MAX_HISTORY_POINTS = 60;
+const messageFlowStatus = computed(() => {
+  if (!stats.value || stats.value.ratesUnavailable) {
+    return { kind: "unavailable", label: "-" };
+  }
+  const active = stats.value.msgRateIn > 0 || stats.value.msgRateOut > 0;
+  return {
+    kind: active ? "healthy" : "idle",
+    label: active ? t("mqMonitoring.flowActive") : t("mqMonitoring.flowIdle"),
+  };
+});
 
 const partitionRows = computed(() => extractPartitionRows(stats.value?.raw));
 const kafkaPartitionRows = computed(() => extractKafkaPartitionRows(stats.value?.raw));
@@ -221,74 +222,12 @@ function refreshNow() {
   void loadStats();
 }
 
-function defaultKafkaMessageSql(): string {
-  const topic = props.topic?.shortName;
-  return topic ? `SELECT * FROM "${topic}" LIMIT 20` : "";
-}
-
-function parseKafkaMessageSql(sql: string): { topic: string; partition?: number; offset?: number; limit: number } {
-  const match = sql.trim().match(/^\s*select\s+\*\s+from\s+(?:"([^"]+)"|`([^`]+)`|'([^']+)'|([^\s;]+))(?:\s+partition\s+(\d+))?(?:\s+offset\s+(\d+))?(?:\s+limit\s+(\d+))?\s*;?\s*$/i);
-  if (!match) {
-    throw new Error(t("mqMonitoring.sqlSyntaxError"));
-  }
-  const topic = match[1] || match[2] || match[3] || match[4] || "";
-  const partition = match[5] != null ? Math.max(0, Number(match[5])) : undefined;
-  const offset = match[6] != null ? Math.max(0, Number(match[6])) : undefined;
-  const limit = Math.max(1, Math.min(100, Number(match[7] ?? 20)));
-  return { topic, partition, offset, limit };
-}
-
-function flatMqMonitorGroupName(): string {
-  if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_monitor__";
-  return "__dbx_kafka_monitor__";
-}
-
-async function runKafkaMessageSql() {
-  if (!props.tenant || !props.namespace) return;
-  kafkaMessageLoading.value = true;
-  kafkaMessageError.value = undefined;
-  try {
-    const parsed = parseKafkaMessageSql(kafkaMessageSql.value);
-    const selected = props.topic && parsed.topic === props.topic.shortName ? props.topic : undefined;
-    const options: { partition?: number; offset?: number } = {};
-    if (parsed.partition != null) options.partition = parsed.partition;
-    if (parsed.offset != null) options.offset = parsed.offset;
-    kafkaMessages.value = await mqPeekMessages(
-      props.connectionId,
-      {
-        tenant: props.tenant,
-        namespace: props.namespace,
-        topic: parsed.topic,
-        persistent: selected?.persistent ?? true,
-        partitioned: selected?.partitioned,
-      },
-      flatMqMonitorGroupName(),
-      parsed.limit,
-      options,
-    );
-  } catch (e: unknown) {
-    kafkaMessageError.value = formatError(e);
-  } finally {
-    kafkaMessageLoading.value = false;
-  }
-}
-
-function kafkaMessagePayload(message: PeekedMessage): string {
-  return message.payloadText ?? message.payloadBase64;
-}
-
-function formatKafkaMessageTimestamp(value?: string): string {
-  if (!value) return "-";
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return value;
-  return new Date(numeric).toLocaleString();
-}
-
 function appendHistoryPoint(statsData: TopicStats, backlogData?: BacklogStats) {
+  const ratesUnavailable = statsData.ratesUnavailable === true;
   const point: MetricPoint = {
     time: new Date().toLocaleTimeString(),
-    msgRateIn: statsData.msgRateIn,
-    msgRateOut: statsData.msgRateOut,
+    msgRateIn: ratesUnavailable ? null : statsData.msgRateIn,
+    msgRateOut: ratesUnavailable ? null : statsData.msgRateOut,
     backlogSize: statsData.backlogSize,
     msgBacklog: backlogData?.msgBacklog ?? 0,
     consumerLagMs: extractConsumerLagMs(statsData.raw),
@@ -347,26 +286,6 @@ function extractRocketMqPartitionRows(raw: unknown): RocketMqPartitionStatsRow[]
     .sort((a, b) => a.partition - b.partition || a.brokerName.localeCompare(b.brokerName));
 }
 
-function extractKafkaPartitionRows(raw: unknown): KafkaPartitionStatsRow[] {
-  return arrayObjects(objectRecord(raw).partitionStats)
-    .map((body) => ({
-      partition: numberField(body.partition) ?? 0,
-      beginOffset: numberField(body.beginOffset) ?? 0,
-      endOffset: numberField(body.endOffset) ?? 0,
-      messageCount: numberField(body.messageCount) ?? 0,
-      leader: numberField(body.leader) ?? -1,
-      replicas: numberArrayField(body.replicas),
-      isr: numberArrayField(body.isr),
-    }))
-    .sort((a, b) => a.partition - b.partition);
-}
-
-function isKafkaStatsPayload(raw: unknown): boolean {
-  if (props.mqSystemKind === "rocketmq") return false;
-  const root = objectRecord(raw);
-  return Array.isArray(root.partitionStats) || (numberField(root.partitions) !== undefined && numberField(root.replicationFactor) !== undefined && numberField(root.totalMessages) !== undefined);
-}
-
 function isKafkaPartitionHealthy(row: KafkaPartitionStatsRow): boolean {
   return row.leader >= 0 && (row.replicas.length === 0 || row.isr.length >= row.replicas.length);
 }
@@ -400,10 +319,6 @@ function arrayObjects(value: unknown): Record<string, unknown>[] {
 
 function numberField(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function numberArrayField(value: unknown): number[] {
-  return Array.isArray(value) ? value.map(numberField).filter((item): item is number => item !== undefined) : [];
 }
 
 function stringField(value: unknown): string {
@@ -447,14 +362,15 @@ function formatNumber(num: number): string {
   return num.toLocaleString();
 }
 
+function formatMessageRate(rate: number, unavailable?: boolean): string {
+  return unavailable ? "-" : `${rate.toFixed(2)} msg/s`;
+}
+
 watch(
   () => props.topic,
   () => {
     history.value = [];
     selectedPartitionName.value = undefined;
-    kafkaMessageSql.value = defaultKafkaMessageSql();
-    kafkaMessageError.value = undefined;
-    kafkaMessages.value = [];
     void loadStats();
     startAutoRefresh();
   },
@@ -515,14 +431,14 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <div v-if="error && topic" class="panel-error">
+      <AlertTriangle :size="18" />
+      <span>{{ error }}</span>
+    </div>
+
     <div v-if="!topic" class="panel-placeholder">
       <Table2 :size="24" />
       <span>{{ t("mqMonitoring.selectTopicFirst") }}</span>
-    </div>
-
-    <div v-else-if="error" class="panel-error">
-      <AlertTriangle :size="18" />
-      <span>{{ error }}</span>
     </div>
 
     <div v-else-if="loading && !stats" class="panel-loading">
@@ -698,36 +614,10 @@ onUnmounted(() => {
       </div>
 
       <div class="stats-section">
-        <div class="section-title-row">
-          <h4>{{ t("mqMonitoring.kafkaMessageQuery") }}</h4>
-          <button type="button" class="btn-sm" :disabled="kafkaMessageLoading || !kafkaMessageSql.trim()" @click="runKafkaMessageSql">
-            <Loader2 v-if="kafkaMessageLoading" class="btn-icon spinning" :size="14" />
-            <span>{{ kafkaMessageLoading ? t("mqMonitoring.querying") : t("mqMonitoring.queryMessages") }}</span>
-          </button>
+        <div class="monitoring-message-heading">
+          <button type="button" class="btn-sm" @click="emit('navigate-tab', { tab: 'messages', topic })">{{ t("mqMessages.queryTitle") }}</button>
         </div>
-        <textarea v-model="kafkaMessageSql" class="kafka-sql-input" rows="2" spellcheck="false" />
-        <div class="query-hint">{{ t("mqMonitoring.queryHint") }}</div>
-        <div v-if="kafkaMessageError" class="panel-error inline-error">
-          <AlertTriangle :size="16" />
-          <span>{{ kafkaMessageError }}</span>
-        </div>
-        <div v-else-if="kafkaMessageLoading" class="empty-state compact">{{ t("mqMonitoring.messagesLoading") }}</div>
-        <div v-else-if="!kafkaMessages.length" class="empty-state compact">{{ t("mqMonitoring.noMessages") }}</div>
-        <div v-else class="kafka-message-list">
-          <article v-for="message in kafkaMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="kafka-message-row">
-            <div class="kafka-message-meta">
-              <span>#{{ message.position }}</span>
-              <span v-if="message.properties?.partition != null">{{ t("mqMonitoring.metaPartition", { partition: message.properties.partition }) }}</span>
-              <span>{{ t("mqMonitoring.metaOffset", { offset: message.messageId || "-" }) }}</span>
-              <span v-if="message.key">{{ t("mqMonitoring.metaKey", { key: message.key }) }}</span>
-              <span>{{ formatKafkaMessageTimestamp(message.publishTime) }}</span>
-            </div>
-            <pre class="kafka-message-payload">{{ kafkaMessagePayload(message) }}</pre>
-            <div v-if="Object.keys(message.headers || {}).length" class="kafka-message-headers">
-              <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
-            </div>
-          </article>
-        </div>
+        <MessageBrowser :connection-id="connectionId" :topic="getTopicRef()" mq-system-kind="kafka" appearance="monitoring" />
       </div>
     </div>
 
@@ -740,14 +630,14 @@ onUnmounted(() => {
             <div class="stat-icon"><Download :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqMonitoring.inboundRate") }}</div>
-              <div class="stat-value">{{ stats.msgRateIn.toFixed(2) }} msg/s</div>
+              <div class="stat-value" data-testid="monitoring-rate-in">{{ formatMessageRate(stats.msgRateIn, stats.ratesUnavailable) }}</div>
             </div>
           </div>
           <div class="stat-card">
             <div class="stat-icon"><Upload :size="21" /></div>
             <div class="stat-content">
               <div class="stat-label">{{ t("mqMonitoring.outboundRate") }}</div>
-              <div class="stat-value">{{ stats.msgRateOut.toFixed(2) }} msg/s</div>
+              <div class="stat-value" data-testid="monitoring-rate-out">{{ formatMessageRate(stats.msgRateOut, stats.ratesUnavailable) }}</div>
             </div>
           </div>
           <div class="stat-card">
@@ -770,7 +660,7 @@ onUnmounted(() => {
       <div class="charts-grid">
         <div class="chart-panel">
           <h4>{{ t("mqMonitoring.rateTrend") }}</h4>
-          <VChart :option="rateChartOption" autoresize class="trend-chart" />
+          <VChart :option="rateChartOption" autoresize class="trend-chart" data-testid="monitoring-rate-chart" />
         </div>
         <div class="chart-panel">
           <h4>{{ t("mqMonitoring.backlogTrend") }}</h4>
@@ -945,8 +835,8 @@ onUnmounted(() => {
         <div class="health-indicators">
           <div class="health-item">
             <span class="health-label">{{ t("mqMonitoring.messageFlow") }}:</span>
-            <span :class="['health-badge', stats.msgRateIn > 0 || stats.msgRateOut > 0 ? 'healthy' : 'idle']">
-              {{ stats.msgRateIn > 0 || stats.msgRateOut > 0 ? t("mqMonitoring.flowActive") : t("mqMonitoring.flowIdle") }}
+            <span :class="['health-badge', messageFlowStatus.kind]" data-testid="monitoring-flow-status">
+              {{ messageFlowStatus.label }}
             </span>
           </div>
           <div class="health-item">
@@ -1027,8 +917,7 @@ onUnmounted(() => {
   gap: 16px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--monitor-border);
-  background: color-mix(in srgb, var(--monitor-surface) 92%, transparent);
-  backdrop-filter: blur(10px);
+  background: var(--monitor-surface);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -1142,11 +1031,12 @@ onUnmounted(() => {
   border-color: var(--monitor-border-strong);
   background: var(--monitor-hover);
   box-shadow: var(--monitor-shadow);
-  transform: translateY(-1px);
 }
 
+/* 桌面端不做位移/缩放按压反馈，仅靠颜色变化表达状态，避免按钮"抖动"观感 */
 .btn-sm:active:not(:disabled) {
-  transform: translateY(0) scale(0.98);
+  background: var(--monitor-accent-soft);
+  border-color: var(--monitor-accent);
 }
 
 .btn-sm:focus-visible {
@@ -1264,87 +1154,6 @@ onUnmounted(() => {
 
 .section-title-row h4 {
   margin-bottom: 0;
-}
-
-.kafka-sql-input {
-  width: 100%;
-  min-height: 54px;
-  padding: 10px 12px;
-  border: 1px solid var(--monitor-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--monitor-surface);
-  color: var(--monitor-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  resize: vertical;
-  box-sizing: border-box;
-}
-
-.kafka-sql-input:focus {
-  outline: none;
-  border-color: var(--monitor-accent);
-  box-shadow: 0 0 0 3px var(--monitor-accent-soft);
-}
-
-.query-hint {
-  margin-top: 6px;
-  color: var(--monitor-faint);
-  font-size: 12px;
-}
-
-.inline-error {
-  justify-content: flex-start;
-  margin-top: 10px;
-  border: 1px solid color-mix(in srgb, var(--monitor-danger) 22%, transparent);
-  border-radius: var(--dbx-radius-fixed-6);
-  padding: 10px 12px;
-}
-
-.kafka-message-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.kafka-message-row {
-  border: 1px solid var(--monitor-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--monitor-surface);
-  overflow: hidden;
-}
-
-.kafka-message-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--monitor-border);
-  color: var(--monitor-muted);
-  font-size: 12px;
-}
-
-.kafka-message-payload {
-  max-height: 220px;
-  margin: 0;
-  overflow: auto;
-  padding: 10px;
-  color: var(--monitor-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.kafka-message-headers {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--monitor-border);
-  color: var(--monitor-muted);
-  font-size: 11px;
 }
 
 .charts-grid {
@@ -1671,6 +1480,19 @@ onUnmounted(() => {
 .health-badge.idle {
   background: color-mix(in srgb, var(--monitor-muted) 12%, transparent);
   color: var(--monitor-muted);
+}
+
+.health-badge.unavailable {
+  background: color-mix(in srgb, var(--monitor-muted) 8%, transparent);
+  color: var(--monitor-muted);
+}
+
+.monitoring-message-heading {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 @keyframes monitor-spin {

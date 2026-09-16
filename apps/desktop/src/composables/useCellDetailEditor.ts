@@ -10,7 +10,7 @@ import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, cellDetailActiveL
 import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/dataGrid/cellDetailPresentation";
-import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import i18n from "@/i18n";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorTheme } from "@/stores/settingsStore";
@@ -94,6 +94,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
     if (settingsStore.editorSettings.fontSize === fontSize) return;
     settingsStore.updateEditorSettings({ fontSize });
   });
+  const wheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
 
   function syncEditorFontCssVars(fontSize = liveFontSize, fontFamily = options.fontFamily()) {
     if (!wrapperEl) return;
@@ -278,7 +279,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
             return true;
           },
           wheel(event) {
-            if (!event.metaKey && !event.ctrlKey) return false;
+            if (!wheelZoomGestureGuard.accepts(event)) return false;
             event.preventDefault();
             const next = fontSizeFromWheelDelta(liveFontSize, event.deltaY);
             applyLiveFontSize(next);

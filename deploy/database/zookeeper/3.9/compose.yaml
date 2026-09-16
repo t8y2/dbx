@@ -4,7 +4,7 @@ services:
     container_name: dbx-zookeeper-3.9
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-2182}:2181"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10800}:2181"
     volumes:
       - data:/data
       - datalog:/datalog

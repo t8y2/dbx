@@ -11,22 +11,25 @@ import MetricLineChart from "@/components/chart/MetricLineChart.vue";
 import * as api from "@/lib/backend/api";
 import { computeQps, computeRate, formatBytes, formatBytesPerSec, formatNumber, formatRate, formatUptime, GLOBAL_STATUS_SQL, GLOBAL_VARIABLES_SQL, innodbBufferHitRatio, MAX_SAMPLES, parseStatusResult, statusEntries, statusNumber, type StatusSample } from "@/lib/database/mysqlServerStatus";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
+  clientSessionId: string;
 }>();
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ autoRefreshInterval?: number; statusSearch?: string; showStatusTable?: boolean }>({}, "MySqlDashboard");
 
 const loading = ref(false);
 const fetching = ref(false);
 const error = ref("");
 const variables = ref<Record<string, string>>({});
 const samples = ref<StatusSample[]>([]);
-const autoRefreshInterval = ref(5);
-const statusSearch = ref("");
-const showStatusTable = ref(true);
+const autoRefreshInterval = ref([0, 1, 2, 5, 10].includes(restoredUiState.autoRefreshInterval ?? -1) ? restoredUiState.autoRefreshInterval! : 5);
+const statusSearch = ref(restoredUiState.statusSearch ?? "");
+const showStatusTable = ref(restoredUiState.showStatusTable ?? true);
 const scrollerRef = ref<HTMLElement | null>(null);
 const scrollerContentRef = ref<HTMLElement | null>(null);
 const scrollbarTrackRef = ref<HTMLElement | null>(null);
@@ -40,6 +43,8 @@ const {
   onThumbPointerDown: onScrollbarThumbPointerDown,
 } = useVerticalOverlayScrollbar(scrollerRef, scrollerContentRef, scrollbarTrackRef);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+trackUiState(() => ({ autoRefreshInterval: autoRefreshInterval.value, statusSearch: statusSearch.value, showStatusTable: showStatusTable.value }));
 
 const connectionName = computed(() => connectionStore.getConfig(props.connectionId)?.name ?? "");
 const latest = computed(() => samples.value[samples.value.length - 1]);
@@ -115,7 +120,7 @@ function formatClock(at: number): string {
 
 async function fetchVariables() {
   try {
-    const result = await api.executeQuery(props.connectionId, "", GLOBAL_VARIABLES_SQL, undefined, undefined, { maxRows: 2000 });
+    const result = await api.executeQuery(props.connectionId, "", GLOBAL_VARIABLES_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: props.clientSessionId });
     variables.value = parseStatusResult(result);
   } catch {
     // Non-fatal: cards that depend on variables (max_connections/version) degrade.
@@ -129,7 +134,7 @@ async function fetchStatus(options: { silent?: boolean } = {}) {
   error.value = "";
   try {
     await connectionStore.ensureConnected(props.connectionId);
-    const result = await api.executeQuery(props.connectionId, "", GLOBAL_STATUS_SQL, undefined, undefined, { maxRows: 2000 });
+    const result = await api.executeQuery(props.connectionId, "", GLOBAL_STATUS_SQL, undefined, undefined, { maxRows: 2000, clientSessionId: props.clientSessionId });
     const sample: StatusSample = { at: Date.now(), status: parseStatusResult(result) };
     const next = [...samples.value, sample];
     samples.value = next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;

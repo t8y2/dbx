@@ -1,0 +1,30 @@
+[workspace]
+
+[package]
+name = "dbx-tdengine-driver"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = "0.4"
+chrono-tz = "0.10"
+futures = "0.3"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+taos = { git = "https://github.com/taosdata/taos-connector-rust.git", rev = "f49c37185987a3f5a893a02d04fe5db662a79c37", default-features = false, features = ["ws-rustls"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"

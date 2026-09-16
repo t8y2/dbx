@@ -20,3 +20,17 @@ export function redisKeyTextToRaw(key: string): string {
   }
   return btoa(binary);
 }
+
+/** Returns null when a Redis key contains bytes that cannot be represented in a text input. */
+export function redisKeyRawToText(keyRaw: string): string | null {
+  try {
+    const bytes = Uint8Array.from(atob(keyRaw), (character) => character.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+export function redisKeyTextToDisplay(key: string): string {
+  return key.replaceAll("\\", "\\\\");
+}

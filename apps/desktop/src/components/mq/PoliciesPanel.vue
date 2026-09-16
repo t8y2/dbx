@@ -4,7 +4,8 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { BacklogQuota, DispatchRate, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
 import { mqGetEffectivePolicies, mqSetBacklogQuota, mqSetDispatchRate, mqSetPublishRate, mqSetRetention, mqSetSubscribeRate } from "@/lib/backend/api";
-import { defaultMqPolicyForms, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { defaultMqPolicyForms, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
   connectionId: string;
@@ -20,6 +21,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const policies = ref<unknown>();
 const loading = ref(false);
@@ -27,6 +29,7 @@ const error = ref<string>();
 const notice = ref<string>();
 const readOnlyMessage = computed(() => t("mqPolicies.readOnly"));
 const defaultForms = defaultMqPolicyForms();
+const policyAccess = ref(policyAccessFromEffectivePolicies(undefined));
 
 const publishForm = ref<PublishRate>({ ...defaultForms.publishForm });
 
@@ -70,18 +73,19 @@ const scopeLabel = computed(() => {
 
 const formattedPolicies = computed(() => JSON.stringify(policies.value ?? {}, null, 2));
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
     notice.value = undefined;
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadPolicies() {
   const current = scope.value;
   policies.value = undefined;
+  policyAccess.value = policyAccessFromEffectivePolicies(undefined);
   notice.value = undefined;
   error.value = undefined;
   if (!current) return;
@@ -90,6 +94,7 @@ async function loadPolicies() {
   try {
     const loaded = await mqGetEffectivePolicies(props.connectionId, current);
     policies.value = loaded;
+    policyAccess.value = policyAccessFromEffectivePolicies(loaded);
     const hydrated = policyFormsFromEffectivePolicies(loaded, defaultMqPolicyForms());
     applyPolicyForms(hydrated);
   } catch (e: unknown) {
@@ -100,7 +105,7 @@ async function loadPolicies() {
 }
 
 async function applyPolicy(kind: string, action: (current: PolicyScope) => Promise<void>) {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(kind))) return;
   const current = scope.value;
   if (!current) {
     error.value = scopePlaceholderMessage.value;
@@ -187,7 +192,8 @@ watch(
       <div v-if="error" class="panel-error">{{ error }}</div>
       <div v-if="notice" class="panel-notice">{{ notice }}</div>
 
-      <div class="policy-grid">
+      <div v-if="!policyAccess.readable" class="readonly-hint">{{ policyAccess.unsupportedReason }}</div>
+      <div v-else class="policy-grid">
         <section v-if="supportsRateLimits !== false" class="policy-section">
           <h4>{{ t("mqPolicies.publishRate") }}</h4>
           <label>
@@ -279,6 +285,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .policies-panel {
   height: 100%;
   display: flex;
@@ -402,23 +410,6 @@ pre {
 .readonly-hint {
   background: var(--color-warning-alpha);
   color: var(--color-warning);
-}
-
-.btn-primary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: white;
 }
 
 button:disabled {

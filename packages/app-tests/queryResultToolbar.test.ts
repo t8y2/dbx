@@ -4,7 +4,12 @@ import { test } from "vitest";
 import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
 
 const contentAreaPath = "apps/desktop/src/components/layout/ContentArea.vue";
+const resultSetNavigatorPath = "apps/desktop/src/components/layout/ResultSetNavigator.vue";
+const appPath = "apps/desktop/src/App.vue";
 const dataGridPath = "apps/desktop/src/components/grid/DataGrid.vue";
+const dataGridExportMenuPath = "apps/desktop/src/components/grid/DataGridExportMenu.vue";
+const dataGridToolbarPath = "apps/desktop/src/components/grid/DataGridToolbar.vue";
+const editorToolbarPath = "apps/desktop/src/components/layout/EditorToolbar.vue";
 const viewSwitcherPath = "apps/desktop/src/components/layout/QueryResultViewSwitcher.vue";
 const toolbarActionsPath = "apps/desktop/src/components/layout/QueryResultToolbarActions.vue";
 
@@ -24,19 +29,35 @@ function assertSfcCompiles(path: string): void {
 }
 
 test("query result toolbar SFCs compile", () => {
-  for (const path of [contentAreaPath, dataGridPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
+  for (const path of [contentAreaPath, dataGridPath, dataGridExportMenuPath, dataGridToolbarPath, editorToolbarPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
+});
+
+test("ContentArea keeps query-result insert and delete capabilities separate", () => {
+  const contentArea = source(contentAreaPath);
+
+  assert.match(contentArea, /:allow-insert-rows="activeTab\.queryAnalysis\?\.allowInsert \?\? activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
+  assert.match(contentArea, /:allow-delete-rows="activeTab\.queryAnalysis\?\.allowDelete \?\? activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
 });
 
 test("query result toolbar reuses the production icon contract", () => {
   const contentArea = source(contentAreaPath);
+  const dataGrid = source(dataGridPath);
+  const dataGridExportMenu = source(dataGridExportMenuPath);
+  const dataGridToolbar = source(dataGridToolbarPath);
+  const editorToolbar = source(editorToolbarPath);
   const viewSwitcher = source(viewSwitcherPath);
   const toolbarActions = source(toolbarActionsPath);
 
   assert.match(contentArea, /<Pin class="h-3\.5 w-3\.5"/);
   assert.match(contentArea, /<Wrench class="h-4 w-4"/);
   assert.match(contentArea, /<ChevronDown class="h-3\.5 w-3\.5"/);
-  assert.match(viewSwitcher, /import \{ BarChart3, ListChecks \} from "@lucide\/vue"/);
-  assert.match(toolbarActions, /import \{ GitBranch, Loader2, Upload \} from "@lucide\/vue"/);
+  assert.match(viewSwitcher, /import \{ BarChart3, ListChecks, MessageSquareText \} from "@lucide\/vue"/);
+  assert.match(toolbarActions, /import \{ GitBranch, Gauge, Loader2, PlugZap, Upload \} from "@lucide\/vue"/);
+  assert.match(editorToolbar, /@click="emit\('importResultArchive'\)"[\s\S]{0,100}<Download/);
+  assert.match(toolbarActions, /@click="emit\('exportArchive'\)"[\s\S]{0,200}<Upload v-else/);
+  assert.match(dataGrid, /return \{ label: t\("grid\.export"\), icon: Upload, children: items \};/);
+  assert.match(dataGridExportMenu, /:trigger-icon="Upload"/);
+  assert.match(dataGridToolbar, /<Upload class="data-grid-topbar-action-icon h-3 w-3"/);
   assert.match(viewSwitcher, /inline-flex h-4 items-center leading-none/);
   assert.match(toolbarActions, /block h-3\.5 w-3\.5 self-center/);
   assert.doesNotMatch(viewSwitcher + toolbarActions, /<svg\b|<symbol\b|<use\b/);
@@ -46,7 +67,7 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   const contentArea = source(contentAreaPath);
   const runScrollerStart = contentArea.indexOf('ref="resultTabsScrollerRef"');
   const listSelectorStart = contentArea.indexOf('<div v-else-if="showResultRunSelector"', runScrollerStart);
-  const fixedResultSetStart = contentArea.indexOf("data-result-set-tabs-region", listSelectorStart);
+  const fixedResultSetStart = contentArea.indexOf("<ResultSetNavigator", listSelectorStart);
 
   assert.match(contentArea, /showResultRunTabs = computed\(\(\) => resultRuns\.value\.length > 0 && resultRunDisplayMode\.value === "tabs"\)/);
   assert.match(contentArea, /showResultRunSelector = computed\(\(\) => resultRuns\.value\.length > 0 && resultRunDisplayMode\.value === "list"\)/);
@@ -55,17 +76,70 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   assert.match(contentArea, /data-result-run-tab/);
   assert.match(contentArea, /@keydown="onResultRunTabKeydown\(\$event, runIndex\)"/);
   assert.match(contentArea, /@click\.stop\.prevent="removeResultRun\(run\.id\)"/);
+  assert.match(contentArea, /const canCloseQueryResult = computed\([\s\S]*!props\.activeTab\.activeResultRunId/);
+  assert.match(contentArea, /v-if="canCloseQueryResult"[\s\S]*@click="closeCurrentQueryResult"/);
+  assert.match(contentArea, /queryStore\.closeQueryResult\(props\.activeTab\.id\)/);
+  assert.match(contentArea, /t\('tabs\.closeResult'\)/);
   assert.match(contentArea, /<DropdownMenuContent align="start" class="w-48">[\s\S]*v-for="run in resultRuns"/);
   assert.match(contentArea, /setResultRunDisplayMode\('list'\)/);
   assert.match(contentArea, /setResultRunDisplayMode\('tabs'\)/);
   assert.ok(runScrollerStart >= 0);
   assert.ok(listSelectorStart > runScrollerStart);
   assert.ok(fixedResultSetStart > listSelectorStart);
+  assert.match(source(resultSetNavigatorPath), /data-result-set-tabs-region/);
   assert.doesNotMatch(contentArea.slice(runScrollerStart, listSelectorStart), /visibleResultItems/);
   assert.match(contentArea, /resultAutoSave \? 'bg-primary\/10 text-primary[\s\S]*: 'text-muted-foreground hover:bg-accent hover:text-foreground'/);
   assert.doesNotMatch(contentArea, /queryResultAutoRefresh|QUERY_RESULT_AUTO_REFRESH|nextResultToolbarLayout/);
   assert.equal((contentArea.match(/<QueryResultViewSwitcher\b/g) ?? []).length, 2);
   assert.equal((contentArea.match(/<QueryResultToolbarActions\b/g) ?? []).length, 2);
+});
+
+test("appending a result run preserves the tab-strip scroll position", () => {
+  const contentArea = source(contentAreaPath);
+  const resultRunWatcherStart = contentArea.indexOf("function resultRunIdsWereAppended");
+  const resultRunWatcherEnd = contentArea.indexOf("const summaryItems", resultRunWatcherStart);
+  const resultRunWatcher = contentArea.slice(resultRunWatcherStart, resultRunWatcherEnd);
+
+  assert.ok(resultRunWatcherStart >= 0);
+  assert.match(resultRunWatcher, /current\.length > previous\.length/);
+  assert.match(resultRunWatcher, /activeRunId: props\.activeTab\.activeResultRunId/);
+  assert.match(resultRunWatcher, /activeRunChanged && !resultRunIdsWereAppended\(previous\.runIds, current\.runIds\)/);
+  assert.match(resultRunWatcher, /updateResultTabsAfterRender/);
+  assert.match(resultRunWatcher, /revealActiveResultRunAfterRender/);
+  assert.match(contentArea, /function focusResultRunByIndex[\s\S]*scrollIntoView/);
+  assert.match(contentArea, /async function removeResultRun[\s\S]*scrollIntoView/);
+});
+
+test("the close-tab shortcut clears query results before closing the tab", () => {
+  const app = source(appPath);
+  const closeSurfaceStart = app.indexOf("async function closeActiveSurface()");
+  const closeSurfaceEnd = app.indexOf("function activateMainContentSurface", closeSurfaceStart);
+  const closeSurface = app.slice(closeSurfaceStart, closeSurfaceEnd);
+
+  assert.ok(closeSurfaceStart >= 0);
+  assert.ok(closeSurface.indexOf("await queryStore.clearQueryResults(queryStore.activeTabId)") < closeSurface.indexOf("queryStore.closeTab(queryStore.activeTabId)"));
+});
+
+test("the configurable results pane shortcut only toggles existing output", () => {
+  const contentArea = source(contentAreaPath);
+  const app = source(appPath);
+  const toggleStart = contentArea.indexOf("function toggleResultsPane()");
+  const toggleEnd = contentArea.indexOf("function onResultsResized", toggleStart);
+  const toggle = contentArea.slice(toggleStart, toggleEnd);
+  const shortcutStart = app.indexOf("if (isToggleResultsPaneShortcut(e, shortcuts)");
+  const shortcutEnd = app.indexOf("if (isNewQueryShortcut", shortcutStart);
+  const shortcut = app.slice(shortcutStart, shortcutEnd);
+
+  assert.ok(toggleStart >= 0);
+  assert.match(toggle, /if \(props\.activeTab\.mode !== "query" \|\| !hasQueryOutput\.value\) return false/);
+  assert.match(toggle, /resultsPaneOpen\.value = !resultsPaneOpen\.value/);
+  assert.match(toggle, /return true/);
+  assert.doesNotMatch(toggle, /closeQueryResult|clearQueryResults|closeResultSession/);
+  assert.match(contentArea, /defineExpose\(\{[\s\S]*toggleResultsPane/);
+  assert.ok(shortcutStart >= 0);
+  assert.match(shortcut, /contentAreaRef\.value\?\.toggleResultsPane\(\)/);
+  assert.match(shortcut, /e\.preventDefault\(\)/);
+  assert.match(shortcut, /e\.stopPropagation\(\)/);
 });
 
 test("ContentArea keeps MySQL standard explain results available in the shared toolbar", () => {
@@ -89,10 +163,14 @@ test("DataGrid exposes persistent result toolbar slots", () => {
 test("table-data toolbar refresh keeps page size independent from SQL editor settings", () => {
   const dataGrid = source(dataGridPath);
 
-  assert.match(dataGrid, /props\.context === "table-data" \? \(props\.pageLimit \?\? tableOpenPageLimit\(settingsStore\.editorSettings\.tableOpenPageSize\)\) : settingsStore\.editorSettings\.pageSize/);
-  assert.match(dataGrid, /if \(props\.context === "table-data"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
-  assert.match(dataGrid, /props\.context === "table-data" \? \{ tableOpenPageSize: normalizedSize \} : \{ pageSize: normalizedSize \}/);
-  assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, \(currentPage\.value - 1\) \* pageSize\.value, "refresh"\)/);
+  // Table-data grids resolve page size through the table-open preference
+  // (pageLimit ?? tableOpenPageLimit(tableOpenPageSize)) instead of the SQL editor pageSize.
+  assert.match(dataGrid, /pageSizePreference = computed\(\(\) => resolveDataGridPageSizePreference\(props\.context, props\.pageSizePreference\)\)/);
+  assert.match(dataGrid, /pageSize = ref\(preferredDataGridPageSize\(settingsStore\.editorSettings, pageSizePreference\.value, props\.pageLimit\)\)/);
+  assert.match(dataGrid, /watch\([\s\S]*\(\) => settingsStore\.editorSettings\.pageSize,[\s\S]*if \(pageSizePreference\.value !== "results"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
+  assert.match(dataGrid, /settingsStore\.updateEditorSettings\(dataGridPageSizeSettingsPatch\(pageSizePreference\.value, normalizedSize\)\)/);
+  assert.match(dataGrid, /const resetToFirstPage = hasPendingConditionInputs\(\);/);
+  assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, resetToFirstPage \? 0 : \(currentPage\.value - 1\) \* pageSize\.value, intent\)/);
 });
 
 test("standalone result views use the same compact toolbar breakpoint", () => {
@@ -103,6 +181,38 @@ test("standalone result views use the same compact toolbar breakpoint", () => {
   assert.match(contentArea, /isDataGridToolbarCompact\(standaloneResultToolbarWidth\.value, standaloneResultToolbarViewportWidth\.value\)/);
   assert.equal((contentArea.match(/:compact="standaloneResultToolbarCompact"/g) ?? []).length, 2);
   assert.match(dataGrid, /isDataGridToolbarCompact\(dataGridTopbarWidth\.value, dataGridViewportWidth\.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH\)/);
+});
+
+test("embedded result toolbar progressively compacts when editing actions overflow its available width", () => {
+  const dataGrid = source(dataGridPath);
+  const toolbar = source(dataGridToolbarPath);
+
+  assert.match(dataGrid, /dataGridTopbarMutationObserver = new MutationObserver\(updateDataGridTopbarWidth\)/);
+  assert.match(dataGrid, /dataGridTopbarMutationObserver\.observe\(topbar, \{ childList: true, characterData: true, subtree: true \}\)/);
+  assert.match(dataGrid, /topbar\.scrollWidth > topbar\.clientWidth \+ 1/);
+  assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = true/);
+  assert.match(dataGrid, /dataGridTopbarOverflowActionCount\.value = compactDataGridToolbarActionCount\.value \+ 1/);
+  assert.match(dataGrid, /dataGridTopbarWidth\.value >= dataGridTopbarExpandedRequiredWidth\.value/);
+  assert.match(dataGrid, /:compact-action-count="compactDataGridToolbarActionCount"/);
+  assert.match(toolbar, /DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER\.filter/);
+  assert.match(toolbar, /<slot name="navigation" :compact="actionIsCompact\('navigation'\)"/);
+});
+
+test("embedded result toolbar remeasures after the SQL preview action is removed", () => {
+  const dataGrid = source(dataGridPath);
+
+  assert.match(dataGrid, /if \(previousVisible && !visible\) resetDataGridTopbarOverflowCompact\(\)/);
+  assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = false/);
+  assert.match(dataGrid, /dataGridTopbarOverflowActionCount\.value = 0/);
+  assert.match(dataGrid, /function scheduleDataGridTopbarRecheck\(\)/);
+  assert.match(dataGrid, /clearDataGridTopbarRecheckTimer\(\)/);
+});
+
+test("embedded result toolbar remeasures after save and rollback actions are removed", () => {
+  const dataGrid = source(dataGridPath);
+
+  assert.match(dataGrid, /\(\) => saveToolbarState\.value\.showActions,/);
+  assert.match(dataGrid, /if \(previousShowActions && !showActions\) resetDataGridTopbarOverflowCompact\(\)/);
 });
 
 test("embedded and standalone result toolbars share the same fixed height", () => {
@@ -133,12 +243,14 @@ test("embedded result toolbar cannot scroll vertically", () => {
 test("DataGrid marks toolbar refresh separately from current-result reloads", () => {
   const dataGrid = source(dataGridPath);
 
-  assert.match(dataGrid, /emit\("reload", props\.sql,[^;]+"refresh"\);/);
+  assert.match(dataGrid, /async function onToolbarRefresh\(\)\s*\{\s*await reloadTableData\("refresh"\);/);
+  assert.match(dataGrid, /refresh: \(\) => reloadTableData\("auto-refresh"\)/);
+  assert.match(dataGrid, /async function reloadTableData\(intent: DataGridReloadIntent\)[\s\S]*?emit\("reload", props\.sql,[^;]+intent\);/);
   assert.match(dataGrid, /function onToolbarRollback\(\)[\s\S]*?emit\("reload", props\.sql,[^;]+\);/);
 });
 
 test("Elasticsearch JSON refresh preserves multi-result query groups", () => {
   const contentArea = source(contentAreaPath);
 
-  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
+  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", props\.activeTab\.id, activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
 });

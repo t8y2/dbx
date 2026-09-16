@@ -1,0 +1,108 @@
+---
+title: Database Documentation
+description: Browse a schema as documentation, annotate tables and columns with notes and colour-coded groups, and export DBML for dbdiagram.io or CI drift checks.
+---
+
+Database documentation turns a live schema into something readable. DBX collects tables, columns, indexes, and relationships into a snapshot, merges it with notes you write yourself, and renders a browsable reference. The same snapshot serializes to DBML, so the diagram tools and CI checks read exactly what the viewer shows.
+
+Notes live in a plain JSON file that you can commit next to your migrations, which makes schema documentation reviewable in pull requests.
+
+## Open Documentation
+
+Right-click a table in [Object Browser](/en/docs/object-browser) and choose **Documentation**. The viewer opens on the current connection, database, and schema.
+
+The sidebar switches between **Schemas** and **Table Groups**. Search covers tables, columns, and groups at once. Each table page lists columns, indexes, **References**, and **Referenced by**, so relationships read in both directions.
+
+## Notes and Groups
+
+| What you annotate | Where |
+| --- | --- |
+| Project note | Documentation home page |
+| Table note | Table page heading |
+| Column note | Column row in the table |
+| Table group and its colour | Group picker on the table page |
+
+Notes accept Markdown and render inline in the index. Every edit autosaves; the header shows **Saving…**, then **Saved**. A failed write is reported rather than swallowed, and your text is kept so the next edit retries.
+
+Groups store a **hue**, not a fixed colour. Lightness and chroma come from the active theme, so a group stays legible in both light and dark mode — and the same hue becomes a `[color: #rrggbb]` value when exported to DBML.
+
+## Local Notes and Database Comments
+
+A column that has a database `COMMENT ON` value and a note written in DBX shows your note marked **LOCAL**, with the database comment preserved underneath. Nothing is overwritten in the database — DBX never issues DDL for documentation, and the original comment is always recoverable.
+
+## Where Notes Are Stored
+
+By default each connection gets its own notes file inside the DBX data directory, so the feature works with no setup.
+
+Set **Notes file** in the connection's **Advanced** settings (stored as `docs_notes_path`) to point it at a file in your repository instead. The notes file itself looks like this:
+
+```json
+{
+  "formatVersion": 1,
+  "project": { "name": "Billing", "note": "# Billing\n\nOne schema per tenant." },
+  "groups": [{ "id": "core", "name": "Core", "hue": 210 }],
+  "tables": {
+    "public.orders": {
+      "group": "core",
+      "note": "One row per checkout.",
+      "columns": { "status": { "note": "Lifecycle state." } }
+    }
+  }
+}
+```
+
+Keys are `schema.table` and `schema.table.column`, folded to match how the engine treats identifier case. Writes are atomic — the file is written beside its target and renamed — so an interrupted save cannot leave a half-written file where your prose used to be.
+
+<Callout type="warn">A missing notes file is fine and starts empty. A malformed one is a hard error, deliberately: proceeding would render apparently-complete documentation while silently discarding writing.</Callout>
+
+## Warnings
+
+Documentation degrades visibly rather than silently. The viewer shows a banner when:
+
+| Situation | What it means |
+| --- | --- |
+| A table could not be documented | One table's metadata failed to read. The rest of the schema still built. |
+| No relationships available | The engine does not report foreign key metadata, so no edges could be derived. |
+| Database comments unavailable | The engine has no comment support, so every description comes from your own notes. |
+| Some notes no longer match anything | A note refers to a table or column that no longer exists. Nothing was deleted. |
+| Not representable in DBML | A construct is documented in DBX but cannot be expressed in exported DBML. |
+
+## DBML Export
+
+```bash
+dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]
+```
+
+Without `--out` the DBML goes to stdout, so it pipes. Notes and groups are merged only when `--notes` names a file; the flag is explicit, so a typo in the path fails instead of silently producing note-free output.
+
+Output includes `Table`, `Ref` with inferred cardinality, `Enum`, and `TableGroup` blocks, and pastes directly into [dbdiagram.io](https://dbdiagram.io).
+
+Commit the result and let CI fail on unreviewed schema drift:
+
+```yaml
+- run: dbx dbml prod --notes docs/dbx-docs.json --out docs/schema.dbml
+- run: git diff --exit-code docs/schema.dbml
+```
+
+## Support and Boundaries
+
+- Relational engines only. Document databases and key-value stores have no DBML vocabulary and are not covered.
+- Tables, columns, indexes, relationships, and enums are documented. Triggers, procedures, functions, sequences, and grants are not.
+- DBML export is one-way. A `.dbml` file is an output, never a source of truth — DBX does not import it.
+- Engines without foreign key metadata produce documentation with no relationship edges, reported as a warning rather than an empty page.
+- Schema history and per-table "last updated" are not tracked. Snapshots are version-stamped so this can be added later.
+
+<Cards>
+  <Card title="Object browser" href="/en/docs/object-browser">
+    Where documentation opens from, and where object source lives.
+  </Card>
+  <Card title="Schema browser" href="/en/docs/schema-browser">
+    Inspect columns, foreign keys, and comments directly.
+  </Card>
+  <Card title="Field lineage" href="/en/docs/field-lineage">
+    Trace where a column comes from and what a change affects.
+  </Card>
+  <Card title="CLI" href="/en/docs/cli">
+    Full command reference, including headless documentation export.
+  </Card>
+</Cards>

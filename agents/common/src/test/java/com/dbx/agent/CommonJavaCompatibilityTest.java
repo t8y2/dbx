@@ -151,6 +151,42 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
+    void jsonRpcServerDispatchesInteractiveTransactionMethods() {
+        List<String> calls = new ArrayList<>();
+        MinimalAgent agent = new MinimalAgent() {
+            @Override
+            public Map<String, Object> beginManualTransaction(String schema) {
+                calls.add("begin:" + schema);
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> commitManualTransaction() {
+                calls.add("commit");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+
+            @Override
+            public Map<String, Object> rollbackManualTransaction() {
+                calls.add("rollback");
+                return Collections.singletonMap("ok", (Object) true);
+            }
+        };
+        JsonRpcServer server = new JsonRpcServer(agent);
+
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"begin_manual_transaction\",\"params\":{\"schema\":\"APP\"}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"commit_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertTrue(JsonParser.parseString(server.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"rollback_manual_transaction\",\"params\":{}}"
+        )).getAsJsonObject().has("result"));
+        assertEquals(List.of("begin:APP", "commit", "rollback"), calls);
+    }
+
+    @Test
     void multiSessionServerCreatesAndClosesIndependentAgents() throws Exception {
         java.util.List<TrackingAgent> created = new java.util.ArrayList<>();
         MultiSessionJsonRpcServer server = new MultiSessionJsonRpcServer(() -> {
@@ -626,17 +662,19 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
-    void executesTransactionsOneByOneWhenJdbcDriverDoesNotSupportTransactions() {
+    void rejectsTransactionsWhenJdbcDriverDoesNotSupportTransactions() {
         List<String> calls = new ArrayList<>();
         DatabaseAgent agent = new TransactionAgent(nonTransactionalConnection(calls));
 
-        QueryResult result = agent.executeTransaction(Arrays.asList("UPDATE A SET ID = 1", "UPDATE B SET ID = 2"), "APP");
-
-        assertEquals(2L, result.getAffected_rows());
-        assertEquals(
-            Arrays.asList("supportsTransactions", "execute:SET SCHEMA \"APP\"", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
-            calls
+        UnsupportedOperationException error = assertThrows(
+            UnsupportedOperationException.class,
+            () -> agent.executeTransaction(Arrays.asList("UPDATE A SET ID = 1", "UPDATE B SET ID = 2"), "APP")
         );
+
+        assertEquals("Transactions are not supported by this JDBC driver", error.getMessage());
+        // Capability is checked before schema switching or statements, so a
+        // failed transaction request cannot leave a partially applied batch.
+        assertEquals(Collections.singletonList("supportsTransactions"), calls);
     }
 
     @Test
@@ -722,6 +760,60 @@ class CommonJavaCompatibilityTest {
                 "COMMENT ON COLUMN \"public\".\"orders\".\"display_name\" IS 'User''s display name';",
             ddl
         );
+    }
+
+    @Test
+    void buildsTableDdlWithNationalCharacterLength() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "DBX_DEMO",
+            "CUSTOMERS",
+            Collections.singletonList(new ColumnInfo(
+                "NAME",
+                "NVARCHAR",
+                false,
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                100
+            )),
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains("\"NAME\" NVARCHAR(100) NOT NULL"));
+    }
+
+    @Test
+    void appendsOracleObjectGrantSqlAfterTableDdl() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "APP",
+            "USERS",
+            Collections.singletonList(new ColumnInfo("ID", "NUMBER", false, null, true)),
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+        String grants = DdlBuilder.buildOracleObjectGrantSql(
+            "APP",
+            "USERS",
+            Arrays.asList(
+                new OracleObjectPrivilege("READER", "SELECT", false),
+                new OracleObjectPrivilege("READER", "INSERT", false),
+                new OracleObjectPrivilege("ADMIN", "SELECT", true),
+                new OracleObjectPrivilege("ANALYST", "UPDATE", false, "NAME")
+            )
+        );
+
+        String combined = DdlBuilder.appendTrailingSql(ddl, grants);
+
+        assertTrue(combined.contains("CREATE TABLE \"APP\".\"USERS\""));
+        assertTrue(combined.contains("GRANT SELECT, INSERT ON \"APP\".\"USERS\" TO \"READER\";"));
+        assertTrue(combined.contains("GRANT SELECT ON \"APP\".\"USERS\" TO \"ADMIN\" WITH GRANT OPTION;"));
+        assertTrue(combined.contains("GRANT UPDATE (\"NAME\") ON \"APP\".\"USERS\" TO \"ANALYST\";"));
+        assertEquals("", DdlBuilder.buildOracleObjectGrantSql("APP", "USERS", Collections.emptyList()));
+        assertEquals(ddl, DdlBuilder.appendTrailingSql(ddl, "   "));
     }
 
     private static class MinimalAgent implements DatabaseAgent {

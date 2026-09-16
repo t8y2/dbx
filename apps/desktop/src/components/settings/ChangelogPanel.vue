@@ -1,17 +1,31 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { ChevronDown, ExternalLink, Loader2, RefreshCw, Tag } from "@lucide/vue";
+import { ChevronDown, CloudDownload, ExternalLink, Loader2, RefreshCw, Tag } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { currentLocale } from "@/i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, createLatestRequestGuard, fetchChangelog, type ChangelogLang, type ChangelogRelease } from "@/lib/app/changelog";
+import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
+import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, createLatestRequestGuard, fetchChangelog, type ChangelogItem, type ChangelogLang, type ChangelogRelease } from "@/lib/app/changelog";
 
 const PAGE_SIZE = 5;
 
 const { t, locale } = useI18n();
+
+withDefaults(
+  defineProps<{
+    checkingUpdates?: boolean;
+  }>(),
+  {
+    checkingUpdates: false,
+  },
+);
+
+const emit = defineEmits<{
+  "check-updates": [];
+}>();
 
 const loading = ref(false);
 const error = ref("");
@@ -67,6 +81,11 @@ function openExternalUrl(url: string) {
   }
 }
 
+function formatChangelogItemHtml(item: ChangelogItem): string {
+  const title = formatAiInlineMarkdownFragment(item.title);
+  return item.desc ? `${title} — ${formatAiInlineMarkdownFragment(item.desc)}` : title;
+}
+
 function isExpanded(tag: string) {
   return expandedTags.value.has(tag);
 }
@@ -117,12 +136,17 @@ watch(changelogLang, (lang) => {
 
 <template>
   <div class="rounded-lg border p-4">
-    <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div class="settings-about-section-header flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div class="min-w-0 space-y-1">
         <Label>{{ t("settings.changelogTitle") }}</Label>
         <p class="text-sm text-muted-foreground">{{ t("settings.changelogDescription") }}</p>
       </div>
-      <div class="flex shrink-0 flex-wrap items-center gap-2">
+      <div class="settings-about-section-actions flex shrink-0 flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" :disabled="checkingUpdates" @click="emit('check-updates')">
+          <Loader2 v-if="checkingUpdates" class="mr-1 h-3.5 w-3.5 animate-spin" />
+          <CloudDownload v-else class="mr-1 h-3.5 w-3.5" />
+          {{ t("updates.check") }}
+        </Button>
         <Button type="button" variant="outline" size="sm" :disabled="loading" @click="openExternalUrl(changelogWebsiteUrl(changelogLang))">
           <ExternalLink class="mr-1 h-3.5 w-3.5" />
           {{ t("settings.changelogOpenWebsite") }}
@@ -175,10 +199,7 @@ watch(changelogLang, (lang) => {
               <ul class="space-y-1.5">
                 <li v-for="(item, itemIndex) in section.items" :key="itemIndex" class="flex gap-2 text-xs leading-relaxed text-muted-foreground">
                   <span class="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-muted-foreground/60" />
-                  <span>
-                    <template v-if="item.desc">{{ item.title }} — {{ item.desc }}</template>
-                    <template v-else>{{ item.title }}</template>
-                  </span>
+                  <span class="min-w-0 [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2" v-html="formatChangelogItemHtml(item)" @click="handleAiMarkdownLinkClick($event, openExternalUrl)" />
                 </li>
               </ul>
             </div>

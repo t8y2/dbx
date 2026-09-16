@@ -47,17 +47,20 @@ const LABEL_PALETTE = [
 ];
 
 const DRIVER_DATABASE_ALIASES = {
+  "cassandra-go": "cassandra",
   gbase8a: "gbase",
   gbase8s: "gbase",
   "h2-legacy": "h2",
   kafka: "mq",
   "kingbase-go": "kingbase",
+  "neo4j-go": "neo4j",
   "oracle-10g": "oracle",
   "oracle-go": "oracle",
   "oracle-legacy": "oracle",
   rabbitmq: "mq",
   rocketmq: "mq",
   "sqlserver-legacy": "sqlserver",
+  "vastbase-go": "vastbase",
 };
 
 const DIALECT_DATABASE_ALIASES = {

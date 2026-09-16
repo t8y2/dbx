@@ -11,6 +11,14 @@ use crate::sql_dialect::{build_table_data_select_sql, TableDataSelectSqlOptions}
 
 const TABLE_DATA_EXPORT_PAGE_SIZE: usize = 10_000;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CsvQuoteMode {
+    #[default]
+    All,
+    Necessary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCsvExportOptions {
@@ -26,6 +34,8 @@ pub struct TableCsvExportOptions {
     pub page_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub csv_quote_mode: CsvQuoteMode,
 }
 
 /// CSV 转义直写目标 buffer：包引号 + 内部 `"` 翻倍。值不含 `"` 时整段拷贝，
@@ -44,6 +54,18 @@ pub(crate) fn push_csv_escaped(out: &mut String, value: &str) {
     out.push('"');
     push_csv_escaped_content(out, value);
     out.push('"');
+}
+
+fn csv_field_needs_quotes(value: &str) -> bool {
+    value.bytes().any(|byte| matches!(byte, b',' | b'"' | b'\n' | b'\r'))
+}
+
+pub(crate) fn push_csv_field(out: &mut String, value: &str, quote_mode: CsvQuoteMode) {
+    if quote_mode == CsvQuoteMode::All || csv_field_needs_quotes(value) {
+        push_csv_escaped(out, value);
+    } else {
+        out.push_str(value);
+    }
 }
 
 struct CsvEscapedWriter<'a>(&'a mut String);
@@ -70,6 +92,26 @@ pub(crate) fn push_csv_text_value(out: &mut String, value: &Value) {
             .expect("writing JSON into a String cannot fail"),
     }
     out.push('"');
+}
+
+fn push_csv_value_with_quote_mode(out: &mut String, value: &Value, quote_mode: CsvQuoteMode, quote_null: bool) {
+    if quote_mode == CsvQuoteMode::All {
+        if value.is_null() && !quote_null {
+            return;
+        }
+        push_csv_text_value(out, value);
+        return;
+    }
+
+    match value {
+        Value::Null => {}
+        Value::String(value) => push_csv_field(out, value, quote_mode),
+        Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        Value::Number(value) => {
+            fmt::write(out, format_args!("{value}")).expect("writing a number into a String cannot fail")
+        }
+        other => push_csv_field(out, &other.to_string(), quote_mode),
+    }
 }
 
 fn push_csv_value(out: &mut String, value: &Value) {
@@ -100,6 +142,15 @@ fn push_tsv_value(out: &mut String, value: &Value) {
     }
 }
 
+pub(crate) fn push_tsv_row(out: &mut String, row: &[Value]) {
+    for (cell_index, cell) in row.iter().enumerate() {
+        if cell_index > 0 {
+            out.push('\t');
+        }
+        push_tsv_value(out, cell);
+    }
+}
+
 /// 预分配粗估：按全部行的实际单元格数求和（不假设等宽），饱和运算防溢出，
 /// 并设上限——估算只是性能提示，绝不能因病态输入放大成巨额分配
 const ROWS_CAPACITY_ESTIMATE_MAX: usize = 16 * 1024 * 1024;
@@ -109,9 +160,16 @@ pub(crate) fn estimated_rows_capacity(rows: &[Vec<Value>]) -> usize {
     cells.saturating_mul(12).min(ROWS_CAPACITY_ESTIMATE_MAX)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn escape_csv(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     push_csv_escaped(&mut out, value);
+    out
+}
+
+fn escape_csv_with_quote_mode(value: &str, quote_mode: CsvQuoteMode) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    push_csv_field(&mut out, value, quote_mode);
     out
 }
 
@@ -133,15 +191,11 @@ fn push_tsv_rows(out: &mut String, rows: &[Vec<Value>]) {
         if row_index > 0 {
             out.push('\n');
         }
-        for (cell_index, cell) in row.iter().enumerate() {
-            if cell_index > 0 {
-                out.push('\t');
-            }
-            push_tsv_value(out, cell);
-        }
+        push_tsv_row(out, row);
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
     let mut out = String::with_capacity(estimated_rows_capacity(rows));
     push_tsv_rows(&mut out, rows);
@@ -166,17 +220,38 @@ pub(crate) fn format_tsv(columns: &[String], rows: &[Vec<Value>]) -> String {
 /// Format query-result rows as CSV text without a header row. Database NULLs
 /// use the same empty-cell representation as table-data exports. Used by the
 /// streaming query-result export for batches after the first.
+pub(crate) fn push_query_result_csv_row(out: &mut String, row: &[Value]) {
+    push_query_result_csv_row_with_quote_mode(out, row, CsvQuoteMode::All);
+}
+
+pub(crate) fn push_query_result_csv_row_with_quote_mode(out: &mut String, row: &[Value], quote_mode: CsvQuoteMode) {
+    for (cell_index, cell) in row.iter().enumerate() {
+        if cell_index > 0 {
+            out.push(',');
+        }
+        push_csv_value_with_quote_mode(out, cell, quote_mode, false);
+    }
+}
+
+pub(crate) fn push_table_csv_row(out: &mut String, row: &[Value]) {
+    push_table_csv_row_with_quote_mode(out, row, CsvQuoteMode::All);
+}
+
+pub(crate) fn push_table_csv_row_with_quote_mode(out: &mut String, row: &[Value], quote_mode: CsvQuoteMode) {
+    for (cell_index, cell) in row.iter().enumerate() {
+        if cell_index > 0 {
+            out.push(',');
+        }
+        push_csv_value_with_quote_mode(out, cell, quote_mode, true);
+    }
+}
+
 fn push_query_result_csv_rows(out: &mut String, rows: &[Vec<Value>]) {
     for (row_index, row) in rows.iter().enumerate() {
         if row_index > 0 {
             out.push('\n');
         }
-        for (cell_index, cell) in row.iter().enumerate() {
-            if cell_index > 0 {
-                out.push(',');
-            }
-            push_csv_value(out, cell);
-        }
+        push_query_result_csv_row(out, row);
     }
 }
 
@@ -205,30 +280,73 @@ pub fn format_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     format_csv_with_value_formatter(columns, rows)
 }
 
+pub fn format_csv_with_quote_mode(columns: &[String], rows: &[Vec<Value>], quote_mode: CsvQuoteMode) -> String {
+    let mut out = String::with_capacity(
+        estimated_rows_capacity(rows).saturating_add(columns.len().saturating_mul(12)).min(ROWS_CAPACITY_ESTIMATE_MAX),
+    );
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        push_csv_field(&mut out, column, quote_mode);
+    }
+    out.push('\n');
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > 0 {
+            out.push('\n');
+        }
+        push_query_result_csv_row_with_quote_mode(&mut out, row, quote_mode);
+    }
+    out
+}
+
 pub fn format_query_result_csv(columns: &[String], rows: &[Vec<Value>]) -> String {
     format_csv(columns, rows)
 }
 
-fn write_csv_text_row(writer: &mut impl Write, values: impl IntoIterator<Item = String>) -> Result<(), String> {
+pub fn format_query_result_csv_with_quote_mode(
+    columns: &[String],
+    rows: &[Vec<Value>],
+    quote_mode: CsvQuoteMode,
+) -> String {
+    format_csv_with_quote_mode(columns, rows, quote_mode)
+}
+
+fn write_csv_text_row(
+    writer: &mut impl Write,
+    values: impl IntoIterator<Item = String>,
+    quote_mode: CsvQuoteMode,
+) -> Result<(), String> {
     let mut first = true;
     for value in values {
         if !first {
             writer.write_all(b",").map_err(|err| err.to_string())?;
         }
         first = false;
-        writer.write_all(escape_csv(&value).as_bytes()).map_err(|err| err.to_string())?;
+        writer.write_all(escape_csv_with_quote_mode(&value, quote_mode).as_bytes()).map_err(|err| err.to_string())?;
     }
     Ok(())
 }
 
-fn write_csv_value_row(writer: &mut impl Write, values: impl IntoIterator<Item = Value>) -> Result<(), String> {
+fn write_csv_value_row(
+    writer: &mut impl Write,
+    values: impl IntoIterator<Item = Value>,
+    quote_mode: CsvQuoteMode,
+) -> Result<(), String> {
     let mut first = true;
     for value in values {
         if !first {
             writer.write_all(b",").map_err(|err| err.to_string())?;
         }
         first = false;
-        writer.write_all(format_csv_value(&value).as_bytes()).map_err(|err| err.to_string())?;
+        let formatted = if quote_mode == CsvQuoteMode::All {
+            format_csv_value(&value)
+        } else {
+            let mut formatted = String::new();
+            push_csv_value_with_quote_mode(&mut formatted, &value, quote_mode, false);
+            formatted
+        };
+        writer.write_all(formatted.as_bytes()).map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -286,7 +404,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
         .await?;
 
         if !wrote_header {
-            write_csv_text_row(&mut writer, result.columns)?;
+            write_csv_text_row(&mut writer, result.columns, options.csv_quote_mode)?;
             wrote_header = true;
         }
 
@@ -296,7 +414,7 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
         }
         for row in result.rows {
             writer.write_all(b"\n").map_err(|err| err.to_string())?;
-            write_csv_value_row(&mut writer, row)?;
+            write_csv_value_row(&mut writer, row, options.csv_quote_mode)?;
         }
 
         rows_exported += fetched as u64;
@@ -315,7 +433,10 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
 
 #[cfg(test)]
 mod tests {
-    use super::{format_csv, format_query_result_csv, format_query_result_csv_rows, format_tsv};
+    use super::{
+        format_csv, format_csv_with_quote_mode, format_query_result_csv, format_query_result_csv_rows, format_tsv,
+        CsvQuoteMode,
+    };
     use serde_json::json;
 
     #[test]
@@ -334,6 +455,27 @@ mod tests {
     fn formats_query_result_null_as_empty_cell() {
         let out = format_query_result_csv(&["id".to_string(), "note".to_string()], &[vec![json!(1), Value::Null]]);
         assert_eq!(out, "\"id\",\"note\"\n\"1\",");
+    }
+
+    #[test]
+    fn necessary_quote_mode_only_quotes_csv_special_characters() {
+        let out = format_csv_with_quote_mode(
+            &["id".to_string(), "district,name".to_string(), "note".to_string()],
+            &[
+                vec![json!(2085252644_u64), json!("延庆县"), json!("plain")],
+                vec![json!(2085252645_u64), json!("门头沟区"), json!("line 1\n\"line 2\"")],
+            ],
+            CsvQuoteMode::Necessary,
+        );
+        assert_eq!(
+            out,
+            "id,\"district,name\",note\n2085252644,延庆县,plain\n2085252645,门头沟区,\"line 1\n\"\"line 2\"\"\""
+        );
+    }
+
+    #[test]
+    fn csv_quote_mode_defaults_to_all_for_backward_compatibility() {
+        assert_eq!(CsvQuoteMode::default(), CsvQuoteMode::All);
     }
 
     #[test]
@@ -397,6 +539,23 @@ mod tests {
             super::push_csv_text_value(&mut out, &value);
             assert_eq!(out, format!("prefix,{expected}"));
         }
+    }
+
+    #[test]
+    fn reusable_row_buffers_match_batch_formatters() {
+        let row = vec![Value::Null, json!("NULL"), json!("line\n\"two\""), json!(42)];
+
+        let mut csv = String::new();
+        super::push_query_result_csv_row(&mut csv, &row);
+        assert_eq!(csv, super::format_query_result_csv_rows(std::slice::from_ref(&row)));
+
+        let mut table_csv = String::new();
+        super::push_table_csv_row(&mut table_csv, &row);
+        assert_eq!(table_csv, "\"\",\"NULL\",\"line\n\"\"two\"\"\",\"42\"");
+
+        let mut tsv = String::new();
+        super::push_tsv_row(&mut tsv, &row);
+        assert_eq!(tsv, super::format_tsv_rows(&[row]));
     }
 
     use serde_json::Value;

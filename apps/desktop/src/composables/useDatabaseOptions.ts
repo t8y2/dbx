@@ -1,13 +1,15 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
-import { isDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
+import { isDorisFamilyCatalogCapable, supportsQueryTargetDatabaseListing } from "@/lib/database/databaseFeatureSupport";
 import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { isInternalDorisCatalog } from "@/lib/database/databaseFeatureSupport";
+import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import type { CatalogInfo, ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
-type NamespaceOptionsConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "visible_databases" | "visible_schemas">;
+type NamespaceOptionsConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "visible_databases" | "visible_database_patterns" | "visible_schemas" | "username" | "show_system_schemas"> &
+  Partial<Pick<ConnectionConfig, "database_info">>;
 export function catalogDatabaseOptionsKey(connectionId: string, catalog: string): string {
   return `${connectionId}:${catalog}`;
 }
@@ -31,21 +33,24 @@ export function databaseAfterCatalogChange(currentDatabase: string, databaseOpti
   return databaseOptions.includes(currentDatabase) ? currentDatabase : "";
 }
 
-export function databaseOptionsForConnection(databaseNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_databases"> | undefined): string[] {
+export function databaseOptionsForConnection(databaseNames: string[], connection: (Pick<ConnectionConfig, "db_type" | "visible_databases"> & Partial<Pick<ConnectionConfig, "database" | "database_info">>) | undefined): string[] {
   const names = filterDatabaseNamesForConnection(databaseNames, connection);
+  const configuredDatabase = connection?.database?.trim() || connection?.database_info?.currentDatabase?.trim();
+  if (names.length === 0 && configuredDatabase) return [configuredDatabase];
   if (names.length === 0 && usesTreeSchemaMode(connection?.db_type)) return [""];
   return names;
 }
 
-export function namespaceOptionsAreSchemas(connection: Pick<ConnectionConfig, "db_type"> | undefined): boolean {
-  return connection?.db_type === "dameng";
+export function namespaceOptionsAreSchemas(connection: NamespaceOptionsConnection | undefined): boolean {
+  return connectionUsesConnectionRootSchemaMode(connection);
 }
 
 export async function fetchNamespaceOptionsForConnection(connectionId: string, connection: NamespaceOptionsConnection): Promise<string[]> {
-  if (connection.db_type === "dameng") {
+  if (namespaceOptionsAreSchemas(connection)) {
     const database = connection.database || "";
-    // Dameng users and schemas are not interchangeable: independent schemas
-    // appear in listSchemas but not in the user-backed listDatabases result.
+    // Oracle, Dameng, and their inferred JDBC dialects expose schemas directly
+    // below the connection; their catalog/database listing is not the namespace
+    // picker used by schema-aware UI surfaces.
     const schemas = await api.listSchemas(connectionId, database, true);
     return filterSchemaNamesForConnection(schemas, connection, database);
   }
@@ -78,40 +83,54 @@ export function useDatabaseOptions() {
   const loadingCatalogOptions = ref<Record<string, boolean>>({});
   const catalogDatabaseOptions = ref<Record<string, string[]>>({});
   const loadingCatalogDatabaseOptions = ref<Record<string, boolean>>({});
+  const databaseRequests = new Map<string, Promise<void>>();
   const catalogRequests = new Map<string, Promise<CatalogInfo[]>>();
   const catalogDatabaseRequests = new Map<string, Promise<string[]>>();
 
-  async function loadDatabaseOptions(connectionId: string, catalog?: string) {
+  async function loadDatabaseOptions(connectionId: string, catalog?: string): Promise<void> {
     const connection = connectionStore.getConfig(connectionId);
-    if (!connection || loadingDatabaseOptions.value[connectionId]) return;
+    if (!connection) return;
 
-    loadingDatabaseOptions.value[connectionId] = true;
-    try {
-      await connectionStore.ensureConnected(connectionId);
-      if (connection.db_type === "redis") {
-        const dbs = await api.redisListDatabases(connectionId);
-        databaseOptions.value[connectionId] = databaseOptionsForConnection(
-          dbs.map((db) => String(db.db)),
-          connection,
-        );
-      } else if (connection.db_type === "mongodb") {
-        databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(await api.mongoListDatabases(connectionId), connection);
-      } else if (catalog && isDorisFamilyCatalogCapable(connection?.db_type, connection?.driver_profile)) {
-        const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
-        databaseOptions.value[connectionId] = databaseOptionsForConnection(
-          dbs.map((db) => db.name),
-          connection,
-        );
-      } else {
-        const dbs = await api.listDatabases(connectionId);
-        databaseOptions.value[connectionId] = databaseOptionsForConnection(
-          dbs.map((db) => db.name),
-          connection,
-        );
+    const requestKey = `${connectionId}:${catalog ?? ""}`;
+    const pending = databaseRequests.get(requestKey);
+    if (pending) return pending;
+
+    const request = (async () => {
+      loadingDatabaseOptions.value[connectionId] = true;
+      try {
+        await connectionStore.ensureConnected(connectionId);
+        if (connection.db_type === "redis") {
+          const dbs = await api.redisListDatabases(connectionId);
+          databaseOptions.value[connectionId] = databaseOptionsForConnection(
+            dbs.map((db) => String(db.db)),
+            connection,
+          );
+        } else if (connection.db_type === "mongodb") {
+          databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(await api.mongoListDatabases(connectionId), connection);
+        } else if (connection.db_type === "dameng") {
+          databaseOptions.value[connectionId] = await fetchNamespaceOptionsForConnection(connectionId, connection);
+        } else if (supportsQueryTargetDatabaseListing(connection.db_type)) {
+          databaseOptions.value[connectionId] = filterDatabaseNamesForConnection(await api.documentListDatabases(connectionId), connection);
+        } else if (catalog && isDorisFamilyCatalogCapable(connection?.db_type, connection?.driver_profile)) {
+          const dbs = await api.listDorisCatalogDatabases(connectionId, catalog);
+          databaseOptions.value[connectionId] = databaseOptionsForConnection(
+            dbs.map((db) => db.name),
+            connection,
+          );
+        } else {
+          const dbs = await api.listDatabases(connectionId);
+          databaseOptions.value[connectionId] = databaseOptionsForConnection(
+            dbs.map((db) => db.name),
+            connection,
+          );
+        }
+      } finally {
+        loadingDatabaseOptions.value[connectionId] = false;
+        databaseRequests.delete(requestKey);
       }
-    } finally {
-      loadingDatabaseOptions.value[connectionId] = false;
-    }
+    })();
+    databaseRequests.set(requestKey, request);
+    return request;
   }
 
   async function loadCatalogOptions(connectionId: string): Promise<CatalogInfo[]> {

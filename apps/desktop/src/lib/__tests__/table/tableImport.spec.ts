@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   autoMapImportColumns,
   buildTableImportParseOptions,
+  defaultTableImportEmptyStringAsNull,
   formatTableImportElapsed,
+  importDataTypeForDatabase,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
   requiredImportTargetColumns,
@@ -13,6 +15,14 @@ import {
 } from "@/lib/table/tableImport";
 
 describe("tableImport", () => {
+  it("preserves explicit empty strings by default for Excel only", () => {
+    expect(defaultTableImportEmptyStringAsNull("excel")).toBe(false);
+    expect(defaultTableImportEmptyStringAsNull("csv")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("tsv")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("delimited")).toBe(true);
+    expect(defaultTableImportEmptyStringAsNull("json")).toBe(true);
+  });
+
   it("formats import elapsed time for progress and terminal summaries", () => {
     expect(formatTableImportElapsed(0)).toBe("0 ms");
     expect(formatTableImportElapsed(999)).toBe("999 ms");
@@ -105,6 +115,26 @@ describe("tableImport", () => {
     expect(buildTableImportParseOptions({ ...baseSettings, format: "csv", sheetName: "Second" }).sheetName).toBeNull();
   });
 
+  it("passes the text encoding for SQL script sources like delimited text", () => {
+    const settings = {
+      delimiter: ",",
+      textEncoding: "gbk" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: true,
+      jsonShape: "auto" as const,
+      databaseType: "mysql" as const,
+    };
+
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).sqlDialect).toBe("mysql");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).sqlDialect).toBeNull();
+    expect(buildTableImportParseOptions({ ...settings, format: "excel" }).encoding).toBeNull();
+  });
+
   it("suggests create-table data types from preview rows", () => {
     expect(
       suggestImportTargetDataTypes(
@@ -121,5 +151,19 @@ describe("tableImport", () => {
       amount: "DOUBLE",
       created_at: "DATETIME",
     });
+  });
+
+  it("uses SQL Server FLOAT for inferred decimal columns", () => {
+    expect(suggestImportTargetDataTypes(["id", "active", "amount", "created_at", "notes"], [[1001, true, "12.5", "2026-07-07 08:15:00", "invoice"]], "sqlserver")).toEqual({
+      id: "BIGINT",
+      active: "BIT",
+      amount: "FLOAT",
+      created_at: "DATETIME2",
+      notes: "NVARCHAR(MAX)",
+    });
+    expect(importDataTypeForDatabase("decimal", "mysql")).toBe("DOUBLE");
+    expect(importDataTypeForDatabase("decimal", "postgres")).toBe("DOUBLE PRECISION");
+    expect(importDataTypeForDatabase("decimal", "sqlite")).toBe("REAL");
+    expect(importDataTypeForDatabase("decimal", "oracle")).toBe("BINARY_DOUBLE");
   });
 });

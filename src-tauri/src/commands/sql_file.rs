@@ -31,6 +31,13 @@ struct SqlFileSummary {
 }
 
 #[tauri::command]
+pub async fn inspect_sql_file_tables(
+    file_path: String,
+) -> Result<Vec<dbx_core::sql_file_import::SqlFileTable>, String> {
+    dbx_core::sql_file_import::inspect_sql_file_tables(std::path::Path::new(&file_path)).await
+}
+
+#[tauri::command]
 pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
@@ -206,7 +213,8 @@ mod execution_tests {
 
     #[tokio::test]
     async fn stops_on_first_failure_by_default() {
-        let summary = run_fake_script(vec!["ok 1".into(), "fail 2".into(), "ok 3".into()], false, None).await;
+        let summary: SqlFileSummary =
+            run_fake_script(vec!["ok 1".into(), "fail 2".into(), "ok 3".into()], false, None).await;
 
         assert_eq!(summary.success_count, 1);
         assert_eq!(summary.failure_count, 1);

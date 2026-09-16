@@ -31,7 +31,7 @@ test("non-release assets retain their official download link", () => {
 
 test("catalog falls back from R2 to CNB without using GitHub API", async () => {
   const requestedUrls: string[] = [];
-  const accessVersion = driverVersions.access;
+  const accessVersion = "9.9.9";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string | URL | Request) => {
@@ -70,6 +70,7 @@ test("catalog falls back from R2 to CNB without using GitHub API", async () => {
 
   assert.deepEqual(requestedUrls, ["https://dl.dbxio.com/agents/agent-registry.json", "https://cnb.cool/dbxio.com/dbx/-/releases/download/agents-latest/agent-registry.json"]);
   assert.equal(catalog?.drivers[0]?.key, "access");
+  assert.equal(catalog?.drivers[0]?.version, accessVersion);
   assert.equal(catalog?.jres[0]?.platformKey, "macos-aarch64");
   assert.equal(catalog?.bundles[0]?.platformKey, "macos-aarch64");
   assert.equal(catalog?.bundles[0]?.url, "https://github.com/t8y2/dbx/releases/download/agents-v0.2.64/dbx-agents-offline-macos-aarch64.zip");
@@ -150,11 +151,53 @@ test("DuckDB native tar.zst packages appear in the native catalog", () => {
     },
   ]);
 
-  assert.deepEqual(entries.map(({ key, platformKey, filename }) => ({ key, platformKey, filename })), [
+  assert.deepEqual(
+    entries.map(({ key, platformKey, filename }) => ({ key, platformKey, filename })),
+    [
+      {
+        key: "duckdb",
+        platformKey: "macos-aarch64",
+        filename: "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
+      },
+    ],
+  );
+});
+
+test("RabbitMQ native tar.zst packages appear in the native catalog", () => {
+  const entries = buildNativeAgentEntries([
     {
-      key: "duckdb",
-      platformKey: "macos-aarch64",
-      filename: "dbx-agent-duckdb-0.1.0-macos-aarch64.tar.zst",
+      name: "dbx-agent-rabbitmq-0.1.1-windows-x64.tar.zst",
+      browser_download_url: "https://example.com/dbx-agent-rabbitmq-0.1.1-windows-x64.tar.zst",
+      size: 4096,
     },
   ]);
+
+  assert.deepEqual(
+    entries.map(({ key, platformKey, filename }) => ({ key, platformKey, filename })),
+    [
+      {
+        key: "rabbitmq",
+        platformKey: "windows-x64",
+        filename: "dbx-agent-rabbitmq-0.1.1-windows-x64.tar.zst",
+      },
+    ],
+  );
+  assert.equal(entries[0]?.label, "RabbitMQ");
+});
+
+test("all current native-only agent packages appear in the native catalog", () => {
+  const nativeKeys = ["cassandra", "duckdb", "hive", "iotdb", "kingbase", "neo4j", "oracle", "rabbitmq", "rocketmq", "tdengine", "vastbase", "xugu", "zookeeper"];
+  const entries = buildNativeAgentEntries(
+    nativeKeys.map((key) => ({
+      name: `dbx-agent-${key}-${driverVersions[key as keyof typeof driverVersions]}-macos-aarch64.tar.zst`,
+      browser_download_url: `https://example.com/dbx-agent-${key}-macos-aarch64.tar.zst`,
+      size: 4096,
+    })),
+  );
+
+  assert.deepEqual(entries.map(({ key }) => key).sort(), nativeKeys);
+  assert.equal(entries.find(({ key }) => key === "cassandra")?.label, "Apache Cassandra");
+  assert.equal(entries.find(({ key }) => key === "hive")?.label, "Apache Hive");
+  assert.equal(entries.find(({ key }) => key === "rocketmq")?.label, "Apache RocketMQ");
+  assert.equal(entries.find(({ key }) => key === "zookeeper")?.label, "Apache ZooKeeper");
 });

@@ -3,7 +3,7 @@ title: Database Support
 description: Understand DBX connection profiles, driver runtimes, specialized workspaces, and capability-gated advanced features.
 ---
 
-The new-connection picker provides more than 70 database and service profiles. A profile defines defaults, form fields, presentation, and a driver entry point, but being able to connect does not mean every advanced feature is available.
+The new-connection picker provides 90+ database and service profiles. A profile defines defaults, form fields, presentation, and a driver entry point, but being able to connect does not mean every advanced feature is available.
 
 <Callout type="info">The installed connection picker and `crates/dbx-core/assets/database-drivers.manifest.json` are authoritative for current types and capabilities. This page intentionally avoids a brittle exhaustive matrix.</Callout>
 
@@ -12,10 +12,11 @@ The new-connection picker provides more than 70 database and service profiles. A
 ### SQL and Compatible Protocols
 
 - Core SQL engines such as MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, Oracle, and Redshift
-- MySQL-protocol or syntax profiles such as MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, and GoldenDB
-- PostgreSQL-compatible profiles such as openGauss, GaussDB, KingBase, HighGo, Vastbase, and CockroachDB
+- MySQL-protocol or syntax profiles such as MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB, and Dolt
+- PostgreSQL-compatible profiles such as openGauss, GaussDB, KingbaseES, HighGo, Vastbase, and CockroachDB
 - Vendor databases including DM, KWDB, YashanDB, GBase, Teradata, Vertica, Exasol, Firebird, and SAP HANA
 - Agent/JDBC analytics engines such as Snowflake, Trino, PrestoSQL, Hive, Spark, DB2, Informix, Databricks, and BigQuery
+- Cloud-managed relational services such as Google Cloud Spanner (Agent/JDBC, GoogleSQL and PostgreSQL dialects)
 
 Protocol compatibility covers only connection and selected dialect behavior. Versions, system catalogs, DDL, privileges, and management APIs differ, so DBX uses separate profiles and capability overrides instead of enabling features by family name alone.
 
@@ -30,11 +31,11 @@ Desktop file paths belong to the local computer. Docker/Web paths belong to the 
 ### Specialized Data Models and Services
 
 - Redis and MongoDB
-- Elasticsearch, Easysearch, and Manticore Search
+- Elasticsearch, Easysearch, Meilisearch, and Manticore Search
 - Qdrant, Milvus, Weaviate, and ChromaDB
 - HBase
 - Pulsar, Kafka, RocketMQ, and RabbitMQ
-- etcd, ZooKeeper, and Nacos
+- etcd, ZooKeeper, Nacos, and Consul KV
 - InfluxDB, IoTDB, TDengine, and other time-series or IoT profiles
 
 These connections use key-value, document, search, vector, messaging, or configuration-center workspaces. They do not inherit every relational grid or SQL concept. See [Specialized Workspaces](/en/docs/specialized-workspaces).
@@ -44,7 +45,7 @@ These connections use key-value, document, search, vector, messaging, or configu
 | Runtime | Description | Typical boundary |
 | --- | --- | --- |
 | Built-in native | Rust driver compiled into DBX | Available immediately after installation |
-| Native Agent / sidecar | DBX-managed Go, Rust, or external process | Requires platform files; DuckDB, Oracle, KingBase, XuguDB, RabbitMQ, and similar paths may use separate runtimes |
+| Native Agent / sidecar | DBX-managed Go, Rust, or external process | Requires platform files; DuckDB, Oracle, KingbaseES, XuguDB, RabbitMQ, and similar paths may use separate runtimes |
 | JDBC Agent | Java Agent plus a vendor JDBC driver | Requires a JRE, Agent, and legally obtained vendor JAR |
 | JDBC plugin | Optional generic JDBC extension | Unknown engines run with generic JDBC capabilities |
 
@@ -94,7 +95,7 @@ Both runtimes share most Rust core query, metadata, and safety policy, but are n
 
 ## Default Ports and Connection URLs
 
-Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
+Profiles prefill common defaults such as MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, Meilisearch `7700`, and RabbitMQ AMQP `5672`. These are defaults, not requirements.
 
 Services such as RabbitMQ may expose separate business and management ports. A custom AMQP port must not be used to infer the Management API port. SSH tunnels, HTTP proxies, TLS SNI, and physical dial targets should also be verified independently.
 

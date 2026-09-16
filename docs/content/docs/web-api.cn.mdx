@@ -89,7 +89,7 @@ Cookie: dbx_session=...
 | `DBX_PORT` | 修改监听端口，默认 `4224` |
 | `DBX_DATA_DIR` | 存放 `dbx.db` 的数据目录 |
 | `DBX_PUBLIC_BASE_PATH` | 在子路径下提供服务，例如 `/dbx` |
-| `DBX_MAX_UPLOAD_MB` | 调整通用请求/上传大小上限，默认 1024 MB |
+| `DBX_MAX_UPLOAD_MB` | 调整通用请求及上传文件大小上限，默认 1024 MB；multipart 路由会额外预留固定的协议开销（如需上传 4 GiB 文件，请设为至少 `4096`） |
 | `DBX_AGENT_DIR` | 覆盖 Web 端 Agent/驱动目录，默认位于数据目录下的 `agents` |
 | `DBX_STATIC_DIR` | 覆盖 Web 静态文件目录 |
 

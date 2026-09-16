@@ -209,6 +209,7 @@ mod tests {
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         };
 
         let extensions = extension_infos_from_query_result(result, true);

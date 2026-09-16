@@ -12,6 +12,7 @@ describe("SQL completion insertion", () => {
     expect(appendSqlCompletionSpace("public.", { enabled: true, itemType: "schema" })).toBe("public.");
     expect(appendSqlCompletionSpace("name", { enabled: true, itemType: "property" })).toBe("name");
     expect(appendSqlCompletionSpace("key", { enabled: true, itemType: "text" })).toBe("key");
+    expect(appendSqlCompletionSpace("tt", { enabled: true, itemType: "variable" })).toBe("tt");
     expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: ")" })).toBe("orders");
     expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: "," })).toBe("orders");
   });

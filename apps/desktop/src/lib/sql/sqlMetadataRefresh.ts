@@ -4,15 +4,23 @@ export type SqlMetadataRefreshTarget = { scope: "none" } | { scope: "connection"
 const DATABASE_DDL_RE = /\b(CREATE|DROP)\s+DATABASE\b/i;
 const SCHEMA_DDL_RE = /\b(CREATE|DROP)\s+SCHEMA\b/i;
 const OBJECT_DDL_RE = /\b(CREATE|ALTER|DROP|RENAME)\s+(OR\s+REPLACE\s+)?(((GLOBAL|LOCAL)\s+)?TEMP(ORARY)?\s+)?(MATERIALIZED\s+)?(TABLE|VIEW|INDEX|SEQUENCE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i;
+const EXPLICIT_TEMP_OBJECT_DDL_RE = /\b(?:CREATE|ALTER|DROP|RENAME)\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?TEMP(?:ORARY)?\s+(?:TABLE|VIEW|INDEX)\b/i;
+const SQLSERVER_TEMP_TABLE_DDL_RE = /\b(?:CREATE|ALTER|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:\[##?[^\]]+\]|##?[A-Za-z_][\w$#]*)/i;
 const OBJECT_NAME_DDL_RE =
   /\b(?:CREATE|ALTER|DROP|RENAME)\s+(?:OR\s+REPLACE\s+)?(?:(?:(?:GLOBAL|LOCAL)\s+)?TEMP(?:ORARY)?\s+)?(?:MATERIALIZED\s+)?(?:TABLE|VIEW|SEQUENCE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s*\.\s*(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*))/i;
 const INDEX_TABLE_DDL_RE = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*)\s*\.\s*(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$]*))/i;
+const SQLSERVER_TEMP_TABLE_TOKEN_RE = /(\b(?:CREATE|ALTER|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?)(\[?)(##?)([A-Za-z_][\w$#]*)(\]?)/gi;
+const TEMP_HASH_PLACEHOLDER = "\u0000dbx-temp-hash\u0000";
 
 function stripSqlMetadataComments(sql: string): string {
   return sql
+    .replace(SQLSERVER_TEMP_TABLE_TOKEN_RE, (_match, prefix: string, openBracket: string, hashes: string, name: string, closeBracket: string) => {
+      return `${prefix}${openBracket}${hashes.replaceAll("#", TEMP_HASH_PLACEHOLDER)}${name}${closeBracket}`;
+    })
     .replace(/\/\*[\s\S]*?\*\//g, " ")
     .replace(/--.*$/gm, " ")
-    .replace(/#.*$/gm, " ");
+    .replace(/#.*$/gm, " ")
+    .replaceAll(TEMP_HASH_PLACEHOLDER, "#");
 }
 
 export function sqlMetadataRefreshScope(sql: string): SqlMetadataRefreshScope {
@@ -44,6 +52,10 @@ function schemaFromObjectDdl(statement: string): string | undefined {
   return match?.[1] ? schemaFromQualifiedName(match[1]) : undefined;
 }
 
+function isTemporaryObjectDdl(statement: string): boolean {
+  return EXPLICIT_TEMP_OBJECT_DDL_RE.test(statement) || SQLSERVER_TEMP_TABLE_DDL_RE.test(statement);
+}
+
 export function sqlMetadataRefreshTarget(sql: string, activeSchema?: string): SqlMetadataRefreshTarget {
   const statements = splitSqlMetadataStatements(sql);
   if (statements.some((stmt) => DATABASE_DDL_RE.test(stmt))) return { scope: "connection" };
@@ -57,6 +69,7 @@ export function sqlMetadataRefreshTarget(sql: string, activeSchema?: string): Sq
       continue;
     }
     if (!OBJECT_DDL_RE.test(statement)) continue;
+    if (isTemporaryObjectDdl(statement)) continue;
     hasDatabaseRefresh = true;
     const schema = schemaFromObjectDdl(statement) || activeSchema;
     if (schema) schemaTargets.add(schema);

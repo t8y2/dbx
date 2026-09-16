@@ -353,6 +353,7 @@ impl PulsarApiProfile {
             msg_out_counter: i64_of("msgOutCounter"),
             subscription_count,
             producer_count,
+            rates_unavailable: false,
             raw: raw.clone(),
         }
     }

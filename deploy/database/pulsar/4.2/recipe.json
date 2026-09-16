@@ -7,7 +7,8 @@
   "platforms": ["linux/amd64", "linux/arm64"],
   "service": "database",
   "defaultPort": 6650,
-  "connection": { "host": "127.0.0.1", "port": 6651, "authentication": "none", "database": "dbx", "namespace": "public/default", "webPort": 8081 },
+  "connection": { "host": "127.0.0.1", "port": 11400, "authentication": "none", "database": "dbx", "namespace": "public/default", "webPort": 11401 },
+  "hostPorts": { "DB_PORT": 11400, "PULSAR_WEB_PORT": 11401 },
   "shell": ["/bin/bash"],
   "smoke": { "steps": [{ "name": "produce a smoke message", "command": ["bin/pulsar-client", "produce", "persistent://public/default/dbx-smoke", "--messages", "DBX smoke"], "expect": "1 messages successfully produced" }] }
 }

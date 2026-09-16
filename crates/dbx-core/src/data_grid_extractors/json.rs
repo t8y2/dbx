@@ -10,7 +10,8 @@ pub(super) fn write_json(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
 ) -> Result<Vec<DataGridExtractWarning>, DataGridExtractError> {
-    let (names, warnings) = unique_json_names(&context.selected_columns);
+    let (names, warnings) =
+        unique_json_names(&context.selected_columns, context.request.options.json.camel_case_field_names);
     let rows =
         JsonRows { names: &names, source_indexes: &context.selected_source_indexes, rows: &context.request.rows };
     let result = if context.request.options.json.pretty {
@@ -31,7 +32,8 @@ pub(super) fn write_json_lines(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
 ) -> Result<Vec<DataGridExtractWarning>, DataGridExtractError> {
-    let (names, warnings) = unique_json_names(&context.selected_columns);
+    let (names, warnings) =
+        unique_json_names(&context.selected_columns, context.request.options.json.camel_case_field_names);
     for (index, row) in context.request.rows.iter().enumerate() {
         if index > 0 {
             write_bytes(output, b"\n")?;
@@ -92,15 +94,28 @@ impl Serialize for JsonRow<'_, '_> {
     }
 }
 
-fn unique_json_names(columns: &[&DataGridExtractColumn]) -> (Vec<String>, Vec<DataGridExtractWarning>) {
-    let reserved = columns.iter().map(|column| column.display_name.as_str()).collect::<std::collections::HashSet<_>>();
+fn unique_json_names(
+    columns: &[&DataGridExtractColumn],
+    camel_case_field_names: bool,
+) -> (Vec<String>, Vec<DataGridExtractWarning>) {
+    let base_names = columns
+        .iter()
+        .map(|column| {
+            if camel_case_field_names {
+                lower_camel_json_name(&column.display_name)
+            } else {
+                column.display_name.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let reserved = base_names.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
     let mut emitted = std::collections::HashSet::<String>::new();
     let mut suffixes = std::collections::HashMap::<String, usize>::new();
     let mut duplicate = false;
-    let names = columns
+    let names = base_names
         .iter()
-        .map(|column| {
-            let base = column.display_name.clone();
+        .map(|base| {
+            let base = base.clone();
             if emitted.insert(base.clone()) {
                 return base;
             }
@@ -124,4 +139,24 @@ fn unique_json_names(columns: &[&DataGridExtractColumn]) -> (Vec<String>, Vec<Da
         Vec::new()
     };
     (names, warnings)
+}
+
+fn lower_camel_json_name(name: &str) -> String {
+    if !name.contains('_') {
+        return if name.chars().any(char::is_lowercase) { name.to_owned() } else { name.to_lowercase() };
+    }
+
+    let mut words = name.split('_').filter(|word| !word.is_empty());
+    let Some(first) = words.next() else {
+        return name.to_owned();
+    };
+    let mut converted = first.to_lowercase();
+    for word in words {
+        let mut characters = word.chars();
+        if let Some(first_character) = characters.next() {
+            converted.extend(first_character.to_uppercase());
+            converted.extend(characters.flat_map(char::to_lowercase));
+        }
+    }
+    converted
 }

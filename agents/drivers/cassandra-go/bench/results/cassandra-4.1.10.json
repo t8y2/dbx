@@ -1,0 +1,36 @@
+{
+  "date": "2026-08-03",
+  "host": "oss-rainyun-01",
+  "cassandra": "4.1.10",
+  "method": "five cold-process startup and connection samples; persistent process for query workloads",
+  "results": [
+    {
+      "candidate": "go-native",
+      "startup_ms": 8.994690957479179,
+      "connect_ms": 33.21323194541037,
+      "rss_kib": 10352,
+      "artifact_bytes": 6750370,
+      "shutdown_exited_within_3s": true,
+      "workloads": [
+        {"name": "select_one", "count": 1000, "elapsed_ms": 1940.8286979887635, "ops_per_sec": 515.2438239584345, "mean_ms": 1.9388069859705865, "p50_ms": 1.9103229278698564, "p95_ms": 2.221024944446981, "p99_ms": 2.3676720447838306},
+        {"name": "decode_all_types", "count": 500, "elapsed_ms": 1079.476205050014, "ops_per_sec": 463.18760678641746, "mean_ms": 2.156704908935353, "p50_ms": 2.141958102583885, "p95_ms": 2.4329390143975616, "p99_ms": 2.7680869679898024},
+        {"name": "list_tables", "count": 500, "elapsed_ms": 57.42691201157868, "ops_per_sec": 8706.71924513698, "mean_ms": 0.11419291398487985, "p50_ms": 0.10622991248965263, "p95_ms": 0.1487070694565773, "p99_ms": 0.19879091996699572},
+        {"name": "page_100", "count": 200, "elapsed_ms": 984.7569830017164, "ops_per_sec": 203.09579261917395, "mean_ms": 4.921203925041482, "p50_ms": 4.922428051941097, "p95_ms": 6.079918937757611, "p99_ms": 7.303814985789359}
+      ]
+    },
+    {
+      "candidate": "jdbc-java",
+      "startup_ms": 657.9867920372635,
+      "connect_ms": 1778.3896300243214,
+      "rss_kib": 166232,
+      "artifact_bytes": 22984056,
+      "shutdown_exited_within_3s": false,
+      "workloads": [
+        {"name": "select_one", "count": 1000, "elapsed_ms": 3868.2536740088835, "ops_per_sec": 258.51458675502147, "mean_ms": 3.865854301955551, "p50_ms": 3.6270120181143284, "p95_ms": 5.733568919822574, "p99_ms": 7.344924029894173},
+        {"name": "decode_all_types", "count": 500, "elapsed_ms": 2014.9188039358705, "ops_per_sec": 248.14895718046694, "mean_ms": 4.0274618696421385, "p50_ms": 3.9998559514060616, "p95_ms": 4.94410190731287, "p99_ms": 5.3489640122279525},
+        {"name": "list_tables", "count": 500, "elapsed_ms": 763.6687039630488, "ops_per_sec": 654.7341764894339, "mean_ms": 1.5251681823283434, "p50_ms": 1.494601950980723, "p95_ms": 1.9315499812364578, "p99_ms": 2.339883940294385},
+        {"name": "page_100", "count": 200, "elapsed_ms": 8309.039836982265, "ops_per_sec": 24.070169829952025, "mean_ms": 41.53980694070924, "p50_ms": 42.0777719700709, "p95_ms": 51.87095201108605, "p99_ms": 57.71494994405657}
+      ]
+    }
+  ]
+}

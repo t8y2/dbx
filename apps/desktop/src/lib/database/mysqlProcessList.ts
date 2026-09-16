@@ -2,7 +2,7 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 
 /**
  * Engines that speak the MySQL protocol and support `SHOW FULL PROCESSLIST` /
- * `KILL CONNECTION`. MariaDB, TiDB, and OceanBase ride the `mysql` dbType via a
+ * `KILL QUERY`. MariaDB, TiDB, and OceanBase ride the `mysql` dbType via a
  * driver profile, so they are covered by the `"mysql"` entry.
  */
 const PROCESS_LIST_DB_TYPES = new Set<DatabaseType>(["mysql"]);
@@ -127,14 +127,14 @@ export function mapProcessRows(result: QueryResult | null | undefined): ProcessR
 }
 
 /**
- * Build the `KILL CONNECTION <id>` statement. `id` must be a finite integer; it
+ * Build the `KILL QUERY <id>` statement. `id` must be a finite positive integer; it
  * is validated (never interpolated as free text) so there is no injection path.
  */
-export function buildKillSql(id: number): string {
-  if (!Number.isInteger(id) || id < 0) {
+export function buildCancelQuerySql(id: number): string {
+  if (!Number.isInteger(id) || id <= 0) {
     throw new Error(`Invalid session id: ${id}`);
   }
-  return `KILL CONNECTION ${id}`;
+  return `KILL QUERY ${id}`;
 }
 
 /** Clamp a user-entered refresh interval to a safe integer range of seconds. */

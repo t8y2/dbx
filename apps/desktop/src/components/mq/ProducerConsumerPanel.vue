@@ -5,6 +5,8 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ConsumerInfo, ProducerInfo, SubscriptionInfo, TopicInfo, TopicRef, TopicStats, MqSystemKind } from "@/types/mq";
 import { mqGetTopicStats, mqListConsumers, mqListProducers, mqListSubscriptions, mqUnloadTopic } from "@/lib/backend/api";
+import { extractKafkaPartitionRows } from "@/lib/mq/kafkaTopicStats";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
 interface Props {
@@ -26,6 +28,7 @@ const emit = defineEmits<{
   topicSelected: [topic: TopicInfo | undefined];
 }>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 interface PartitionClientRow {
   name: string;
@@ -37,16 +40,6 @@ interface PartitionClientRow {
   consumerCount: number;
   producers: ProducerInfo[];
   subscriptions: SubscriptionInfo[];
-}
-
-interface KafkaPartitionRow {
-  partition: number;
-  beginOffset: number;
-  endOffset: number;
-  messageCount: number;
-  leader: number;
-  replicas: number[];
-  isr: number[];
 }
 
 const producers = ref<ProducerInfo[]>([]);
@@ -148,7 +141,7 @@ async function loadTopics(force = false) {
   try {
     await topicSelectRef.value?.loadTopics();
   } catch (e: unknown) {
-    error.value = translateBackendError(t, formatError(e));
+    error.value = translateBackendError(t, e);
   } finally {
     topicsLoading.value = false;
   }
@@ -261,7 +254,7 @@ async function loadRuntimeClients() {
     }
   } catch (e: unknown) {
     if (isRuntimeLoadCurrent(loadSeq, currentKey)) {
-      error.value = translateBackendError(t, formatError(e)) || String(e);
+      error.value = translateBackendError(t, e);
     }
   } finally {
     if (loadSeq === runtimeLoadSeq) {
@@ -273,6 +266,7 @@ async function loadRuntimeClients() {
 async function unloadTopic() {
   const current = topicRef.value;
   if (!current || props.readOnly || unloading.value) return;
+  if (!(await confirmMqWrite(t("mqClients.unloadTopic")))) return;
   if (!confirm(t("mqClients.confirmUnload"))) return;
 
   unloading.value = true;
@@ -434,20 +428,6 @@ function extractPartitionClientRows(raw: unknown): PartitionClientRow[] {
   });
 }
 
-function extractKafkaPartitionRows(raw: unknown): KafkaPartitionRow[] {
-  return arrayObjects(objectRecord(raw).partitionStats)
-    .map((body) => ({
-      partition: numberField(body.partition) ?? 0,
-      beginOffset: numberField(body.beginOffset) ?? 0,
-      endOffset: numberField(body.endOffset) ?? 0,
-      messageCount: numberField(body.messageCount) ?? 0,
-      leader: numberField(body.leader) ?? -1,
-      replicas: numberArrayField(body.replicas),
-      isr: numberArrayField(body.isr),
-    }))
-    .sort((a, b) => a.partition - b.partition);
-}
-
 function mergeSubscriptionOptions(base: SubscriptionInfo[], partitions: PartitionClientRow[]): SubscriptionInfo[] {
   const byName = new Map<string, SubscriptionInfo>();
   for (const sub of base) {
@@ -526,10 +506,6 @@ function numberField(value: unknown): number | undefined {
     return Number.isFinite(parsed) ? parsed : undefined;
   }
   return undefined;
-}
-
-function numberArrayField(value: unknown): number[] {
-  return Array.isArray(value) ? value.map(numberField).filter((item): item is number => item !== undefined) : [];
 }
 
 function stringField(value: unknown): string {
@@ -762,6 +738,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .producer-consumer-panel {
   display: flex;
   flex-direction: column;
@@ -826,44 +804,6 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.btn-secondary {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--color-hover);
-}
-
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-sm:hover:not(:disabled) {
-  background: var(--color-hover);
-}
-
-.btn-sm.danger {
-  border-color: var(--color-error);
-  color: var(--color-error);
-}
-
-.btn-sm:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .runtime-content {

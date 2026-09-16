@@ -5,8 +5,8 @@ services:
     restart: always
     command: ["bin/pulsar", "standalone", "--advertised-address", "localhost"]
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6651}:6650"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${PULSAR_WEB_PORT:-8081}:8080"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11400}:6650"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${PULSAR_WEB_PORT:-11401}:8080"
     volumes:
       - data:/pulsar/data
       - conf:/pulsar/conf

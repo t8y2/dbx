@@ -1,0 +1,35 @@
+schemaVersion: 1
+order: 620
+dbType: ignite3
+rustVariant: Ignite3
+label: Apache Ignite 3
+runtimeMode: agent
+mcpMode: bridge
+agentKey: ignite3
+driverStoreVisible: true
+driverStoreOrder: 32
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 10800
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: understand
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

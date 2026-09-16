@@ -38,6 +38,21 @@ describe("treeNodeLoadedChildrenContentPresent", () => {
     expect(treeNodeLoadedChildrenContentPresent(databaseNode(), "simple")).toBe(true);
   });
 
+  it("does not mistake the runtime Queries node for loaded database metadata", () => {
+    const node = databaseNode([
+      {
+        id: "conn:test1:__queries",
+        label: "tree.queries",
+        type: "saved-sql-root",
+        connectionId: "conn",
+        database: "test1",
+        children: [],
+      },
+    ]);
+    expect(treeNodeLoadedChildrenContentPresent(node, "grouped")).toBe(false);
+    expect(simpleModeEmptyShellNeedsConfirmedLoad(node, "simple")).toBe(true);
+  });
+
   it("accepts loaded object groups with zero items", () => {
     const node: TreeNode = {
       id: "conn:test1:__tables",

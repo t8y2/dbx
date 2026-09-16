@@ -50,8 +50,8 @@ mod tests {
         let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
         con.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR)").expect("create table");
 
-        let inserted = duckdb_execute(&con, "INSERT INTO users VALUES (1, 'Ada') RETURNING id, name")
-            .expect("insert returning");
+        let inserted =
+            duckdb_execute(&con, "INSERT INTO users VALUES (1, 'Ada') RETURNING id, name").expect("insert returning");
         let updated = duckdb_execute(&con, "UPDATE users SET name = 'Ada Lovelace' RETURNING id, name")
             .expect("update returning");
         let deleted = duckdb_execute(&con, "DELETE FROM users RETURNING id, name").expect("delete returning");
@@ -142,6 +142,21 @@ mod tests {
                 serde_json::json!([1, 2, 3]),
             ]]
         );
+    }
+
+    #[test]
+    fn duckdb_execute_resolves_current_date_arithmetic() {
+        let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
+
+        let result = duckdb_execute(&con, "SELECT CURRENT_DATE - 4 AS d").expect("execute CURRENT_DATE - literal");
+        let expected = (Utc::now().date_naive() - ChronoDuration::days(4)).to_string();
+        assert_eq!(result.rows[0][0], serde_json::Value::String(expected));
+
+        con.execute_batch("CREATE VIEW recent AS SELECT CURRENT_DATE - 4 AS start_date, CURRENT_DATE - 1 AS end_date")
+            .expect("create view using CURRENT_DATE arithmetic");
+        let view_result =
+            duckdb_execute(&con, "SELECT * FROM recent").expect("query view built on CURRENT_DATE arithmetic");
+        assert_eq!(view_result.rows.len(), 1);
     }
 
     #[test]
@@ -378,6 +393,8 @@ pub fn duckdb_execute_with_max_rows(
 ) -> Result<db::QueryResult, String> {
     let start = std::time::Instant::now();
     let row_limit = query_result_row_limit(max_rows);
+    let sql = crate::sql::rewrite_duckdb_current_date_literal_arithmetic(sql);
+    let sql = sql.as_ref();
 
     if crate::sql::starts_with_duckdb_result_sql_keyword(sql) {
         let mut stmt = con.prepare(sql).map_err(|e| e.to_string())?;

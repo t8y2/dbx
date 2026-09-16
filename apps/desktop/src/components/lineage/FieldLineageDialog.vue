@@ -317,7 +317,7 @@ function openItemTarget(item: FieldLineageItem) {
 
         <div class="min-h-0 flex-1 overflow-y-auto px-6 py-4">
           <div v-if="loading" class="rounded-md border bg-muted/20 p-4">
-            <div class="flex items-center gap-2 text-sm text-muted-foreground">
+            <div class="flex items-center gap-2 text-sm text-muted-foreground tabular-nums">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("lineage.loading", { done: progressDone, total: progressTotal || "-" }) }}
             </div>

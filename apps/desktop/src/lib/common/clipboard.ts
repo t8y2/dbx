@@ -1,8 +1,10 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { getPlatform, type Platform } from "@/lib/backend/platform";
 
 interface ClipboardApi {
   readText?: () => Promise<string> | string;
   writeText?: (text: string) => Promise<void> | void;
+  write?: (items: readonly unknown[]) => Promise<void> | void;
 }
 
 interface ClipboardNavigator {
@@ -23,18 +25,46 @@ interface ClipboardTextarea {
   setSelectionRange?(start: number, end: number): void;
 }
 
+interface ClipboardContainer {
+  appendChild(node: unknown): unknown;
+  removeChild(node: unknown): unknown;
+}
+
 interface ClipboardDocument {
-  body?: {
-    appendChild(node: unknown): unknown;
-    removeChild(node: unknown): unknown;
+  body?: ClipboardContainer;
+  activeElement?: {
+    closest?(selector: string): ClipboardContainer | null;
   };
   createElement(tagName: "textarea"): ClipboardTextarea;
   execCommand?(command: string): boolean;
 }
 
+/** Structural stand-ins for the DOM constructors used by the rich-text path. */
+type ClipboardItemConstructor = new (items: Record<string, unknown>) => unknown;
+type ClipboardBlobConstructor = new (parts: readonly string[], options?: { type?: string }) => unknown;
+
 export interface ClipboardEnvironment {
   navigator?: ClipboardNavigator;
   document?: ClipboardDocument;
+  /** Injected for tests; resolves from `globalThis` in the app. */
+  ClipboardItem?: ClipboardItemConstructor;
+  /** Injected for tests; resolves from `globalThis` in the app. */
+  Blob?: ClipboardBlobConstructor;
+}
+
+/**
+ * Rewrites the line endings of text destined for the system clipboard.
+ *
+ * Windows native edit controls (the Win32 EDIT control, and applications built
+ * on it such as PowerBuilder) only treat CRLF as a line break, so text copied
+ * with bare LF arrives as a single line. Other platforms keep LF.
+ *
+ * Existing CRLF pairs are matched before bare CR and LF so that already
+ * normalized text is left byte-identical.
+ */
+export function clipboardLineEndings(text: string, platform: Platform = getPlatform()): string {
+  if (platform !== "windows") return text;
+  return text.replace(/\r\n|\r|\n/g, "\r\n");
 }
 
 export interface ClipboardShortcutEvent {
@@ -58,6 +88,7 @@ interface NativeClipboardSelectionEnvironment {
 
 const EDITABLE_CLIPBOARD_TARGET_SELECTOR = "input, textarea, [contenteditable='true'], [role='textbox']";
 const NATIVE_CLIPBOARD_REGION_SELECTOR = "[data-native-clipboard]";
+const DATA_GRID_ROOT_SELECTOR = "[data-grid-root]";
 let clipboardWriteRevision = 0;
 
 export function getClipboardWriteRevision(): number {
@@ -66,6 +97,10 @@ export function getClipboardWriteRevision(): number {
 
 function recordClipboardWrite(): void {
   clipboardWriteRevision += 1;
+}
+
+function legacyClipboardContainer(document: ClipboardDocument): ClipboardContainer | undefined {
+  return document.activeElement?.closest?.("[role='dialog']") ?? document.body;
 }
 
 function closestElement(target: unknown, selector: string): unknown {
@@ -84,6 +119,10 @@ function selectionNodeElement(node: Node | null): Element | null {
 
 export function isPlainClipboardShortcut(event: ClipboardShortcutEvent, key: string): boolean {
   return !!(event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === key;
+}
+
+export function shouldBlockAppNativeSelectAll(event: ClipboardShortcutEvent): boolean {
+  return isPlainClipboardShortcut(event, "a") && !eventTargetUsesNativeClipboard(event) && !closestElement(event.target, DATA_GRID_ROOT_SELECTOR);
 }
 
 export function hasNativeClipboardSelection(env: NativeClipboardSelectionEnvironment = globalThis as unknown as NativeClipboardSelectionEnvironment): boolean {
@@ -122,6 +161,8 @@ export async function readTextFromClipboard(env: ClipboardEnvironment = globalTh
 }
 
 export async function copyToClipboard(text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
+  text = clipboardLineEndings(text);
+
   if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
     try {
       const { writeText } = await import("@tauri-apps/plugin-clipboard-manager");
@@ -144,7 +185,8 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   }
 
   const document = env.document;
-  if (!document?.body || !document.execCommand) {
+  const container = document ? legacyClipboardContainer(document) : undefined;
+  if (!document || !container || !document.execCommand) {
     throw new Error("Clipboard API is not available");
   }
 
@@ -156,7 +198,7 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
   textarea.style.left = "-9999px";
   textarea.style.opacity = "0";
 
-  document.body.appendChild(textarea);
+  container.appendChild(textarea);
   try {
     textarea.focus?.();
     textarea.select();
@@ -166,6 +208,54 @@ export async function copyToClipboard(text: string, env: ClipboardEnvironment = 
     }
     recordClipboardWrite();
   } finally {
-    document.body.removeChild(textarea);
+    container.removeChild(textarea);
   }
+}
+
+/**
+ * Write both an HTML flavor and a plain-text flavor to the system clipboard.
+ *
+ * Rich-text targets (email clients, Word, chat apps) pick up `text/html` and
+ * keep the formatting, while plain-text targets fall back to `text` — so the
+ * same copy works everywhere.
+ *
+ * Order of attempts:
+ * 1. Tauri `clipboard-manager` `writeHtml`, whose `altText` argument is the
+ *    plain-text flavor.
+ * 2. Web `navigator.clipboard.write` with a two-flavor `ClipboardItem`.
+ * 3. Plain text via {@link copyToClipboard}. Rich writes need a secure
+ *    context, and a non-secure web deployment should still copy something
+ *    rather than fail.
+ */
+export async function copyRichTextToClipboard(html: string, text: string, env: ClipboardEnvironment = globalThis as unknown as ClipboardEnvironment): Promise<void> {
+  text = clipboardLineEndings(text);
+  if (isTauriRuntime(env as unknown as Record<string, unknown>)) {
+    try {
+      const { writeHtml } = await import("@tauri-apps/plugin-clipboard-manager");
+      await writeHtml(html, text);
+      recordClipboardWrite();
+      return;
+    } catch {
+      // Fall through to the Web Clipboard rich-text path.
+    }
+  }
+
+  try {
+    const ClipboardItem = env.ClipboardItem;
+    const Blob = env.Blob;
+    if (env.navigator?.clipboard?.write && typeof ClipboardItem === "function" && typeof Blob === "function") {
+      await env.navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      recordClipboardWrite();
+      return;
+    }
+  } catch {
+    // Fall through to the plain-text path so the copy still succeeds.
+  }
+
+  await copyToClipboard(text, env);
 }

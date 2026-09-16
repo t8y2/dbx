@@ -29,7 +29,9 @@ pub async fn start_table_export(
     let export_id = request.export_id.clone();
     let file_path = request.file_path.clone();
 
-    tokio::spawn(async move {
+    // Exports interleave async fetches with synchronous row formatting and
+    // buffered disk writes; run them off the async workers (see spawn_export_task).
+    dbx_core::export_runtime::spawn_export_task(async move {
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancelled_progress = cancelled.clone();
         let result = dbx_core::table_export::export_table_data_core(&state, &request, |progress| {

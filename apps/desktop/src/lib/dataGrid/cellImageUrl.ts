@@ -1,5 +1,6 @@
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { isBinaryCellColumnType, parseBinaryCellBytes } from "@/lib/dataGrid/binaryCellDownload";
+import type { DatabaseType } from "@/types/database";
 
 const IMAGE_PATH_RE = /\.(?:png|jpe?g|webp|gif|avif|bmp|svg)$/i;
 const SAFE_DATA_IMAGE_RE = /^data:image\/(?:png|jpe?g|webp|gif|avif|bmp);base64,[a-z0-9+/=\s]+$/i;
@@ -14,10 +15,11 @@ function isLocalHttpHost(hostname: string): boolean {
 
 export interface CellImagePreviewOptions {
   binary?: boolean;
+  databaseType?: DatabaseType;
 }
 
 export function cellImagePreviewUrl(value: CellValue | unknown, columnType?: string, options: CellImagePreviewOptions = {}): string | null {
-  const binaryPreviewUrl = options.binary === false ? null : binaryImagePreviewUrl(value, columnType);
+  const binaryPreviewUrl = options.binary === false ? null : binaryImagePreviewUrl(value, columnType, options.databaseType);
   if (binaryPreviewUrl) return binaryPreviewUrl;
 
   if (typeof value !== "string") return null;
@@ -38,16 +40,16 @@ export function cellImagePreviewUrl(value: CellValue | unknown, columnType?: str
   return text;
 }
 
-function binaryImagePreviewUrl(value: unknown, columnType?: string): string | null {
-  if (estimatedBinaryByteLength(value, columnType) > MAX_BINARY_IMAGE_PREVIEW_BYTES) return null;
-  const bytes = parseBinaryCellBytes(value, columnType);
+function binaryImagePreviewUrl(value: unknown, columnType?: string, databaseType?: DatabaseType): string | null {
+  if (estimatedBinaryByteLength(value, columnType, databaseType) > MAX_BINARY_IMAGE_PREVIEW_BYTES) return null;
+  const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes || bytes.length > MAX_BINARY_IMAGE_PREVIEW_BYTES) return null;
   const mimeType = detectImageMimeType(bytes);
   if (!mimeType) return null;
   return `data:${mimeType};base64,${bytesToBase64(bytes)}`;
 }
 
-function estimatedBinaryByteLength(value: unknown, columnType?: string): number {
+function estimatedBinaryByteLength(value: unknown, columnType?: string, databaseType?: DatabaseType): number {
   if (Array.isArray(value)) return value.length;
   if (value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data)) {
     return (value as { data: unknown[] }).data.length;
@@ -58,7 +60,9 @@ function estimatedBinaryByteLength(value: unknown, columnType?: string): number 
   const prefixed = trimmed.match(HEX_PREFIX_RE);
   if (prefixed) return prefixed[1].replace(/\s+/g, "").length / 2;
   if (HEX_ESCAPE_RE.test(trimmed)) return trimmed.replace(/\s+/g, "").replace(/\\x/gi, "").length / 2;
-  if (isBinaryCellColumnType(columnType) && BARE_HEX_RE.test(trimmed)) return trimmed.replace(/\s+/g, "").length / 2;
+  if (databaseType !== "tdengine" && isBinaryCellColumnType(columnType) && BARE_HEX_RE.test(trimmed)) {
+    return trimmed.replace(/\s+/g, "").length / 2;
+  }
   return 0;
 }
 

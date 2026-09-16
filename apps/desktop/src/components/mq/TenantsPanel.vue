@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { TenantInfo, TenantConfig } from "@/types/mq";
 import { mqListTenants, mqCreateTenant, mqUpdateTenant, mqDeleteTenant } from "@/lib/backend/api";
 import { defaultTenantConfig, normalizeClusterOptions, validateTenantForm } from "@/lib/mq/mqTenantForm";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
   connectionId: string;
@@ -19,6 +20,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const tenants = ref<TenantInfo[]>([]);
 const loading = ref(false);
@@ -46,12 +48,12 @@ const selectedAllowedClusters = computed(() => normalizeClusterOptions(formData.
 const displayedSelectedClusters = computed(() => [...normalizedClusterOptions.value.filter((cluster) => selectedAllowedClusters.value.includes(cluster)), ...selectedAllowedClusters.value.filter((cluster) => !clusterOptionSet.value.has(cluster))]);
 const canSubmitTenant = computed(() => Boolean(formData.value.name.trim()) && selectedAllowedClusters.value.length > 0);
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = t("mqTenants.readOnly");
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 async function loadTenants() {
@@ -67,7 +69,10 @@ async function loadTenants() {
 }
 
 function openCreateDialog() {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTenants.readOnly");
+    return;
+  }
   formData.value = {
     name: "",
     config: defaultTenantConfig(normalizedClusterOptions.value),
@@ -79,7 +84,10 @@ function openCreateDialog() {
 }
 
 function openEditDialog(tenant: TenantInfo) {
-  if (!guardWritable()) return;
+  if (props.readOnly) {
+    error.value = t("mqTenants.readOnly");
+    return;
+  }
   editingTenant.value = tenant;
   formData.value = {
     name: tenant.name,
@@ -95,7 +103,7 @@ function openEditDialog(tenant: TenantInfo) {
 }
 
 async function handleCreate() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTenants.create")))) return;
   const validationError = validateTenantForm(formData.value.name, formData.value.config);
   if (validationError) {
     error.value = t(validationError);
@@ -116,7 +124,7 @@ async function handleCreate() {
 }
 
 async function handleUpdate() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTenants.edit")))) return;
   if (!editingTenant.value) return;
   const validationError = validateTenantForm(formData.value.name, formData.value.config);
   if (validationError) {
@@ -138,7 +146,7 @@ async function handleUpdate() {
 }
 
 async function handleDelete(tenant: TenantInfo) {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqTenants.delete")))) return;
   if (!confirm(t("mqTenants.confirmDelete", { name: tenant.name }))) return;
   loading.value = true;
   error.value = undefined;
@@ -392,6 +400,8 @@ watch(normalizedClusterOptions, (clusters) => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .tenants-panel {
   height: 100%;
   display: flex;
@@ -509,45 +519,6 @@ td {
   gap: 8px;
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm,
-.btn-danger {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  color: white;
-  border-color: var(--color-primary);
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--color-error);
-  color: white;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -586,16 +557,6 @@ button:disabled {
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-  padding: 0;
-  line-height: 1;
 }
 
 .dialog-body {

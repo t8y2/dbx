@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampDocumentPage, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
+import { clampDocumentPage, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
 
 describe("Elasticsearch document totals", () => {
   it("keeps a lower-bound search total separate from an exact background count", () => {
@@ -39,7 +39,5 @@ describe("Elasticsearch document totals", () => {
   it("clamps the final request without exceeding the conservative page cap", () => {
     expect(clampDocumentPage(30, 333, 10_000)).toBe(30);
     expect(clampDocumentPage(31, 333, 10_000)).toBe(30);
-    expect(documentPageRequestLimit(30, 333, 10_000)).toBe(10);
-    expect(documentPageRequestLimit(0, 100, undefined)).toBe(100);
   });
 });

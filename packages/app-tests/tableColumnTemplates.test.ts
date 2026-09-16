@@ -1,6 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { createTableColumnTemplateDrafts, DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields, parseTableColumnTemplateFields, PRESET_FIELDS_TEMPLATE_ID, tableColumnTemplates, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
+import {
+  createTableColumnTemplateDrafts,
+  DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS,
+  normalizeTableColumnTemplateFields,
+  parseTableColumnTemplateFields,
+  PRESET_FIELDS_TEMPLATE_ID,
+  tableColumnTemplateRowsToSettings,
+  tableColumnTemplates,
+  TABLE_COLUMN_TEMPLATE_DATABASE_TYPES,
+} from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
 
 const sixCustomFields = [
   "tenant_id | mysql:bigint | postgres:uuid | default:0 | comment:Tenant",
@@ -113,5 +122,48 @@ test("skips configured preset fields that already exist", () => {
   assert.deepEqual(
     columns.map((column) => column.name),
     ["request_id", "created_time", "modified_time", "creator_id"],
+  );
+});
+
+test("merges same-name fields across database types (#5579)", () => {
+  const normalized = normalizeTableColumnTemplateFields(["id | sqlite:INTEGER", "id | mysql:BIGINT", "create_time | sqlite:TEXT | default:CURRENT_TIMESTAMP", "create_time | mysql:DATETIME"]);
+  assert.deepEqual(normalized, ["id | sqlite:INTEGER | mysql:BIGINT", "create_time | sqlite:TEXT | mysql:DATETIME | default:CURRENT_TIMESTAMP"]);
+
+  assert.deepEqual(
+    createTableColumnTemplateDrafts({
+      templateId: PRESET_FIELDS_TEMPLATE_ID,
+      databaseType: "mysql",
+      columnNames: normalized,
+      createId: () => "x",
+    }).map((column) => ({ name: column.name, dataType: column.dataType })),
+    [
+      { name: "id", dataType: "BIGINT" },
+      { name: "create_time", dataType: "DATETIME" },
+    ],
+  );
+});
+
+test("tableColumnTemplateRowsToSettings serializes multi-db rows and merges duplicate names", () => {
+  assert.deepEqual(
+    tableColumnTemplateRowsToSettings([
+      {
+        name: "id",
+        required: true,
+        defaultValue: "",
+        comment: "",
+        overrides: [
+          { databaseType: "sqlite", dataType: "INTEGER" },
+          { databaseType: "mysql", dataType: "BIGINT" },
+        ],
+      },
+      {
+        name: "id",
+        required: false,
+        defaultValue: "0",
+        comment: "pk",
+        overrides: [{ databaseType: "postgres", dataType: "bigint" }],
+      },
+    ]),
+    ["id | sqlite:INTEGER | mysql:BIGINT | postgres:bigint | default:0 | comment:pk"],
   );
 });

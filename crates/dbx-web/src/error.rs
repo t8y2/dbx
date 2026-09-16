@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_response_preserves_filtered_legacy_detail() {
+    async fn http_response_preserves_original_legacy_detail() {
         let response = AppError::internal("database failed").into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.headers()[axum::http::header::CONTENT_TYPE], "application/json");
@@ -105,7 +105,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_response_preserves_filtered_structured_agent_detail() {
+    async fn http_response_preserves_sql_keyword_diagnostic_detail() {
+        let response = AppError::internal("Incorrect syntax near SELECT").into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], "DBX-LEGACY-0001");
+        assert_eq!(payload["detail"], "Incorrect syntax near SELECT");
+    }
+
+    #[tokio::test]
+    async fn http_response_preserves_original_structured_agent_detail() {
         use dbx_core::db::agent_driver::{
             AgentCallError, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentOperationOutcome,
             AgentSessionDisposition,
@@ -136,5 +145,54 @@ mod tests {
         assert_eq!(payload["source"], "jdbcAgent");
         assert_eq!(payload["detail"], "relation customer_orders does not exist");
         assert!(payload["diagnostics"].get("agentSessionId").is_none());
+    }
+
+    #[tokio::test]
+    async fn http_response_preserves_duckdb_native_detail_and_worker_code() {
+        let error = BackendError::from_duckdb_worker_error(
+            "duckdb_execute_failed",
+            "Catalog Error: Table missing_table does not exist",
+        );
+
+        let response = AppError::from(error).into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(payload["detail"], "Catalog Error: Table missing_table does not exist");
+        assert_eq!(payload["origin"]["driver"], "duckdb");
+        assert_eq!(payload["diagnostics"]["adapterCode"], "duckdb_execute_failed");
+    }
+
+    #[tokio::test]
+    async fn http_response_preserves_native_sql_detail() {
+        let error = BackendError::from_sql_detail(
+            "ERROR: statement [UPDATE users SET password='user-input' WHERE email='literal-secret@example.com']",
+        );
+
+        let response = AppError::from(error).into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let detail = payload["detail"].as_str().unwrap();
+
+        assert_eq!(
+            detail,
+            "ERROR: statement [UPDATE users SET password='user-input' WHERE email='literal-secret@example.com']"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_response_redacts_common_sensitive_key_variants() {
+        let error = AppError::internal(
+            "driver failed: PASSWORD:secret-a refresh_token = \"secret-b\" api-key:secret-c authorization: Bearer secret-d sessionid=secret-e",
+        );
+
+        let response = error.into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let detail = payload["detail"].as_str().unwrap();
+
+        for secret in ["secret-a", "secret-b", "secret-c", "secret-d", "secret-e"] {
+            assert!(!detail.contains(secret), "sensitive value leaked: {secret}; detail={detail}");
+        }
     }
 }

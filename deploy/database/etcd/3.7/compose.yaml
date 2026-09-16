@@ -18,8 +18,8 @@ services:
       - --logger=zap
       - --log-outputs=stderr
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-2380}:2379"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${ETCD_PEER_PORT:-2381}:2380"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10700}:2379"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${ETCD_PEER_PORT:-10701}:2380"
     volumes:
       - data:/etcd-data
     healthcheck:

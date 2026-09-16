@@ -4,33 +4,62 @@
 
 export type BackendErrorParam = string | number | boolean;
 
+/**
+ * Driver-reported SQL error position, relative to the statement text that was
+ * actually sent to the database. `line`/`column` are 1-based and counted in
+ * Unicode scalar values; `offset` is the 0-based scalar-value index.
+ *
+ * Currently only populated by the native PostgreSQL driver.
+ */
+export interface SqlErrorPosition {
+  line: number;
+  column: number;
+  offset: number;
+}
+
 export interface BackendError {
   version: 1;
   code: string;
   messageKey: string;
   messageParams: Record<string, BackendErrorParam>;
-  source: "jdbcAgent" | "jdbcAgentLegacy" | "legacyBackend";
+  /** Compatibility provenance. New callers should prefer origin metadata. */
+  source: string;
   operationOutcome: "not_started" | "unknown";
+  origin?: {
+    subsystem: string;
+    adapter: string;
+    driver?: string;
+  };
   detail?: string;
   diagnostics?: Record<string, unknown>;
   helpUrl?: string;
+  errorPosition?: SqlErrorPosition;
 }
 
+export const MANUAL_TRANSACTION_SESSION_EXPIRED_CODE = "DBX-TXN-1001";
+
+const MAX_FALLBACK_CHARS = 64 * 1024;
+const MAX_ERROR_PARSE_DEPTH = 16;
 const AGENT_RPC_ERROR_DATA_MARKER = "\nDBX_AGENT_ERROR_DATA:";
+// Rust-side transport suffix carrying a driver cursor position. It is stripped
+// before a structured envelope is built, but metadata/catalog errors can surface
+// as raw strings, so strip it here so it never reaches the UI.
+const SQL_ERROR_POSITION_MARKER_PATTERN = /\nDBX_SQL_ERROR_POSITION:\d+/g;
 
 export function sanitizeBackendErrorMessage(message: string): string {
-  const markerIndex = message.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
-  if (markerIndex < 0) return message;
+  const withoutPositionMarker = message.replace(SQL_ERROR_POSITION_MARKER_PATTERN, "");
+  const markerIndex = withoutPositionMarker.lastIndexOf(AGENT_RPC_ERROR_DATA_MARKER);
+  if (markerIndex < 0) return withoutPositionMarker;
 
-  const rawData = message.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
+  const rawData = withoutPositionMarker.slice(markerIndex + AGENT_RPC_ERROR_DATA_MARKER.length).trim();
   try {
     const data: unknown = JSON.parse(rawData);
-    if (!data || typeof data !== "object" || Array.isArray(data)) return message;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return withoutPositionMarker;
   } catch {
-    return message;
+    return withoutPositionMarker;
   }
 
-  return message.slice(0, markerIndex).trimEnd();
+  return withoutPositionMarker.slice(0, markerIndex).trimEnd();
 }
 
 function isBackendError(value: unknown): value is BackendError {
@@ -45,35 +74,121 @@ function isBackendError(value: unknown): value is BackendError {
     !candidate.messageParams ||
     typeof candidate.messageParams !== "object" ||
     Array.isArray(candidate.messageParams) ||
-    !["jdbcAgent", "jdbcAgentLegacy", "legacyBackend"].includes(String(candidate.source)) ||
+    typeof candidate.source !== "string" ||
+    candidate.source.length === 0 ||
+    candidate.source.length > 64 ||
     !["not_started", "unknown"].includes(String(candidate.operationOutcome))
   ) {
     return false;
   }
+  if (candidate.origin !== undefined) {
+    const origin = candidate.origin;
+    const originRecord = origin as Record<string, unknown>;
+    if (
+      !origin ||
+      typeof origin !== "object" ||
+      Array.isArray(origin) ||
+      typeof originRecord.subsystem !== "string" ||
+      typeof originRecord.adapter !== "string" ||
+      originRecord.subsystem.length > 64 ||
+      originRecord.adapter.length > 64 ||
+      (originRecord.driver !== undefined && (typeof originRecord.driver !== "string" || originRecord.driver.length > 64))
+    ) {
+      return false;
+    }
+  }
   if (candidate.detail !== undefined && typeof candidate.detail !== "string") return false;
+  // Optional driver-reported position. Malformed values are rejected so a
+  // corrupted envelope never drives a wrong editor jump, while a missing field
+  // stays valid (all non-PostgreSQL errors and older backends).
+  if (candidate.errorPosition !== undefined) {
+    if (!isValidErrorPosition(candidate.errorPosition)) return false;
+  }
   return Object.values(candidate.messageParams).every((param) => typeof param === "string" || typeof param === "boolean" || (typeof param === "number" && Number.isFinite(param)));
 }
 
+function isValidErrorPosition(value: unknown): value is SqlErrorPosition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const { line, column, offset } = value as Record<string, unknown>;
+  return isPositiveInt(line) && isPositiveInt(column) && isNonNegativeInt(offset);
+}
+
+function isPositiveInt(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function isNonNegativeInt(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
 export function normalizeBackendError(error: unknown): BackendError | null {
-  if (error instanceof BackendErrorException) return error.backendError;
+  return normalizeBackendErrorAtDepth(error, new WeakSet<object>(), 0);
+}
+
+export function isManualTransactionSessionExpired(error: unknown): boolean {
+  if (normalizeBackendError(error)?.code === MANUAL_TRANSACTION_SESSION_EXPIRED_CODE) return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  return message?.startsWith("Transaction session not found or expired;") === true || message === "Transaction was auto-rolled back due to 5 minutes of inactivity";
+}
+
+export function isUnsupportedManualTransactionMethod(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  if (!message) return false;
+  const normalized = message.toLowerCase();
+  return normalized.includes("begin_manual_transaction") && (normalized.includes("unknown method") || normalized.includes("method not found"));
+}
+
+function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, depth: number): BackendError | null {
+  if (depth > MAX_ERROR_PARSE_DEPTH) return null;
+
+  if (error && typeof error === "object") {
+    if (seen.has(error)) return null;
+    seen.add(error);
+
+    if ("name" in error && error.name === "BackendErrorException" && "backendError" in error) {
+      const normalized = normalizeBackendErrorAtDepth((error as { backendError: unknown }).backendError, seen, depth + 1);
+      if (normalized) return normalized;
+    }
+  }
+  if (typeof error === "string") {
+    try {
+      return normalizeBackendErrorAtDepth(JSON.parse(error), seen, depth + 1);
+    } catch {
+      return null;
+    }
+  }
   if (isBackendError(error)) return error;
   if (error && typeof error === "object" && "backendError" in error) {
     const backendError = (error as { backendError: unknown }).backendError;
-    if (isBackendError(backendError)) return backendError;
+    const normalized = normalizeBackendErrorAtDepth(backendError, seen, depth + 1);
+    if (normalized) return normalized;
   }
   if (error && typeof error === "object" && "error" in error) {
     const nested = (error as { error: unknown }).error;
-    if (isBackendError(nested)) return nested;
+    const normalized = normalizeBackendErrorAtDepth(nested, seen, depth + 1);
+    if (normalized) return normalized;
+  }
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    try {
+      const parsed: unknown = JSON.parse(error.message);
+      const normalized = normalizeBackendErrorAtDepth(parsed, seen, depth + 1);
+      if (normalized) return normalized;
+    } catch {
+      // Keep checking compatibility wrappers before falling back to plain text.
+    }
   }
   return null;
 }
+
+export const GENERIC_TRANSPORT_FAILURE_MESSAGE = "Backend request failed";
 
 export class BackendErrorException extends Error {
   readonly backendError: BackendError;
 
   constructor(error: unknown) {
     const backendError = normalizeRawBackendError(error);
-    const fallbackMessage = sanitizeBackendErrorMessage(typeof error === "string" ? error : error instanceof Error ? error.message : "Backend request failed");
+    const fallbackDetail = boundedFallbackText(error);
+    const fallbackMessage = sanitizeBackendErrorMessage(fallbackDetail ?? GENERIC_TRANSPORT_FAILURE_MESSAGE);
     super(backendError?.detail ? sanitizeBackendErrorMessage(backendError.detail) : fallbackMessage);
     this.name = "BackendErrorException";
     this.backendError = backendError ?? {
@@ -83,21 +198,44 @@ export class BackendErrorException extends Error {
       messageParams: {},
       source: "legacyBackend",
       operationOutcome: "unknown",
-      detail: fallbackMessage,
+      origin: { subsystem: "backend", adapter: "legacy" },
+      ...(fallbackDetail ? { detail: sanitizeBackendErrorMessage(fallbackDetail) } : {}),
     };
   }
 }
 
 function normalizeRawBackendError(error: unknown): BackendError | null {
-  if (typeof error === "string") {
-    try {
-      const parsed: unknown = JSON.parse(error);
-      return normalizeBackendError(parsed);
-    } catch {
-      return null;
-    }
-  }
   return normalizeBackendError(error);
+}
+
+function boundedFallbackText(error: unknown): string | undefined {
+  return boundedFallbackTextAtDepth(error, new WeakSet<object>(), 0);
+}
+
+function boundedFallbackTextAtDepth(error: unknown, seen: WeakSet<object>, depth: number): string | undefined {
+  if (depth > MAX_ERROR_PARSE_DEPTH) return undefined;
+
+  let text: string | undefined;
+  if (typeof error === "string") {
+    text = error;
+  } else if (error instanceof Error) {
+    text = error.message;
+  } else if (error && typeof error === "object") {
+    if (seen.has(error)) return undefined;
+    seen.add(error);
+    const candidate = error as Record<string, unknown>;
+    for (const key of ["message", "reason", "detail"]) {
+      if (typeof candidate[key] === "string") {
+        text = candidate[key];
+        break;
+      }
+    }
+    if (!text && "error" in candidate) text = boundedFallbackTextAtDepth(candidate.error, seen, depth + 1);
+    if (!text && "backendError" in candidate) text = boundedFallbackTextAtDepth(candidate.backendError, seen, depth + 1);
+  }
+  const normalized = text?.trim();
+  if (!normalized) return undefined;
+  return Array.from(normalized).slice(0, MAX_FALLBACK_CHARS).join("");
 }
 
 /**
@@ -117,6 +255,7 @@ function normalizeRawBackendError(error: unknown): BackendError | null {
 export function formatError(e: unknown): string {
   const backendError = normalizeBackendError(e);
   if (backendError?.detail) return sanitizeBackendErrorMessage(backendError.detail);
+  if (backendError) return backendError.code;
 
   if (e instanceof Error) {
     return sanitizeBackendErrorMessage(e.message);

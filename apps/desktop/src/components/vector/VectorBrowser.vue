@@ -8,6 +8,7 @@ import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import type { DatabaseType, MilvusCollectionSchema, MilvusFieldInfo, QueryResult } from "@/types/database";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const DataGrid = defineAsyncComponent(() => import("@/components/grid/DataGrid.vue"));
 const { t } = useI18n();
@@ -21,7 +22,22 @@ const props = defineProps<{
   collectionLabel?: string;
   databaseType?: DatabaseType;
   dimension?: number;
+  tenant?: string;
+  result?: QueryResult;
 }>();
+
+const emit = defineEmits<{
+  "update:result": [result: QueryResult | undefined];
+}>();
+
+interface VectorTabUiState {
+  operationMode?: VectorOperationMode;
+  requestText?: string;
+  requestIsDefault?: boolean;
+  searchVector?: string;
+  searchTopK?: number;
+}
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<VectorTabUiState>({}, "VectorBrowser");
 
 const loading = ref(false);
 const cancelling = ref(false);
@@ -29,12 +45,14 @@ const executionId = ref("");
 const elapsedSeconds = ref("0.0");
 const error = ref("");
 const statusMessage = ref("");
-const result = ref<QueryResult>(emptyResult());
-const operationMode = ref<VectorOperationMode>("browse");
-const requestText = ref("");
-const requestIsDefault = ref(true);
-const searchVector = ref("");
-const searchTopK = ref(10);
+const emptyResultValue = emptyResult();
+const result = computed(() => props.result ?? emptyResultValue);
+const operationMode = ref<VectorOperationMode>(restoredUiState.operationMode ?? "browse");
+const requestText = ref(restoredUiState.requestText ?? "");
+const requestIsDefault = ref(restoredUiState.requestIsDefault ?? true);
+const searchVector = ref(restoredUiState.searchVector ?? "");
+const searchTopK = ref(restoredUiState.searchTopK ?? 10);
+let initialRequestStateHandled = false;
 let loadingTimer: ReturnType<typeof setInterval> | undefined;
 const milvusSchema = ref<MilvusCollectionSchema>();
 const milvusDetailError = ref("");
@@ -89,9 +107,19 @@ const executeDisabled = computed(() => loading.value || !requestText.value.trim(
 watch(
   () => [props.connectionId, props.databaseType, props.database, props.collection] as const,
   () => {
+    if (!initialRequestStateHandled) {
+      initialRequestStateHandled = true;
+      if (restoredUiState.requestText !== undefined) {
+        if (props.databaseType === "milvus") void loadMilvusCollectionDetail();
+        return;
+      }
+      resetRequest();
+      if (props.databaseType === "milvus") void loadMilvusCollectionDetail();
+      return;
+    }
     invalidateRequest();
     resetRequest();
-    result.value = emptyResult();
+    emit("update:result", undefined);
     error.value = "";
     statusMessage.value = "";
     resetMilvusCollectionDetail();
@@ -99,6 +127,8 @@ watch(
   },
   { immediate: true },
 );
+
+trackUiState(() => ({ operationMode: operationMode.value, requestText: requestText.value, requestIsDefault: requestIsDefault.value, searchVector: searchVector.value, searchTopK: searchTopK.value }));
 
 watch(
   () => [operationMode.value, searchVector.value, searchTopK.value, collectionDimension.value] as const,
@@ -248,16 +278,19 @@ function defaultRequestText(databaseType: DatabaseType | undefined, database: st
   }
   if (databaseType === "chromadb") {
     const collectionId = collection || "collection-id";
+    const tenant = encodeURIComponent(props.tenant?.trim() || "default_tenant");
+    const chromaDatabase = encodeURIComponent(database.trim() || "default_database");
+    const collectionPath = `/api/v2/tenants/${tenant}/databases/${chromaDatabase}/collections/${encodeURIComponent(collectionId)}`;
     if (mode === "delete") {
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/delete\n${JSON.stringify({ ids: ["id1"] }, null, 2)}`;
+      return `POST ${collectionPath}/delete\n${JSON.stringify({ ids: ["id1"] }, null, 2)}`;
     }
     if (mode === "upsert") {
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [sampleVector()], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
+      return `POST ${collectionPath}/upsert\n${JSON.stringify({ ids: ["id1"], embeddings: [sampleVector()], documents: ["sample document"], metadatas: [{}] }, null, 2)}`;
     }
     if (mode === "search") {
-      return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/query\n${JSON.stringify({ query_embeddings: [tryParseVector(searchVector.value)], n_results: searchTopK.value, include: ["documents", "metadatas", "distances"] }, null, 2)}`;
+      return `POST ${collectionPath}/query\n${JSON.stringify({ query_embeddings: [tryParseVector(searchVector.value)], n_results: searchTopK.value, include: ["documents", "metadatas", "distances"] }, null, 2)}`;
     }
-    return `POST /api/v2/tenants/default_tenant/databases/default_database/collections/${encodeURIComponent(collectionId)}/get\n${JSON.stringify({ limit: 100, include: ["documents", "metadatas"] }, null, 2)}`;
+    return `POST ${collectionPath}/get\n${JSON.stringify({ limit: 100, include: ["documents", "metadatas"] }, null, 2)}`;
   }
   const collectionPath = pathSegment(collection);
   if (mode === "delete") {
@@ -387,7 +420,7 @@ function refreshResult() {
   return withLoading(async (id) => {
     const browseText = defaultRequestText(props.databaseType, props.database, props.collection, "browse");
     const nextResult = await executeRequestText(browseText);
-    if (executionId.value === id) result.value = nextResult;
+    if (executionId.value === id) emit("update:result", nextResult);
   });
 }
 
@@ -398,12 +431,12 @@ function runRequest() {
     const nextResult = await executeRequestText(requestText.value);
     if (executionId.value !== id) return;
     if (operationMode.value === "browse" || operationMode.value === "search") {
-      result.value = nextResult;
+      emit("update:result", nextResult);
     } else {
       const browseText = defaultRequestText(props.databaseType, props.database, props.collection, "browse", true);
       const browseResult = await executeRequestText(browseText);
       if (executionId.value !== id) return;
-      result.value = browseResult;
+      emit("update:result", browseResult);
       statusMessage.value = t("vector.operationSuccess");
     }
   });

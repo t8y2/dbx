@@ -4,6 +4,11 @@ import { delimiter, join } from "node:path";
 
 const tasks = [
   {
+    name: "connection-types",
+    command: "node",
+    args: ["scripts/sync-connection-types.mjs", "--check"],
+  },
+  {
     name: "format",
     command: "oxfmt",
     args: ["--check", "apps/desktop/src/**/*.{ts,vue}"],

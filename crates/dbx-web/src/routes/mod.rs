@@ -3,17 +3,21 @@ pub mod ai;
 pub mod app_settings;
 pub mod cloud_sync;
 pub mod connection;
+pub mod consul;
 pub mod data_compare;
 pub mod database_export;
 pub mod dialect;
+pub mod docs;
 pub mod document_store;
 pub mod etcd;
+pub(crate) mod export_download;
 pub mod hbase;
 pub mod history;
 pub mod jdbc;
 pub mod layout;
 pub mod mcp_policy;
 pub mod mongo;
+pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 pub mod nacos;
@@ -37,4 +41,8 @@ pub mod text_export;
 pub mod transfer;
 pub mod tunnel_profiles;
 pub mod update;
+pub mod vector;
 pub mod zookeeper;
+
+#[cfg(test)]
+mod object_cache_tests;

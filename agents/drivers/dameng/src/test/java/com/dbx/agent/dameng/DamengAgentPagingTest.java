@@ -21,6 +21,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DamengAgentPagingTest {
     @Test
+    void executeQueryPageSerializesBitValuesAsNumericBytes() {
+        assertBitResponse(Boolean.FALSE, "0");
+        assertBitResponse(Boolean.TRUE, "1");
+    }
+
+    @Test
+    void executeQueryPagePreservesNullBitAndBooleanValues() {
+        String nullBitResponse = executeSingleValueQuery("FLAG", Types.BIT, null, null, null);
+        String booleanResponse = executeSingleValueQuery("FLAG", Types.BOOLEAN, Boolean.TRUE, null, null);
+
+        assertFalse(nullBitResponse.contains("\"error\""), nullBitResponse);
+        assertTrue(nullBitResponse.contains("\"rows\":[[null]]"), nullBitResponse);
+        assertFalse(booleanResponse.contains("\"error\""), booleanResponse);
+        assertTrue(booleanResponse.contains("\"rows\":[[true]]"), booleanResponse);
+    }
+
+    @Test
     void executeQueryPageStringifiesTimestampValuesBeforeJsonRpcSerialization() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(
@@ -118,6 +135,40 @@ class DamengAgentPagingTest {
         assertFalse(response.contains("SerialBlob"), response);
     }
 
+    private static void assertBitResponse(Boolean value, String expected) {
+        String response = executeSingleValueQuery("FLAG", Types.BIT, value, null, null);
+
+        assertFalse(response.contains("\"error\""), response);
+        assertTrue(response.contains("\"rows\":[[" + expected + "]]"), response);
+        assertFalse(response.contains("\"rows\":[[" + value + "]]"), response);
+    }
+
+    private static String executeSingleValueQuery(
+        String columnLabel,
+        int sqlType,
+        Object objectValue,
+        String stringValue,
+        byte[] bytesValue
+    ) {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(
+            agent,
+            singleValueConnection(columnLabel, sqlType, objectValue, stringValue, bytesValue)
+        );
+        return handleRequest(new JsonRpcServer(agent), """
+            {
+              "jsonrpc": "2.0",
+              "id": 1,
+              "method": "execute_query_page",
+              "params": {
+                "sql": "SELECT FLAG FROM sample",
+                "schema": "SYS",
+                "pageSize": 100
+              }
+            }
+            """);
+    }
+
     private static Connection singleValueConnection(
         String columnLabel,
         int sqlType,
@@ -191,6 +242,24 @@ class DamengAgentPagingTest {
             if ("getObject".equals(name)) {
                 return objectValue;
             }
+            if ("getBoolean".equals(name)) {
+                if (objectValue instanceof Boolean value) {
+                    return value;
+                }
+                if (objectValue instanceof Number value) {
+                    return value.intValue() != 0;
+                }
+                return false;
+            }
+            if ("getByte".equals(name)) {
+                if (objectValue instanceof Boolean value) {
+                    return value ? (byte) 1 : (byte) 0;
+                }
+                if (objectValue instanceof Number value) {
+                    return value.byteValue();
+                }
+                return (byte) 0;
+            }
             if ("getString".equals(name)) {
                 return stringValue;
             }
@@ -198,7 +267,7 @@ class DamengAgentPagingTest {
                 return bytesValue;
             }
             if ("wasNull".equals(name)) {
-                return false;
+                return objectValue == null && stringValue == null && bytesValue == null;
             }
             if ("close".equals(name)) {
                 return null;

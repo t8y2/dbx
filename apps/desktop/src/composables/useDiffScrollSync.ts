@@ -18,6 +18,7 @@ export function useDiffScrollSync({ container, leftPane, rightPane, hunks }: Use
     if (!source || !target) return;
     isSyncingScroll.value = true;
     target.scrollTop = source.scrollTop;
+    target.scrollLeft = source.scrollLeft;
     isSyncingScroll.value = false;
   }
 

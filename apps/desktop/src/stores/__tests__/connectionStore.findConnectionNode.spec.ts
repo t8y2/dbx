@@ -37,6 +37,7 @@ describe("connection root lookup", () => {
     // markConnectionLost → clearConnectionNodeLoading 经连接根查找定位节点：
     // 分组内的连接必须能被找到并清除 loading
     store.markConnectionLost("pg-1", new Error("connection lost"));
+    await vi.dynamicImportSettled();
     expect(conn.isLoading).toBe(false);
   });
 
@@ -55,6 +56,7 @@ describe("connection root lookup", () => {
     (collidingDeepNode as { isLoading?: boolean }).isLoading = true;
 
     store.markConnectionLost("pg-1", new Error("connection lost"));
+    await vi.dynamicImportSettled();
     // 真正的连接根被清除 loading；深层碰撞节点不受影响
     expect(realRoot.isLoading).toBe(false);
     expect((collidingDeepNode as { isLoading?: boolean }).isLoading).toBe(true);

@@ -1,3 +1,5 @@
+import { matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
+
 export interface DataGridColumnLookupItem {
   index: number;
   name: string;
@@ -8,12 +10,13 @@ export interface DataGridColumnLookupItem {
 export interface DataGridColumnLookupOptions {
   columns: readonly string[];
   sourceColumns?: readonly (string | undefined)[];
+  columnComments?: readonly (string | undefined)[];
   displayableIndexes?: readonly number[];
   commentByColumn?: ReadonlyMap<string, string>;
 }
 
 function normalizedSearchText(value: string): string {
-  return value.trim().toLocaleLowerCase();
+  return value.trim();
 }
 
 function nonEmptyComment(value: string | undefined): string | undefined {
@@ -36,7 +39,9 @@ export function buildDataGridColumnLookupItems(options: DataGridColumnLookupOpti
   return indexes.map((index) => {
     const name = options.columns[index] ?? `#${index + 1}`;
     const sourceName = options.sourceColumns?.[index];
-    const comment = dataGridColumnCommentFor(options.commentByColumn, name, sourceName);
+    // A present ordinal array owns unresolved entries too; falling back by
+    // name there could leak another source's comment onto an aggregate/alias.
+    const comment = options.columnComments === undefined ? dataGridColumnCommentFor(options.commentByColumn, name, sourceName) : nonEmptyComment(options.columnComments[index]);
     return {
       index,
       name,
@@ -49,5 +54,5 @@ export function buildDataGridColumnLookupItems(options: DataGridColumnLookupOpti
 export function filterDataGridColumnLookupItems<ColumnLookupItem extends DataGridColumnLookupItem>(items: readonly ColumnLookupItem[], query: string): ColumnLookupItem[] {
   const normalizedQuery = normalizedSearchText(query);
   if (!normalizedQuery) return [...items];
-  return items.filter((item) => [item.name, item.sourceName, item.comment].filter((value): value is string => !!value).some((value) => value.toLocaleLowerCase().includes(normalizedQuery)));
+  return items.filter((item) => [item.name, item.sourceName, item.comment].filter((value): value is string => !!value).some((value) => matchesIdentifierSearch(value, normalizedQuery)));
 }

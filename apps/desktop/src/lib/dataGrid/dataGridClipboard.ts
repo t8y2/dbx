@@ -3,6 +3,7 @@ import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { parseClipboardTable } from "@/lib/dataGrid/gridSelection";
 
 export type DataGridPasteIntent = "native" | "block" | "paste";
+export type DataGridSelectAllIntent = "native" | "block" | "select";
 
 export interface DataGridPasteCell {
   rowOffset: number;
@@ -22,6 +23,17 @@ interface DataGridPasteEvent {
   target?: EventTarget | null;
   preventDefault(): void;
   stopPropagation(): void;
+}
+
+interface DataGridSelectAllEvent {
+  target?: EventTarget | null;
+  preventDefault(): void;
+}
+
+export function claimDataGridSelectAll(event: DataGridSelectAllEvent, loading: boolean, hasData: boolean): DataGridSelectAllIntent {
+  if (eventTargetUsesNativeClipboard(event) || (!loading && !hasData)) return "native";
+  event.preventDefault();
+  return loading ? "block" : "select";
 }
 
 export function claimDataGridPaste(event: DataGridPasteEvent, editable: boolean, hasSelection: boolean): DataGridPasteIntent {

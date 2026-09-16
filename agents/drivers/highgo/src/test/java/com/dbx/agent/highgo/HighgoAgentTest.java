@@ -29,6 +29,15 @@ class HighgoAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void preservesPublicFunctionsWhenSwitchingSchemas() {
+        HighgoAgent agent = new HighgoAgent();
+
+        Assertions.assertEquals("SET search_path TO \"app\", public", agent.setSchemaSQL("app"));
+        Assertions.assertEquals("SET search_path TO \"public\"", agent.setSchemaSQL("public"));
+        Assertions.assertEquals("SET search_path TO \"PUBLIC\", public", agent.setSchemaSQL("PUBLIC"));
+    }
+
+    @Test
     void readsViewSourceWithQuotedRegclassParameter() {
         HighgoAgent agent = new HighgoAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());

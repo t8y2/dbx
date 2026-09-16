@@ -1,3 +1,8 @@
+import type { DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
+import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, defaultDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
+
+export type DataGridTypeForegrounds = Record<DataGridTypeVisualKind, string>;
+
 export interface DataGridPaintTheme {
   background: string;
   border: string;
@@ -8,6 +13,8 @@ export interface DataGridPaintTheme {
   rowNew: string;
   rowDeleted: string;
   cellActive: string;
+  cellCrosshairRow: string;
+  cellCrosshairCol: string;
   cellDirty: string;
   cellSelected: string;
   cellSelectedDirty: string;
@@ -28,6 +35,7 @@ export interface DataGridPaintTheme {
   rowNumberTextNew: string;
   rowNumberTextEdited: string;
   rowNumberTextDeleted: string;
+  typeForegrounds: DataGridTypeForegrounds;
 }
 
 export const DATA_GRID_DARK_SEARCH_COLORS = {
@@ -37,6 +45,17 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
 } as const;
 export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(244, 248, 255)";
 export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
+// 十字行/列底色：混入背景的实色（color-mix(in srgb, var(--primary) P%, var(--background))），
+// 而非透明叠加——铺在浅底上的半透明色会被冲淡到几乎不可见，对比度不足正 jira #7276 的核心痛点。
+// 行/列占 primary 34%/50%（CSS 方向：P% primary + 其余 background）；现有 28%/40% 在浅色
+// 主题的大面积网格中仍不够醒目。列更重，交点通过 Canvas 的两次绘制进一步加深；选中格仍以显式
+// 填充与描边优先，故不会被十字高亮覆盖。
+// 常量按默认主题 soft-light/dark（primary/background）混合得出，作为 var 未设置 / 旧浏览器
+// 降级实色；color-mix 支持时网格组件的 CSS 变量会用它重新混成 —— 两处取值一致。
+export const DATA_GRID_LIGHT_CROSSHAIR_ROW_BG = "rgb(174, 195, 224)";
+export const DATA_GRID_LIGHT_CROSSHAIR_COL_BG = "rgb(142, 170, 210)";
+export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgb(75, 84, 98)";
+export const DATA_GRID_DARK_CROSSHAIR_COL_BG = "rgb(98, 111, 130)";
 export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
@@ -145,7 +164,8 @@ function mixRgb(first: RgbaColor, firstPercent: number, second: RgbaColor, secon
 }
 
 function parseColorMix(value: string): string | null {
-  const body = value.match(/^color-mix\(\s*in\s+oklab\s*,\s*(.*)\)$/i)?.[1];
+  // Crosshair tokens use sRGB so Canvas can reproduce the DOM blend exactly.
+  const body = value.match(/^color-mix\(\s*in\s+(?:srgb|oklab)\s*,\s*(.*)\)$/i)?.[1];
   if (!body) return null;
   const [firstRaw, secondRaw] = splitTopLevelCommas(body);
   if (!firstRaw || !secondRaw) return null;
@@ -251,6 +271,10 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNew = isDark ? "rgb(51, 51, 55)" : "rgb(243, 243, 243)";
   const rowDeleted = isDark ? "rgb(55, 31, 32)" : "rgb(255, 244, 244)";
   const cellActive = activeSurface;
+  // 浅/深都读 CSS 变量（--data-grid-cell-crosshair-*-bg 从 --primary 派生），保证 DOM 与
+  // Canvas 在不同主题/深浅模式下取到同一色源；固定常量仅作 var 未设置时的降级默认。
+  const cellCrosshairRow = paintToken(getVar, "--data-grid-cell-crosshair-row-bg", isDark ? DATA_GRID_DARK_CROSSHAIR_ROW_BG : DATA_GRID_LIGHT_CROSSHAIR_ROW_BG);
+  const cellCrosshairCol = paintToken(getVar, "--data-grid-cell-crosshair-col-bg", isDark ? DATA_GRID_DARK_CROSSHAIR_COL_BG : DATA_GRID_LIGHT_CROSSHAIR_COL_BG);
   const cellDirty = isDark ? "rgb(94, 75, 26)" : "rgb(255, 248, 230)";
   const cellSelected = isDark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)";
   const cellSelectedDirty = isDark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)";
@@ -266,6 +290,11 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNumberDeleted = isDark ? DATA_GRID_DARK_ROW_NUMBER_DELETED_BG : DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG;
   const rowNumberActive = activeSurface;
   const rowNumberSelected = isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)";
+  const typeDefaults = defaultDataGridTypeColors(isDark);
+  const typeForegrounds = { unknown: foreground } as DataGridTypeForegrounds;
+  for (const key of DATA_GRID_TYPE_COLOR_KEYS) {
+    typeForegrounds[key] = paintToken(getVar, dataGridTypeColorCssVar(key), typeDefaults[key]);
+  }
 
   return {
     background,
@@ -277,12 +306,14 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
     rowNew: isDark ? rowNew : paintToken(getVar, "--data-grid-row-new-bg", rowNew),
     rowDeleted: isDark ? rowDeleted : paintToken(getVar, "--data-grid-row-deleted-bg", rowDeleted),
     cellActive: isDark ? cellActive : paintToken(getVar, "--data-grid-cell-active-bg", cellActive),
-    cellDirty: isDark ? cellDirty : paintToken(getVar, "--data-grid-cell-dirty-bg", cellDirty),
-    cellSelected: isDark ? cellSelected : paintToken(getVar, "--data-grid-cell-selected-bg", cellSelected),
-    cellSelectedDirty: isDark ? cellSelectedDirty : paintToken(getVar, "--data-grid-cell-selected-dirty-bg", cellSelectedDirty),
-    cellSelectedBorder: isDark ? cellSelectedBorder : paintToken(getVar, "--data-grid-cell-selected-border", cellSelectedBorder),
-    cellSelectedSingle: isDark ? cellSelectedSingle : paintToken(getVar, "--data-grid-cell-selected-single-bg", cellSelectedSingle),
-    cellSelectedSingleBorder: isDark ? primary : paintToken(getVar, "--data-grid-cell-selected-single-border", primary),
+    cellCrosshairRow,
+    cellCrosshairCol,
+    cellDirty: paintToken(getVar, "--data-grid-cell-dirty-bg", cellDirty),
+    cellSelected: paintToken(getVar, "--data-grid-cell-selected-bg", cellSelected),
+    cellSelectedDirty: paintToken(getVar, "--data-grid-cell-selected-dirty-bg", cellSelectedDirty),
+    cellSelectedBorder: paintToken(getVar, "--data-grid-cell-selected-border", cellSelectedBorder),
+    cellSelectedSingle: paintToken(getVar, "--data-grid-cell-selected-single-bg", cellSelectedSingle),
+    cellSelectedSingleBorder: paintToken(getVar, "--data-grid-cell-selected-single-border", primary),
     cellHover: isDark ? cellHover : paintToken(getVar, "--data-grid-cell-hover-bg", cellHover),
     cellSearch: isDark ? cellSearch : paintToken(getVar, "--data-grid-cell-search-bg", cellSearch),
     cellCurrentSearch: isDark ? cellCurrentSearch : paintToken(getVar, "--data-grid-cell-current-search-bg", cellCurrentSearch),
@@ -292,10 +323,15 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
     rowNumberEdited: isDark ? rowNumberEdited : paintToken(getVar, "--data-grid-row-number-edited-bg", rowNumberEdited),
     rowNumberDeleted: isDark ? rowNumberDeleted : paintToken(getVar, "--data-grid-row-number-deleted-bg", rowNumberDeleted),
     rowNumberActive: isDark ? rowNumberActive : paintToken(getVar, "--data-grid-row-number-active-bg", rowNumberActive),
-    rowNumberSelected: isDark ? rowNumberSelected : paintToken(getVar, "--data-grid-row-number-selected-bg", rowNumberSelected),
+    rowNumberSelected: paintToken(getVar, "--data-grid-row-number-selected-bg", rowNumberSelected),
     rowNumberTextClean: mutedForeground,
     rowNumberTextNew: isDark ? "rgb(94, 233, 181)" : "rgb(0, 122, 85)",
     rowNumberTextEdited: isDark ? "rgb(255, 210, 48)" : "rgb(187, 77, 0)",
     rowNumberTextDeleted: destructive,
+    typeForegrounds,
   };
+}
+
+export function dataGridTypeForeground(theme: Pick<DataGridPaintTheme, "foreground" | "typeForegrounds">, kind: DataGridTypeVisualKind): string {
+  return theme.typeForegrounds[kind] ?? theme.foreground;
 }

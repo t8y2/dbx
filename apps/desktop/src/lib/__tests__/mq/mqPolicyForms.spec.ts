@@ -1,7 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { defaultMqPolicyForms, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { defaultMqPolicyForms, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
 
 describe("mqPolicyForms", () => {
+  it("keeps ordinary policy responses available", () => {
+    expect(policyAccessFromEffectivePolicies({ configs: {} })).toEqual({
+      readable: true,
+      unsupportedReason: undefined,
+    });
+  });
+
+  it("marks legacy Kafka configuration responses as unavailable with a reason", () => {
+    expect(
+      policyAccessFromEffectivePolicies({
+        configs: {},
+        configSupported: false,
+        unsupportedReason: "The broker does not support DescribeConfigs.",
+      }),
+    ).toEqual({
+      readable: false,
+      unsupportedReason: "The broker does not support DescribeConfigs.",
+    });
+  });
+
   it("hydrates forms from topic effective policies", () => {
     const forms = policyFormsFromEffectivePolicies(
       {

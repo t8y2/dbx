@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import type { EditableStructureIndex } from "@/lib/table/tableStructureEditorSql";
 
 export type TableStructureDialect = "mysql" | "postgres" | "sqlite" | "duckdb" | "sqlserver" | "oracle" | "h2" | "clickhouse" | "informix" | "influxdb" | "unsupported";
 export type TableStructureAlterStrategy = "none" | "direct" | "sqlite-rebuild";
@@ -14,6 +15,7 @@ export interface TableStructureCapabilities {
   alterType: boolean;
   alterNullability: boolean;
   alterDefault: boolean;
+  addPrimaryKey: boolean;
   alterPrimaryKey: boolean;
   reorderColumn: boolean;
   comment: boolean;
@@ -24,6 +26,7 @@ export interface TableStructureCapabilities {
   indexInclude: boolean;
   indexFilter: boolean;
   indexComment: boolean;
+  indexConcurrent: boolean;
   foreignKey: boolean;
 }
 
@@ -38,6 +41,7 @@ const unsupportedCapabilities: TableStructureCapabilities = {
   alterType: false,
   alterNullability: false,
   alterDefault: false,
+  addPrimaryKey: false,
   alterPrimaryKey: false,
   reorderColumn: false,
   comment: false,
@@ -48,6 +52,7 @@ const unsupportedCapabilities: TableStructureCapabilities = {
   indexInclude: false,
   indexFilter: false,
   indexComment: false,
+  indexConcurrent: false,
   foreignKey: false,
 };
 
@@ -55,6 +60,9 @@ function capabilities(overrides: Partial<TableStructureCapabilities>): TableStru
   const resolved = { ...unsupportedCapabilities, ...overrides };
   if (overrides.alterStrategy === undefined && resolved.alterExistingColumn) {
     resolved.alterStrategy = "direct";
+  }
+  if (resolved.alterPrimaryKey) {
+    resolved.addPrimaryKey = true;
   }
   return resolved;
 }
@@ -111,6 +119,12 @@ const postgresCapabilities = capabilities({
   foreignKey: true,
 });
 
+const postgresBefore11Capabilities = capabilities({
+  ...postgresCapabilities,
+  indexInclude: false,
+  indexConcurrent: true,
+});
+
 const redshiftCapabilities = capabilities({
   ...postgresCapabilities,
   createIndex: false,
@@ -120,6 +134,7 @@ const redshiftCapabilities = capabilities({
   indexInclude: false,
   indexFilter: false,
   indexComment: false,
+  addPrimaryKey: false,
   alterPrimaryKey: false,
 });
 
@@ -173,7 +188,7 @@ const sqlserverCapabilities = capabilities({
   indexComment: true,
 });
 
-const oracleCapabilities = capabilities({
+const oracleCompatibleCapabilities = capabilities({
   dialect: "oracle",
   createTable: true,
   addColumn: true,
@@ -190,15 +205,20 @@ const oracleCapabilities = capabilities({
   indexType: true,
 });
 
+const oracleCapabilities = capabilities({
+  ...oracleCompatibleCapabilities,
+  addPrimaryKey: true,
+});
+
 // Dameng (DM8): ALTER TABLE ... DROP PRIMARY KEY / ADD PRIMARY KEY is official DDL.
-// Keep separate from oracleCapabilities so UI cannot enable PK edit without BE drop SQL.
+// Keep separate from Oracle-compatible engines so UI cannot enable PK edits without verified DDL.
 const damengCapabilities = capabilities({
-  ...oracleCapabilities,
+  ...oracleCompatibleCapabilities,
   alterPrimaryKey: true,
 });
 
 const irisCapabilities = capabilities({
-  ...oracleCapabilities,
+  ...oracleCompatibleCapabilities,
   // IRIS exposes %DESCRIPTION at definition time but cannot alter persisted descriptions.
   comment: false,
 });
@@ -309,10 +329,10 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   starrocks: mysqlCapabilities,
   goldendb: mysqlCapabilities,
   sundb: mysqlCapabilities,
-  oscar: unsupportedCapabilities,
+  oscar: damengCapabilities,
   databend: mysqlCapabilities,
   gbase: gbaseCapabilities,
-  postgres: postgresCapabilities,
+  postgres: capabilities({ ...postgresCapabilities, indexConcurrent: true }),
   gaussdb: postgresCapabilities,
   kwdb: postgresCapabilities,
   opengauss: postgresCapabilities,
@@ -331,10 +351,10 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   sqlserver: sqlserverCapabilities,
   oracle: oracleCapabilities,
   dameng: damengCapabilities,
-  "oceanbase-oracle": oracleCapabilities,
+  "oceanbase-oracle": oracleCompatibleCapabilities,
   iris: irisCapabilities,
-  yashandb: oracleCapabilities,
-  xugu: oracleCapabilities,
+  yashandb: oracleCompatibleCapabilities,
+  xugu: oracleCompatibleCapabilities,
   h2: h2Capabilities,
   access: accessCapabilities,
   clickhouse: clickhouseCapabilities,
@@ -343,9 +363,27 @@ const capabilityByType: Partial<Record<DatabaseType, TableStructureCapabilities>
   manticoresearch: manticoreSearchCapabilities,
 };
 
-export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType): TableStructureCapabilities {
+function postgresMajorVersion(productVersion?: string): number | undefined {
+  const normalized = productVersion?.trim();
+  if (!normalized) return undefined;
+  const match = normalized.match(/\bPostgreSQL\s+(\d+)(?:\.\d+)?\b/i) ?? normalized.match(/^(\d+)(?:\.\d+)?\b/);
+  if (!match) return undefined;
+  const majorVersion = Number.parseInt(match[1], 10);
+  return Number.isFinite(majorVersion) ? majorVersion : undefined;
+}
+
+export function getTableStructureCapabilities(dbType?: DatabaseType, connectionDbType?: DatabaseType, productVersion?: string): TableStructureCapabilities {
   if (dbType === "sqlite" && connectionDbType === "sqlite") return nativeSqliteCapabilities;
+  if (dbType === "postgres") {
+    const majorVersion = postgresMajorVersion(productVersion);
+    if (majorVersion !== undefined && majorVersion < 11) return postgresBefore11Capabilities;
+  }
   return dbType ? (capabilityByType[dbType] ?? unsupportedCapabilities) : unsupportedCapabilities;
+}
+
+export function sanitizeStructureIndexesForCapabilities(indexes: EditableStructureIndex[], capabilities: Pick<TableStructureCapabilities, "indexInclude">): EditableStructureIndex[] {
+  if (capabilities.indexInclude || indexes.every((index) => index.includedColumns.length === 0)) return indexes;
+  return indexes.map((index) => (index.includedColumns.length === 0 ? index : { ...index, includedColumns: [] }));
 }
 
 export function canEditTableStructure(dbType?: DatabaseType): boolean {

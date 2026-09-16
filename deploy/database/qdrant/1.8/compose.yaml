@@ -4,8 +4,8 @@ services:
     container_name: dbx-qdrant-1.8
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6334}:6333"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-6335}:6334"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11200}:6333"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${QDRANT_GRPC_PORT:-11201}:6334"
     environment:
       QDRANT__SERVICE__API_KEY: "${DB_PASSWORD:-123456}"
     volumes:

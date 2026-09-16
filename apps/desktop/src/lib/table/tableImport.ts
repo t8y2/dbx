@@ -35,6 +35,14 @@ export interface TableImportProgressLike {
 
 export type TableImportWizardStep = "source" | "options" | "mapping" | "review" | "execution";
 
+export const TABLE_IMPORT_ENCODING_OPTIONS: ReadonlyArray<{ value: TableImportTextEncoding; labelKey: string }> = [
+  { value: "auto", labelKey: "tableImport.encodingAuto" },
+  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
+  { value: "gbk", labelKey: "tableImport.encodingGbk" },
+  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
+  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
+];
+
 export const TABLE_IMPORT_WIZARD_STEPS: TableImportWizardStep[] = ["source", "options", "mapping", "review", "execution"];
 
 export function formatTableImportElapsed(ms: number): string {
@@ -86,13 +94,20 @@ export interface TableImportParseSettings {
   emptyStringAsNull: boolean;
   sheetName?: string;
   jsonShape: TableImportJsonShape;
+  databaseType?: DatabaseType | null;
+}
+
+export function defaultTableImportEmptyStringAsNull(format: TableImportSourceFormat): boolean {
+  return format !== "excel";
 }
 
 export function buildTableImportParseOptions(settings: TableImportParseSettings): TableImportParseOptions {
   const isDelimited = settings.format === "csv" || settings.format === "tsv" || settings.format === "delimited";
+  // SQL 脚本与分隔文本一样是纯文本源，需要传递编码供后端解码（支持 GBK 等常见转储编码）
+  const isTextSource = isDelimited || settings.format === "sql";
   return {
     delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
-    encoding: isDelimited ? settings.textEncoding : null,
+    encoding: isTextSource ? settings.textEncoding : null,
     titleRow: settings.titleRow,
     dataStartRow: settings.dataStartRow,
     lastDataRow: settings.lastDataRow,
@@ -100,6 +115,8 @@ export function buildTableImportParseOptions(settings: TableImportParseSettings)
     emptyStringAsNull: settings.emptyStringAsNull,
     sheetName: settings.format === "excel" ? settings.sheetName || null : null,
     jsonShape: settings.format === "json" ? settings.jsonShape : null,
+    // SQL 脚本需要按源方言解析字符串转义与标识符大小写（取目标连接的数据库类型）
+    sqlDialect: settings.format === "sql" ? (settings.databaseType ?? null) : null,
   };
 }
 
@@ -239,6 +256,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       return "BIGINT";
     case "decimal":
       if (["postgres", "gaussdb", "opengauss", "redshift", "kingbase", "highgo", "uxdb", "kwdb", "vastbase"].includes(databaseType || "")) return "DOUBLE PRECISION";
+      if (databaseType === "sqlserver") return "FLOAT";
       if (databaseType === "sqlite" || databaseType === "rqlite" || databaseType === "turso" || databaseType === "cloudflare-d1") return "REAL";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "BINARY_DOUBLE";
       if (databaseType === "clickhouse") return "Float64";
@@ -262,7 +280,7 @@ export function importDataTypeForDatabase(inferredType: ImportInferredType, data
       if (databaseType === "sqlserver") return "NVARCHAR(MAX)";
       if (databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "dameng") return "CLOB";
       if (databaseType === "clickhouse") return "String";
-      if (["hive", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
+      if (["hive", "argo", "trino", "prestosql", "databricks"].includes(databaseType || "")) return "STRING";
       return "TEXT";
   }
 }

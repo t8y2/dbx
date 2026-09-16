@@ -38,6 +38,11 @@ test("detects binary image values from hex strings", () => {
   assert.equal(cellImagePreviewUrl("89504e470d0a1a0a"), null);
 });
 
+test("does not treat TDengine BINARY text as unprefixed image hex", () => {
+  assert.equal(cellImagePreviewUrl("89504e470d0a1a0a", "BINARY(16)", { databaseType: "tdengine" }), null);
+  assert.match(cellImagePreviewUrl("0x89504e470d0a1a0a", "BINARY(16)", { databaseType: "tdengine" }) ?? "", /^data:image\/png;base64,/);
+});
+
 test("can skip generated binary image previews while keeping URL previews", () => {
   assert.equal(cellImagePreviewUrl("0x89504e470d0a1a0a0000000d49484452", "longblob", { binary: false }), null);
   assert.equal(cellImagePreviewUrl("https://cdn.example.com/avatar.png", "longblob", { binary: false }), "https://cdn.example.com/avatar.png");

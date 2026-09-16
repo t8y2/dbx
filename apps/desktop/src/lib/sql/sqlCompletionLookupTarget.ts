@@ -46,7 +46,7 @@ function sqlStatementWithoutLeadingComments(statement: string): string {
   return remaining;
 }
 
-function sqlServerUseDatabase(statement: string): string | undefined {
+export function sqlServerUseDatabaseFromStatement(statement: string): string | undefined {
   const match = /^USE\s+(?:\[((?:[^\]]|\]\])*)\]|"((?:[^"]|"")*)"|([\p{L}_@#][\p{L}\p{N}_@$#]*))\s*;?\s*$/iu.exec(sqlStatementWithoutLeadingComments(statement));
   if (!match) return undefined;
   if (match[1] !== undefined) return match[1].replaceAll("]]", "]");
@@ -59,9 +59,39 @@ export function sqlServerUseDatabaseBeforeCursor(sql: string, cursor: number): s
   let database: string | undefined;
   for (const statement of executableStatementRanges(sql, "sqlserver")) {
     if (statement.from >= position || statement.to >= position) break;
-    database = sqlServerUseDatabase(statement.sql) ?? database;
+    database = sqlServerUseDatabaseFromStatement(statement.sql) ?? database;
   }
   return database;
+}
+
+export interface SqlServerLeadingUseScript {
+  querySql: string;
+  queryFrom: number;
+  queryTo: number;
+  database: string;
+}
+
+export function sqlServerLeadingUseScript(sql: string): SqlServerLeadingUseScript | undefined {
+  const statements = executableStatementRanges(sql, "sqlserver");
+  if (statements.length < 2) return undefined;
+  const query = statements[statements.length - 1]!;
+  let database: string | undefined;
+  for (const statement of statements.slice(0, -1)) {
+    database = sqlServerUseDatabaseFromStatement(statement.sql);
+    if (!database) return undefined;
+  }
+  return {
+    querySql: query.sql,
+    queryFrom: query.from,
+    queryTo: query.to,
+    database: database!,
+  };
+}
+
+export function replaceSqlServerLeadingUseQuery(sql: string, script: SqlServerLeadingUseScript, querySql: string): string {
+  const suffix = sql.slice(script.queryTo);
+  const replacement = /^\s*;/u.test(suffix) ? querySql.replace(/;\s*$/u, "") : querySql;
+  return `${sql.slice(0, script.queryFrom)}${replacement}${suffix}`;
 }
 
 function unclosedQuotedIdentifierPrefix(value: string, quoteStyle: "bracket" | "double"): string | undefined {

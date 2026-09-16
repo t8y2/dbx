@@ -32,4 +32,9 @@ describe("defaultDatabase selectable values", () => {
     expect(isDefaultDatabase({ db_type: "sqlite", database: "analytics" }, "analytics")).toBe(true);
     expect(resolveDefaultDatabase({ db_type: "sqlite", host: "primary.db", database: undefined }, ["analytics.db"])).toBe("analytics.db");
   });
+
+  it("matches PostgreSQL backend defaults when the configured database is empty", () => {
+    expect(resolveDefaultDatabase({ db_type: "postgres", database: "" }, [])).toBe("postgres");
+    expect(resolveDefaultDatabase({ db_type: "postgres", driver_profile: "cockroachdb", database: " " }, [])).toBe("defaultdb");
+  });
 });

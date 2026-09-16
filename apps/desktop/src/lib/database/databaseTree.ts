@@ -19,17 +19,26 @@ export function sortSidebarDatabases(databases: readonly DatabaseInfo[]): Databa
   return [...databases].sort((left, right) => sidebarNameCollator.compare(left.name, right.name));
 }
 
-export function buildDatabaseTreeNodes(connectionId: string, databases: DatabaseInfo[], options: { includeDefaultWhenEmpty?: boolean } = {}): TreeNode[] {
+export function buildDatabaseTreeNodes(
+  connectionId: string,
+  databases: DatabaseInfo[],
+  // `displayLabel` only rewrites the visible text. `id` and `database` keep the
+  // backend-reported name because that value round-trips to the agent — Cloud
+  // Spanner reports the full `projects/../instances/../databases/..` resource
+  // path and would break URL building if the shortened label were sent back.
+  options: { includeDefaultWhenEmpty?: boolean; displayLabel?: (name: string) => string } = {},
+): TreeNode[] {
   const nodes = sortSidebarDatabases(databases).flatMap((db) => {
     const name = db.name;
     if (!name.trim()) return [];
     return [
       {
         id: `${connectionId}:${name}`,
-        label: name,
+        label: options.displayLabel?.(name) || name,
         type: "database" as const,
         connectionId,
         database: name,
+        compatibilityMode: db.compatibility_mode?.trim() || undefined,
         isExpanded: false,
         children: [],
       },
@@ -79,6 +88,7 @@ export function buildDuckDbConnectionTreeNodes(connectionId: string, databases: 
         type: "database" as const,
         connectionId,
         database: name,
+        compatibilityMode: db.compatibility_mode?.trim() || undefined,
         isExpanded: false,
         children: [],
       },

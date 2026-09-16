@@ -77,7 +77,7 @@ async function loadData() {
       throw firstError;
     }
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   } finally {
     loading.value = false;
   }
@@ -100,7 +100,7 @@ async function installExtension(name: string) {
     await loadData();
     emit("changed");
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   } finally {
     installing.value = null;
   }
@@ -122,7 +122,7 @@ async function dropExtension(name: string) {
     await loadData();
     emit("changed");
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   } finally {
     dropping.value = null;
   }

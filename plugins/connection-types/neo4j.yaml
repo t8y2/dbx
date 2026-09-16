@@ -1,0 +1,32 @@
+schemaVersion: 1
+order: 560
+dbType: neo4j
+rustVariant: Neo4j
+label: Neo4j
+runtimeMode: agent
+mcpMode: bridge
+agentKey: neo4j
+driverStoreVisible: true
+driverStoreOrder: 26
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 7687
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

@@ -48,6 +48,17 @@ export function shortcutDisplayParts(shortcut?: string, platform = globalThis.na
   return shortcutDisplayOrder(parseShortcutParts(shortcut), platform);
 }
 
+export function canonicalShortcutKey(shortcut: string): string {
+  return shortcutDisplayParts(shortcut, "Win32")
+    .map((part) => {
+      if (part === "Mod") return "Ctrl";
+      if (part === "Plus") return "+";
+      return part;
+    })
+    .join("+")
+    .toLowerCase();
+}
+
 export function shortcutDisplayStrokes(shortcut?: string, platform = globalThis.navigator?.platform || ""): string[][] {
   return parseShortcutStrokes(shortcut).map((parts) => shortcutDisplayOrder(parts, platform));
 }

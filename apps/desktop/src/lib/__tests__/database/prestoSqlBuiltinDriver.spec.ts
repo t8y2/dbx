@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { PRESTOSQL_JDBC_DRIVER_COORDINATE, prestoSqlBuiltinDriverPaths, prestoSqlBuiltinDriverRow, prestoSqlMavenBundle } from "@/lib/database/prestoSqlBuiltinDriver";
+import { PRESTOSQL_JDBC_DRIVER_COORDINATE, PRESTOSQL_MANAGED_JDBC_DRIVER, prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
+import { managedJdbcDriverBundles, managedJdbcDriverRow } from "@/lib/database/managedJdbcDriver";
 import type { JdbcMavenBundleInfo } from "@/types/database";
 
 function bundle(coordinate: string, version = "350"): JdbcMavenBundleInfo {
@@ -28,7 +29,7 @@ function bundle(coordinate: string, version = "350"): JdbcMavenBundleInfo {
 
 describe("prestoSqlBuiltinDriver", () => {
   it("adds an uninstalled PrestoSQL row when the Maven bundle is absent", () => {
-    const row = prestoSqlBuiltinDriverRow([]);
+    const row = managedJdbcDriverRow(PRESTOSQL_MANAGED_JDBC_DRIVER, []);
 
     expect(row.db_type).toBe("prestosql");
     expect(row.label).toBe("PrestoSQL");
@@ -40,9 +41,9 @@ describe("prestoSqlBuiltinDriver", () => {
 
   it("marks PrestoSQL installed when its Maven coordinate is present", () => {
     const installed = bundle(PRESTOSQL_JDBC_DRIVER_COORDINATE);
-    const row = prestoSqlBuiltinDriverRow([bundle("com.mysql:mysql-connector-j:9.2.0"), installed]);
+    const row = managedJdbcDriverRow(PRESTOSQL_MANAGED_JDBC_DRIVER, [bundle("com.mysql:mysql-connector-j:9.2.0"), installed], { installed: true, compatible: true });
 
-    expect(prestoSqlMavenBundle([installed])?.id).toBe(installed.id);
+    expect(managedJdbcDriverBundles(PRESTOSQL_MANAGED_JDBC_DRIVER, [installed])[0]?.id).toBe(installed.id);
     expect(prestoSqlBuiltinDriverPaths([installed])).toEqual(["drivers/jdbc/presto-jdbc-350.jar"]);
     expect(row.installed).toBe(true);
     expect(row.installed_version).toBe("350");

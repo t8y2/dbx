@@ -1,0 +1,2586 @@
+{
+  "formatVersion": 1,
+  "project": {
+    "name": "Keycloak",
+    "databaseType": "postgres",
+    "database": "keycloak",
+    "schemas": [
+      "public"
+    ],
+    "generatedAt": "2026-08-03T14:40:30.253915+00:00",
+    "note": "# Keycloak\n\nFixture generated for the docs viewer conformance test."
+  },
+  "tables": [
+    {
+      "schema": "public",
+      "name": "client",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "full_scope_allowed",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "client_id",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "not_before",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "public_client",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "secret",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "base_url",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "bearer_only",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "management_url",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "surrogate_auth_required",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "realm_id",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "protocol",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "node_rereg_timeout",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "frontchannel_logout",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "consent_required",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "service_accounts_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "client_authenticator_type",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "root_url",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "description",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "registration_token",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "standard_flow_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "true",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "implicit_flow_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "direct_access_grants_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "always_display_in_console",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_7",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_client_id",
+          "columns": [
+            "client_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "uk_b71cjlbenv945rb6gcon438at",
+          "columns": [
+            "realm_id",
+            "client_id"
+          ],
+          "is_unique": true,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [],
+      "groupId": "client-registry",
+      "note": "Every registered OIDC/SAML client. Owned by the platform team.",
+      "noteSource": "LOCAL",
+      "shadowedNote": null,
+      "columnNotes": {
+        "client_id": {
+          "note": "The public client identifier callers send at the token endpoint.",
+          "source": "LOCAL",
+          "shadowed": null
+        }
+      },
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "client_attributes",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "client_id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "value",
+          "data_type": "text",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_3c",
+          "columns": [
+            "client_id",
+            "name"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_client_att_by_name_value",
+          "columns": [
+            "name",
+            "substr(value, 1, 255)"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk3c47c64beacca966",
+          "column": "client_id",
+          "ref_schema": "public",
+          "ref_table": "client",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "client_scope",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "realm_id",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "description",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "protocol",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_realm_clscope",
+          "columns": [
+            "realm_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "pk_cli_template",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "uk_cli_scope",
+          "columns": [
+            "realm_id",
+            "name"
+          ],
+          "is_unique": true,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "client_scope_attributes",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "scope_id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "value",
+          "data_type": "character varying(2048)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 2048
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_clscope_attrs",
+          "columns": [
+            "scope_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "pk_cl_tmpl_attr",
+          "columns": [
+            "scope_id",
+            "name"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk_cl_scope_attr_scope",
+          "column": "scope_id",
+          "ref_schema": "public",
+          "ref_table": "client_scope",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "composite_role",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "composite",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "child_role",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_composite_role",
+          "columns": [
+            "composite",
+            "child_role"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_composite",
+          "columns": [
+            "composite"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_composite_child",
+          "columns": [
+            "child_role"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk_a63wvekftu8jo1pnj81e7mce2",
+          "column": "composite",
+          "ref_schema": "public",
+          "ref_table": "keycloak_role",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "name": "fk_gr7thllb9lu8q4vqa4524jjy8",
+          "column": "child_role",
+          "ref_schema": "public",
+          "ref_table": "keycloak_role",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "credential",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "salt",
+          "data_type": "bytea",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "type",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "user_id",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "created_date",
+          "data_type": "bigint",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "user_label",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "secret_data",
+          "data_type": "text",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "credential_data",
+          "data_type": "text",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "priority",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "version",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_f",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_user_credential",
+          "columns": [
+            "user_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk_pfyr0glasqyl0dei3kl69r6v0",
+          "column": "user_id",
+          "ref_schema": "public",
+          "ref_table": "user_entity",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "federated_identity",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "identity_provider",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "realm_id",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "federated_user_id",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "federated_username",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "token",
+          "data_type": "text",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "user_id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_40",
+          "columns": [
+            "identity_provider",
+            "user_id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_fedidentity_feduser",
+          "columns": [
+            "federated_user_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_fedidentity_user",
+          "columns": [
+            "user_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk404288b92ef007a6",
+          "column": "user_id",
+          "ref_schema": "public",
+          "ref_table": "user_entity",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "keycloak_role",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "client_realm_constraint",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "client_role",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "description",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "realm_id",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "client",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "realm",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        }
+      ],
+      "indexes": [
+        {
+          "name": "UK_J3RWUVD56ONTGSUHOGM184WW2-2",
+          "columns": [
+            "name",
+            "client_realm_constraint"
+          ],
+          "is_unique": true,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "constraint_a",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_keycloak_role_client",
+          "columns": [
+            "client"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_keycloak_role_realm",
+          "columns": [
+            "realm"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk_6vyqfe4cn4wlq8r6kt5vdsj5c",
+          "column": "realm",
+          "ref_schema": "public",
+          "ref_table": "realm",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "protocol_mapper",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "protocol",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "protocol_mapper_name",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "client_id",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "client_scope_id",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_pcm",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_clscope_protmap",
+          "columns": [
+            "client_scope_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_protocol_mapper_client",
+          "columns": [
+            "client_id"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk_cli_scope_mapper",
+          "column": "client_scope_id",
+          "ref_schema": "public",
+          "ref_table": "client_scope",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "name": "fk_pcm_realm",
+          "column": "client_id",
+          "ref_schema": "public",
+          "ref_table": "client",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "protocol_mapper_config",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "protocol_mapper_id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "value",
+          "data_type": "text",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_pmconfig",
+          "columns": [
+            "protocol_mapper_id",
+            "name"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [
+        {
+          "name": "fk_pmconfig",
+          "column": "protocol_mapper_id",
+          "ref_schema": "public",
+          "ref_table": "protocol_mapper",
+          "ref_column": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "realm",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "access_code_lifespan",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "user_action_lifespan",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "access_token_lifespan",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "account_theme",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "admin_theme",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "email_theme",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "events_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "events_expiration",
+          "data_type": "bigint",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "login_theme",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "name",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "not_before",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "password_policy",
+          "data_type": "character varying(2550)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 2550
+        },
+        {
+          "name": "registration_allowed",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "remember_me",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "reset_password_allowed",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "social",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "ssl_required",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "sso_idle_timeout",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "sso_max_lifespan",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "update_profile_on_soc_login",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "verify_email",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "master_admin_client",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "login_lifespan",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "internationalization_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "default_locale",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "reg_email_as_username",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "admin_events_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "admin_events_details_enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "edit_username_allowed",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "otp_policy_counter",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "otp_policy_window",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "1",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "otp_policy_period",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "30",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "otp_policy_digits",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "6",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "otp_policy_alg",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": "'HmacSHA1'::character varying",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "otp_policy_type",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": "'totp'::character varying",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "browser_flow",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "registration_flow",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "direct_grant_flow",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "reset_credentials_flow",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "client_auth_flow",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "offline_session_idle_timeout",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "revoke_refresh_token",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "access_token_life_implicit",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "login_with_email_allowed",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "true",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "duplicate_emails_allowed",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "docker_auth_flow",
+          "data_type": "character varying(36)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "refresh_token_max_reuse",
+          "data_type": "integer",
+          "is_nullable": true,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "allow_user_managed_access",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "sso_max_lifespan_remember_me",
+          "data_type": "integer",
+          "is_nullable": false,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "sso_idle_timeout_remember_me",
+          "data_type": "integer",
+          "is_nullable": false,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "default_role",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_4a",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_realm_master_adm_cli",
+          "columns": [
+            "master_admin_client"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "uk_orvsdmla56612eaefiq6wl5oi",
+          "columns": [
+            "name"
+          ],
+          "is_unique": true,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    },
+    {
+      "schema": "public",
+      "name": "user_entity",
+      "kind": "TABLE",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "character varying(36)",
+          "is_nullable": false,
+          "column_default": null,
+          "is_primary_key": true,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 36
+        },
+        {
+          "name": "email",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "email_constraint",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "email_verified",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "enabled",
+          "data_type": "boolean",
+          "is_nullable": false,
+          "column_default": "false",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "federation_link",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "first_name",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "last_name",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "realm_id",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "username",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "created_timestamp",
+          "data_type": "bigint",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        },
+        {
+          "name": "service_account_client_link",
+          "data_type": "character varying(255)",
+          "is_nullable": true,
+          "column_default": null,
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": 255
+        },
+        {
+          "name": "not_before",
+          "data_type": "integer",
+          "is_nullable": false,
+          "column_default": "0",
+          "is_primary_key": false,
+          "extra": null,
+          "comment": null,
+          "numeric_precision": null,
+          "numeric_scale": null,
+          "character_maximum_length": null
+        }
+      ],
+      "indexes": [
+        {
+          "name": "constraint_fb",
+          "columns": [
+            "id"
+          ],
+          "is_unique": true,
+          "is_primary": true,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_user_email",
+          "columns": [
+            "email"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "idx_user_service_account",
+          "columns": [
+            "realm_id",
+            "service_account_client_link"
+          ],
+          "is_unique": false,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "uk_dykn684sl8up1crfei6eckhd7",
+          "columns": [
+            "realm_id",
+            "email_constraint"
+          ],
+          "is_unique": true,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        },
+        {
+          "name": "uk_ru8tt6t700s9v50bu18ws5ha6",
+          "columns": [
+            "realm_id",
+            "username"
+          ],
+          "is_unique": true,
+          "is_primary": false,
+          "filter": null,
+          "index_type": "btree",
+          "included_columns": null,
+          "comment": null
+        }
+      ],
+      "foreignKeys": [],
+      "groupId": null,
+      "note": null,
+      "noteSource": "NONE",
+      "shadowedNote": null,
+      "columnNotes": {},
+      "estimatedRows": null,
+      "viewDefinition": null
+    }
+  ],
+  "relationships": [
+    {
+      "id": "public.client_attributes:fk3c47c64beacca966:client_id:client:id",
+      "name": "fk3c47c64beacca966",
+      "from": {
+        "schema": "public",
+        "table": "client_attributes",
+        "column": "client_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "client",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.client_scope_attributes:fk_cl_scope_attr_scope:scope_id:client_scope:id",
+      "name": "fk_cl_scope_attr_scope",
+      "from": {
+        "schema": "public",
+        "table": "client_scope_attributes",
+        "column": "scope_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "client_scope",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.composite_role:fk_a63wvekftu8jo1pnj81e7mce2:composite:keycloak_role:id",
+      "name": "fk_a63wvekftu8jo1pnj81e7mce2",
+      "from": {
+        "schema": "public",
+        "table": "composite_role",
+        "column": "composite"
+      },
+      "to": {
+        "schema": "public",
+        "table": "keycloak_role",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.composite_role:fk_gr7thllb9lu8q4vqa4524jjy8:child_role:keycloak_role:id",
+      "name": "fk_gr7thllb9lu8q4vqa4524jjy8",
+      "from": {
+        "schema": "public",
+        "table": "composite_role",
+        "column": "child_role"
+      },
+      "to": {
+        "schema": "public",
+        "table": "keycloak_role",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.credential:fk_pfyr0glasqyl0dei3kl69r6v0:user_id:user_entity:id",
+      "name": "fk_pfyr0glasqyl0dei3kl69r6v0",
+      "from": {
+        "schema": "public",
+        "table": "credential",
+        "column": "user_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "user_entity",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.federated_identity:fk404288b92ef007a6:user_id:user_entity:id",
+      "name": "fk404288b92ef007a6",
+      "from": {
+        "schema": "public",
+        "table": "federated_identity",
+        "column": "user_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "user_entity",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.keycloak_role:fk_6vyqfe4cn4wlq8r6kt5vdsj5c:realm:realm:id",
+      "name": "fk_6vyqfe4cn4wlq8r6kt5vdsj5c",
+      "from": {
+        "schema": "public",
+        "table": "keycloak_role",
+        "column": "realm"
+      },
+      "to": {
+        "schema": "public",
+        "table": "realm",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.protocol_mapper:fk_cli_scope_mapper:client_scope_id:client_scope:id",
+      "name": "fk_cli_scope_mapper",
+      "from": {
+        "schema": "public",
+        "table": "protocol_mapper",
+        "column": "client_scope_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "client_scope",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.protocol_mapper:fk_pcm_realm:client_id:client:id",
+      "name": "fk_pcm_realm",
+      "from": {
+        "schema": "public",
+        "table": "protocol_mapper",
+        "column": "client_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "client",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    },
+    {
+      "id": "public.protocol_mapper_config:fk_pmconfig:protocol_mapper_id:protocol_mapper:id",
+      "name": "fk_pmconfig",
+      "from": {
+        "schema": "public",
+        "table": "protocol_mapper_config",
+        "column": "protocol_mapper_id"
+      },
+      "to": {
+        "schema": "public",
+        "table": "protocol_mapper",
+        "column": "id"
+      },
+      "cardinality": "MANY_TO_ONE",
+      "onUpdate": "NO ACTION",
+      "onDelete": "NO ACTION"
+    }
+  ],
+  "groups": [
+    {
+      "id": "client-registry",
+      "name": "Client Registry",
+      "hue": 210,
+      "note": "Tables describing registered clients and their protocol mappers."
+    }
+  ],
+  "enums": [],
+  "warnings": [
+    {
+      "kind": "orphanedNotes",
+      "count": 1
+    }
+  ]
+}

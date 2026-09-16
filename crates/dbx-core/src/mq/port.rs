@@ -18,6 +18,13 @@ pub trait MessageQueueAdmin: Send + Sync {
     /// Connectivity test; returns cluster/version info.
     async fn test_connection(&self) -> Result<MqClusterInfo, String>;
 
+    /// When true, the adapter's build path already validated connectivity (e.g.
+    /// RocketMQ agent `connect` RPC). Callers may skip an immediate follow-up
+    /// `test_connection` on first build, but should still test on cache reuse.
+    fn build_includes_connect_test(&self) -> bool {
+        false
+    }
+
     // ---- Tenants ----
     async fn list_tenants(&self) -> Result<Vec<TenantInfo>, String>;
     async fn get_tenant(&self, name: &str) -> Result<TenantInfo, String>;
@@ -142,6 +149,20 @@ pub trait MessageQueueAdmin: Send + Sync {
 
     // ---- Subscriptions ----
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String>;
+
+    /// Second-pass enrichment for subscription rows (e.g. RocketMQ online members/topics).
+    /// Default reuses [`list_subscriptions`]; RocketMQ overrides with `enrich: true`.
+    async fn enrich_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
+        self.list_subscriptions(topic).await
+    }
+
+    /// Kafka-only cluster-wide consumer group snapshot. Other MQ systems keep
+    /// the default unsupported response instead of leaking Kafka concepts into
+    /// their existing subscription APIs.
+    async fn get_kafka_consumer_group_snapshot(&self) -> Result<KafkaConsumerGroupSnapshot, String> {
+        Err("Kafka consumer group snapshots are not supported by this MQ system".to_string())
+    }
+
     async fn create_subscription(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String>;
     async fn delete_subscription(&self, topic: &TopicRef, sub: &str, force: bool) -> Result<(), String>;
     async fn skip_messages(&self, topic: &TopicRef, sub: &str, count: SkipCount) -> Result<(), String>;
@@ -153,7 +174,7 @@ pub trait MessageQueueAdmin: Send + Sync {
         sub: &str,
         count: u32,
         options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String>;
+    ) -> Result<PeekMessagesResult, String>;
     async fn expire_messages(&self, topic: &TopicRef, sub: &str, expire_seconds: i64) -> Result<(), String>;
 
     /// RocketMQ: read subscription group config from broker metadata.

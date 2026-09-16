@@ -1,0 +1,41 @@
+schemaVersion: 1
+order: 100
+dbType: sqlserver
+rustVariant: SqlServer
+label: SQL Server
+dialect: SQL Server
+runtimeMode: native
+mcpMode: bridge
+driverProfiles:
+  - profile: sqlserver-legacy
+    agentKey: sqlserver-legacy
+    label: SQL Server legacy compatibility component
+    storeVisible: true
+    storeOrder: 47
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: false
+defaultPort: 1433
+traits:
+  schemaAware: true
+  databaseSchemaQualified: true
+  treeSchema: true
+  diagramSql: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: true
+  sqlExplain: true
+  userAdmin: false
+  driverManagement: false

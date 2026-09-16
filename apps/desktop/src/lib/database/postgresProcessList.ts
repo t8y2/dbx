@@ -149,7 +149,7 @@ export function mapPgProcessRows(result: QueryResult | null | undefined): PgProc
 }
 
 /**
- * Build a `SELECT pg_terminate_backend(<pid>)` statement. `pid` is validated as a
+ * Build a `SELECT pg_cancel_backend(<pid>)` statement. `pid` is validated as a
  * finite positive integer (never interpolated as free text) so there is no
  * injection path.
  */
@@ -159,39 +159,39 @@ function validateBackendPid(pid: number): void {
   }
 }
 
-export function buildPgKillSql(pid: number): string {
+export function buildPgCancelQuerySql(pid: number): string {
   validateBackendPid(pid);
-  return `SELECT pg_terminate_backend(${pid})`;
+  return `SELECT pg_cancel_backend(${pid})`;
 }
 
-export function buildKingbaseKillSql(pid: number): string {
+export function buildKingbaseCancelQuerySql(pid: number): string {
   validateBackendPid(pid);
-  return `SELECT sys_terminate_backend(${pid})`;
+  return `SELECT sys_cancel_backend(${pid})`;
 }
 
-export function buildKingbasePgKillSql(pid: number): string {
+export function buildKingbasePgCancelQuerySql(pid: number): string {
   validateBackendPid(pid);
-  return `SELECT pg_terminate_backend(${pid})`;
+  return `SELECT pg_cancel_backend(${pid})`;
 }
 
-/** Return an error when PostgreSQL declines to terminate the target backend. */
-export function pgKillResultError(results: QueryResult[]): string | null {
-  return backendKillResultError(results, "pg_terminate_backend");
+/** Return an error when PostgreSQL reports that no running query was canceled. */
+export function pgCancelQueryResultError(results: QueryResult[]): string | null {
+  return backendCancelQueryResultError(results, "pg_cancel_backend");
 }
 
-export function kingbaseKillResultError(results: QueryResult[]): string | null {
-  return backendKillResultError(results, "sys_terminate_backend");
+export function kingbaseCancelQueryResultError(results: QueryResult[]): string | null {
+  return backendCancelQueryResultError(results, "sys_cancel_backend");
 }
 
-export function kingbasePgKillResultError(results: QueryResult[]): string | null {
-  return backendKillResultError(results, "pg_terminate_backend");
+export function kingbasePgCancelQueryResultError(results: QueryResult[]): string | null {
+  return backendCancelQueryResultError(results, "pg_cancel_backend");
 }
 
-function backendKillResultError(results: QueryResult[], functionName: string): string | null {
+function backendCancelQueryResultError(results: QueryResult[], functionName: string): string | null {
   const result = results.find((item) => item.execution_error !== true);
   const value = result?.rows?.[0]?.[0];
   if (value === true || value === 1 || String(value).toLowerCase() === "t" || String(value).toLowerCase() === "true") return null;
-  return `${functionName} did not terminate the backend`;
+  return `${functionName} did not cancel a running query`;
 }
 
 /** Detect the undefined-column failure produced by pre-9.6 pg_stat_activity. */
@@ -210,6 +210,6 @@ export function isKingbaseOwnSessionCatalogCompatibilityError(error: unknown): b
   return isMissingKingbaseSysFunction(error, ["sys_backend_pid"]);
 }
 
-export function isKingbaseTerminateCatalogCompatibilityError(error: unknown): boolean {
-  return isMissingKingbaseSysFunction(error, ["sys_terminate_backend"]);
+export function isKingbaseCancelCatalogCompatibilityError(error: unknown): boolean {
+  return isMissingKingbaseSysFunction(error, ["sys_cancel_backend"]);
 }

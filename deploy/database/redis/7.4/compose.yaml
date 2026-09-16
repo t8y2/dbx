@@ -8,7 +8,7 @@ services:
       # Keep the password in container env so CMD-SHELL can quote it safely.
       REDIS_PASSWORD: "${DB_PASSWORD:-123456}"
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-6380}:6379"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10501}:6379"
     volumes:
       - data:/data
     healthcheck:

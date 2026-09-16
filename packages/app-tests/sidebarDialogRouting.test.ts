@@ -6,6 +6,7 @@ const connectionTree = readFileSync("apps/desktop/src/components/sidebar/Connect
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
 const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
 const dialogHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeItemDialogs.vue", "utf8");
+const objectBrowser = readFileSync("apps/desktop/src/components/objects/ObjectBrowser.vue", "utf8");
 const dialogState = readFileSync("apps/desktop/src/components/sidebar/sidebarTreeDialogState.ts", "utf8");
 const visibleDatabasesDialog = readFileSync("apps/desktop/src/components/sidebar/VisibleDatabasesDialog.vue", "utf8");
 const visibleSchemasDialog = readFileSync("apps/desktop/src/components/sidebar/VisibleSchemasDialog.vue", "utf8");
@@ -39,6 +40,16 @@ test("remaining form dialogs render once at tree level and keep confirm/cancel b
   assert.match(dialogHost, /@click="confirmCreateDatabase"/);
   assert.match(dialogHost, /v-model:open="showPasteDialog"/);
   assert.match(dialogHost, /@click="confirmPasteTable"/);
+});
+
+test("rename dialogs preserve their layout while scrolling unbounded identifiers", () => {
+  const previewClass = "max-h-32 min-w-0 max-w-full overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap";
+  const errorClass = "min-w-0 max-w-full overflow-x-auto text-sm text-destructive";
+
+  assert.equal(occurrences(dialogHost, previewClass), 2);
+  assert.equal(occurrences(dialogHost, errorClass), 2);
+  assert.ok(objectBrowser.includes(previewClass));
+  assert.ok(objectBrowser.includes(errorClass));
 });
 
 test("dialog controller routing preserves shared open-flag refs instead of spreading them", () => {

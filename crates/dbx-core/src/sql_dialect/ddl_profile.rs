@@ -78,6 +78,23 @@ pub enum RenameColumnSyntax {
     SqlServerSpRename,
 }
 
+/// Column DDL that cannot use the generic `ADD COLUMN` / `ALTER COLUMN` forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnDdlSyntax {
+    Generic,
+    /// SQL Server uses `ADD` without `COLUMN`, a full definition for
+    /// `ALTER COLUMN`, and separate default-constraint objects.
+    SqlServer,
+}
+
+/// Standalone table and column comment representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentDdlSyntax {
+    Generic,
+    /// SQL Server stores comments in the `MS_Description` extended property.
+    SqlServerExtendedProperty,
+}
+
 /// DDL generation profile for one [`DatabaseType`].
 #[derive(Debug, Clone, Copy)]
 pub struct DdlDialectProfile {
@@ -86,6 +103,11 @@ pub struct DdlDialectProfile {
     pub auto_inc: AutoIncSyntax,
     /// When false, display widths like `INT(11)` are stripped if no type_map hit.
     pub supports_display_width: bool,
+    /// Whether this target's VARCHAR/CHARACTER VARYING/NVARCHAR syntax rejects a
+    /// missing length (e.g. `VARCHAR` with no length is a MySQL syntax error).
+    /// Distinct from `supports_display_width`: that flag is about whether the
+    /// target *prints* MySQL-style `INT(11)` widths, not whether VARCHAR needs one.
+    pub requires_explicit_varchar_length: bool,
     /// Cap for length params when applying `{}` templates (e.g. Access TEXT max 255).
     pub max_varchar_len: Option<u32>,
     /// MySQL-style inline `COMMENT '...'` on columns.
@@ -96,6 +118,12 @@ pub struct DdlDialectProfile {
     pub drop_index_uses_on_table: bool,
     /// `DROP FOREIGN KEY` (MySQL) vs `DROP CONSTRAINT`.
     pub drop_fk_as_foreign_key: bool,
+    /// `DROP TABLE t CASCADE` is accepted. Oracle's `CASCADE CONSTRAINTS` is a
+    /// different clause and does not count.
+    pub drop_table_supports_cascade: bool,
+    /// `DROP TABLE IF EXISTS t` is valid grammar. False for Oracle (pre-23c),
+    /// Access, Firebird, Db2, Informix, SAP HANA and Teradata.
+    pub drop_table_supports_if_exists: bool,
     /// Index method placement.
     pub index_type_placement: IndexTypePlacement,
     /// `INCLUDE (cols)` on indexes.
@@ -108,8 +136,10 @@ pub struct DdlDialectProfile {
     pub table_comment_via_alter: bool,
     /// Standalone column comment SQL is unsupported (MySQL needs MODIFY COLUMN).
     pub column_comment_via_modify_only: bool,
+    pub comment_ddl: CommentDdlSyntax,
     pub trigger_template: TriggerTemplate,
     pub rename_column: RenameColumnSyntax,
+    pub column_ddl: ColumnDdlSyntax,
     /// MySQL `MODIFY COLUMN` vs ANSI `ALTER COLUMN … TYPE/SET`.
     pub alter_uses_modify_column: bool,
     /// Batch multiple alter clauses in one `ALTER TABLE` statement.
@@ -141,6 +171,9 @@ pub struct DdlDialectProfile {
     pub rule_drop_template: Option<&'static str>,
     /// `ALTER {object_type} {name} OWNER TO {owner};`
     pub owner_alter_template: Option<&'static str>,
+    /// `DROP TABLE {table}{cascade};` — the caller quotes `{table}` itself. Engines
+    /// that drop a differently-named object override the whole shape.
+    pub drop_table_template: &'static str,
     /// Optional session lock-timeout preamble for generated scripts.
     pub lock_timeout_sql: Option<&'static str>,
     /// Data-driven base-type rewrites for this target (empty → rely on matrix / normalize only).
@@ -176,6 +209,14 @@ impl DdlDialectProfile {
         }
     }
 
+    pub fn alter_modify_keyword(&self) -> &'static str {
+        if self.database_type == DatabaseType::Dameng {
+            "MODIFY"
+        } else {
+            "MODIFY COLUMN"
+        }
+    }
+
     /// Replace `{key}` placeholders. Unknown keys are left unchanged.
     pub fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
         let mut out = template.to_string();
@@ -193,8 +234,14 @@ const SEQ_CREATE: &str =
 const SEQ_ALTER: &str =
     "ALTER SEQUENCE {name} AS {data_type} START WITH {start_value} INCREMENT BY {increment} MINVALUE {min_value} MAXVALUE {max_value} {cycle};";
 const SEQ_DROP: &str = "DROP SEQUENCE {name}{cascade};";
+const SQLSERVER_FN_DROP: &str = "DROP FUNCTION {name};";
+const SQLSERVER_SEQ_ALTER: &str =
+    "ALTER SEQUENCE {name} RESTART WITH {start_value} INCREMENT BY {increment} MINVALUE {min_value} MAXVALUE {max_value} {cycle};";
 const RULE_DROP: &str = "DROP RULE IF EXISTS {rule_name} ON {table_name}{cascade};";
 const OWNER_ALTER: &str = "ALTER {object_type} {name} OWNER TO {owner};";
+/// Shared ANSI `DROP TABLE` shape. `{if_exists}` is deliberately absent: whether a
+/// dialect accepts `IF EXISTS` is a capability flag, not part of the rendered shape.
+const DROP_TABLE: &str = "DROP TABLE {table}{cascade};";
 
 // ---------------------------------------------------------------------------
 // Type maps (data only — no per-database logic at call sites)
@@ -292,19 +339,24 @@ fn mysql_family(db: DatabaseType) -> DdlDialectProfile {
         quote: QuoteStyle::Backtick,
         auto_inc: AutoIncSyntax::Suffix(" AUTO_INCREMENT"),
         supports_display_width: true,
+        requires_explicit_varchar_length: true,
         max_varchar_len: Some(65_535),
         inline_column_comment: true,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: true,
         drop_fk_as_foreign_key: true,
+        drop_table_supports_cascade: false,
+        drop_table_supports_if_exists: true,
         index_type_placement: IndexTypePlacement::UsingBeforeOn,
         index_supports_include: false,
         index_supports_filter: false,
         index_supports_comment: true,
         table_comment_via_alter: true,
         column_comment_via_modify_only: true,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::MysqlStyle,
         rename_column: RenameColumnSyntax::MysqlChangeColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: true,
         grant_uses_mysql_user_syntax: true,
         warn_fk_needs_table_rebuild: false,
@@ -324,6 +376,7 @@ fn mysql_family(db: DatabaseType) -> DdlDialectProfile {
         sequence_drop_template: None,
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: Some("SET SESSION lock_wait_timeout = 3;"),
         type_map: &[],
     }
@@ -335,19 +388,24 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         quote: QuoteStyle::DoubleQuote,
         auto_inc: AutoIncSyntax::PostgresSequence,
         supports_display_width: false,
+        requires_explicit_varchar_length: false,
         max_varchar_len: None,
         inline_column_comment: false,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        drop_table_supports_cascade: true,
+        drop_table_supports_if_exists: true,
         index_type_placement: IndexTypePlacement::UsingSuffix,
         index_supports_include: true,
         index_supports_filter: true,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::PostgresStyle,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -367,6 +425,7 @@ fn postgres_family(db: DatabaseType) -> DdlDialectProfile {
         sequence_drop_template: Some(SEQ_DROP),
         rule_drop_template: Some(RULE_DROP),
         owner_alter_template: Some(OWNER_ALTER),
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: Some("SET lock_timeout = '3s';"),
         type_map: &[],
     }
@@ -378,19 +437,28 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
         quote: QuoteStyle::UnquotedUpper,
         auto_inc: AutoIncSyntax::Suffix(" GENERATED BY DEFAULT AS IDENTITY"),
         supports_display_width: false,
+        // Oracle's VARCHAR2 also rejects a missing length in real DDL, but this
+        // is left false (unverified, no Oracle instance in scope for this
+        // change) rather than asserting untested cross-dialect behavior.
+        requires_explicit_varchar_length: false,
         max_varchar_len: Some(4000),
         inline_column_comment: false,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        // Oracle spells it `CASCADE CONSTRAINTS`, and `IF EXISTS` only landed in 23c.
+        drop_table_supports_cascade: false,
+        drop_table_supports_if_exists: false,
         index_type_placement: IndexTypePlacement::None,
         index_supports_include: false,
         index_supports_filter: false,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -411,6 +479,7 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
         sequence_drop_template: Some(SEQ_DROP),
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: Some("ALTER SESSION SET DDL_LOCK_TIMEOUT = 3;"),
         type_map: &[],
     }
@@ -419,41 +488,48 @@ fn oracle_family(db: DatabaseType) -> DdlDialectProfile {
 fn sqlserver_family(db: DatabaseType) -> DdlDialectProfile {
     DdlDialectProfile {
         database_type: db,
-        quote: QuoteStyle::DoubleQuote,
+        quote: QuoteStyle::Brackets,
         auto_inc: AutoIncSyntax::Suffix(" IDENTITY(1,1)"),
         supports_display_width: false,
+        requires_explicit_varchar_length: false,
         max_varchar_len: None,
         inline_column_comment: false,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        drop_table_supports_cascade: false,
+        // `DROP TABLE IF EXISTS` is valid on SQL Server 2016+.
+        drop_table_supports_if_exists: true,
         index_type_placement: IndexTypePlacement::TypePrefix,
         index_supports_include: true,
         index_supports_filter: true,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::SqlServerExtendedProperty,
         trigger_template: TriggerTemplate::SqlServerStyle,
         rename_column: RenameColumnSyntax::SqlServerSpRename,
+        column_ddl: ColumnDdlSyntax::SqlServer,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
         alter_uses_modify_column: false,
         alter_batches_clauses: false,
         create_table_if_not_exists: false,
-        create_index_if_not_exists: true,
+        create_index_if_not_exists: false,
         create_function_or_replace: false,
         supports_function_ddl: true,
         supports_sequence_ddl: true,
         supports_rule_ddl: false,
         supports_owner_ddl: false,
         function_create_template: Some(FN_CREATE),
-        function_drop_template: Some(FN_DROP),
+        function_drop_template: Some(SQLSERVER_FN_DROP),
         sequence_create_template: Some(SEQ_CREATE),
-        sequence_alter_template: Some(SEQ_ALTER),
+        sequence_alter_template: Some(SQLSERVER_SEQ_ALTER),
         sequence_drop_template: Some(SEQ_DROP),
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: Some("SET LOCK_TIMEOUT 3000;"),
         type_map: &[],
     }
@@ -463,21 +539,26 @@ fn sqlite_family(db: DatabaseType) -> DdlDialectProfile {
     DdlDialectProfile {
         database_type: db,
         quote: QuoteStyle::DoubleQuote,
-        auto_inc: AutoIncSyntax::None,
+        auto_inc: AutoIncSyntax::Suffix(" AUTOINCREMENT"),
         supports_display_width: false,
+        requires_explicit_varchar_length: false,
         max_varchar_len: None,
         inline_column_comment: false,
         foreign_keys_inline_in_create: true,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        drop_table_supports_cascade: false,
+        drop_table_supports_if_exists: true,
         index_type_placement: IndexTypePlacement::None,
         index_supports_include: false,
         index_supports_filter: true,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: true,
@@ -497,6 +578,7 @@ fn sqlite_family(db: DatabaseType) -> DdlDialectProfile {
         sequence_drop_template: None,
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: None,
         type_map: SQLITE_TYPE_MAP,
     }
@@ -508,19 +590,25 @@ fn access_profile() -> DdlDialectProfile {
         quote: QuoteStyle::DoubleQuote,
         auto_inc: AutoIncSyntax::ReplaceTypeWith("COUNTER"),
         supports_display_width: false,
+        requires_explicit_varchar_length: false,
         max_varchar_len: Some(255),
         inline_column_comment: false,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        // Jet SQL has neither CASCADE nor IF EXISTS on DROP TABLE.
+        drop_table_supports_cascade: false,
+        drop_table_supports_if_exists: false,
         index_type_placement: IndexTypePlacement::None,
         index_supports_include: false,
         index_supports_filter: false,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -540,6 +628,7 @@ fn access_profile() -> DdlDialectProfile {
         sequence_drop_template: None,
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: None,
         type_map: ACCESS_TYPE_MAP,
     }
@@ -551,19 +640,26 @@ fn h2_profile() -> DdlDialectProfile {
         quote: QuoteStyle::DoubleQuote,
         auto_inc: AutoIncSyntax::None,
         supports_display_width: false,
+        requires_explicit_varchar_length: false,
         max_varchar_len: None,
         inline_column_comment: false,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        // H2 accepts CASCADE, but it stays off to keep the cascade set aligned with
+        // the frontend preview list in `dbAdminSql.ts`.
+        drop_table_supports_cascade: false,
+        drop_table_supports_if_exists: true,
         index_type_placement: IndexTypePlacement::None,
         index_supports_include: false,
         index_supports_filter: false,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::AlterColumnRenameTo,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -583,6 +679,7 @@ fn h2_profile() -> DdlDialectProfile {
         sequence_drop_template: None,
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: None,
         type_map: &[],
     }
@@ -594,19 +691,31 @@ fn conservative_ansi(db: DatabaseType) -> DdlDialectProfile {
         quote: QuoteStyle::DoubleQuote,
         auto_inc: AutoIncSyntax::None,
         supports_display_width: false,
+        // This fallback also covers DB2 and Informix, which reject a bare
+        // VARCHAR with no length — but it's shared with dialects that don't
+        // (Snowflake, BigQuery, DuckDB, Trino, ...), so it can't be flipped
+        // true here without a dedicated DB2/Informix profile and DB
+        // verification. Tracked as a known gap, not fixed by this flag.
+        requires_explicit_varchar_length: false,
         max_varchar_len: None,
         inline_column_comment: false,
         foreign_keys_inline_in_create: false,
         drop_index_uses_on_table: false,
         drop_fk_as_foreign_key: false,
+        drop_table_supports_cascade: false,
+        // Most engines in this bucket accept `IF EXISTS`; `profile_for` opts out the
+        // ones that do not.
+        drop_table_supports_if_exists: true,
         index_type_placement: IndexTypePlacement::None,
         index_supports_include: false,
         index_supports_filter: false,
         index_supports_comment: false,
         table_comment_via_alter: false,
         column_comment_via_modify_only: false,
+        comment_ddl: CommentDdlSyntax::Generic,
         trigger_template: TriggerTemplate::GenericRowBody,
         rename_column: RenameColumnSyntax::RenameColumn,
+        column_ddl: ColumnDdlSyntax::Generic,
         prefers_native_source_ddl: false,
         grant_uses_mysql_user_syntax: false,
         warn_fk_needs_table_rebuild: false,
@@ -626,6 +735,7 @@ fn conservative_ansi(db: DatabaseType) -> DdlDialectProfile {
         sequence_drop_template: None,
         rule_drop_template: None,
         owner_alter_template: None,
+        drop_table_template: DROP_TABLE,
         lock_timeout_sql: None,
         type_map: &[],
     }
@@ -639,6 +749,14 @@ fn clickhouse_profile() -> DdlDialectProfile {
     p
 }
 
+fn influxdb_profile() -> DdlDialectProfile {
+    let mut p = conservative_ansi(DatabaseType::InfluxDb);
+    // InfluxDB drops a measurement, not a table, and has no IF EXISTS form.
+    p.drop_table_template = "DROP MEASUREMENT {table};";
+    p.drop_table_supports_if_exists = false;
+    p
+}
+
 /// Resolve DDL profile for a concrete target database type.
 ///
 /// This is the **only** place that maps [`DatabaseType`] → profile data.
@@ -649,12 +767,29 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
         // MySQL family
         Mysql | Doris | StarRocks | Goldendb | Sundb | Databend | Gbase | ManticoreSearch => mysql_family(db_type),
 
+        Dameng => {
+            let mut profile = oracle_family(db_type);
+            profile.alter_uses_modify_column = true;
+            profile
+        }
+
         // PostgreSQL family
-        Postgres | Redshift | Gaussdb | Kingbase | Highgo | Vastbase | OpenGauss | Kwdb | Firebird | Vertica
-        | Exasol | Uxdb => postgres_family(db_type),
+        Postgres | Redshift | Gaussdb | Kingbase | Highgo | Vastbase | OpenGauss | Kwdb | Uxdb => {
+            postgres_family(db_type)
+        }
+
+        // PostgreSQL-shaped DDL, but not the PostgreSQL `DROP TABLE` grammar:
+        // Firebird has neither CASCADE nor IF EXISTS; Vertica and Exasol are kept off
+        // CASCADE so the set stays aligned with the frontend preview list.
+        Firebird | Vertica | Exasol => {
+            let mut profile = postgres_family(db_type);
+            profile.drop_table_supports_cascade = false;
+            profile.drop_table_supports_if_exists = db_type != Firebird;
+            profile
+        }
 
         // Oracle family
-        Oracle | Dameng | OceanbaseOracle | Yashandb | Xugu | Iris => oracle_family(db_type),
+        Oracle | OceanbaseOracle | Yashandb | Xugu | Iris => oracle_family(db_type),
 
         // SQL Server (not Access)
         SqlServer => sqlserver_family(db_type),
@@ -669,12 +804,26 @@ pub fn profile_for(db_type: DatabaseType) -> DdlDialectProfile {
 
         ClickHouse => clickhouse_profile(),
 
-        DuckDb | Questdb | SapHana | Teradata | Snowflake | Trino | PrestoSql | Hive | Spark | Db2 | Informix
-        | Bigquery | Kylin | Oscar | Tdengine | Iotdb | Databricks | Jdbc => conservative_ansi(db_type),
+        // Engines whose DROP TABLE grammar has no `IF EXISTS`.
+        Db2 | Informix | SapHana | Teradata => {
+            let mut profile = conservative_ansi(db_type);
+            profile.drop_table_supports_if_exists = false;
+            profile
+        }
+
+        DuckDb | Questdb | Snowflake | Trino | PrestoSql | Hive | Kyuubi | Impala | Argo | Spark | Bigquery
+        | Spanner | Kylin | Ignite | Ignite3 | Oscar | Tdengine | Iotdb | Databricks | Jdbc => {
+            conservative_ansi(db_type)
+        }
+
+        InfluxDb => influxdb_profile(),
+
+        Plugin => conservative_ansi(db_type),
 
         // Non-tabular / not applicable for relational CREATE TABLE
-        Redis | MongoDb | Elasticsearch | Easysearch | Qdrant | Milvus | Weaviate | ChromaDb | Neo4j | Cassandra
-        | Etcd | ZooKeeper | Nacos | InfluxDb | MessageQueue | Hbase => conservative_ansi(db_type),
+        Redis | MongoDb | DynamoDb | Elasticsearch | Easysearch | Meilisearch | Qdrant | Milvus | Weaviate
+        | ChromaDb | Neo4j | Cassandra | Etcd | ZooKeeper | Nacos | Consul | InfluxDb3 | VictoriaMetrics
+        | MessageQueue | Mqtt | Hbase => conservative_ansi(db_type),
     }
 }
 
@@ -690,11 +839,12 @@ mod tests {
         assert!(matches!(mssql.auto_inc, AutoIncSyntax::Suffix(s) if s.contains("IDENTITY")));
         assert!(access.lookup_type("VARCHAR").is_some());
         assert!(mssql.type_map.is_empty());
-        // Access must not inherit SQL Server lock-timeout / idempotent flags.
+        // Access must not inherit SQL Server lock-timeout behavior. Neither
+        // database supports CREATE INDEX IF NOT EXISTS syntax.
         assert_eq!(access.lock_timeout_sql, None);
         assert!(mssql.lock_timeout_sql.is_some());
         assert!(!access.create_index_if_not_exists);
-        assert!(mssql.create_index_if_not_exists);
+        assert!(!mssql.create_index_if_not_exists);
     }
 
     #[test]
@@ -711,6 +861,7 @@ mod tests {
     fn quote_styles() {
         assert_eq!(profile_for(DatabaseType::Mysql).quote_ident("a`b"), "`a``b`");
         assert_eq!(profile_for(DatabaseType::Access).quote_ident(r#"a"b"#), "\"a\"\"b\"");
+        assert_eq!(profile_for(DatabaseType::SqlServer).quote_ident("a]b"), "[a]]b]");
         assert_eq!(profile_for(DatabaseType::Oracle).quote_ident("emp"), "EMP");
         assert_eq!(profile_for(DatabaseType::Oracle).quote_ident("EMP"), "EMP");
         // Mixed-case must preserve spelling via quotes (not EMPMIXED).
@@ -746,5 +897,75 @@ mod tests {
             &[("name", "\"public\".\"f\""), ("cascade", " CASCADE")],
         );
         assert_eq!(rendered, "DROP FUNCTION IF EXISTS \"public\".\"f\" CASCADE;");
+    }
+
+    #[test]
+    fn drop_table_if_exists_support_matches_dialect_grammar() {
+        for db in [
+            DatabaseType::Mysql,
+            DatabaseType::Postgres,
+            DatabaseType::SqlServer,
+            DatabaseType::Sqlite,
+            DatabaseType::DuckDb,
+            DatabaseType::ClickHouse,
+            DatabaseType::H2,
+            DatabaseType::Snowflake,
+        ] {
+            assert!(profile_for(db).drop_table_supports_if_exists, "{db:?} does support DROP TABLE IF EXISTS");
+        }
+        // Oracle only gained `IF EXISTS` in 23c; the rest have no such grammar at all.
+        for db in [
+            DatabaseType::Oracle,
+            DatabaseType::Dameng,
+            DatabaseType::OceanbaseOracle,
+            DatabaseType::Access,
+            DatabaseType::Firebird,
+            DatabaseType::Db2,
+            DatabaseType::Informix,
+            DatabaseType::SapHana,
+            DatabaseType::Teradata,
+            DatabaseType::InfluxDb,
+        ] {
+            assert!(!profile_for(db).drop_table_supports_if_exists, "{db:?} does not support DROP TABLE IF EXISTS");
+        }
+    }
+
+    #[test]
+    fn drop_table_cascade_support_is_limited_to_the_postgres_grammar() {
+        for db in [
+            DatabaseType::Postgres,
+            DatabaseType::Redshift,
+            DatabaseType::Gaussdb,
+            DatabaseType::Kwdb,
+            DatabaseType::Kingbase,
+            DatabaseType::Highgo,
+            DatabaseType::Uxdb,
+            DatabaseType::Vastbase,
+            DatabaseType::OpenGauss,
+        ] {
+            assert!(profile_for(db).drop_table_supports_cascade, "{db:?} should keep DROP TABLE … CASCADE");
+        }
+        // Oracle's `CASCADE CONSTRAINTS` is a different clause; Firebird, Vertica and Exasol
+        // share the PostgreSQL profile but stay out of the cascade set so the backend matches
+        // the frontend preview list in `dbAdminSql.ts`.
+        for db in [
+            DatabaseType::Oracle,
+            DatabaseType::Firebird,
+            DatabaseType::Vertica,
+            DatabaseType::Exasol,
+            DatabaseType::Mysql,
+            DatabaseType::Sqlite,
+            DatabaseType::DuckDb,
+            DatabaseType::SqlServer,
+            DatabaseType::H2,
+        ] {
+            assert!(!profile_for(db).drop_table_supports_cascade, "{db:?} must not emit DROP TABLE … CASCADE");
+        }
+    }
+
+    #[test]
+    fn drop_table_template_carries_the_whole_statement_shape() {
+        assert_eq!(profile_for(DatabaseType::Postgres).drop_table_template, "DROP TABLE {table}{cascade};");
+        assert_eq!(profile_for(DatabaseType::InfluxDb).drop_table_template, "DROP MEASUREMENT {table};");
     }
 }

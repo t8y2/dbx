@@ -1,8 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
+import { decodeBase64Utf8Preview, formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
 import type { KvKeyMetadata } from "@/lib/backend/api";
 
 describe("kv value display helpers", () => {
+  it("decodes a valid Base64 value as a lossless UTF-8 preview", () => {
+    expect(decodeBase64Utf8Preview("5L2g5aW9")).toEqual({
+      ok: true,
+      value: "你好",
+      lossy: false,
+    });
+  });
+
+  it("marks replacement decoding of invalid UTF-8 bytes as lossy", () => {
+    expect(decodeBase64Utf8Preview("ZoBv")).toEqual({
+      ok: true,
+      value: "f�o",
+      lossy: true,
+    });
+  });
+
+  it("rejects malformed Base64 without throwing", () => {
+    expect(decodeBase64Utf8Preview("not base64!")).toEqual({
+      ok: false,
+      error: "invalid_base64",
+    });
+  });
+
   it("pretty prints valid JSON text", () => {
     expect(prettyPrintJsonText('{"name":"张三","roles":["admin","reader"]}')).toEqual({
       ok: true,

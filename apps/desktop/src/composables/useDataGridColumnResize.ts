@@ -36,11 +36,13 @@ export interface UseDataGridColumnResizeOptions {
   columnIndexes: ComputedRef<number[]>;
   density: Ref<ColumnWidthDensity>;
   compactColumnHeaderActions: ComputedRef<boolean>;
+  columnIndexIndicators?: ComputedRef<readonly boolean[]>;
   cacheKey?: ComputedRef<string | undefined>;
   columnStructureSignature: ComputedRef<string>;
   measureHeaderText?: (text: string) => number | undefined;
   headerMeasurementKey?: Ref<unknown>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
+  displayValue?: (value: CellValue, columnIndex: number) => CellValue;
 }
 
 export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions) {
@@ -67,7 +69,8 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const actualColIdx = columnIndexes.value[visibleColIdx];
     if (actualColIdx === undefined) return [];
     const preset = COLUMN_WIDTH_DENSITY_PRESETS[density.value];
-    return sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
+    const values = sampleDataGridColumnValues(sourceRows.value, actualColIdx, preset.sampleRows);
+    return options.displayValue ? values.map((value) => options.displayValue!(value, actualColIdx)) : values;
   }
 
   function neededColumnWidth(colIdx: number): number {
@@ -79,10 +82,11 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       density: density.value,
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       headerTextWidth: measureHeaderText?.(colName),
+      hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
   }
 
-  const neededColumnWidths = computed(() => columns.value.map((_, colIdx) => neededColumnWidth(colIdx)));
+  const neededColumnWidths = computed(() => (columns.value ?? []).map((_, colIdx) => neededColumnWidth(colIdx)));
   const neededColumnWidthSignature = computed(() => neededColumnWidths.value.join("|"));
 
   /** Grow-only: late pages with larger keys must not stay stuck at a short-header / early-page width. */
@@ -119,9 +123,10 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const nextColumnIndexes = [...columnIndexes.value];
     const cachedState = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
     if (cachedState) userSizedColumnIndexes = new Set(cachedState.userSizedColumnIndexes);
-    const currentNeededWidths = neededColumnWidths.value;
-    if (force || columnWidths.value.length !== columns.value.length || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
-      columnWidths.value = columns.value.map((_, colIdx) => {
+    const currentNeededWidths = neededColumnWidths.value ?? [];
+    const columnCount = columns.value?.length ?? 0;
+    if (force || columnWidths.value.length !== columnCount || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
+      columnWidths.value = (columns.value ?? []).map((_, colIdx) => {
         if (!force) {
           const existingWidth = previousWidthsByColumnIndex.get(nextColumnIndexes[colIdx]);
           if (existingWidth !== undefined) return existingWidth;
@@ -191,6 +196,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
       compactColumnHeaderActions: compactColumnHeaderActions.value,
       includeValues: true,
       headerTextWidth: measureHeaderText?.(colName),
+      hasIndexIndicator: options.columnIndexIndicators?.value[colIdx] ?? false,
     });
     markColumnUserSized(colIdx);
     persistColumnWidths();

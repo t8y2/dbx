@@ -378,7 +378,7 @@ cargo check --package dbx-web --features mq-admin
 
 ### 添加新的 MQ 系统
 
-Kafka 与 RocketMQ 已实现 Java Agent + Rust 适配器模式。新增 MQ 系统时：
+Kafka 使用 Java Agent，RocketMQ 使用 Go 原生 Agent；两者均通过 Rust 适配器接入。新增 MQ 系统时：
 
 1. 在 `agents/drivers/<name>/` 实现 JSON-RPC Agent（参考 `kafka` / `rocketmq`）
 2. 在 `crates/dbx-core/src/mq/adapters/` 实现 `MessageQueueAdmin`
@@ -407,9 +407,9 @@ Kafka 与 RocketMQ 已实现 Java Agent + Rust 适配器模式。新增 MQ 系�
 Agent 构建与安装：
 
 ```bash
-cd agents
-./gradlew :rocketmq:shadowJar
-# 将 shadow JAR 安装到 DBX 数据目录 agents/drivers/rocketmq/agent.jar
+cd agents/drivers/rocketmq
+CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o agent .
+# 将可执行文件安装到 DBX 数据目录 agents/drivers/rocketmq/agent
 ```
 
 Docker 快速启动（NameServer 9876 + Broker 10911，仅用于本地验证）：

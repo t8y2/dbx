@@ -205,6 +205,8 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .broker-panel {
   height: 100%;
   display: flex;
@@ -249,26 +251,6 @@ onUnmounted(() => {
 }
 
 .refresh-interval:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.2s;
-}
-
-.btn-sm:hover:not(:disabled) {
-  background: var(--color-hover);
-}
-
-.btn-sm:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -406,20 +388,6 @@ onUnmounted(() => {
 .role-badge.follower {
   background: var(--color-background-tertiary);
   color: var(--color-text-secondary);
-}
-
-.btn-secondary {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--color-hover);
 }
 
 button:disabled {

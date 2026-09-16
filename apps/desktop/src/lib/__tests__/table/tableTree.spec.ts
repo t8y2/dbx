@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
+import { appendTableTreeLoadMoreNode, buildGroupedObjectTreeNodes, buildObjectGroupPlaceholderNodes, buildSimpleObjectTreeNodes, buildTableTreeNodes, mergeTableInfosIntoObjects, mergeTableTreePageChildren, tablePartitionGroups, withoutTableTreeLoadMoreNodes } from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 
 const context = {
@@ -95,19 +95,189 @@ describe("PostgreSQL overloaded routines", () => {
   });
 });
 
+describe("PostgreSQL custom type metadata", () => {
+  it("preserves type kind and member capability in simple and grouped trees", () => {
+    const objects: ObjectInfo[] = [
+      { name: "address", object_type: "TYPE", schema: "public", custom_type_kind: "composite", has_members: true },
+      { name: "email", object_type: "TYPE", schema: "public", custom_type_kind: "domain", has_members: false },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "public", objects });
+    expect(simple.map((node) => ({ name: node.label, kind: node.customTypeKind, hasMembers: node.hasMembers }))).toEqual([
+      { name: "address", kind: "composite", hasMembers: true },
+      { name: "email", kind: "domain", hasMembers: false },
+    ]);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "public", objects });
+    expect(grouped.find((node) => node.type === "group-types")?.children?.map((node) => ({ name: node.label, kind: node.customTypeKind, hasMembers: node.hasMembers }))).toEqual([
+      { name: "address", kind: "composite", hasMembers: true },
+      { name: "email", kind: "domain", hasMembers: false },
+    ]);
+  });
+});
+
 describe("programmable database objects", () => {
+  it("renders only the synonym group for the Xugu public-synonym scope", () => {
+    const groups = buildObjectGroupPlaceholderNodes({
+      ...context,
+      schema: "\u0000DBX_XUGU_PUBLIC_SYNONYMS",
+      objectTypes: ["SYNONYM"],
+    });
+
+    expect(groups).toEqual([expect.objectContaining({ type: "group-synonyms", label: "tree.synonyms" })]);
+  });
+
+  it("coalesces Xugu package specification and body into one top-level node", () => {
+    const objects: ObjectInfo[] = [
+      { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP", valid: true },
+      { name: "DBX_UI_PKG", object_type: "PACKAGE_BODY", schema: "APP", valid: false },
+    ];
+
+    const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects, databaseType: "xugu" });
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toEqual(
+      expect.objectContaining({
+        type: "package",
+        objectName: "DBX_UI_PKG",
+        valid: false,
+        xuguPackageBodyAvailable: true,
+        xuguPackageBodyValid: false,
+      }),
+    );
+  });
+
+  it("keeps the package body as metadata for the expandable Xugu package node", () => {
+    const objects: ObjectInfo[] = [
+      { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP", valid: true },
+      { name: "DBX_UI_PKG", object_type: "PACKAGE_BODY", schema: "APP", valid: true },
+    ];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "APP", objects, databaseType: "xugu" });
+    const packageGroup = groups.find((node) => node.type === "group-packages");
+    expect(packageGroup?.objectCount).toBe(1);
+    expect(packageGroup?.children).toEqual([expect.objectContaining({ type: "package", objectName: "DBX_UI_PKG" })]);
+  });
+
+  it("keeps a body-only Xugu metadata response visible as a package", () => {
+    const nodes = buildSimpleObjectTreeNodes({
+      ...context,
+      schema: "APP",
+      objects: [{ name: "BODY_ONLY_PKG", object_type: "PACKAGE_BODY", schema: "APP", valid: true }],
+      databaseType: "xugu",
+    });
+
+    expect(nodes).toEqual([
+      expect.objectContaining({
+        type: "package",
+        objectName: "BODY_ONLY_PKG",
+        xuguPackageBodyAvailable: true,
+        xuguPackageBodyValid: true,
+      }),
+    ]);
+  });
+
+  it("does not advertise a body child for a specification-only Xugu package", () => {
+    const nodes = buildSimpleObjectTreeNodes({
+      ...context,
+      schema: "APP",
+      objects: [{ name: "SPEC_ONLY_PKG", object_type: "PACKAGE", schema: "APP", valid: true }],
+      databaseType: "xugu",
+    });
+
+    expect(nodes[0]).toEqual(expect.objectContaining({ type: "package", xuguPackageBodyAvailable: undefined }));
+  });
+
+  it("does not merge package and package body for other databases", () => {
+    const objects: ObjectInfo[] = [
+      { name: "DBX_UI_PKG", object_type: "PACKAGE", schema: "APP" },
+      { name: "DBX_UI_PKG", object_type: "PACKAGE_BODY", schema: "APP" },
+    ];
+
+    const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects, databaseType: "oracle" });
+    expect(nodes.map((node) => node.type)).toEqual(["package", "package-body"]);
+  });
+
   it("keeps Xugu trigger/type nodes distinct and preserves an invalid status", () => {
     const objects: ObjectInfo[] = [
       { name: "TRG_AUDIT", object_type: "TRIGGER", schema: "APP", valid: false },
-      { name: "ADDRESS_T", object_type: "TYPE", schema: "APP", valid: true },
+      { name: "ADDRESS_T", object_type: "TYPE", schema: "APP", valid: true, xugu_type_members_expandable: true },
+      { name: "ADDRESS_LIST", object_type: "TYPE", schema: "APP", valid: true, xugu_type_members_expandable: false },
       { name: "ADDRESS_T", object_type: "TYPE_BODY", schema: "APP", valid: true },
     ];
 
     const nodes = buildSimpleObjectTreeNodes({ ...context, schema: "APP", objects });
 
     expect(nodes).toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }), expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true }), expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true })]),
+      expect.arrayContaining([
+        expect.objectContaining({ type: "trigger", objectName: "TRG_AUDIT", valid: false }),
+        expect.objectContaining({ type: "type", objectName: "ADDRESS_T", valid: true, xuguTypeMembersExpandable: true }),
+        expect.objectContaining({ type: "type", objectName: "ADDRESS_LIST", valid: true, xuguTypeMembersExpandable: false }),
+        expect.objectContaining({ type: "type-body", objectName: "ADDRESS_T", valid: true }),
+      ]),
     );
+  });
+
+  it("preserves Xugu trigger details for the schema trigger group", () => {
+    const trigger = {
+      name: "TRG_AUDIT",
+      event: "INSERT OR UPDATE",
+      timing: "BEFORE",
+      level: "FOR EACH ROW",
+      enabled: false,
+      valid: false,
+      condition: "NEW_VALUE >= 0",
+      language: "PL/SQL",
+      comment: "row audit trigger",
+      created_at: "2026-08-10 09:30:00",
+    };
+    const groups = buildGroupedObjectTreeNodes({
+      ...context,
+      schema: "APP",
+      objects: [{ name: trigger.name, object_type: "TRIGGER", schema: "APP", valid: false, comment: trigger.comment, trigger }],
+    });
+    const triggerGroup = groups.find((node) => node.type === "group-triggers");
+
+    expect(triggerGroup?.children).toEqual([
+      expect.objectContaining({
+        type: "trigger",
+        objectName: trigger.name,
+        valid: false,
+        comment: trigger.comment,
+        meta: trigger,
+      }),
+    ]);
+  });
+
+  it("groups MySQL scheduled events under a dedicated Events group", () => {
+    const objects: ObjectInfo[] = [{ name: "event_daily_middle_db_sync", object_type: "EVENT", schema: "shop" }];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "shop", objects, databaseType: "mysql" });
+    const eventGroup = groups.find((node) => node.type === "group-events");
+
+    expect(eventGroup).toEqual(expect.objectContaining({ objectCount: 1, label: "tree.events" }));
+    expect(eventGroup?.children).toEqual([expect.objectContaining({ type: "event", objectName: "event_daily_middle_db_sync" })]);
+  });
+
+  it("keeps table-scoped Kingbase triggers distinct and source-addressable", () => {
+    const objects: ObjectInfo[] = [
+      { name: "audit_before", object_type: "TRIGGER", schema: "public", parent_schema: "public", parent_name: "items" },
+      { name: "audit_before", object_type: "TRIGGER", schema: "public", parent_schema: "public", parent_name: "orders" },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "public", objects, databaseType: "kingbase" });
+    expect(simple.map((node) => ({ label: node.label, tableName: node.tableName }))).toEqual([
+      { label: "audit_before (items)", tableName: "items" },
+      { label: "audit_before (orders)", tableName: "orders" },
+    ]);
+    expect(new Set(simple.map((node) => node.id)).size).toBe(2);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "public", objects, databaseType: "kingbase" });
+    const triggers = grouped.find((node) => node.type === "group-triggers")?.children ?? [];
+    expect(triggers.map((node) => ({ label: node.label, objectName: node.objectName, tableName: node.tableName }))).toEqual([
+      { label: "audit_before (items)", objectName: "audit_before", tableName: "items" },
+      { label: "audit_before (orders)", objectName: "audit_before", tableName: "orders" },
+    ]);
+    expect(new Set(triggers.map((node) => node.id)).size).toBe(2);
   });
 
   it("groups Xugu private synonyms as source objects", () => {
@@ -118,6 +288,22 @@ describe("programmable database objects", () => {
 
     expect(synonymGroup).toEqual(expect.objectContaining({ objectCount: 1, label: "tree.synonyms" }));
     expect(synonymGroup?.children).toEqual([expect.objectContaining({ type: "synonym", objectName: "SYN_SHOP_USERS", valid: true })]);
+  });
+
+  it("groups user-defined types with an object count", () => {
+    const objects: ObjectInfo[] = [
+      { name: "status", object_type: "TYPE", schema: "app", comment: "order status" },
+      { name: "email", object_type: "TYPE", schema: "app" },
+    ];
+
+    const groups = buildGroupedObjectTreeNodes({ ...context, schema: "app", objects });
+    const typeGroup = groups.find((node) => node.type === "group-types");
+
+    expect(typeGroup).toEqual(expect.objectContaining({ objectCount: 2, label: "tree.types" }));
+    expect(typeGroup?.children?.map((node) => node.type)).toEqual(["type", "type"]);
+    expect(typeGroup?.children?.map((node) => node.objectName)).toEqual(["email", "status"]);
+    expect(typeGroup?.children?.[0]?.comment).toBeUndefined();
+    expect(typeGroup?.children?.[1]?.comment).toBe("order status");
   });
 });
 

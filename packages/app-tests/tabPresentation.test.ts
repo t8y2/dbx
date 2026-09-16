@@ -8,6 +8,7 @@ import {
   middleEllipsis,
   nextExecutionSummaryView,
   resultGridCacheKey,
+  resultGridColumnWidthCacheKey,
   resultRunItems,
   resultSourceRange,
   resultSqlForGrid,
@@ -15,6 +16,8 @@ import {
   tabModeLabel,
   tabularResultItems,
 } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
+import i18n, { setLocale } from "../../apps/desktop/src/i18n/index.ts";
+import { restoreOpenTabsState } from "../../apps/desktop/src/lib/app/openTabsPersistence.ts";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import type { ConnectionConfig, QueryResult, QueryTab } from "../../apps/desktop/src/types/database.ts";
 
@@ -81,6 +84,41 @@ test("query tab display title uses custom title when present", () => {
     assert.equal(tabDisplayTitle(queryTab(), t), "Prod@app");
     assert.equal(tabDisplayTitle(queryTab({ title: "Revenue checks", customTitle: true }), t), "Revenue checks");
   } finally {
+    restoreStorage();
+  }
+});
+
+test("restored MQTT tab titles ignore legacy persisted text and follow the current locale", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  useConnectionStore().addEphemeralConnection({
+    ...conn("conn-1"),
+    name: "test-mqtt",
+    db_type: "mqtt",
+    port: 1883,
+  });
+  const restored = restoreOpenTabsState(
+    JSON.stringify([
+      queryTab({
+        title: "test-mqtt Console",
+        database: "",
+        mode: "mqtt",
+      }),
+    ]),
+    "tab-1",
+    { validConnectionIds: ["conn-1"] },
+  );
+  const tab = restored.tabs[0];
+  const translate = (key: string) => i18n.global.t(key);
+
+  try {
+    assert.ok(tab);
+    await setLocale("en");
+    assert.equal(tabDisplayTitle(tab, translate), "test-mqtt - MQTT Console");
+    await setLocale("zh-CN");
+    assert.equal(tabDisplayTitle(tab, translate), "test-mqtt - MQTT 控制台");
+  } finally {
+    await setLocale("en");
     restoreStorage();
   }
 });
@@ -287,6 +325,7 @@ test("result run items expose ordered labels and active state", () => {
         sequence: 1,
         sql: "select 1",
         createdAt: 10,
+        pinned: true,
         result: result(["one"]),
       },
       {
@@ -301,8 +340,8 @@ test("result run items expose ordered labels and active state", () => {
   });
 
   assert.deepEqual(resultRunItems(tab), [
-    { id: "run-1", title: "Run 1", sequence: 1, active: false },
-    { id: "run-2", title: "Run 2", sequence: 2, active: true },
+    { id: "run-1", title: "Run 1", sequence: 1, active: false, pinned: true },
+    { id: "run-2", title: "Run 2", sequence: 2, active: true, pinned: false },
   ]);
   assert.equal(activeResultRun(tab)?.id, "run-2");
   assert.deepEqual(
@@ -318,9 +357,18 @@ test("result grid cache key includes result run id and statement result index", 
   assert.equal(resultGridCacheKey(queryTab({ activeResultIndex: undefined })), "tab-1-current-0");
 });
 
+test("result grid column width cache key ignores result run id and isolates result indexes", () => {
+  const first = queryTab({ activeResultRunId: "run-1", activeResultIndex: 2 });
+  const rerun = queryTab({ activeResultRunId: "run-2", activeResultIndex: 2 });
+
+  assert.equal(resultGridColumnWidthCacheKey(first), "result-column-width-tab-1-2");
+  assert.equal(resultGridColumnWidthCacheKey(rerun), resultGridColumnWidthCacheKey(first));
+  assert.notEqual(resultGridColumnWidthCacheKey(queryTab({ activeResultIndex: 1 })), resultGridColumnWidthCacheKey(first));
+});
+
 test("execution summary items include table and non-table statement results", () => {
   const items = executionSummaryItems({
-    results: [result([]), result(["id"]), { ...result(["Error"]), rows: [["boom"]], execution_error: true }],
+    results: [result([], { affected_rows: 4 }), result(["id"], { rows: [[1], [2], [3]] }), { ...result(["Error"]), rows: [["boom"]], execution_error: true }],
   });
 
   assert.deepEqual(
@@ -329,12 +377,13 @@ test("execution summary items include table and non-table statement results", ()
       hasTabularResult: item.hasTabularResult,
       returnedColumns: item.returnedColumns,
       returnedRows: item.returnedRows,
+      rowCount: item.rowCount,
       isError: item.isError,
     })),
     [
-      { index: 0, hasTabularResult: false, returnedColumns: 0, returnedRows: 0, isError: false },
-      { index: 1, hasTabularResult: true, returnedColumns: 1, returnedRows: 0, isError: false },
-      { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, isError: true },
+      { index: 0, hasTabularResult: false, returnedColumns: 0, returnedRows: 0, rowCount: 4, isError: false },
+      { index: 1, hasTabularResult: true, returnedColumns: 1, returnedRows: 3, rowCount: 3, isError: false },
+      { index: 2, hasTabularResult: true, returnedColumns: 1, returnedRows: 1, rowCount: 1, isError: true },
     ],
   );
 });

@@ -24,10 +24,10 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.TreeSet;
 
 public final class InformixAgent extends AbstractJdbcAgent {
     private String loginOwner = "";
@@ -187,27 +187,24 @@ public final class InformixAgent extends AbstractJdbcAgent {
                     }
                 }
             }
-            return mergeSchemaOwners(catalogOwners, loginOwner);
+            return normalizeSchemaOwners(catalogOwners);
         });
     }
 
     static String schemaCatalogSql() {
-        // Informix JDBC catalogs are databases; schemas are the object owners in the current database.
+        // Informix schemas are object owners. Include routine-only owners because
+        // the same sidebar node also exposes procedures and functions.
         return "SELECT owner FROM systables WHERE tabid >= 100 AND owner IS NOT NULL "
                 + "UNION SELECT owner FROM sysprocedures WHERE owner IS NOT NULL ORDER BY owner";
     }
 
-    static List<String> mergeSchemaOwners(List<String> catalogOwners, String loginOwner) {
-        Set<String> owners = new TreeSet<>();
+    static List<String> normalizeSchemaOwners(List<String> catalogOwners) {
+        Set<String> owners = new LinkedHashSet<>();
         for (String owner : catalogOwners) {
             String normalized = normalizeOwner(owner);
             if (!normalized.isEmpty()) {
                 owners.add(normalized);
             }
-        }
-        String normalizedLoginOwner = normalizeOwner(loginOwner);
-        if (!normalizedLoginOwner.isEmpty()) {
-            owners.add(normalizedLoginOwner);
         }
         return new ArrayList<>(owners);
     }

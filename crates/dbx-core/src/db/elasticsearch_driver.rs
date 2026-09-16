@@ -1,12 +1,16 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
+use regex::Regex;
 use reqwest::{Client as HttpClient, Method, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use super::{http_client_builder, with_connection_timeout};
+use super::{apply_tls_certificates, http_client_builder, with_connection_timeout};
 use crate::db::document_result::DocumentQueryResult;
 use crate::types::QueryResult;
 
@@ -50,6 +54,15 @@ pub struct EsClient {
     transport_mode: ElasticsearchTransportMode,
     /// GET path used for connect / health / test (default "/").
     connectivity_check_path: String,
+    /// 为 true 时完全跳过连通性检查（test_connection 直接返回 Ok）。
+    /// 用于账号连 `/` 或任何检查路径都无权限、且集群间权限不统一的场景。
+    connectivity_check_disabled: bool,
+    /// 正则:把易变的时间/滚动后缀折叠成 `*`，将同一前缀的滚动索引聚合成一个
+    /// pattern 节点。`None` 表示关闭聚合，展示原始索引名。
+    index_grouping: Option<Regex>,
+    /// 该集群能否用 PIT + `search_after` 深分页。用 `Arc` 是因为连接池里的实例会被
+    /// `clone()` 出去执行每次查询，探测结果必须回流到同一个连接上。
+    pit_search_supported: Arc<AtomicBool>,
 }
 
 impl EsClient {
@@ -68,9 +81,16 @@ impl EsClient {
             timeout,
             ElasticsearchTransportMode::Direct,
             "/".to_string(),
+            false,
+            None,
+            None,
+            None,
+            None,
         )
+        .expect("failed to build Elasticsearch HTTP client")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_mode(
         url: &str,
         username: Option<&str>,
@@ -79,16 +99,36 @@ impl EsClient {
         timeout: Duration,
         transport_mode: ElasticsearchTransportMode,
         connectivity_check_path: String,
-    ) -> Self {
+        connectivity_check_disabled: bool,
+        index_grouping: Option<Regex>,
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+    ) -> Result<Self, String> {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
             _ => None,
         };
-        let builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
-        let http = builder.build().unwrap_or_else(|_| HttpClient::new());
+        let mut builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
+        builder = apply_tls_certificates(builder, ca_cert_path, client_cert_path, client_key_path)?;
+        if let Some(addrs) = elasticsearch_localhost_resolve_addrs(&base_url, connectivity_check_disabled) {
+            builder = builder.resolve_to_addrs("localhost", &addrs);
+        }
+        let http =
+            builder.build().map_err(|error| format!("Failed to initialize Elasticsearch HTTP client: {error}"))?;
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self { http, base_url, fallback_base_urls, auth, transport_mode, connectivity_check_path }
+        Ok(Self {
+            http,
+            base_url,
+            fallback_base_urls,
+            auth,
+            transport_mode,
+            connectivity_check_path,
+            connectivity_check_disabled,
+            index_grouping,
+            pit_search_supported: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     pub fn from_config(
@@ -99,7 +139,10 @@ impl EsClient {
         url_params: Option<&str>,
         external_config: Option<&Value>,
         timeout: Duration,
-    ) -> Self {
+        ca_cert_path: Option<&str>,
+        client_cert_path: Option<&str>,
+        client_key_path: Option<&str>,
+    ) -> Result<Self, String> {
         let kibana_base_path = elasticsearch_kibana_base_path(external_config);
         let transport_mode = if kibana_base_path.is_some() {
             ElasticsearchTransportMode::KibanaProxy
@@ -108,6 +151,8 @@ impl EsClient {
         };
         let base_url = format!("{}{}", url.trim_end_matches('/'), kibana_base_path.as_deref().unwrap_or(""));
         let connectivity_check_path = elasticsearch_connectivity_check_path(external_config);
+        let connectivity_check_disabled = elasticsearch_connectivity_check_disabled(external_config);
+        let index_grouping = elasticsearch_index_grouping(external_config);
         Self::new_with_mode(
             &base_url,
             username,
@@ -116,6 +161,11 @@ impl EsClient {
             timeout,
             transport_mode,
             connectivity_check_path,
+            connectivity_check_disabled,
+            index_grouping,
+            ca_cert_path,
+            client_cert_path,
+            client_key_path,
         )
     }
 
@@ -142,7 +192,8 @@ impl EsClient {
                 .http
                 .post(format!("{}/api/console/proxy", self.base_url))
                 .query(&[("path", path), ("method", method.as_str())])
-                .header("kbn-xsrf", "true"),
+                .header("kbn-xsrf", "true")
+                .header("osd-xsrf", "true"),
         };
         self.with_auth(req)
     }
@@ -169,6 +220,14 @@ impl EsClient {
         }
         response.status()
     }
+
+    fn supports_pit_search(&self) -> bool {
+        self.pit_search_supported.load(Ordering::Relaxed)
+    }
+
+    fn disable_pit_search(&self) {
+        self.pit_search_supported.store(false, Ordering::Relaxed);
+    }
 }
 
 impl Clone for EsClient {
@@ -180,6 +239,10 @@ impl Clone for EsClient {
             auth: self.auth.clone(),
             transport_mode: self.transport_mode,
             connectivity_check_path: self.connectivity_check_path.clone(),
+            connectivity_check_disabled: self.connectivity_check_disabled,
+            index_grouping: self.index_grouping.clone(),
+            // 共享标记而不是复制值：探测结果要对整个连接生效。
+            pit_search_supported: Arc::clone(&self.pit_search_supported),
         }
     }
 }
@@ -227,7 +290,68 @@ pub fn elasticsearch_connectivity_check_path(external_config: Option<&Value>) ->
     }
 }
 
+/// 解析连接配置里的索引聚合正则。**默认关闭**（命名格式因环境而异，不做全局假设）。
+/// - 缺省/空/`off`/`none`/`false` → 关闭聚合，展示原始索引名。
+/// - 其它 → 作为自定义正则；编译失败同样视为关闭，避免意外折叠。
+///
+/// 语义：用 `${1}*` 模板替换匹配区间——正则带捕获组 1 时保留其内容做前缀，
+/// 不带捕获组时即把匹配到的“易变尾巴”替换成 `*`。
+/// 是否完全跳过连通性检查。读取配置 `connectivityCheckDisabled`（布尔）。
+/// 也兼容字符串 "true"/"1"/"yes"/"on"。用于账号无任何集群/索引探活权限的场景。
+pub fn elasticsearch_connectivity_check_disabled(external_config: Option<&Value>) -> bool {
+    let Some(value) = external_config.and_then(Value::as_object).and_then(|c| c.get("connectivityCheckDisabled"))
+    else {
+        return false;
+    };
+    match value {
+        Value::Bool(b) => *b,
+        Value::String(s) => {
+            let s = s.trim();
+            s.eq_ignore_ascii_case("true") || s == "1" || s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("on")
+        }
+        _ => false,
+    }
+}
+
+pub fn elasticsearch_index_grouping(external_config: Option<&Value>) -> Option<Regex> {
+    let raw = external_config
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("indexGroupingPattern"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty()
+        || raw.eq_ignore_ascii_case("off")
+        || raw.eq_ignore_ascii_case("none")
+        || raw.eq_ignore_ascii_case("false")
+    {
+        return None;
+    }
+    Regex::new(raw).ok()
+}
+
+/// 用分组正则把索引名聚合成 pattern。`None` 表示关闭聚合，原样返回。
+fn group_index_names(names: Vec<String>, pattern: Option<&Regex>) -> Vec<String> {
+    let Some(re) = pattern else {
+        return names;
+    };
+    let mut buckets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in names {
+        // `${1}*`：有捕获组则保留组1做前缀，无组则把匹配尾巴替换成 `*`。
+        let key = re.replace(&name, "${1}*").into_owned();
+        buckets.entry(key).or_default().push(name);
+    }
+    let mut out: Vec<String> = buckets.into_keys().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub async fn test_connection(client: &mut EsClient, timeout: Duration) -> Result<(), String> {
+    // 用户显式关闭连通性检查：不发探活请求，直接视为可连。
+    if client.connectivity_check_disabled {
+        return Ok(());
+    }
     let mut errors = Vec::new();
     let urls = std::iter::once(client.base_url.clone()).chain(client.fallback_base_urls.clone());
     let check_path = client.connectivity_check_path.clone();
@@ -307,6 +431,17 @@ fn elasticsearch_base_url_fallbacks(base_url: &str) -> Vec<String> {
     }
 }
 
+fn elasticsearch_localhost_resolve_addrs(base_url: &str, connectivity_check_disabled: bool) -> Option<[SocketAddr; 2]> {
+    if !connectivity_check_disabled {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(base_url).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some([SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)])
+}
+
 fn elasticsearch_index_path(index: &str, endpoint: &str) -> String {
     format!("/{}/{}", elasticsearch_path_segment(index), endpoint.trim_start_matches('/'))
 }
@@ -370,25 +505,202 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
     parts.join(": ")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElasticsearchIndexEntry {
+    pub name: String,
+    pub aliases: Vec<String>,
+}
+
+struct ListedIndexNames {
+    indices: Vec<String>,
+    index_aliases: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Deserialize)]
 struct CatIndex {
     index: String,
 }
 
+#[derive(Deserialize)]
+struct ResolveIndexResponse {
+    #[serde(default)]
+    indices: Vec<ResolveNamed>,
+    #[serde(default)]
+    aliases: Vec<ResolveAlias>,
+    #[serde(default)]
+    data_streams: Vec<ResolveNamed>,
+}
+
+#[derive(Deserialize)]
+struct ResolveNamed {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct ResolveAlias {
+    name: String,
+    #[serde(default)]
+    indices: Vec<String>,
+}
+
+/// 去掉 ES 内部索引（以 `.` 开头），排序并去重后返回可见索引名。
+fn normalize_index_names(names: impl Iterator<Item = String>) -> Vec<String> {
+    let mut names: Vec<String> = names.filter(|name| !name.starts_with('.') && !name.is_empty()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
+    let names = list_raw_indices(client, false).await?.indices;
+    Ok(group_index_names(names, client.index_grouping.as_ref()))
+}
+
+pub async fn list_indices_with_aliases(client: &EsClient) -> Result<Vec<ElasticsearchIndexEntry>, String> {
+    let listed = list_raw_indices(client, true).await?;
+    Ok(merge_index_entries(listed.indices, &listed.index_aliases, client.index_grouping.as_ref()))
+}
+
+fn merge_index_entries(
+    indices: Vec<String>,
+    index_aliases: &BTreeMap<String, Vec<String>>,
+    grouping: Option<&Regex>,
+) -> Vec<ElasticsearchIndexEntry> {
+    let Some(re) = grouping else {
+        return indices
+            .into_iter()
+            .map(|name| {
+                let aliases = index_aliases.get(&name).into_iter().flatten().cloned();
+                elasticsearch_index_entry(name, aliases)
+            })
+            .collect();
+    };
+
+    let mut buckets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in indices {
+        let key = re.replace(&name, "${1}*").into_owned();
+        buckets.entry(key).or_default().push(name);
+    }
+    buckets
+        .into_iter()
+        .map(|(name, members)| {
+            let aliases = members.iter().flat_map(|member| index_aliases.get(member).into_iter().flatten().cloned());
+            elasticsearch_index_entry(name, aliases)
+        })
+        .collect()
+}
+
+fn elasticsearch_index_entry(name: String, aliases: impl IntoIterator<Item = String>) -> ElasticsearchIndexEntry {
+    let aliases = normalize_alias_names(aliases, &name);
+    ElasticsearchIndexEntry { name, aliases }
+}
+
+fn normalize_alias_names(aliases: impl IntoIterator<Item = String>, index_name: &str) -> Vec<String> {
+    let mut aliases: Vec<String> = aliases
+        .into_iter()
+        .filter(|alias| !alias.is_empty() && !alias.starts_with('.') && alias != index_name)
+        .collect();
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn index_aliases_from_pairs(pairs: impl Iterator<Item = (String, String)>) -> BTreeMap<String, Vec<String>> {
+    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (index, alias) in pairs {
+        if index.is_empty() || alias.is_empty() || alias.starts_with('.') {
+            continue;
+        }
+        map.entry(index).or_default().insert(alias);
+    }
+    map.into_iter().map(|(index, aliases)| (index, aliases.into_iter().collect())).collect()
+}
+
+async fn list_raw_indices(client: &EsClient, include_aliases: bool) -> Result<ListedIndexNames, String> {
+    // 主路径 `_cat/indices` 需要集群级 `monitor` 权限。仅有索引级权限的账号
+    // （例如日志采集用户）会在这里拿到 401/403，此时降级到索引级元数据端点。
     let resp = client
         .get("/_cat/indices?format=json&h=index")
         .send()
         .await
         .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = client.response_status(&resp);
+    if status.is_success() {
+        let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+        return Ok(ListedIndexNames {
+            indices: normalize_index_names(indices.into_iter().map(|i| i.index)),
+            index_aliases: if include_aliases { alias_map_or_empty(client).await } else { BTreeMap::new() },
+        });
+    }
+    if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        return list_indices_via_metadata(client).await;
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(format!("Elasticsearch error: {body}"))
+}
+
+/// 集群 `monitor` 不可用时的降级：`_resolve/index` 与 `_alias` 属于
+/// `indices:admin/*` 动作，`view_index_metadata`/`read` 索引权限即可访问，
+/// 且 ES 安全层会把结果过滤为当前账号可见的索引。
+async fn list_indices_via_metadata(client: &EsClient) -> Result<ListedIndexNames, String> {
+    // 优先 `_resolve/index`：同时覆盖普通索引、数据流（data stream）和别名。
+    if let Some(listed) = resolve_index_entries(client).await? {
+        return Ok(listed);
+    }
+    alias_endpoint_entries(client).await
+}
+
+async fn alias_map_or_empty(client: &EsClient) -> BTreeMap<String, Vec<String>> {
+    match alias_endpoint_entries(client).await {
+        Ok(listed) => listed.index_aliases,
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+/// 通过 `GET /_resolve/index/*` 列举索引与别名。该端点缺权限时返回 `Ok(None)`，
+/// 以便继续尝试 `_alias`；其它错误如实上抛。
+async fn resolve_index_entries(client: &EsClient) -> Result<Option<ListedIndexNames>, String> {
+    let resp =
+        client.get("/_resolve/index/*").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let status = client.response_status(&resp);
+    if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    let body: ResolveIndexResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    let indices = body.indices.into_iter().chain(body.data_streams).map(|item| item.name);
+    let index_aliases = index_aliases_from_pairs(
+        body.aliases
+            .into_iter()
+            .flat_map(|alias| alias.indices.into_iter().map(move |index| (index, alias.name.clone()))),
+    );
+    Ok(Some(ListedIndexNames { indices: normalize_index_names(indices), index_aliases }))
+}
+
+/// 通过 `GET /_alias` 列举索引（对象 key）和嵌套别名。
+async fn alias_endpoint_entries(client: &EsClient) -> Result<ListedIndexNames, String> {
+    let resp = client.get("/_alias").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
-    let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-    let mut names: Vec<String> = indices.into_iter().filter(|i| !i.index.starts_with('.')).map(|i| i.index).collect();
-    names.sort();
-    Ok(names)
+    let body: serde_json::Map<String, Value> =
+        resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    let mut indices = Vec::new();
+    let mut pairs = Vec::new();
+    for (index, value) in body {
+        if let Some(alias_map) = value.get("aliases").and_then(Value::as_object) {
+            pairs.extend(alias_map.keys().cloned().map(|alias| (index.clone(), alias)));
+        }
+        indices.push(index);
+    }
+    Ok(ListedIndexNames {
+        indices: normalize_index_names(indices.into_iter()),
+        index_aliases: index_aliases_from_pairs(pairs.into_iter()),
+    })
 }
 
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
@@ -436,16 +748,22 @@ fn collect_mapping_columns(
     for (name, definition) in properties {
         let field_name = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
         let field_type = definition.get("type").and_then(Value::as_str);
+        let children = definition.get("properties").and_then(Value::as_object);
 
         if let Some(data_type) = field_type {
             push_mapping_column(&field_name, data_type, seen, columns);
+        } else if children.is_some() {
+            // Elasticsearch infers `object` for a field with `properties` when
+            // the mapping omits an explicit type. Return the parent too because
+            // the document grid renders top-level object values as one column.
+            push_mapping_column(&field_name, "object", seen, columns);
         }
 
         if let Some(fields) = definition.get("fields").and_then(Value::as_object) {
             collect_mapping_columns(&field_name, fields, seen, columns);
         }
 
-        if let Some(children) = definition.get("properties").and_then(Value::as_object) {
+        if let Some(children) = children {
             collect_mapping_columns(&field_name, children, seen, columns);
         }
     }
@@ -545,6 +863,47 @@ struct SearchHit {
     source: serde_json::Value,
 }
 
+const ES_PIT_KEEP_ALIVE: &str = "1m";
+const ES_SCROLL_KEEP_ALIVE: &str = "1m";
+const ES_MAX_RESULT_WINDOW: usize = 10_000;
+
+/// 一页检索的分页方式。PIT + `search_after` 是首选；集群不支持时降级为 from/size。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum EsPageMode {
+    Pit { pit_id: String, keep_alive: String, search_after: Vec<serde_json::Value> },
+    Scroll { scroll_id: String, keep_alive: String },
+    Offset { from: u64 },
+}
+
+/// 三条链路共用的分页游标。`body` 只含 `query` / `sort`——随分页方式变化的
+/// `from`/`size`/`pit`/`search_after` 由 [`es_build_page_request_body`] 现拼，
+/// 因此 `body` 可以直接拿来比对「翻页途中过滤条件或排序是否被改过」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EsPageCursor {
+    index: String,
+    body: serde_json::Value,
+    size: usize,
+    mode: EsPageMode,
+}
+
+/// Opaque cursor handed back to the caller. It is either a paged `_search`
+/// cursor (PIT or offset), or a raw ES SQL cursor returned by `_sql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EsSearchCursor {
+    Page(EsPageCursor),
+    Sql { cursor: String, columns_key: String, columns: Vec<serde_json::Value> },
+}
+
+fn encode_es_search_cursor(cursor: &EsSearchCursor) -> Result<String, String> {
+    serde_json::to_string(cursor).map_err(|e| format!("Failed to encode Elasticsearch search cursor: {e}"))
+}
+
+fn decode_es_search_cursor(cursor: &str) -> Result<EsSearchCursor, String> {
+    serde_json::from_str(cursor).map_err(|e| format!("Invalid Elasticsearch search cursor: {e}"))
+}
+
 pub async fn find_documents(
     client: &EsClient,
     index: &str,
@@ -566,6 +925,458 @@ pub async fn find_documents(
     let result: SearchResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
 
     search_response_to_document_result(result)
+}
+
+async fn open_es_pit(client: &EsClient, index: &str, keep_alive: &str) -> Result<String, String> {
+    let path =
+        format!("/{}/_pit?keep_alive={}", elasticsearch_path_segment(index), elasticsearch_query_value(keep_alive));
+    let resp = client.post(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    let body: Value = resp.json().await.map_err(|e| format!("Elasticsearch PIT parse error: {e}"))?;
+    body.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "Elasticsearch PIT response missing id".to_string())
+}
+
+async fn close_es_pit(client: &EsClient, pit_id: &str) -> Result<(), String> {
+    let resp = client
+        .delete("/_pit")
+        .json(&serde_json::json!({ "id": pit_id }))
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    Ok(())
+}
+
+async fn close_es_scroll(client: &EsClient, scroll_id: &str) -> Result<(), String> {
+    let resp = client
+        .delete("/_search/scroll")
+        .json(&serde_json::json!({ "scroll_id": [scroll_id] }))
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    Ok(())
+}
+
+async fn close_es_sql_cursor(client: &EsClient, cursor: &str) -> Result<(), String> {
+    let resp = client
+        .post("/_sql/close")
+        .json(&serde_json::json!({ "cursor": cursor }))
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    Ok(())
+}
+
+/// Close a previously returned ES cursor. Supports DBX-wrapped paged cursors,
+/// DBX-wrapped SQL cursors, and raw ES SQL cursors.
+pub async fn close_cursor(client: &EsClient, cursor: &str) -> Result<(), String> {
+    if let Ok(search_cursor) = decode_es_search_cursor(cursor) {
+        return match search_cursor {
+            EsSearchCursor::Page(page) => match page.mode {
+                EsPageMode::Pit { pit_id, .. } => close_es_pit(client, &pit_id).await,
+                EsPageMode::Scroll { scroll_id, .. } if !scroll_id.is_empty() => {
+                    close_es_scroll(client, &scroll_id).await
+                }
+                EsPageMode::Scroll { .. } => Ok(()),
+                // from/size 分页在服务端没有留下任何状态，无需释放。
+                EsPageMode::Offset { .. } => Ok(()),
+            },
+            EsSearchCursor::Sql { cursor, .. } => close_es_sql_cursor(client, &cursor).await,
+        };
+    }
+    close_es_sql_cursor(client, cursor).await
+}
+
+/// Decide whether a SELECT * query should use PIT + search_after.
+///
+/// The pagination plan always emits `LIMIT n OFFSET m` (even `OFFSET 0`), so a
+/// zero/absent `from` plus an OFFSET clause is treated as a plan first page.
+/// A user-written `OFFSET > 0` without a cursor keeps the legacy from/size path
+/// so explicit offsets are not silently ignored.
+fn should_use_search_cursor(body: &serde_json::Value, has_offset: bool, cursor: Option<&str>) -> bool {
+    if cursor.is_some() {
+        return true;
+    }
+    if !has_offset {
+        return false;
+    }
+    body.get("from").and_then(serde_json::Value::as_u64).is_none_or(|from| from == 0)
+}
+
+/// PIT + `search_after` 需要一个稳定的分片级 tiebreaker。`_shard_doc` 只在 PIT 检索下
+/// 存在，所以仅在 PIT 模式追加；退回 from/size 时不需要它。
+fn elasticsearch_apply_pit_sort_tiebreaker(items: &mut Vec<serde_json::Value>) {
+    // 无显式排序时通用文档排序给出的是 `"_doc"`——字符串形式，不是 `{"_doc": ...}`。
+    // 两种形式都要认，否则会拼出 `["_doc", {"_shard_doc":"asc"}]`。
+    let is_plain_doc_sort = items.len() == 1 && (items[0].as_str() == Some("_doc") || items[0].get("_doc").is_some());
+    if is_plain_doc_sort {
+        items.clear();
+    }
+    if items.iter().all(|item| item.get("_shard_doc").is_none()) {
+        items.push(serde_json::json!({ "_shard_doc": "asc" }));
+    }
+}
+
+/// 取出基础检索体里的 `sort`。非数组形式（对象/字符串）包成单元素数组而不是丢弃。
+fn elasticsearch_sort_items(body: &serde_json::Value) -> Vec<serde_json::Value> {
+    match body.get("sort") {
+        Some(serde_json::Value::Array(items)) => items.clone(),
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(other) => vec![other.clone()],
+    }
+}
+
+struct EsPageRequest {
+    index: String,
+    body: serde_json::Value,
+    size: usize,
+}
+
+struct EsPageOutcome {
+    status: u16,
+    response: serde_json::Value,
+    next_cursor: Option<String>,
+    /// 指向当前页的游标，供调用方在翻完后释放 PIT。
+    active_cursor: Option<String>,
+}
+
+/// `es_send_page` 的失败原因。只有「ES 收到并拒绝了请求」才值得换一种分页方式重试；
+/// 传输层失败（超时、连接断开）重发一次只会把用户的等待时间翻倍。
+struct EsPageError {
+    message: String,
+    rejected_by_server: bool,
+}
+
+impl From<EsPageError> for String {
+    fn from(error: EsPageError) -> Self {
+        error.message
+    }
+}
+
+/// 集群接受了 PIT，却不认 PIT 专属的 `_shard_doc` 排序字段。这是能力缺失，
+/// 对整个连接永久生效；其余错误只回退本次请求。
+fn elasticsearch_error_lacks_pit_sort(error: &str) -> bool {
+    error.contains("_shard_doc")
+}
+
+/// 按分页方式拼出真正发给 ES 的检索体；游标里只存不变的部分。
+fn es_build_page_request_body(page: &EsPageCursor) -> serde_json::Value {
+    let mut body = page.body.clone();
+    let Some(map) = body.as_object_mut() else {
+        return body;
+    };
+    map.insert("size".to_string(), serde_json::json!(page.size));
+    match &page.mode {
+        EsPageMode::Pit { pit_id, keep_alive, search_after } => {
+            // PIT 检索自带快照范围，不能再带 `from`。
+            map.remove("from");
+            map.insert("track_total_hits".to_string(), serde_json::json!(true));
+            let mut sort = elasticsearch_sort_items(&page.body);
+            elasticsearch_apply_pit_sort_tiebreaker(&mut sort);
+            map.insert("sort".to_string(), serde_json::Value::Array(sort));
+            map.insert("pit".to_string(), serde_json::json!({ "id": pit_id, "keep_alive": keep_alive }));
+            if !search_after.is_empty() {
+                map.insert("search_after".to_string(), serde_json::Value::Array(search_after.clone()));
+            }
+        }
+        EsPageMode::Scroll { .. } => {
+            map.remove("from");
+        }
+        EsPageMode::Offset { from } => {
+            map.insert("from".to_string(), serde_json::json!(from));
+            // from/size 各页之间没有快照，排序有并列值时页边界会重复或漏行。
+            // `_doc` 在所有 ES 版本都可用，作为次级键把并列打散。
+            let mut sort = elasticsearch_sort_items(&page.body);
+            let has_doc_key = sort.iter().any(|item| item.as_str() == Some("_doc") || item.get("_doc").is_some());
+            if !sort.is_empty() && !has_doc_key {
+                sort.push(serde_json::json!("_doc"));
+                map.insert("sort".to_string(), serde_json::Value::Array(sort));
+            }
+        }
+    }
+    body
+}
+
+/// 发出一页检索并算出下一页游标。`is_continuation` 为 false 表示这是首页，
+/// 出错或翻到底时由这里关闭刚开的 PIT；续页的 PIT 归调用方持有，不能关。
+async fn es_send_page(
+    client: &EsClient,
+    page: &EsPageCursor,
+    is_continuation: bool,
+) -> Result<EsPageOutcome, EsPageError> {
+    let request_body = es_build_page_request_body(page);
+    // PIT 检索必须打全局 `/_search`——PIT 自带索引信息，路径里再带索引名会被拒。
+    let path = match &page.mode {
+        EsPageMode::Pit { .. } => "/_search".to_string(),
+        EsPageMode::Scroll { scroll_id, keep_alive } if !scroll_id.is_empty() => {
+            let _ = keep_alive;
+            "/_search/scroll".to_string()
+        }
+        EsPageMode::Scroll { keep_alive, .. } => {
+            format!(
+                "/{}/_search?scroll={}",
+                elasticsearch_path_segment(&page.index),
+                elasticsearch_query_value(keep_alive)
+            )
+        }
+        EsPageMode::Offset { .. } => elasticsearch_index_path(&page.index, "_search"),
+    };
+    let request_body = match &page.mode {
+        EsPageMode::Scroll { scroll_id, keep_alive } if !scroll_id.is_empty() => {
+            serde_json::json!({ "scroll": keep_alive, "scroll_id": scroll_id })
+        }
+        _ => request_body,
+    };
+    let opened_pit = match &page.mode {
+        EsPageMode::Pit { pit_id, .. } if !is_continuation => Some(pit_id.clone()),
+        _ => None,
+    };
+
+    let resp = client.post(&path).json(&request_body).send().await.map_err(|e| EsPageError {
+        message: format!("Elasticsearch request failed: {e}"),
+        rejected_by_server: false,
+    })?;
+    let status = client.response_status(&resp);
+    if !status.is_success() {
+        if let Some(pit_id) = &opened_pit {
+            let _ = close_es_pit(client, pit_id).await;
+        }
+        let error_body = resp.text().await.unwrap_or_default();
+        return Err(EsPageError { message: format!("Elasticsearch error: {error_body}"), rejected_by_server: true });
+    }
+
+    let response: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    let hits = response.pointer("/hits/hits").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    // `!hits.is_empty()` 不能省：`LIMIT 0` 时 `0 == 0` 会让空页被当成满页，
+    // offset 模式下就会不断吐出停在同一个 from 上的游标，翻页永远结束不了。
+    let is_full_page = !hits.is_empty() && hits.len() == page.size;
+    let last_sort = hits.last().and_then(|hit| hit.get("sort").and_then(serde_json::Value::as_array).cloned());
+
+    let (current_mode, next_mode) = match &page.mode {
+        EsPageMode::Pit { pit_id, keep_alive, search_after } => {
+            // 每次响应都可能给出新的 pit_id，必须跟着换，否则续页会用到过期的。
+            let pit_id = response
+                .get("pit_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| pit_id.clone());
+            let current = EsPageMode::Pit {
+                pit_id: pit_id.clone(),
+                keep_alive: keep_alive.clone(),
+                search_after: last_sort.clone().unwrap_or_else(|| search_after.clone()),
+            };
+            let next = match last_sort {
+                Some(search_after) if is_full_page => {
+                    Some(EsPageMode::Pit { pit_id, keep_alive: keep_alive.clone(), search_after })
+                }
+                _ => None,
+            };
+            (current, next)
+        }
+        EsPageMode::Scroll { scroll_id, keep_alive } => {
+            let scroll_id = response
+                .get("_scroll_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| scroll_id.clone());
+            let current = EsPageMode::Scroll { scroll_id: scroll_id.clone(), keep_alive: keep_alive.clone() };
+            let next = (!scroll_id.is_empty() && is_full_page)
+                .then_some(EsPageMode::Scroll { scroll_id, keep_alive: keep_alive.clone() });
+            (current, next)
+        }
+        EsPageMode::Offset { from } => {
+            let next_from = from.saturating_add(page.size as u64);
+            // 下一页整页都要落在 max_result_window 内，否则那次请求必被 ES 拒绝。
+            let next = if is_full_page && next_from.saturating_add(page.size as u64) <= ES_MAX_RESULT_WINDOW as u64 {
+                Some(EsPageMode::Offset { from: next_from })
+            } else {
+                None
+            };
+            (EsPageMode::Offset { from: *from }, next)
+        }
+    };
+
+    let encode = |mode| {
+        encode_es_search_cursor(&EsSearchCursor::Page(EsPageCursor { mode, ..page.clone() }))
+            .map_err(|message| EsPageError { message, rejected_by_server: false })
+    };
+    let next_cursor = match next_mode {
+        Some(mode) => Some(encode(mode)?),
+        None => None,
+    };
+    // 首页就翻到底时没有「上一页」可回，直接关掉 PIT 而不是挂着等它过期。
+    if next_cursor.is_none() && !is_continuation {
+        match &current_mode {
+            EsPageMode::Pit { pit_id, .. } => {
+                let _ = close_es_pit(client, pit_id).await;
+            }
+            EsPageMode::Scroll { scroll_id, .. } if !scroll_id.is_empty() => {
+                let _ = close_es_scroll(client, scroll_id).await;
+            }
+            _ => {}
+        }
+    }
+    let active_cursor = if next_cursor.is_some() || is_continuation { Some(encode(current_mode)?) } else { None };
+
+    Ok(EsPageOutcome { status: status.as_u16(), response, next_cursor, active_cursor })
+}
+
+/// 三条链路共用的分页入口。首页优先 PIT + `search_after`，被拒就退回 from/size。
+/// 判据是集群的实际响应而非版本号——`GET /` 可能没权限或被改写，兼容实现的版本号也不可信。
+async fn es_execute_paged_search(
+    client: &EsClient,
+    request: EsPageRequest,
+    cursor: Option<EsPageCursor>,
+) -> Result<EsPageOutcome, String> {
+    if let Some(page) = cursor {
+        let mismatch = if page.index != request.index {
+            Some("Elasticsearch cursor was created for a different index".to_string())
+        } else if page.body != request.body {
+            Some("Elasticsearch cursor no longer matches the current filter/sort; rerun the query".to_string())
+        } else {
+            None
+        };
+        if let Some(error) = mismatch {
+            match &page.mode {
+                EsPageMode::Pit { pit_id, .. } => {
+                    let _ = close_es_pit(client, pit_id).await;
+                }
+                EsPageMode::Scroll { scroll_id, .. } if !scroll_id.is_empty() => {
+                    let _ = close_es_scroll(client, scroll_id).await;
+                }
+                _ => {}
+            }
+            return Err(error);
+        }
+        return es_send_page(client, &page, true).await.map_err(String::from);
+    }
+
+    if client.supports_pit_search() {
+        let keep_alive = ES_PIT_KEEP_ALIVE.to_string();
+        // PIT 开不起来（版本过老、无权限、代理拦截）时静默退回 from/size。
+        if let Ok(pit_id) = open_es_pit(client, &request.index, &keep_alive).await {
+            let page = EsPageCursor {
+                index: request.index.clone(),
+                body: request.body.clone(),
+                size: request.size,
+                mode: EsPageMode::Pit { pit_id, keep_alive, search_after: Vec::new() },
+            };
+            match es_send_page(client, &page, false).await {
+                Ok(outcome) => return Ok(outcome),
+                // 请求压根没送到（超时、连接断开）时不重试：换个分页方式也送不到，
+                // 只会让用户多等一倍。
+                Err(error) if !error.rejected_by_server => return Err(error.message),
+                Err(error) => {
+                    // 只有能力缺失才记到连接上；偶发 5xx 仅回退本次请求。
+                    if elasticsearch_error_lacks_pit_sort(&error.message) {
+                        client.disable_pit_search();
+                    }
+                }
+            }
+        }
+    }
+
+    let page = EsPageCursor {
+        index: request.index.clone(),
+        body: request.body.clone(),
+        size: request.size,
+        mode: EsPageMode::Scroll { scroll_id: String::new(), keep_alive: ES_SCROLL_KEEP_ALIVE.to_string() },
+    };
+    match es_send_page(client, &page, false).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if !error.rejected_by_server => Err(error.message),
+        Err(_) => {
+            let page = EsPageCursor {
+                index: request.index,
+                body: request.body,
+                size: request.size,
+                mode: EsPageMode::Offset { from: 0 },
+            };
+            es_send_page(client, &page, false).await.map_err(String::from)
+        }
+    }
+}
+
+/// 首页解析失败时游标不会交到调用方手上，这里释放它可能持有的 PIT。
+/// 续页的 PIT 归调用方所有，不能碰。
+async fn es_release_unreturned_cursor(client: &EsClient, outcome_cursor: Option<&String>, is_first_page: bool) {
+    if !is_first_page {
+        return;
+    }
+    if let Some(cursor) = outcome_cursor {
+        let _ = close_cursor(client, cursor).await;
+    }
+}
+
+/// 把一个不透明游标串解出分页游标；SQL 游标不能用来续 `_search`。
+async fn es_page_cursor_from_str(
+    client: &EsClient,
+    cursor: Option<&str>,
+    misuse_error: &str,
+) -> Result<Option<EsPageCursor>, String> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    match decode_es_search_cursor(cursor)? {
+        EsSearchCursor::Page(page) => Ok(Some(page)),
+        EsSearchCursor::Sql { cursor, .. } => {
+            let _ = close_es_sql_cursor(client, &cursor).await;
+            Err(misuse_error.to_string())
+        }
+    }
+}
+
+/// 分页浏览一个 ES 索引。`cursor` 是上一次调用返回的不透明串；`None` 表示第一页。
+pub async fn find_documents_with_cursor(
+    client: &EsClient,
+    index: &str,
+    limit: i64,
+    filter: Option<&str>,
+    sort: Option<&str>,
+    cursor: Option<&str>,
+) -> Result<DocumentQueryResult, String> {
+    let size = limit.max(1).min(ES_MAX_RESULT_WINDOW as i64) as usize;
+    // 基础检索体只留 query/sort，from 与 size 交给分页执行器。
+    let mut body = build_find_documents_body(0, size as i64, filter, sort)?;
+    if let Some(map) = body.as_object_mut() {
+        map.remove("from");
+        map.remove("size");
+    }
+
+    let page_cursor =
+        es_page_cursor_from_str(client, cursor, "Elasticsearch SQL cursor cannot be used to continue a document query")
+            .await?;
+    let outcome =
+        es_execute_paged_search(client, EsPageRequest { index: index.to_string(), body, size }, page_cursor).await?;
+
+    let parsed: Result<SearchResponse, String> =
+        serde_json::from_value(outcome.response).map_err(|e| format!("Elasticsearch parse error: {e}"));
+    let mut document_result = match parsed.and_then(search_response_to_document_result) {
+        Ok(result) => result,
+        Err(error) => {
+            es_release_unreturned_cursor(client, outcome.next_cursor.as_ref(), cursor.is_none()).await;
+            return Err(error);
+        }
+    };
+    document_result.next_cursor = outcome.next_cursor;
+    Ok(document_result)
 }
 
 #[derive(Deserialize)]
@@ -612,6 +1423,91 @@ pub async fn count_documents(client: &EsClient, index: &str, filter: Option<&str
     Ok(result.count)
 }
 
+/// `GET /{index}/_mapping` —— 字段映射。
+pub async fn get_index_mapping(client: &EsClient, index: &str) -> Result<Value, String> {
+    get_index_metadata(client, index, "_mapping").await
+}
+
+/// `GET /{index}/_settings` —— 索引配置（分片数、副本数、analysis 等）。
+pub async fn get_index_settings(client: &EsClient, index: &str) -> Result<Value, String> {
+    get_index_metadata(client, index, "_settings").await
+}
+
+/// `GET /{index}/_stats` —— 索引统计（文档数、存储大小、各类操作计数）。
+pub async fn get_index_stats(client: &EsClient, index: &str) -> Result<Value, String> {
+    get_index_metadata(client, index, "_stats").await
+}
+
+/// 侧边栏的索引节点可能是 `index_grouping` 折叠出的通配模式（如 `logs-*`）。
+/// 这三个端点都原生接受通配，`elasticsearch_path_segment` 也不转义 `*`，
+/// 因此聚合节点会如实返回该模式命中的全部索引。
+async fn get_index_metadata(client: &EsClient, index: &str, endpoint: &str) -> Result<Value, String> {
+    let path = elasticsearch_index_path(index, endpoint);
+    let resp = client.get(&path).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))
+}
+
+/// 清空索引数据的结果。文档删除可能部分失败（分片错误、并发写入），
+/// 所以返回计数与失败明细，让调用方能如实告知用户而不是笼统报成功。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElasticsearchDeleteByQueryResult {
+    /// 匹配到的文档数。
+    pub total: u64,
+    /// 实际删除的文档数。
+    pub deleted: u64,
+    /// 因并发写入导致的版本冲突数（`conflicts=proceed` 下会被跳过而非中断）。
+    pub version_conflicts: u64,
+    /// 请求是否在删完前超时。
+    pub timed_out: bool,
+    /// 分片级失败的原始 JSON，逐条保留以便排查。
+    pub failures: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteByQueryResponse {
+    #[serde(default)]
+    total: u64,
+    #[serde(default)]
+    deleted: u64,
+    #[serde(default)]
+    version_conflicts: u64,
+    #[serde(default)]
+    timed_out: bool,
+    #[serde(default)]
+    failures: Vec<Value>,
+}
+
+/// 清空索引数据：`POST /{index}/_delete_by_query` + `match_all`，只删文档，
+/// 保留 mapping、settings、别名。
+///
+/// `conflicts=proceed` 让并发写入引起的版本冲突被跳过而不是中断整批删除；
+/// `refresh=true` 让删除立即对随后的搜索与计数可见，否则清空后刷新数据页
+/// 仍会看到旧文档。
+pub async fn delete_all_documents(client: &EsClient, index: &str) -> Result<ElasticsearchDeleteByQueryResult, String> {
+    let path = format!("{}?conflicts=proceed&refresh=true", elasticsearch_index_path(index, "_delete_by_query"));
+    let body = serde_json::json!({ "query": { "match_all": {} } });
+    let resp = client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+
+    let result: DeleteByQueryResponse =
+        resp.json().await.map_err(|e| format!("Elasticsearch delete-by-query parse error: {e}"))?;
+    Ok(ElasticsearchDeleteByQueryResult {
+        total: result.total,
+        deleted: result.deleted,
+        version_conflicts: result.version_conflicts,
+        timed_out: result.timed_out,
+        failures: result.failures.iter().map(Value::to_string).collect(),
+    })
+}
+
 fn search_response_to_document_result(result: SearchResponse) -> Result<DocumentQueryResult, String> {
     // A 200 search response can still omit failed shards. Only expose an
     // exact total when both the total relation and shard metadata agree.
@@ -655,6 +1551,7 @@ fn search_response_to_document_result(result: SearchResponse) -> Result<Document
         extended_documents: None,
         total,
         total_is_exact,
+        next_cursor: None,
     })
 }
 
@@ -1161,19 +2058,28 @@ fn validate_elasticsearch_ndjson(body: &str) -> Result<String, String> {
 pub(crate) type SqlResponseParser = fn(&serde_json::Value, std::time::Instant) -> Option<QueryResult>;
 
 pub async fn execute_rest_query(client: &EsClient, input: &str) -> Result<QueryResult, String> {
-    execute_rest_query_with_sql_parser(client, input, parse_sql_response).await
+    execute_rest_query_with_sql_parser(client, input, parse_sql_response, None).await
+}
+
+pub async fn execute_rest_query_with_cursor(
+    client: &EsClient,
+    input: &str,
+    cursor: Option<&str>,
+) -> Result<QueryResult, String> {
+    execute_rest_query_with_sql_parser(client, input, parse_sql_response, cursor).await
 }
 
 pub(crate) async fn execute_rest_query_with_sql_parser(
     client: &EsClient,
     input: &str,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
     let start = std::time::Instant::now();
     let input = strip_leading_elasticsearch_comments(input);
 
     if let Some(search_query) = parse_select_star_search_query(input) {
-        return execute_search_query(client, search_query, start, sql_response_parser).await;
+        return execute_search_query(client, search_query, start, sql_response_parser, cursor).await;
     }
 
     if is_elasticsearch_sql_query(input) {
@@ -1189,13 +2095,13 @@ pub(crate) async fn execute_rest_query_with_sql_parser(
         let adapted_for_translator = adapt_elasticsearch_sql_query(input);
         match crate::db::elasticsearch_sql::translate_select_star(&adapted_for_translator) {
             Ok(Some(translated)) => {
-                return execute_translated_select_star(client, translated, start, sql_response_parser).await;
+                return execute_translated_select_star(client, translated, start, sql_response_parser, cursor).await;
             }
             Ok(None) => {}
             Err(message) => return Err(format!("Elasticsearch SQL error: {message}")),
         }
 
-        return execute_sql_query(client, input, start, sql_response_parser).await;
+        return execute_sql_query(client, input, start, sql_response_parser, cursor).await;
     }
 
     // CAT APIs default to text, so request JSON for an unformatted CAT call.
@@ -1227,6 +2133,7 @@ pub(crate) async fn execute_rest_query_with_sql_parser(
 // of documents. The result-grid surfaces the index's true total separately so
 // the user can see how much was actually held back.
 const AUTO_PAGED_SELECT_STAR_SIZE: usize = 100;
+const ES_SQL_FETCH_SIZE: usize = 10_000;
 
 struct ElasticsearchSearchQuery {
     index: String,
@@ -1239,29 +2146,95 @@ struct ElasticsearchSearchQuery {
     from_plan_pagination: bool,
 }
 
-async fn execute_search_query(
+/// `SELECT *` 快路径与 SQL 翻译路径只有字段来源不同，检索与分页逻辑收敛到这里。
+struct EsIndexedSearch {
+    index: String,
+    body: serde_json::Value,
+    /// SQL 里带了 OFFSET，说明分页由前端的分页计划驱动（而不是用户手写的 LIMIT）。
+    from_plan_pagination: bool,
+    /// 用索引的真实命中总数覆盖 `affected_rows`，让表格能算出总页数。
+    report_index_total: bool,
+}
+
+async fn execute_indexed_search(
     client: &EsClient,
-    query: ElasticsearchSearchQuery,
+    search: EsIndexedSearch,
     start: std::time::Instant,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
-    let report_index_total = query.from_plan_pagination;
-    let path = elasticsearch_index_path(&query.index, "_search");
-    let resp =
-        client.post(&path).json(&query.body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = client.response_status(&resp).as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
-    // Capture the index's true match total before the body is consumed by the
-    // parser — needed below when we report total instead of rows.len().
-    let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+    let EsIndexedSearch { index, mut body, from_plan_pagination, report_index_total } = search;
+    // Only pagination-plan first pages (OFFSET 0) and explicit cursor
+    // continuations use PIT + search_after. A bare user `LIMIT n` or a
+    // user-written `OFFSET > 0` stays on the legacy from/size path.
+    if !should_use_search_cursor(&body, from_plan_pagination, cursor) {
+        let path = elasticsearch_index_path(&index, "_search");
+        let resp =
+            client.post(&path).json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+        let status = client.response_status(&resp).as_u16();
+        let response: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        let index_total = response.pointer("/hits/total/value").and_then(|v| v.as_u64());
+        let mut result = parse_elasticsearch_response_with_sql_parser(status, response, start, sql_response_parser)?;
+        if report_index_total {
+            if let Some(total) = index_total {
+                result.affected_rows = total;
+            }
+        }
+        return Ok(result);
+    }
 
-    let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
+    let page_cursor =
+        es_page_cursor_from_str(client, cursor, "Elasticsearch SQL cursor cannot be used to continue a _search query")
+            .await?;
+    // 基础检索体只留 query/sort，from 与 size 交给分页执行器。
+    let size =
+        body.get("size").and_then(serde_json::Value::as_u64).unwrap_or(AUTO_PAGED_SELECT_STAR_SIZE as u64) as usize;
+    if let Some(map) = body.as_object_mut() {
+        map.remove("from");
+        map.remove("size");
+    }
+
+    let outcome = es_execute_paged_search(client, EsPageRequest { index, body, size }, page_cursor).await?;
+
+    let index_total = outcome.response.pointer("/hits/total/value").and_then(|v| v.as_u64());
+    let has_more = outcome.next_cursor.is_some();
+    let mut result = match parse_elasticsearch_response_with_sql_parser(
+        outcome.status,
+        outcome.response,
+        start,
+        sql_response_parser,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            es_release_unreturned_cursor(client, outcome.next_cursor.as_ref(), cursor.is_none()).await;
+            return Err(error);
+        }
+    };
     if report_index_total {
         if let Some(total) = index_total {
             result.affected_rows = total;
         }
     }
+    // 翻到底后仍要把最后一个游标交回去，调用方据此释放 PIT。
+    result.session_id = outcome.next_cursor.or(outcome.active_cursor).or_else(|| cursor.map(str::to_string));
+    result.has_more = has_more;
     Ok(result)
+}
+
+async fn execute_search_query(
+    client: &EsClient,
+    query: ElasticsearchSearchQuery,
+    start: std::time::Instant,
+    sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
+) -> Result<QueryResult, String> {
+    let search = EsIndexedSearch {
+        index: query.index,
+        body: query.body,
+        from_plan_pagination: query.from_plan_pagination,
+        report_index_total: query.from_plan_pagination,
+    };
+    execute_indexed_search(client, search, start, sql_response_parser, cursor).await
 }
 
 #[cfg(test)]
@@ -1298,6 +2271,7 @@ fn parse_elasticsearch_response_with_sql_parser(
                 session_id: None,
                 has_more: false,
                 elasticsearch_raw_body: None,
+                messages: Vec::new(),
             })
         } else {
             Ok(json_response_result(status, &body, start))
@@ -1323,6 +2297,7 @@ fn parse_elasticsearch_response_with_sql_parser(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     } else {
         Ok(json_response_result(status, &body, start))
@@ -1494,6 +2469,7 @@ fn raw_json_response_result(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 
@@ -1560,6 +2536,7 @@ fn parse_elasticsearch_rest_response_with_sql_parser(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -1665,26 +2642,40 @@ async fn execute_translated_select_star(
     translated: crate::db::elasticsearch_sql::TranslatedSelectStar,
     start: std::time::Instant,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
-    let report_index_total = !translated.user_limited;
-    let path = elasticsearch_index_path(&translated.index, "_search");
-    let resp = client
-        .post(&path)
-        .json(&translated.body)
-        .send()
-        .await
-        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
-    let status = client.response_status(&resp).as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
-    let index_total = body.pointer("/hits/total/value").and_then(|v| v.as_u64());
+    let search = EsIndexedSearch {
+        index: translated.index,
+        body: translated.body,
+        from_plan_pagination: translated.from_plan_pagination,
+        // 用户自己写了 LIMIT 时不覆盖行数，否则会把「取 10 条」显示成索引总量。
+        report_index_total: !translated.user_limited,
+    };
+    execute_indexed_search(client, search, start, sql_response_parser, cursor).await
+}
 
-    let mut result = parse_elasticsearch_response_with_sql_parser(status, body, start, sql_response_parser)?;
-    if report_index_total {
-        if let Some(total) = index_total {
-            result.affected_rows = total;
+/// Split a trailing `LIMIT n OFFSET m` from an ES SQL statement. The OFFSET
+/// form is produced by the DBX pagination plan; it must be removed before
+/// sending the query to `_sql` so ES SQL cursor pagination can drive paging.
+/// A bare user `LIMIT n` (no OFFSET) is preserved as an explicit row cap.
+fn es_sql_pagination(query: &str) -> (String, Option<usize>) {
+    let trimmed = query.trim().trim_end_matches(';').trim();
+    let re =
+        Regex::new(r"(?i)^(.*?)\s+limit\s+(\d+)(?:\s+offset\s+(\d+))?\s*$").expect("valid ES SQL pagination regex");
+    if let Some(caps) = re.captures(trimmed) {
+        let limit = caps.get(2).and_then(|value| value.as_str().parse::<usize>().ok());
+        let offset = caps.get(3).and_then(|value| value.as_str().parse::<usize>().ok());
+        // Only the plan's `OFFSET 0` first page is safe to strip. A
+        // user-written `OFFSET > 0` must keep its explicit offset semantics.
+        if offset == Some(0) {
+            let base = caps.get(1).map(|value| value.as_str().trim().to_string()).unwrap_or_default();
+            (base, limit)
+        } else {
+            (trimmed.to_string(), limit)
         }
+    } else {
+        (trimmed.to_string(), None)
     }
-    Ok(result)
 }
 
 async fn execute_sql_query(
@@ -1692,21 +2683,80 @@ async fn execute_sql_query(
     query: &str,
     start: std::time::Instant,
     sql_response_parser: SqlResponseParser,
+    cursor: Option<&str>,
 ) -> Result<QueryResult, String> {
-    let query = adapt_elasticsearch_sql_query(query);
-    let body = serde_json::json!({ "query": query });
+    let (body, mut column_metadata) = if let Some(cursor) = cursor {
+        if let Ok(search_cursor) = decode_es_search_cursor(cursor) {
+            match search_cursor {
+                EsSearchCursor::Sql { cursor, columns_key, columns } => {
+                    (serde_json::json!({ "cursor": cursor }), Some((columns_key, columns)))
+                }
+                EsSearchCursor::Page(page) => {
+                    if let EsPageMode::Pit { pit_id, .. } = &page.mode {
+                        let _ = close_es_pit(client, pit_id).await;
+                    }
+                    return Err("Elasticsearch PIT cursor cannot be used to continue a _sql query".to_string());
+                }
+            }
+        } else {
+            (serde_json::json!({ "cursor": cursor }), None)
+        }
+    } else {
+        // The pagination plan rewrites ES SQL to `LIMIT n OFFSET m`. Strip the
+        // OFFSET form so ES SQL cursor pagination can return exactly `n` rows
+        // per page and continue beyond index.max_result_window.
+        let (base_query, limit) = es_sql_pagination(query);
+        let query = adapt_elasticsearch_sql_query(&base_query);
+        let fetch_size = limit.unwrap_or(ES_SQL_FETCH_SIZE);
+        (serde_json::json!({ "query": query, "fetch_size": fetch_size }), None)
+    };
+
     let resp =
         client.post("/_sql").json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     let status = client.response_status(&resp);
-    let response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
+    let mut response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
 
     if !status.is_success() {
         return Err(format_sql_error(status, &response_body));
     }
 
-    sql_response_parser(&response_body, start).ok_or_else(|| {
-        let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_else(|_| response_body.to_string());
-        format!("Unexpected Elasticsearch SQL response: {pretty}")
+    if response_body.get("schema").is_none() && response_body.get("columns").is_none() {
+        if let (Some(body), Some((columns_key, columns))) = (response_body.as_object_mut(), column_metadata.as_ref()) {
+            body.insert(columns_key.clone(), serde_json::Value::Array(columns.clone()));
+        }
+    }
+    if column_metadata.is_none() {
+        column_metadata = sql_cursor_column_metadata(&response_body);
+    }
+
+    let mut result = match sql_response_parser(&response_body, start) {
+        Some(result) => result,
+        None => {
+            if let Some(raw_cursor) = response_body.get("cursor").and_then(serde_json::Value::as_str) {
+                let _ = close_es_sql_cursor(client, raw_cursor).await;
+            }
+            let pretty = serde_json::to_string_pretty(&response_body).unwrap_or_else(|_| response_body.to_string());
+            return Err(format!("Unexpected Elasticsearch SQL response: {pretty}"));
+        }
+    };
+    // Wrap the raw ES SQL cursor so close_cursor can distinguish it from a PIT
+    // cursor and close it with POST /_sql/close.
+    if let Some(raw_cursor) = result.session_id.take() {
+        let (columns_key, columns) =
+            column_metadata.ok_or_else(|| "Elasticsearch SQL response missing column metadata".to_string())?;
+        result.session_id =
+            Some(encode_es_search_cursor(&EsSearchCursor::Sql { cursor: raw_cursor, columns_key, columns })?);
+    } else if let Some(cursor) = cursor {
+        // On an exhausted continuation, keep returning the cursor that was used
+        // so the frontend can still close the SQL cursor during cleanup.
+        result.session_id = Some(cursor.to_string());
+    }
+    Ok(result)
+}
+
+fn sql_cursor_column_metadata(body: &serde_json::Value) -> Option<(String, Vec<serde_json::Value>)> {
+    ["schema", "columns"].into_iter().find_map(|key| {
+        body.get(key).and_then(serde_json::Value::as_array).map(|columns| (key.to_string(), columns.clone()))
     })
 }
 
@@ -1996,6 +3046,7 @@ pub(crate) fn parse_tabular_sql_response(
         session_id: body.get("cursor").and_then(|cursor| cursor.as_str()).map(str::to_string),
         has_more: body.get("cursor").and_then(|cursor| cursor.as_str()).is_some(),
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     })
 }
 
@@ -2090,7 +3141,8 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 mod tests {
     use super::{
         build_count_documents_body, build_find_documents_body, elasticsearch_accept_invalid_certs,
-        elasticsearch_base_url_fallbacks, redact_elasticsearch_url, EsClient, SearchResponse,
+        elasticsearch_base_url_fallbacks, elasticsearch_index_grouping, group_index_names, merge_index_entries,
+        normalize_index_names, redact_elasticsearch_url, ElasticsearchIndexEntry, EsClient, SearchResponse,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -2135,6 +3187,261 @@ mod tests {
         assert_eq!(request.path, "/_nodes/stats/jvm?pretty");
         assert_eq!(request.body, None);
         assert_eq!(request.body_kind, super::ElasticsearchRestBodyKind::Json);
+    }
+
+    #[test]
+    fn normalize_index_names_filters_sorts_and_dedups() {
+        let names = normalize_index_names(
+            [".kibana", "ngx-log-2", "ngx-log-1", "ngx-log-1", ".security-7"].into_iter().map(String::from),
+        );
+        // 去掉点前缀内部索引、排序、去重。
+        assert_eq!(names, vec!["ngx-log-1".to_string(), "ngx-log-2".to_string()]);
+    }
+
+    #[test]
+    fn mapping_columns_include_implicit_object_parents() {
+        let mapping = json!({
+            "profile": {
+                "properties": {
+                    "name": { "type": "keyword" }
+                }
+            }
+        });
+        let properties = mapping.as_object().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let mut columns = Vec::new();
+
+        super::collect_mapping_columns("", properties, &mut seen, &mut columns);
+
+        assert!(columns.iter().any(|column| column.name == "profile" && column.data_type == "object"));
+        assert!(columns.iter().any(|column| column.name == "profile.name" && column.data_type == "keyword"));
+    }
+
+    #[test]
+    fn connectivity_check_disabled_parses_bool_and_string() {
+        use super::elasticsearch_connectivity_check_disabled as disabled;
+        assert!(!disabled(None));
+        assert!(!disabled(Some(&serde_json::json!({}))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": true }))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "on" }))));
+        assert!(disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "TRUE" }))));
+        assert!(!disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": false }))));
+        assert!(!disabled(Some(&serde_json::json!({ "connectivityCheckDisabled": "off" }))));
+    }
+
+    #[test]
+    fn group_index_names_off_by_default() {
+        // 缺省配置 → 关闭聚合，原样返回。
+        assert!(elasticsearch_index_grouping(None).is_none());
+        let raw = vec!["a-2026.08.04".to_string(), "a-2026.08.05".to_string()];
+        assert_eq!(group_index_names(raw.clone(), None), raw);
+    }
+
+    #[test]
+    fn group_index_names_tenant_level_with_capture_group() {
+        // 保留 `@<第一段>`（到第一个下划线），其后全部折叠成 `*`。用中性占位名。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"^([^@]*@[^_]+)_.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec![
+                "svc@alpha_r1-2026.08.06@0-000001".to_string(),
+                "svc@alpha_r1-2026.08.07@0-000001".to_string(),
+                "svc@beta_r1-2026.08.06@0-000001".to_string(),
+                "svc_err-2026.08.06@0-000001".to_string(), // 无 @ → 不匹配 → 原样
+            ],
+            re.as_ref(),
+        );
+        assert_eq!(
+            out,
+            vec!["svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err-2026.08.06@0-000001".to_string(),]
+        );
+    }
+
+    #[test]
+    fn group_index_names_tail_strip_without_capture_group() {
+        // 无捕获组：按 ES 惯例剥掉“日期+滚动号”尾巴，`${1}` 为空即替换成 `*`。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"[-_.@]\d{4}[-_.]?\d{2}[-_.]?\d{2}.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec!["logs-2026.08.06".to_string(), "logs-2026.08.07".to_string(), "orders-2026.08.01".to_string()],
+            re.as_ref(),
+        );
+        assert_eq!(out, vec!["logs*".to_string(), "orders*".to_string()]);
+    }
+
+    #[test]
+    fn group_index_names_mixed_tenant_and_plain_scheme() {
+        // 同一条正则同时处理：真租户（@后跟字母）折到 @租户；无租户的按名字剥日期尾巴；
+        // 普通非时间序列索引保持原样。区分点：真租户 @ 后是字母，滚动号 @ 后是数字。用中性名。
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"^([^@]*@[a-zA-Z][a-zA-Z0-9]*|[^-@]*)[-_.@].*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let out = group_index_names(
+            vec![
+                "svc_err-2026.08.10@0-000001".to_string(), // 无租户 → svc_err*
+                "svc_err-2026.08.11@0-000001".to_string(),
+                "svc@alpha_r1-2026.08.10@0-000001".to_string(), // 带区域租户 → svc@alpha*
+                "svc@beta-2026.08.10@0-000001".to_string(),     // 无区域租户 → svc@beta*
+                "catalog".to_string(),                          // 普通索引无尾巴 → 原样
+            ],
+            re.as_ref(),
+        );
+        assert_eq!(
+            out,
+            vec!["catalog".to_string(), "svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err*".to_string(),]
+        );
+    }
+
+    fn entry(name: &str, aliases: &[&str]) -> ElasticsearchIndexEntry {
+        ElasticsearchIndexEntry {
+            name: name.to_string(),
+            aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+        }
+    }
+
+    fn alias_map(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(index, aliases)| (index.to_string(), aliases.iter().map(|alias| alias.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn merge_index_entries_attaches_aliases_to_the_same_index_row() {
+        let entries = merge_index_entries(
+            vec!["orders".to_string(), "users".to_string()],
+            &alias_map(&[("orders", &["orders-write", "orders"]), ("users", &[".hidden"])]),
+            None,
+        );
+        assert_eq!(entries, vec![entry("orders", &["orders-write"]), entry("users", &[])]);
+    }
+
+    #[test]
+    fn merge_index_entries_collects_grouped_index_aliases_onto_the_pattern_row() {
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"[-_.@]\d{4}[-_.]?\d{2}[-_.]?\d{2}.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let entries = merge_index_entries(
+            vec!["logs-2026.08.06".to_string(), "logs-2026.08.07".to_string()],
+            &alias_map(&[("logs-2026.08.06", &["logs"]), ("logs-2026.08.07", &["logs", "logs-write"])]),
+            re.as_ref(),
+        );
+        assert_eq!(entries, vec![entry("logs*", &["logs", "logs-write"])]);
+    }
+
+    async fn write_json_http_response(socket: &mut tokio::net::TcpStream, status: u16, body: &str) {
+        use tokio::io::AsyncWriteExt;
+
+        let reason = match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            _ => "Error",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    async fn serve_elasticsearch_json_routes(
+        listener: tokio::net::TcpListener,
+        routes: Vec<(&'static str, u16, &'static str)>,
+    ) {
+        for _ in 0..routes.len() {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (status, body) = routes
+                .iter()
+                .find(|(prefix, _, _)| {
+                    let encoded = prefix.replace('*', "%2A");
+                    request.starts_with(&format!("GET {prefix}")) || request.starts_with(&format!("GET {encoded}"))
+                })
+                .map(|(_, status, body)| (*status, *body))
+                .unwrap_or((404, "{}"));
+            write_json_http_response(&mut socket, status, body).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn list_indices_lists_aliases_from_existing_alias_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![
+                ("/_cat/indices", 200, r#"[{"index":"orders"},{"index":".security"}]"#),
+                (
+                    "/_alias",
+                    200,
+                    r#"{"orders":{"aliases":{"orders-write":{},".kibana":{}}},"hidden":{"aliases":{"orders-write":{}}}}"#,
+                ),
+            ],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("orders", &["orders-write"])]);
+    }
+
+    #[tokio::test]
+    async fn list_indices_keeps_indices_when_alias_endpoint_is_forbidden() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![("/_cat/indices", 200, r#"[{"index":"orders"}]"#), ("/_alias", 403, r#"{"error":"forbidden"}"#)],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("orders", &[])]);
+    }
+
+    #[tokio::test]
+    async fn list_indices_reads_aliases_from_resolve_index_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![
+                ("/_cat/indices", 403, r#"{"error":"forbidden"}"#),
+                (
+                    "/_resolve/index/*",
+                    200,
+                    r#"{"indices":[{"name":"orders"}],"aliases":[{"name":"orders-write","indices":["orders"]}],"data_streams":[{"name":"logs"}]}"#,
+                ),
+            ],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("logs", &[]), entry("orders", &["orders-write"])]);
+    }
+
+    #[tokio::test]
+    async fn list_indices_reads_nested_aliases_from_alias_endpoint_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![
+                ("/_cat/indices", 403, r#"{"error":"forbidden"}"#),
+                ("/_resolve/index/*", 403, r#"{"error":"forbidden"}"#),
+                ("/_alias", 200, r#"{"orders":{"aliases":{"orders-write":{}}},"users":{"aliases":{}}}"#),
+            ],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("orders", &["orders-write"]), entry("users", &[])]);
     }
 
     #[test]
@@ -2209,6 +3516,55 @@ mod tests {
     }
 
     #[test]
+    fn disabled_connectivity_check_keeps_localhost_request_fallback() {
+        assert_eq!(
+            super::elasticsearch_localhost_resolve_addrs("https://localhost:9200", true),
+            Some(["[::1]:0".parse().unwrap(), "127.0.0.1:0".parse().unwrap()])
+        );
+        assert_eq!(super::elasticsearch_localhost_resolve_addrs("https://localhost:9200", false), None);
+        assert_eq!(super::elasticsearch_localhost_resolve_addrs("https://search.example.com:9200", true), None);
+    }
+
+    #[tokio::test]
+    async fn disabled_connectivity_check_can_request_ipv4_localhost() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /_cluster/health "), "unexpected request: {request}");
+            let body = r#"{"status":"green"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut client = EsClient::from_config(
+            &format!("http://localhost:{}", addr.port()),
+            None,
+            None,
+            false,
+            None,
+            Some(&json!({ "connectivityCheckDisabled": "yes" })),
+            Duration::from_secs(2),
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
+        super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
+        let response = client.get("/_cluster/health").send().await.unwrap();
+
+        assert!(response.status().is_success());
+        server.await.unwrap();
+    }
+
+    #[test]
     fn elasticsearch_client_from_config_uses_url_params_for_tls_verification() {
         let client = EsClient::from_config(
             "https://localhost:9200/",
@@ -2218,7 +3574,11 @@ mod tests {
             Some("sslmode=disable"),
             None,
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
 
         assert_eq!(client.base_url, "https://localhost:9200");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:9200"]);
@@ -2253,7 +3613,11 @@ mod tests {
                 "connectivityCheckPath": "GET pro-logs-*/_search"
             })),
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         assert_eq!(client.connectivity_check_path, "/pro-logs-*/_search");
     }
 
@@ -2286,7 +3650,11 @@ mod tests {
             None,
             Some(&json!({ "connectivityCheckPath": "/pro-logs-*/_search" })),
             Duration::from_secs(2),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
         server.await.unwrap();
     }
@@ -2302,7 +3670,11 @@ mod tests {
             None,
             Some(&external_config),
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
 
         assert_eq!(client.base_url, "https://localhost:5601/kibana/s/analytics");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:5601/kibana/s/analytics"]);
@@ -2387,6 +3759,645 @@ mod tests {
             })
         );
         assert!(body.get("track_total_hits").is_none());
+    }
+
+    #[test]
+    fn pit_sort_tiebreaker_replaces_plain_doc_sort() {
+        // 无排序时文档链路给出的是字符串形式的 "_doc"，必须被替换而不是叠加。
+        let mut items = vec![serde_json::json!("_doc")];
+        super::elasticsearch_apply_pit_sort_tiebreaker(&mut items);
+        assert_eq!(items, vec![serde_json::json!({ "_shard_doc": "asc" })]);
+
+        let mut items = Vec::new();
+        super::elasticsearch_apply_pit_sort_tiebreaker(&mut items);
+        assert_eq!(items, vec![serde_json::json!({ "_shard_doc": "asc" })]);
+
+        let mut items = vec![serde_json::json!({ "created_at": { "order": "desc" } })];
+        super::elasticsearch_apply_pit_sort_tiebreaker(&mut items);
+        assert_eq!(
+            items,
+            vec![serde_json::json!({ "created_at": { "order": "desc" } }), serde_json::json!({ "_shard_doc": "asc" })]
+        );
+    }
+
+    #[test]
+    fn detects_only_missing_pit_sort_errors() {
+        assert!(super::elasticsearch_error_lacks_pit_sort(
+            r#"Elasticsearch error: {"error":{"root_cause":[{"type":"query_shard_exception","reason":"No mapping found for [_shard_doc] in order to sort on","index":"products"}]},"status":400}"#
+        ));
+        // 偶发故障不该被当成能力缺失。
+        assert!(!super::elasticsearch_error_lacks_pit_sort("Elasticsearch request failed: operation timed out"));
+        assert!(!super::elasticsearch_error_lacks_pit_sort(
+            r#"Elasticsearch error: {"error":{"type":"search_phase_execution_exception"},"status":503}"#
+        ));
+    }
+
+    #[test]
+    fn pit_page_body_includes_pit_and_search_after() {
+        let page = super::EsPageCursor {
+            index: "logs".to_string(),
+            body: json!({
+                "query": { "term": { "city": "长治" } },
+                "sort": [{ "created_at": { "order": "desc" } }],
+            }),
+            size: 25,
+            mode: super::EsPageMode::Pit {
+                pit_id: "pit-1".to_string(),
+                keep_alive: "1m".to_string(),
+                search_after: vec![json!("abc"), json!(123)],
+            },
+        };
+        assert_eq!(
+            super::es_build_page_request_body(&page),
+            json!({
+                "size": 25,
+                "track_total_hits": true,
+                "query": { "term": { "city": "长治" } },
+                "sort": [{ "created_at": { "order": "desc" } }, { "_shard_doc": "asc" }],
+                "pit": { "id": "pit-1", "keep_alive": "1m" },
+                "search_after": ["abc", 123]
+            })
+        );
+    }
+
+    #[test]
+    fn offset_page_body_uses_from_and_never_adds_shard_doc() {
+        let page = super::EsPageCursor {
+            index: "logs".to_string(),
+            body: json!({ "sort": ["_doc"], "query": { "match_all": {} } }),
+            size: 25,
+            mode: super::EsPageMode::Offset { from: 50 },
+        };
+        // 退回 from/size 时绝不能出现 `_shard_doc`。
+        assert_eq!(
+            super::es_build_page_request_body(&page),
+            // 回退路径刻意不带 track_total_hits：那会让每页都对整个索引做精确计数。
+            json!({
+                "size": 25,
+                "from": 50,
+                "sort": ["_doc"],
+                "query": { "match_all": {} }
+            })
+        );
+    }
+
+    #[test]
+    fn scroll_page_body_removes_offset_for_legacy_clusters() {
+        let page = super::EsPageCursor {
+            index: "events".to_string(),
+            body: json!({ "from": 9_500, "query": { "match_all": {} }, "sort": ["created_at"] }),
+            size: 500,
+            mode: super::EsPageMode::Scroll { scroll_id: String::new(), keep_alive: "1m".to_string() },
+        };
+        assert_eq!(
+            super::es_build_page_request_body(&page),
+            json!({ "query": { "match_all": {} }, "size": 500, "sort": ["created_at"] })
+        );
+    }
+
+    #[test]
+    fn es_sql_pagination_strips_plan_offset_but_keeps_user_limit() {
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 500 OFFSET 0");
+        assert_eq!(base, "SELECT field FROM idx");
+        assert_eq!(limit, Some(500));
+
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 10");
+        assert_eq!(base, "SELECT field FROM idx LIMIT 10");
+        assert_eq!(limit, Some(10));
+
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 500 OFFSET 100");
+        assert_eq!(base, "SELECT field FROM idx LIMIT 500 OFFSET 100");
+        assert_eq!(limit, Some(500));
+
+        let (base, limit) = super::es_sql_pagination("SELECT field FROM idx");
+        assert_eq!(base, "SELECT field FROM idx");
+        assert_eq!(limit, None);
+    }
+
+    #[test]
+    fn should_use_search_cursor_distinguishes_plan_from_user_offset() {
+        let plan_first = serde_json::json!({ "size": 100 });
+        let user_offset = serde_json::json!({ "size": 100, "from": 5 });
+        assert!(super::should_use_search_cursor(&plan_first, true, None));
+        assert!(!super::should_use_search_cursor(&user_offset, true, None));
+        assert!(super::should_use_search_cursor(&user_offset, true, Some("cursor")));
+        assert!(!super::should_use_search_cursor(&plan_first, false, None));
+    }
+
+    #[test]
+    fn search_cursor_encode_decode_round_trips() {
+        let cursor = super::EsSearchCursor::Page(super::EsPageCursor {
+            index: "logs".to_string(),
+            body: serde_json::json!({ "query": { "match_all": {} } }),
+            size: 100,
+            mode: super::EsPageMode::Pit {
+                pit_id: "pit-1".to_string(),
+                keep_alive: "1m".to_string(),
+                search_after: vec![serde_json::json!("abc")],
+            },
+        });
+        let encoded = super::encode_es_search_cursor(&cursor).unwrap();
+        let decoded = super::decode_es_search_cursor(&encoded).unwrap();
+        match decoded {
+            super::EsSearchCursor::Page(page) => match page.mode {
+                super::EsPageMode::Pit { pit_id, search_after, .. } => {
+                    assert_eq!(pit_id, "pit-1");
+                    assert_eq!(search_after, vec![serde_json::json!("abc")]);
+                }
+                super::EsPageMode::Scroll { .. } => panic!("expected PIT page cursor"),
+                super::EsPageMode::Offset { .. } => panic!("expected PIT page cursor"),
+            },
+            super::EsSearchCursor::Sql { .. } => panic!("expected PIT search cursor"),
+        }
+
+        let sql = super::EsSearchCursor::Sql {
+            cursor: "raw-sql-cursor".to_string(),
+            columns_key: "columns".to_string(),
+            columns: vec![serde_json::json!({ "name": "message", "type": "keyword" })],
+        };
+        let encoded = super::encode_es_search_cursor(&sql).unwrap();
+        match super::decode_es_search_cursor(&encoded).unwrap() {
+            super::EsSearchCursor::Sql { cursor, columns_key, columns } => {
+                assert_eq!(cursor, "raw-sql-cursor");
+                assert_eq!(columns_key, "columns");
+                assert_eq!(columns, vec![serde_json::json!({ "name": "message", "type": "keyword" })]);
+            }
+            super::EsSearchCursor::Page(_) => panic!("expected SQL cursor"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pit_search_uses_global_endpoint_and_latest_pit_id() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /products/_pit?keep_alive=1m "), "{request}");
+            let response_body = r#"{"id":"pit-1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_search "), "{request}");
+            assert!(request.contains(r#""pit":{"id":"pit-1","keep_alive":"1m"}"#), "{request}");
+            let response_body = r#"{"pit_id":"pit-2","hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"},"sort":[1]}]}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        server.await.unwrap();
+
+        let page = match super::decode_es_search_cursor(result.next_cursor.as_deref().unwrap()).unwrap() {
+            super::EsSearchCursor::Page(page) => page,
+            super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
+        };
+        match page.mode {
+            super::EsPageMode::Pit { pit_id, .. } => assert_eq!(pit_id, "pit-2"),
+            super::EsPageMode::Scroll { .. } => panic!("expected PIT mode"),
+            super::EsPageMode::Offset { .. } => panic!("expected PIT mode"),
+        }
+    }
+
+    /// 依次应答固定的一串响应，并记下收到的请求。
+    async fn serve_responses(
+        listener: tokio::net::TcpListener,
+        responses: Vec<(u16, String)>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        use tokio::io::AsyncWriteExt;
+
+        tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_http_request(&mut socket).await);
+                let reason = if status >= 400 { "Bad Request" } else { "OK" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        })
+    }
+
+    /// PIT 开得成功、但不认 `_shard_doc` 的集群返回的报错体。
+    fn missing_shard_doc_error_body() -> String {
+        r#"{"error":{"root_cause":[{"type":"query_shard_exception","reason":"No mapping found for [_shard_doc] in order to sort on","index":"products"}],"type":"search_phase_execution_exception","reason":"all shards failed"},"status":400}"#
+            .to_string()
+    }
+
+    fn one_hit_response() -> String {
+        r#"{"hits":{"total":{"value":42,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"}}]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string()
+    }
+
+    #[tokio::test]
+    async fn unsupported_pit_uses_scroll_cursor_before_offset_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (400, r#"{"error":"PIT is not supported"}"#.to_string()),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-1","hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"}}]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-2","hits":{"total":{"value":2,"relation":"eq"},"hits":[]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let first = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let second =
+            super::find_documents_with_cursor(&client, "products", 1, None, None, first.next_cursor.as_deref())
+                .await
+                .unwrap();
+        let requests = server.await.unwrap();
+
+        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /products/_search?scroll=1m "), "{}", requests[1]);
+        assert!(requests[1].contains(r#""size":1"#), "{}", requests[1]);
+        assert!(requests[2].starts_with("POST /_search/scroll "), "{}", requests[2]);
+        assert!(requests[2].contains(r#""scroll_id":"scroll-1""#), "{}", requests[2]);
+        assert_eq!(first.documents.len(), 1);
+        assert!(first.next_cursor.is_some());
+        assert!(second.documents.is_empty());
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_shard_doc_support_falls_back_to_scroll_paging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (400, missing_shard_doc_error_body()),
+                (200, "{}".to_string()),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-1","hits":{"total":{"value":42,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"}}]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /_search "), "{}", requests[1]);
+        assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
+        assert!(requests[2].starts_with("DELETE /_pit "), "{}", requests[2]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
+        assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
+        assert!(!requests[3].contains(r#""from":0"#), "{}", requests[3]);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.total, 42);
+
+        // 回退后仍要给出游标，否则数据浏览器只能停在第一页。
+        let page = match super::decode_es_search_cursor(result.next_cursor.as_deref().unwrap()).unwrap() {
+            super::EsSearchCursor::Page(page) => page,
+            super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
+        };
+        assert_eq!(
+            page.mode,
+            super::EsPageMode::Scroll { scroll_id: "scroll-1".to_string(), keep_alive: "1m".to_string() }
+        );
+    }
+
+    #[tokio::test]
+    async fn scroll_fallback_is_remembered_for_the_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (400, missing_shard_doc_error_body()),
+                (200, "{}".to_string()),
+                (200, one_hit_response()),
+                (200, one_hit_response()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let _first = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let second = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let requests = server.await.unwrap();
+
+        // 探测结果记在连接上：第二次查询不再尝试开 PIT。
+        assert_eq!(requests.len(), 5);
+        assert!(requests[4].starts_with("POST /products/_search?scroll=1m "), "{}", requests[4]);
+        assert_eq!(second.documents.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_search_failure_does_not_disable_pit_for_the_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (503, r#"{"error":{"type":"unavailable_shards_exception"},"status":503}"#.to_string()),
+                (200, "{}".to_string()),
+                (200, one_hit_response()),
+                (200, r#"{"id":"pit-2"}"#.to_string()),
+                (200, one_hit_response()),
+                (200, "{}".to_string()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let first = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        assert_eq!(first.documents.len(), 1);
+        let _ = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let requests = server.await.unwrap();
+
+        // 偶发 5xx 只回退这一次请求，下一次查询仍旧先试 PIT。
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
+        assert!(requests[4].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[4]);
+    }
+
+    #[tokio::test]
+    async fn offset_paging_stops_at_the_max_result_window() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = (0..5_000).map(|id| format!(r#"{{"_id":"{id}","_source":{{}}}}"#)).collect::<Vec<_>>().join(",");
+        let full_page = format!(
+            r#"{{"hits":{{"total":{{"value":100000,"relation":"eq"}},"hits":[{hits}]}},"_shards":{{"total":1,"successful":1,"skipped":0,"failed":0}}}}"#
+        );
+        let server = serve_responses(listener, vec![(200, full_page.clone()), (200, full_page)]).await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let cursor_at = |from: u64| {
+            super::encode_es_search_cursor(&super::EsSearchCursor::Page(super::EsPageCursor {
+                index: "products".to_string(),
+                body: serde_json::json!({ "sort": ["_doc"] }),
+                size: 5_000,
+                mode: super::EsPageMode::Offset { from },
+            }))
+            .unwrap()
+        };
+
+        // from=0：下一页是 5000..10000，正好落在窗口内，可以继续翻。
+        let first = super::find_documents_with_cursor(&client, "products", 5_000, None, None, Some(&cursor_at(0)))
+            .await
+            .unwrap();
+        let page = match super::decode_es_search_cursor(first.next_cursor.as_deref().unwrap()).unwrap() {
+            super::EsSearchCursor::Page(page) => page,
+            super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
+        };
+        assert_eq!(page.mode, super::EsPageMode::Offset { from: 5_000 });
+
+        // from=5000：再下一页要到 10000..15000，越过 max_result_window，必须停在这里，
+        // 否则那次请求一定会被 ES 拒绝。
+        let second = super::find_documents_with_cursor(&client, "products", 5_000, None, None, Some(&cursor_at(5_000)))
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(second.documents.len(), 5_000);
+        assert!(second.next_cursor.is_none(), "must not offer a page past max_result_window");
+    }
+
+    #[tokio::test]
+    async fn offset_paging_never_loops_on_an_empty_page() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let empty = r#"{"hits":{"total":{"value":0,"relation":"eq"},"hits":[]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#;
+        let server = serve_responses(listener, vec![(200, empty.to_string())]).await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        // `LIMIT 0` 会让 size 为 0；空页若被当成「满页」就会不断吐出停在同一个
+        // from 上的游标，翻页永远结束不了。
+        let cursor = super::encode_es_search_cursor(&super::EsSearchCursor::Page(super::EsPageCursor {
+            index: "products".to_string(),
+            body: serde_json::json!({}),
+            size: 0,
+            mode: super::EsPageMode::Offset { from: 0 },
+        }))
+        .unwrap();
+        let result =
+            super::execute_rest_query_with_cursor(&client, "SELECT * FROM products LIMIT 0 OFFSET 0", Some(&cursor))
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert!(result.rows.is_empty());
+        assert!(!result.has_more, "an empty page must not advertise a next page");
+    }
+
+    #[tokio::test]
+    async fn scroll_fallback_keeps_track_total_hits_off_and_preserves_requested_sort() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (400, missing_shard_doc_error_body()),
+                (200, "{}".to_string()),
+                (200, one_hit_response()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::find_documents_with_cursor(&client, "products", 1, None, Some(r#"{"created_at":-1}"#), None)
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+
+        let fallback = &requests[3];
+        // Scroll 持有搜索快照，保留用户的排序即可，无需追加 `_doc`。
+        assert!(fallback.starts_with("POST /products/_search?scroll=1m "), "{fallback}");
+        assert!(fallback.contains(r#""sort":[{"created_at":{"order":"desc"}}]"#), "{fallback}");
+        // 回退路径不加 track_total_hits：那会让每页都对整个索引做一次精确计数，
+        // 而这条路径针对的正是老的大集群。
+        assert!(!fallback.contains("track_total_hits"), "{fallback}");
+        assert!(requests[1].contains(r#""track_total_hits":true"#), "{}", requests[1]);
+    }
+
+    #[tokio::test]
+    async fn transport_failure_is_not_retried_through_the_offset_path() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // 开 PIT 成功后直接断连，模拟检索请求根本没送到。
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            let body = r#"{"id":"pit-1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            drop(socket);
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let error = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap_err();
+        server.abort();
+
+        // 传输层失败换个分页方式也送不到，只会让用户多等一倍。
+        assert!(error.starts_with("Elasticsearch request failed:"), "{error}");
+        assert!(client.supports_pit_search(), "transport failures must not downgrade the connection");
+    }
+
+    #[tokio::test]
+    async fn select_star_shares_the_same_offset_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (400, missing_shard_doc_error_body()),
+                (200, "{}".to_string()),
+                (200, one_hit_response()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        // 查询编辑器与文档浏览器共用同一个分页执行器，兜底行为必须一致。
+        let result = super::execute_rest_query_with_cursor(&client, "SELECT * FROM products LIMIT 2 OFFSET 0", None)
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+
+        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
+        assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
+        assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
+        assert_eq!(result.rows.len(), 1);
+        // 分页计划要拿索引真实总数来算总页数。
+        assert_eq!(result.affected_rows, 42);
+    }
+
+    #[tokio::test]
+    async fn sql_cursor_continuation_reuses_first_page_columns() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_sql "), "{request}");
+            let response_body = r#"{"columns":[{"name":"name","type":"keyword"}],"rows":[["first"]],"cursor":"raw-1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_sql "), "{request}");
+            assert!(request.ends_with(r#"{"cursor":"raw-1"}"#), "{request}");
+            let response_body = r#"{"rows":[["second"]]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let first = super::execute_rest_query(&client, "SELECT name FROM products").await.unwrap();
+        let second =
+            super::execute_rest_query_with_cursor(&client, "SELECT name FROM products", first.session_id.as_deref())
+                .await
+                .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(second.columns, vec!["name"]);
+        assert_eq!(second.rows, vec![vec![json!("second")]]);
+        assert!(!second.has_more);
+    }
+
+    #[tokio::test]
+    async fn closes_pit_and_sql_cursors_with_elasticsearch_protocols() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("DELETE /_pit "), "{request}");
+            assert!(request.ends_with(r#"{"id":"pit-1"}"#), "{request}");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /_sql/close "), "{request}");
+            assert!(request.ends_with(r#"{"cursor":"sql-1"}"#), "{request}");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        super::close_es_pit(&client, "pit-1").await.unwrap();
+        super::close_es_sql_cursor(&client, "sql-1").await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn offset_cursor_encode_decode_round_trips() {
+        let cursor = super::EsSearchCursor::Page(super::EsPageCursor {
+            index: "logs".to_string(),
+            body: serde_json::json!({ "sort": ["_doc"], "query": { "term": { "city": "长治" } } }),
+            size: 100,
+            mode: super::EsPageMode::Offset { from: 200 },
+        });
+        let encoded = super::encode_es_search_cursor(&cursor).unwrap();
+        match super::decode_es_search_cursor(&encoded).unwrap() {
+            super::EsSearchCursor::Page(page) => {
+                assert_eq!(page.index, "logs");
+                assert_eq!(page.size, 100);
+                assert_eq!(page.mode, super::EsPageMode::Offset { from: 200 });
+            }
+            super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
+        }
     }
 
     #[test]
@@ -3008,6 +5019,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_metadata_endpoints_read_their_index_scoped_paths() {
+        use tokio::io::AsyncWriteExt;
+
+        for (kind, endpoint) in [("mapping", "_mapping"), ("settings", "_settings"), ("stats", "_stats")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let expected = format!("GET /my-index/{endpoint} ");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                assert!(request.starts_with(&expected), "unexpected request: {request}");
+                let body = r#"{"my-index":{}}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+
+            let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+            let value = match kind {
+                "mapping" => super::get_index_mapping(&client, "my-index").await.unwrap(),
+                "settings" => super::get_index_settings(&client, "my-index").await.unwrap(),
+                _ => super::get_index_stats(&client, "my-index").await.unwrap(),
+            };
+            server.await.unwrap();
+            assert_eq!(value, json!({ "my-index": {} }));
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_all_documents_posts_match_all_and_reports_skipped_documents() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            // The index itself must survive: this is a delete-by-query, not a DELETE /index.
+            assert!(
+                request.starts_with("POST /logs/_delete_by_query?conflicts=proceed&refresh=true "),
+                "unexpected request: {request}"
+            );
+            assert!(request.contains(r#""match_all""#), "unexpected body: {request}");
+            let body =
+                r#"{"total":10,"deleted":8,"version_conflicts":2,"timed_out":false,"failures":[{"index":"logs"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::delete_all_documents(&client, "logs").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.total, 10);
+        assert_eq!(result.deleted, 8);
+        assert_eq!(result.version_conflicts, 2);
+        assert!(!result.timed_out);
+        assert_eq!(result.failures, vec![r#"{"index":"logs"}"#.to_string()]);
+    }
+
+    /// ES 6.x through 9.x all answer `_delete_by_query` with the same counter
+    /// names wrapped in a larger, version-dependent envelope (`retries`,
+    /// `throttled_millis`, `slices`, …). Parsing must ignore the envelope
+    /// instead of failing on fields a given server happens to add.
+    #[tokio::test]
+    async fn delete_all_documents_ignores_version_specific_response_fields() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            let body = r#"{"took":42,"timed_out":false,"total":5,"deleted":5,"batches":1,"version_conflicts":0,"noops":0,"retries":{"bulk":0,"search":0},"throttled_millis":0,"requests_per_second":-1.0,"throttled_until_millis":0,"slices":[],"failures":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::delete_all_documents(&client, "logs").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.total, 5);
+        assert_eq!(result.deleted, 5);
+        assert_eq!(result.version_conflicts, 0);
+        assert!(!result.timed_out);
+        assert!(result.failures.is_empty());
+    }
+
+    #[tokio::test]
     async fn execute_rest_head_request_returns_http_status() {
         use tokio::io::AsyncWriteExt;
 
@@ -3049,6 +5161,7 @@ mod tests {
             assert_eq!(query.get("path").map(String::as_str), Some("/missing/_doc/1?refresh=true"));
             assert_eq!(query.get("method").map(String::as_str), Some("DELETE"));
             assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("kbn-xsrf: true")), "{headers}");
+            assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("osd-xsrf: true")), "{headers}");
             assert!(headers.lines().any(|line| line.eq_ignore_ascii_case("authorization: Basic ZWxhc3RpYzpzZWNyZXQ=")));
             assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), json!({ "reason": "cleanup" }));
 
@@ -3069,7 +5182,11 @@ mod tests {
             None,
             Some(&external_config),
             Duration::from_secs(1),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         let result =
             super::execute_rest_query(&client, "DELETE /missing/_doc/1?refresh=true\n{\"reason\":\"cleanup\"}")
                 .await
@@ -3078,6 +5195,15 @@ mod tests {
 
         assert_eq!(result.rows[0][0], json!(404));
         assert_eq!(result.rows[0][1], json!(response_body));
+    }
+
+    #[test]
+    fn direct_transport_omits_proxy_xsrf_headers() {
+        let client = EsClient::new("http://localhost:9200", None, None, false, Duration::from_secs(1));
+        let request = client.get("/").build().unwrap();
+
+        assert!(!request.headers().contains_key("kbn-xsrf"));
+        assert!(!request.headers().contains_key("osd-xsrf"));
     }
 
     #[tokio::test]
@@ -3413,7 +5539,11 @@ mod tests {
             None,
             Some(&external_config),
             Duration::from_secs(20),
-        );
+            None,
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(20)).await.unwrap();
 
         let index = format!("dbx-kibana-proxy-{}", uuid::Uuid::new_v4().simple());
@@ -3503,5 +5633,49 @@ mod tests {
             super::elasticsearch_document_body_and_routing_from_json(r#"{"z":1,"_id":"abc","a":2}"#, None).unwrap();
 
         assert_eq!(serde_json::to_string(&doc).unwrap(), r#"{"z":1,"a":2}"#);
+    }
+
+    // Integration test against a real TLS-enabled Elasticsearch. Gated by env vars
+    // so it stays a no-op in CI:
+    //   DBX_ELASTICSEARCH_TLS_TEST_URL            e.g. https://localhost:9200
+    //   DBX_ELASTICSEARCH_TLS_TEST_CA_CERT_PATH   path to the server's CA cert (PEM)
+    // Mirrors the ZooKeeper TLS integration test: tls_enabled=true loads the custom
+    // CA (and any client cert) through apply_tls_certificates, then connects over HTTPS.
+    #[tokio::test]
+    async fn tls_integration_connects_with_custom_ca() {
+        let url = match std::env::var("DBX_ELASTICSEARCH_TLS_TEST_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("skipping ES TLS integration test: DBX_ELASTICSEARCH_TLS_TEST_URL not set");
+                return;
+            }
+        };
+        let ca_cert_path = match std::env::var("DBX_ELASTICSEARCH_TLS_TEST_CA_CERT_PATH") {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("skipping ES TLS integration test: DBX_ELASTICSEARCH_TLS_TEST_CA_CERT_PATH not set");
+                return;
+            }
+        };
+        // Optional basic-auth credentials (required when the server has security enabled).
+        let username = std::env::var("DBX_ELASTICSEARCH_TLS_TEST_USERNAME").ok();
+        let password = std::env::var("DBX_ELASTICSEARCH_TLS_TEST_PASSWORD").ok();
+        let timeout = std::time::Duration::from_secs(15);
+        let mut client = EsClient::from_config(
+            &url,
+            username.as_deref(),
+            password.as_deref(),
+            true,
+            None,
+            None,
+            timeout,
+            Some(&ca_cert_path),
+            None,
+            None,
+        )
+        .expect("failed to build Elasticsearch TLS client");
+        super::test_connection(&mut client, timeout)
+            .await
+            .expect("Elasticsearch TLS connection with custom CA should succeed");
     }
 }

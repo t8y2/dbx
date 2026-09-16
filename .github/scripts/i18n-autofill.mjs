@@ -2,16 +2,20 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const LOCALES_DIR = "apps/desktop/src/i18n/locales";
 const SOURCE_LOCALE = "zh-CN";
-const TARGET_LOCALES = ["en", "es", "it", "ja", "pt-BR", "zh-TW"];
+const TARGET_LOCALES = ["en", "es", "it", "ja", "ko", "pt-BR", "zh-TW"];
+// `git show <ref>:<path>` needs forward slashes even on Windows, where
+// `path.join()` yields backslashes. Allow an override (CI keeps the default).
+const refPath = (path) => path.replaceAll("\\", "/");
 const TARGET_LABELS = {
   en: "English",
   es: "Spanish",
   it: "Italian",
   ja: "Japanese",
+  ko: "Korean",
   "pt-BR": "Brazilian Portuguese",
   "zh-TW": "Traditional Chinese used in Taiwan",
 };
@@ -106,7 +110,7 @@ function localePath(locale) {
 
 function readBaseFile(path) {
   try {
-    return execFileSync("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    return execFileSync("git", ["show", `${baseRef}:${refPath(path)}`], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
   } catch (error) {
     throw new Error(`Unable to read ${path} from ${baseRef}: ${error.message}`);
   }
@@ -201,9 +205,7 @@ function assertSamePlaceholders(key, source, translated, locale) {
   const sourcePlaceholders = placeholders(source);
   const translatedPlaceholders = placeholders(translated);
   if (sourcePlaceholders.join("\0") !== translatedPlaceholders.join("\0")) {
-    throw new Error(
-      `${locale}:${key} placeholder mismatch: expected [${sourcePlaceholders.join(", ")}], got [${translatedPlaceholders.join(", ")}]`,
-    );
+    throw new Error(`${locale}:${key} placeholder mismatch: expected [${sourcePlaceholders.join(", ")}], got [${translatedPlaceholders.join(", ")}]`);
   }
 }
 
@@ -353,25 +355,96 @@ function applyEdits(text, edits) {
 
 function flattenLeaves(root) {
   const result = new Map();
-  flattenNode(root, [], result);
+  flattenNode(root, [], result, root.externalObjects || new Map(), new Set());
   return result;
 }
 
-function flattenNode(node, path, result) {
+function flattenNode(node, path, result, externalObjects, activeExternalObjects) {
   for (const property of node.properties) {
     const nextPath = [...path, property.key];
     if (property.value.type === "object") {
-      flattenNode(property.value, nextPath, result);
-    } else {
+      flattenNode(property.value, nextPath, result, externalObjects, activeExternalObjects);
+    } else if (property.value.type === "string") {
       result.set(nextPath.join("."), property.value.value);
+    } else if (property.value.type === "spread") {
+      const [binding, ...members] = property.value.expression.split(".");
+      let spreadObject = externalObjects.get(binding);
+      for (const member of members) {
+        spreadObject = spreadObject?.properties.find((candidate) => candidate.key === member && candidate.value.type === "object")?.value;
+      }
+      flattenExternalObject(property.value.expression, spreadObject, path, result, externalObjects, activeExternalObjects);
+    } else if (property.value.type === "external") {
+      flattenExternalObject(property.key, externalObjects.get(property.key), nextPath, result, externalObjects, activeExternalObjects);
     }
   }
+}
+
+function flattenExternalObject(name, object, path, result, externalObjects, activeExternalObjects) {
+  if (!object || activeExternalObjects.has(name)) return;
+  activeExternalObjects.add(name);
+  flattenNode(object, path, result, externalObjects, activeExternalObjects);
+  activeExternalObjects.delete(name);
 }
 
 function parseLocaleFile(text, file) {
   const parser = new Parser(text, file);
   const root = parser.parseLocaleRoot();
+  root.externalObjects = parseImportedObjects(text, file);
+  for (const [name, object] of parseDeclaredObjects(text, file)) {
+    root.externalObjects.set(name, object);
+  }
   return { root };
+}
+
+function parseDeclaredObjects(text, file) {
+  const result = new Map();
+  const declarations = /^\s*const\s+([A-Za-z_$][\w$]*)\s*=/gm;
+  const exportIndex = text.indexOf("export default");
+
+  for (const match of text.slice(0, exportIndex).matchAll(declarations)) {
+    const parser = new Parser(text, file);
+    parser.index = match.index + match[0].length;
+    parser.skipSpace();
+    if (parser.peek() === "{") result.set(match[1], parser.parseObject());
+  }
+
+  return result;
+}
+
+function parseImportedObjects(text, file, visited = new Set()) {
+  const result = new Map();
+  const actualFile = existsSync(file) ? file : file.slice(file.indexOf(":") + 1);
+  const resolvedFile = resolve(actualFile);
+  if (visited.has(resolvedFile)) return result;
+  visited.add(resolvedFile);
+  const importPattern = /import\s*\{([^}]+)\}\s*from\s*["'](\.\.?\/[^"']+)["'];?/g;
+
+  for (const match of text.matchAll(importPattern)) {
+    const modulePath = resolve(dirname(actualFile), `${match[2]}.ts`);
+    if (!existsSync(modulePath)) continue;
+    const moduleText = readFileSync(modulePath, "utf8");
+    for (const [name, object] of parseImportedObjects(moduleText, modulePath, visited)) {
+      if (!result.has(name)) result.set(name, object);
+    }
+    for (const specifier of match[1].split(",")) {
+      const [exportedName, localName = exportedName] = specifier.trim().split(/\s+as\s+/);
+      if (!exportedName) continue;
+      const object = parseExportedObject(moduleText, modulePath, exportedName);
+      if (object) result.set(localName, object);
+    }
+  }
+
+  return result;
+}
+
+function parseExportedObject(text, file, name) {
+  const match = new RegExp(`export\\s+const\\s+${name.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*=`).exec(text);
+  if (!match) return null;
+  const parser = new Parser(text, file);
+  parser.index = match.index + match[0].length;
+  parser.skipSpace();
+  if (parser.peek() !== "{") return null;
+  return parser.parseObject();
 }
 
 class Parser {
@@ -414,8 +487,34 @@ class Parser {
       }
 
       const start = this.index;
+      if (this.text.startsWith("...", this.index)) {
+        this.index += 3;
+        this.skipSpace();
+        const root = this.parseIdentifier();
+        if (!root) this.fail("Expected spread identifier");
+        let expression = root;
+        while (this.peek() === ".") {
+          this.index += 1;
+          const member = this.parseIdentifier();
+          if (!member) this.fail("Expected spread member");
+          expression += `.${member}`;
+        }
+        this.skipSpace();
+        const hasComma = this.peek() === ",";
+        if (hasComma) this.index += 1;
+        else if (this.peek() !== "}") this.fail("Expected comma after spread property");
+        properties.push({ key: `...${expression}`, start, end: this.index, hasComma, value: { type: "spread", expression } });
+        continue;
+      }
+
       const key = this.parseKey();
       this.skipSpace();
+      if (this.peek() === "," || this.peek() === "}") {
+        const hasComma = this.peek() === ",";
+        if (hasComma) this.index += 1;
+        properties.push({ key, start, end: this.index, hasComma, value: { type: "external" } });
+        continue;
+      }
       this.expect(":");
       this.skipSpace();
       const value = this.parseValue();

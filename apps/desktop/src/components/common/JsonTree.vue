@@ -2,7 +2,7 @@
 import { computed, defineComponent, h, nextTick, ref, shallowRef, watch, type VNodeChild } from "vue";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import { ChevronDown, ChevronRight } from "@lucide/vue";
-import { createJsonTreeRoot, getJsonTreeChildren, getVisibleJsonTreeNodes, isJsonTreeContainer, isJsonTreeInitiallyExpanded, jsonTreeContainerKind, jsonTreeContainerSummary, type JsonTreeNode } from "@/lib/common/jsonTree";
+import { createJsonTreeRoot, getJsonTreeChildren, getVisibleJsonTreeNodes, isJsonTreeClosingNode, isJsonTreeContainer, isJsonTreeInitiallyExpanded, jsonTreeContainerKind, jsonTreeContainerSummary, type JsonTreeNode } from "@/lib/common/jsonTree";
 import { isLosslessJsonNumber } from "@/lib/common/safeJsonFormat";
 
 defineOptions({ name: "JsonTree" });
@@ -137,12 +137,21 @@ function renderJsonNode(node: JsonTreeNode): VNodeChild {
 
   if (containerValue !== undefined) {
     const kind = jsonTreeContainerKind(containerValue);
-    rowChildren.push(h("span", { class: `json-tree-bracket is-${kind}` }, kind === "array" ? "[" : "{"), h("span", { class: "json-tree-summary" }, jsonTreeContainerSummary(containerValue, expanded)), h("span", { class: `json-tree-bracket is-${kind}` }, kind === "array" ? "]" : "}"));
+    rowChildren.push(h("span", { class: `json-tree-bracket is-${kind}` }, kind === "array" ? "[" : "{"));
+    if (!expanded) {
+      rowChildren.push(h("span", { class: "json-tree-summary" }, jsonTreeContainerSummary(containerValue)), h("span", { class: `json-tree-bracket is-${kind}` }, kind === "array" ? "]" : "}"));
+    }
   } else {
     rowChildren.push(highlightedJsonSpan(scalarClass(node.value), scalarText(node.value)));
   }
 
-  const children = containerValue !== undefined && expanded ? h("div", { class: "json-tree-children" }, getJsonTreeChildren(node).map(renderJsonNode)) : null;
+  const children =
+    containerValue !== undefined && expanded
+      ? h("div", { class: "json-tree-children" }, [
+          ...getJsonTreeChildren(node).map(renderJsonNode),
+          h("div", { class: "json-tree-row", style: { paddingInlineStart: indent } }, [h("span", { class: `json-tree-bracket json-tree-closing is-${jsonTreeContainerKind(containerValue)}` }, jsonTreeContainerKind(containerValue) === "array" ? "]" : "}")]),
+        ])
+      : null;
 
   return h("div", { key: node.path, class: "json-tree-node", "data-json-path": node.path }, [h("div", { class: "json-tree-row", style: { paddingInlineStart: indent } }, rowChildren), children]);
 }
@@ -154,7 +163,7 @@ const JsonTreeRoot = defineComponent({
   },
 });
 
-const visibleNodes = computed(() => getVisibleJsonTreeNodes(rootNode.value, isNodeExpanded));
+const visibleNodes = computed(() => getVisibleJsonTreeNodes(rootNode.value, isNodeExpanded, props.virtualized));
 
 function refresh(resetScroll = false) {
   if (!props.virtualized) return;
@@ -180,24 +189,31 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
         <DynamicScrollerItem :item="node" :active="active" :size-dependencies="[wordWrap, node.path, node.label, scalarText(node.value), isNodeExpanded(node)]" :data-index="index">
           <div class="json-tree-node" :data-json-path="node.path">
             <div class="json-tree-row" :style="{ paddingInlineStart: `${node.depth * 16}px` }">
-              <button v-if="isJsonTreeContainer(node.value)" type="button" class="json-tree-toggle" :aria-expanded="isNodeExpanded(node)" :aria-label="nodeAccessibleLabel(node)" :title="nodeAccessibleLabel(node)" @click="toggleNode(node)">
-                <ChevronDown v-if="isNodeExpanded(node)" class="h-3.5 w-3.5" aria-hidden="true" />
-                <ChevronRight v-else class="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-              <span v-else class="json-tree-spacer" aria-hidden="true" />
-
-              <template v-if="node.parentKind !== 'root'">
-                <span v-if="node.parentKind === 'array'" class="json-tree-index">[{{ node.label }}]</span>
-                <span v-else class="json-tree-key" v-html="highlightedJson(JSON.stringify(node.label))" />
-                <span class="json-tree-punctuation">:</span>
+              <template v-if="isJsonTreeClosingNode(node)">
+                <span class="json-tree-bracket json-tree-closing" :class="`is-${jsonTreeContainerKind(node.value)}`">{{ jsonTreeContainerKind(node.value) === "array" ? "]" : "}" }}</span>
               </template>
+              <template v-else>
+                <button v-if="isJsonTreeContainer(node.value)" type="button" class="json-tree-toggle" :aria-expanded="isNodeExpanded(node)" :aria-label="nodeAccessibleLabel(node)" :title="nodeAccessibleLabel(node)" @click="toggleNode(node)">
+                  <ChevronDown v-if="isNodeExpanded(node)" class="h-3.5 w-3.5" aria-hidden="true" />
+                  <ChevronRight v-else class="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
+                <span v-else class="json-tree-spacer" aria-hidden="true" />
 
-              <template v-if="isJsonTreeContainer(node.value)">
-                <span class="json-tree-bracket" :class="`is-${jsonTreeContainerKind(node.value)}`">{{ jsonTreeContainerKind(node.value) === "array" ? "[" : "{" }}</span>
-                <span class="json-tree-summary">{{ jsonTreeContainerSummary(node.value, isNodeExpanded(node)) }}</span>
-                <span class="json-tree-bracket" :class="`is-${jsonTreeContainerKind(node.value)}`">{{ jsonTreeContainerKind(node.value) === "array" ? "]" : "}" }}</span>
+                <template v-if="node.parentKind !== 'root'">
+                  <span v-if="node.parentKind === 'array'" class="json-tree-index">[{{ node.label }}]</span>
+                  <span v-else class="json-tree-key" v-html="highlightedJson(JSON.stringify(node.label))" />
+                  <span class="json-tree-punctuation">:</span>
+                </template>
+
+                <template v-if="isJsonTreeContainer(node.value)">
+                  <span class="json-tree-bracket" :class="`is-${jsonTreeContainerKind(node.value)}`">{{ jsonTreeContainerKind(node.value) === "array" ? "[" : "{" }}</span>
+                  <template v-if="!isNodeExpanded(node)">
+                    <span class="json-tree-summary">{{ jsonTreeContainerSummary(node.value) }}</span>
+                    <span class="json-tree-bracket" :class="`is-${jsonTreeContainerKind(node.value)}`">{{ jsonTreeContainerKind(node.value) === "array" ? "]" : "}" }}</span>
+                  </template>
+                </template>
+                <span v-else :class="scalarClass(node.value)" v-html="highlightedJson(scalarText(node.value))" />
               </template>
-              <span v-else :class="scalarClass(node.value)" v-html="highlightedJson(scalarText(node.value))" />
             </div>
           </div>
         </DynamicScrollerItem>
@@ -241,6 +257,9 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
   min-height: 24px;
   align-items: flex-start;
   gap: 4px;
+  padding-block: 2px;
+  /* Fixed line box so the hover background wraps the glyphs symmetrically. */
+  line-height: 20px;
   border-radius: var(--dbx-radius-fixed-4);
 }
 
@@ -249,7 +268,7 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
 }
 
 .json-tree-toggle {
-  margin-top: 1px;
+  align-self: center;
   display: inline-flex;
   height: 18px;
   width: 18px;
@@ -273,6 +292,14 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
 .json-tree-spacer {
   width: 18px;
   flex: 0 0 auto;
+}
+
+/* Closing brackets sit in the toggle's slot so they line up with the chevron above. */
+.json-tree-closing {
+  display: inline-flex;
+  width: 18px;
+  flex: 0 0 auto;
+  justify-content: center;
 }
 
 .json-tree-key {
@@ -305,6 +332,26 @@ defineExpose({ expandAll, collapseAll, resetExpansion, refresh });
 .json-tree-bracket {
   color: var(--foreground);
   font-weight: 650;
+}
+
+.json-tree-key,
+.json-tree-index,
+.json-tree-punctuation,
+.json-tree-bracket {
+  flex: 0 0 auto;
+}
+
+.json-tree-string,
+.json-tree-number,
+.json-tree-boolean,
+.json-tree-null {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.json-tree-summary {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .dark .json-tree {

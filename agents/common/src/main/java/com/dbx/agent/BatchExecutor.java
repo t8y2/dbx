@@ -32,25 +32,8 @@ public final class BatchExecutor {
         return unchecked(() -> {
             long start = System.currentTimeMillis();
             applySchema(conn, schema, setSchemaSql, resetSchemaSql);
-            long totalAffected = 0;
-            int statementCount = 0;
-            try (Statement stmt = conn.createStatement()) {
-                for (String statement : statements) {
-                    String trimmed = JdbcExecutor.trimSql(statement);
-                    if (trimmed.isEmpty()) {
-                        continue;
-                    }
-                    stmt.addBatch(trimmed);
-                    statementCount++;
-                }
-                if (statementCount > 0) {
-                    totalAffected = affectedRows(executeBatch(stmt));
-                }
-            } catch (BatchUpdateException e) {
-                long[] counts = e.getLargeUpdateCounts();
-                int failedIndex = counts == null ? 1 : counts.length + 1;
-                throw new RuntimeException("Statement " + failedIndex + " failed: " + e.getMessage(), e);
-            }
+            Long batchAffected = tryExecuteBatch(conn, statements);
+            long totalAffected = batchAffected == null ? executeIndividually(conn, statements) : batchAffected;
             return new QueryResult(
                 Collections.emptyList(),
                 Collections.emptyList(),
@@ -59,6 +42,54 @@ public final class BatchExecutor {
                 false
             );
         });
+    }
+
+    private static Long tryExecuteBatch(Connection conn, List<String> statements) throws Exception {
+        try (Statement stmt = conn.createStatement()) {
+            try {
+                int statementCount = 0;
+                for (String statement : statements) {
+                    String trimmed = JdbcExecutor.trimSql(statement);
+                    if (trimmed.isEmpty()) {
+                        continue;
+                    }
+                    stmt.addBatch(trimmed);
+                    statementCount++;
+                }
+                return statementCount == 0 ? 0L : affectedRows(executeBatch(stmt));
+            } catch (BatchUpdateException e) {
+                long[] counts = e.getLargeUpdateCounts();
+                int failedIndex = counts == null ? 1 : counts.length + 1;
+                throw new RuntimeException("Statement " + failedIndex + " failed: " + e.getMessage(), e);
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError e) {
+                return null;
+            }
+        }
+    }
+
+    private static long executeIndividually(Connection conn, List<String> statements) throws Exception {
+        long totalAffected = 0;
+        int statementIndex = 0;
+        try (Statement stmt = conn.createStatement()) {
+            for (String statement : statements) {
+                String trimmed = JdbcExecutor.trimSql(statement);
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                statementIndex++;
+                try {
+                    if (!stmt.execute(trimmed)) {
+                        long updateCount = updateCount(stmt);
+                        if (updateCount >= 0) {
+                            totalAffected += updateCount;
+                        }
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException("Statement " + statementIndex + " failed: " + e.getMessage(), e);
+                }
+            }
+        }
+        return totalAffected;
     }
 
     private static long affectedRows(long[] updateCounts) {
@@ -86,6 +117,14 @@ public final class BatchExecutor {
                 largeCounts[i] = counts[i];
             }
             return largeCounts;
+        }
+    }
+
+    private static long updateCount(Statement stmt) throws Exception {
+        try {
+            return stmt.getLargeUpdateCount();
+        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError e) {
+            return stmt.getUpdateCount();
         }
     }
 

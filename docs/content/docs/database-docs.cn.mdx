@@ -1,0 +1,108 @@
+---
+title: 数据库文档
+description: 以文档方式浏览 Schema，为表和字段编写笔记并按颜色分组，导出 DBML 用于 dbdiagram.io 或 CI 中的结构漂移检查。
+---
+
+数据库文档把线上 Schema 变成可读的资料。DBX 会把表、字段、索引和关系收集成一份快照，与你自己编写的笔记合并后渲染成可浏览的参考文档。同一份快照还能序列化为 DBML，因此图形工具和 CI 检查读到的内容与查看器中显示的完全一致。
+
+笔记保存在一个普通的 JSON 文件中，你可以把它和 migration 放在一起提交，让 Schema 文档能够在 Pull Request 中被评审。
+
+## 打开方式
+
+在[对象浏览器](/cn/docs/object-browser)中右键点击一张表，选择 **Documentation**。查看器会基于当前连接、数据库和 Schema 打开。
+
+侧边栏可在 **Schemas** 和 **Table Groups** 之间切换。搜索会同时覆盖表、字段和分组。每个表页面列出字段、索引、**References** 与 **Referenced by**，因此关系可以双向查看。
+
+## 笔记与分组
+
+| 可标注的内容 | 位置 |
+| --- | --- |
+| 项目笔记 | 文档首页 |
+| 表笔记 | 表页面标题处 |
+| 字段笔记 | 表格中的字段行 |
+| 表分组及其颜色 | 表页面的分组选择器 |
+
+笔记支持 Markdown，并在索引中内联渲染。每次编辑都会自动保存，标题栏会依次显示 **Saving…** 和 **Saved**。写入失败会被明确提示而不是被吞掉，你的文字会保留下来，下一次编辑时重试。
+
+分组保存的是**色相（hue）**，而不是固定颜色。明度和彩度由当前主题决定，因此同一个分组在浅色和深色模式下都保持清晰可读；导出 DBML 时，这个色相会转换成 `[color: #rrggbb]`。
+
+## 本地笔记与数据库注释
+
+如果某个字段既有数据库的 `COMMENT ON`，又有你在 DBX 中写的笔记，页面会显示你的笔记并标记 **LOCAL**，同时在下方保留原有的数据库注释。数据库中的内容不会被覆盖——DBX 从不为文档执行 DDL，原始注释始终可以找回。
+
+## 笔记的存储位置
+
+默认情况下，每个连接在 DBX 数据目录中拥有各自的笔记文件，因此该功能开箱即用。
+
+你也可以在连接的**高级**设置中填写 **Notes file**（对应配置项 `docs_notes_path`），把它指向仓库中的文件。笔记文件的结构如下：
+
+```json
+{
+  "formatVersion": 1,
+  "project": { "name": "Billing", "note": "# Billing\n\n每个租户一个 schema。" },
+  "groups": [{ "id": "core", "name": "Core", "hue": 210 }],
+  "tables": {
+    "public.orders": {
+      "group": "core",
+      "note": "每次结算对应一行。",
+      "columns": { "status": { "note": "生命周期状态。" } }
+    }
+  }
+}
+```
+
+键名为 `schema.table` 和 `schema.table.column`，并按各数据库对标识符大小写的处理方式折叠。写入是原子的——先写入同目录下的临时文件再重命名——因此保存被中断也不会在原有文字的位置留下半个文件。
+
+<Callout type="warn">笔记文件不存在是正常情况，会以空笔记开始；但文件格式损坏会直接报错，这是有意为之：继续执行会渲染出看似完整的文档，同时悄悄丢弃已写好的内容。</Callout>
+
+## 警告提示
+
+文档只会显式降级，不会静默降级。出现以下情况时，查看器会显示提示条：
+
+| 情况 | 含义 |
+| --- | --- |
+| 某张表无法生成文档 | 单张表的元数据读取失败，Schema 的其余部分仍然可用。 |
+| 没有可用的关系 | 该数据库不提供外键元数据，因此无法推导关系连线。 |
+| 无法获取数据库注释 | 该数据库不支持注释，所有描述都来自你自己的笔记。 |
+| 部分笔记不再匹配任何对象 | 笔记指向的表或字段已不存在。内容不会被删除。 |
+| 无法在 DBML 中表示 | 某个结构在 DBX 中有文档，但无法写入导出的 DBML。 |
+
+## DBML 导出
+
+```bash
+dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]
+```
+
+不指定 `--out` 时，DBML 会输出到 stdout，便于管道处理。只有在 `--notes` 明确指定文件时才会合并笔记和分组；该参数是显式的，因此路径写错会直接失败，而不是悄悄生成一份没有笔记的结果。
+
+输出包含 `Table`、带推导基数的 `Ref`、`Enum` 和 `TableGroup` 块，可直接粘贴到 [dbdiagram.io](https://dbdiagram.io)。
+
+把结果提交到仓库，就能让 CI 在未经评审的结构漂移时失败：
+
+```yaml
+- run: dbx dbml prod --notes docs/dbx-docs.json --out docs/schema.dbml
+- run: git diff --exit-code docs/schema.dbml
+```
+
+## 支持范围与边界
+
+- 仅支持关系型数据库。文档型数据库和键值存储没有对应的 DBML 表达方式，不在支持范围内。
+- 覆盖表、字段、索引、关系和枚举；不包含触发器、存储过程、函数、序列和权限。
+- DBML 导出是单向的。`.dbml` 文件只是输出，不会作为数据来源——DBX 不会导入它。
+- 缺少外键元数据的数据库会生成没有关系连线的文档，并以警告说明，而不是给出一个空白页面。
+- 不记录 Schema 历史，也没有按表的“最近更新”。快照带有版本标记，方便后续增量添加该能力。
+
+<Cards>
+  <Card title="对象浏览器" href="/cn/docs/object-browser">
+    文档的入口，也是查看对象源码的地方。
+  </Card>
+  <Card title="Schema 浏览器" href="/cn/docs/schema-browser">
+    直接查看字段、外键和注释。
+  </Card>
+  <Card title="字段血缘" href="/cn/docs/field-lineage">
+    追踪字段的来源以及修改会影响到什么。
+  </Card>
+  <Card title="命令行" href="/cn/docs/cli">
+    完整的命令参考，包括无界面的文档导出。
+  </Card>
+</Cards>

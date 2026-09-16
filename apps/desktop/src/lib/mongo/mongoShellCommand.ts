@@ -2,20 +2,188 @@ import type { QueryResult } from "@/types/database";
 import { mongoDocumentIdForGrid } from "@/lib/mongo/mongoDocumentValues";
 import {
   chainedMethodCallPattern,
-  describeMongoCommandParseFailure,
+  describeMongoCommandParseFailure as describeMongoCommandParseFailureBasic,
   findChainedMethodCallIndex,
   findMatchingParen,
   MONGO_SHELL_COMMAND_HINT,
   normalizeJsonArgument,
   parseCollectionMethodTarget,
   parseMongoAggregateCommand,
+  parseMongoObjectArgument,
   quoteUnquotedObjectKeys,
   splitTopLevel,
   type MongoAggregateCommand,
 } from "@dbx-app/mongo-shell";
 
 export type { MongoAggregateCommand };
-export { describeMongoCommandParseFailure, MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
+export { MONGO_SHELL_COMMAND_HINT, parseMongoAggregateCommand, quoteUnquotedObjectKeys };
+
+/* ------------------------------------------------------------------ *
+ * Parse-failure diagnostics
+ *
+ * When no parser accepts a command, say what was wrong with it rather than
+ * repeating the generic list of supported commands. The shared package only
+ * diagnoses aggregate-shaped input; this layer knows every method the editor
+ * supports, so it can name an unsupported method, an unsupported value
+ * constructor, or the argument shape a known method expects.
+ * ------------------------------------------------------------------ */
+
+interface MongoMethodShape {
+  /** What the method takes, in prose, for "expects ..." messages. */
+  expects: string;
+  /** Argument roles by position, for "the filter argument" wording. */
+  roles: string[];
+}
+
+const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
+  find: { expects: "an optional filter and an optional projection", roles: ["filter", "projection"] },
+  findOne: { expects: "an optional filter, an optional projection, and optional options", roles: ["filter", "projection", "options"] },
+  count: { expects: "an optional filter", roles: ["filter"] },
+  countDocuments: { expects: "an optional filter", roles: ["filter"] },
+  estimatedDocumentCount: { expects: "no arguments", roles: [] },
+  distinct: { expects: "a field name and an optional filter", roles: ["field", "filter"] },
+  insert: { expects: "one document or an array of documents", roles: ["document"] },
+  insertOne: { expects: "one document", roles: ["document"] },
+  insertMany: { expects: "an array of documents", roles: ["documents"] },
+  update: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  updateOne: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  updateMany: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  deleteOne: { expects: "a filter", roles: ["filter"] },
+  deleteMany: { expects: "a filter", roles: ["filter"] },
+  findOneAndUpdate: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
+  findOneAndReplace: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
+  findOneAndDelete: { expects: "a filter and optional options", roles: ["filter", "options"] },
+  createIndex: { expects: "an index keys document and optional options", roles: ["keys", "options"] },
+  dropIndex: { expects: "an index name or keys document", roles: ["index"] },
+  dropIndexes: { expects: "no arguments, or an index name or list of names", roles: ["index"] },
+  getIndexes: { expects: "no arguments", roles: [] },
+  drop: { expects: "no arguments", roles: [] },
+  stats: { expects: "an optional scale", roles: ["scale"] },
+  dataSize: { expects: "no arguments", roles: [] },
+  storageSize: { expects: "no arguments", roles: [] },
+  totalIndexSize: { expects: "no arguments", roles: [] },
+};
+
+const SUPPORTED_COLLECTION_METHODS = [
+  "find",
+  "findOne",
+  "aggregate",
+  "count",
+  "countDocuments",
+  "estimatedDocumentCount",
+  "distinct",
+  "insertOne",
+  "insertMany",
+  "updateOne",
+  "updateMany",
+  "deleteOne",
+  "deleteMany",
+  "findOneAndUpdate",
+  "findOneAndReplace",
+  "findOneAndDelete",
+  "getIndexes",
+  "createIndex",
+  "dropIndex",
+  "dropIndexes",
+  "drop",
+  "stats",
+];
+
+/** Database-level methods with a supported equivalent worth pointing at. */
+const DATABASE_METHOD_HINTS: Record<string, string> = {
+  getSiblingDB: "switch databases with `use <database>` and then run the command against db.<collection>",
+  adminCommand: "use db.runCommand({ ... })",
+  getCollectionNames: "collections are listed in the sidebar",
+  createCollection: 'collections are created on first insert, or use db.runCommand({ create: "name" })',
+};
+
+const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
+  version: { expects: "no arguments", roles: [] },
+  stats: { expects: "no arguments", roles: [] },
+  serverStatus: { expects: "no arguments", roles: [] },
+  createUser: { expects: "a user document and optional write concern", roles: ["user", "writeConcern"] },
+  runCommand: { expects: "one command document", roles: ["command"] },
+};
+
+const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createUser", "runCommand", "getCollection"];
+
+const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
+
+const COMMAND_SHAPE = /^db\s*(?:\.\s*(?<collection>[A-Za-z_$][\w$]*)|\[\s*(["'])(?<bracket>.*?)\2\s*\]|\.\s*getCollection\s*\(\s*(["'])(?<named>.*?)\4\s*\))?\s*\.\s*(?<method>[A-Za-z_$][\w$]*)\s*\(/;
+
+export function describeMongoCommandParseFailure(input: string): string {
+  const basic = describeMongoCommandParseFailureBasic(input);
+  if (basic !== MONGO_SHELL_COMMAND_HINT) return basic;
+  const source = trimMongoOuterComments(input).trim().replace(/;$/, "").trim();
+  return diagnoseMongoCommand(source) ?? basic;
+}
+
+function diagnoseMongoCommand(source: string): string | null {
+  if (/^show\s+(collections|tables)\b/i.test(source)) {
+    return "show collections is not supported here; collections are listed in the sidebar. Only show dbs is supported.";
+  }
+
+  const shape = COMMAND_SHAPE.exec(source);
+  if (!shape?.groups) return null;
+  const { method } = shape.groups;
+  if (!method) return null;
+  const isDatabaseLevel = shape.groups.collection === undefined && shape.groups.bracket === undefined && shape.groups.named === undefined;
+
+  const shapeSpec = isDatabaseLevel ? DATABASE_METHOD_SHAPES[method] : COLLECTION_METHOD_SHAPES[method];
+  if (!shapeSpec) {
+    if (isDatabaseLevel && SUPPORTED_DATABASE_METHODS.includes(method)) return null;
+    if (isDatabaseLevel) {
+      const hint = DATABASE_METHOD_HINTS[method];
+      return `db.${method}() is not supported${hint ? `; ${hint}` : ""}. Supported database commands: ${SUPPORTED_DATABASE_METHODS.map((name) => `db.${name}()`).join(", ")}.`;
+    }
+    return `Collection method ${method}() is not supported. Supported collection methods: ${SUPPORTED_COLLECTION_METHODS.join(", ")}.`;
+  }
+
+  const openIndex = source.indexOf("(", shape[0].length - 1);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0) return null;
+  const rawArgs = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  const args = rawArgs.length === 1 && !rawArgs[0]?.trim() ? [] : rawArgs;
+
+  for (const [index, arg] of args.entries()) {
+    if (!arg.trim() || normalizeJsonArgument(arg) !== null) continue;
+    const role = shapeSpec.roles[index] ?? `argument ${index + 1}`;
+    const constructor = findUnsupportedValueConstructor(arg);
+    if (constructor) {
+      return `Unsupported value ${constructor}(...) in the ${role} argument of ${method}(). Supported value constructors: ${SUPPORTED_VALUE_CONSTRUCTORS.join(", ")}.`;
+    }
+    return `The ${role} argument of ${method}() is not a valid document.`;
+  }
+
+  const tail = source.slice(closeIndex + 1).trim();
+  if (tail) return `Unexpected text after ${method}(...): "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
+  return `${method}() expects ${shapeSpec.expects}.`;
+}
+
+/** First `Name(` outside a string that is not a constructor the parser understands. */
+function findUnsupportedValueConstructor(argument: string): string | null {
+  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < argument.length; index += 1) {
+    const char = argument[index]!;
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    const call = /^(?:new\s+)?([A-Za-z_$][\w$]*)\s*\(/.exec(argument.slice(index));
+    if (call && !known.has(call[1]!) && (index === 0 || !/[\w$.]/.test(argument[index - 1]!))) {
+      return /^new\s/.test(call[0]) ? `new ${call[1]}` : call[1]!;
+    }
+  }
+  return null;
+}
 
 export interface MongoFindCommand {
   collection: string;
@@ -24,6 +192,7 @@ export interface MongoFindCommand {
   skip: number;
   limit: number;
   sort?: string;
+  collation?: string;
 }
 
 export interface MongoFindPaginationPlan {
@@ -60,6 +229,19 @@ export interface MongoVersionCommand {
   kind: "version";
 }
 
+export interface MongoShowDatabasesCommand {
+  kind: "showDatabases";
+}
+
+export interface MongoCreateUserCommand {
+  userJson: string;
+  writeConcernJson?: string;
+}
+
+export interface MongoRunCommand {
+  commandJson: string;
+}
+
 export type MongoCollectionStatsMetric = "stats" | "dataSize" | "storageSize" | "totalIndexSize";
 
 export interface MongoCollectionStatsCommand {
@@ -74,18 +256,21 @@ export interface MongoDistinctCommand {
   filter?: string;
 }
 
-type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
+type MongoWriteKind = "runCommand" | "insert" | "update" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
   | ({ kind: "findOne" } & MongoFindOneCommand)
   | MongoVersionCommand
+  | MongoShowDatabasesCommand
   | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
   | ({ kind: "aggregate" } & MongoAggregateCommand)
   | ({ kind: "distinct" } & MongoDistinctCommand)
   | ({ kind: "getIndexes" } & MongoGetIndexesCommand)
   | ({ kind: "collectionStats" } & MongoCollectionStatsCommand)
   | ({ kind: "use" } & MongoUseCommand)
+  | ({ kind: "createUser" } & MongoCreateUserCommand)
+  | ({ kind: "runCommand" } & MongoRunCommand)
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
@@ -162,6 +347,14 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     sort = parsedSort;
   }
 
+  const collationArg = readChainedCallArgument(chain, "collation");
+  let collation: string | undefined;
+  if (collationArg !== undefined) {
+    const parsedCollation = normalizeJsonArgument(collationArg);
+    if (!parsedCollation) return null;
+    collation = parsedCollation;
+  }
+
   const skip = readChainedIntegerArgument(chain, "skip", 0);
   const limit = readChainedIntegerArgument(chain, "limit", DEFAULT_LIMIT);
   if (skip === null || limit === null) return null;
@@ -173,6 +366,7 @@ export function parseMongoFindCommand(input: string): MongoFindCommand | null {
     skip,
     limit,
     sort,
+    ...(collation ? { collation } : {}),
   };
 }
 
@@ -332,7 +526,23 @@ export function applyMongoFindSort(input: string, column: string, direction: "as
 
 export function parseMongoCountDocumentsCommand(input: string): MongoCountDocumentsCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
-  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseFindCountCommand(source);
+  return parseCollectionCountCommand(source, "countDocuments") ?? parseCollectionCountCommand(source, "count") ?? parseEstimatedDocumentCountCommand(source) ?? parseFindCountCommand(source);
+}
+
+/**
+ * estimatedDocumentCount() takes no filter and is metadata-backed, which is exactly
+ * the legacy count() fast path the driver already uses for a filterless count.
+ */
+function parseEstimatedDocumentCountCommand(source: string): MongoCountDocumentsCommand | null {
+  const target = parseCollectionMethodTarget(source, "estimatedDocumentCount");
+  if (!target) return null;
+
+  const openIndex = source.indexOf("(", target.methodCallIndex);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  if (source.slice(openIndex + 1, closeIndex).trim()) return null;
+
+  return { collection: target.collection, filter: "{}", mode: "legacy" };
 }
 
 function parseCollectionCountCommand(source: string, method: "countDocuments" | "count"): MongoCountDocumentsCommand | null {
@@ -461,6 +671,50 @@ export function parseMongoVersionCommand(input: string): MongoVersionCommand | n
   return /^db\s*\.\s*version\s*\(\s*\)$/i.test(source) ? { kind: "version" } : null;
 }
 
+export function parseMongoCreateUserCommand(input: string): MongoCreateUserCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const match = /^db\s*\.\s*createUser\s*\(/i.exec(source);
+  if (!match) return null;
+  const openIndex = source.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  if (args.length < 1 || args.length > 2) return null;
+  const userJson = parseMongoObjectArgument(args[0]);
+  if (!userJson) return null;
+  const user = JSON.parse(userJson) as Record<string, unknown>;
+  if (typeof user.user !== "string" || !user.user.trim()) return null;
+  const writeConcernJson = args[1]?.trim() ? parseMongoObjectArgument(args[1]) : undefined;
+  if (args[1]?.trim() && !writeConcernJson) return null;
+  return {
+    userJson: JSON.stringify(user),
+    ...(writeConcernJson ? { writeConcernJson: JSON.stringify(JSON.parse(writeConcernJson)) } : {}),
+  };
+}
+
+/** The shell's shorthand for the matching runCommand, so they share its execution path. */
+const DATABASE_STATUS_COMMANDS: Record<string, string> = { stats: "dbStats", serverStatus: "serverStatus" };
+
+export function parseMongoRunCommand(input: string): MongoRunCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  for (const [method, command] of Object.entries(DATABASE_STATUS_COMMANDS)) {
+    if (new RegExp(`^db\\s*\\.\\s*${method}\\s*\\(\\s*\\)$`, "i").test(source)) {
+      return { commandJson: JSON.stringify({ [command]: 1 }) };
+    }
+  }
+  const match = /^db\s*\.\s*runCommand\s*\(/i.exec(source);
+  if (!match) return null;
+  const openIndex = source.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  if (args.length !== 1) return null;
+  const commandJson = parseMongoObjectArgument(args[0]);
+  if (!commandJson) return null;
+  const command = JSON.parse(commandJson) as Record<string, unknown>;
+  return Object.keys(command).length > 0 ? { commandJson: JSON.stringify(command) } : null;
+}
+
 export function parseMongoWriteCommand(input: string): MongoWriteCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   const insertOne = parseCollectionMethodTarget(source, "insertOne");
@@ -561,9 +815,18 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
   // Keep the more specific readers ahead of generic write parsing so the
   // returned kind matches the result renderer we want to use downstream.
   const parsers: Array<(source: string) => MongoCommand | null> = [
+    parseMongoShowDatabasesCommand,
     (source) => {
       const version = parseMongoVersionCommand(source);
       return version ?? null;
+    },
+    (source) => {
+      const createUser = parseMongoCreateUserCommand(source);
+      return createUser ? { kind: "createUser", ...createUser } : null;
+    },
+    (source) => {
+      const runCommand = parseMongoRunCommand(source);
+      return runCommand ? { kind: "runCommand", ...runCommand } : null;
     },
     (source) => {
       // Legacy Mongo shell uses count()/find().count(); keep accepting it
@@ -623,6 +886,11 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
   }
 
   return null;
+}
+
+export function parseMongoShowDatabasesCommand(input: string): MongoShowDatabasesCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  return /^show\s+(?:dbs|databases)$/i.test(source) ? { kind: "showDatabases" } : null;
 }
 
 export function splitMongoCommands(input: string): ParsedMongoCommand[] {
@@ -717,6 +985,27 @@ export function mongoDocumentsToQueryResult(documents: unknown[], executionTimeM
     affected_rows: total,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
     truncated: total > documents.length,
+  };
+}
+
+export function mongoDatabasesToQueryResult(documents: unknown[], executionTimeMs: number, maxRows: number): QueryResult {
+  const response = documents[0];
+  const databases = isRecord(response) ? response.databases : undefined;
+  if (!Array.isArray(databases)) throw new Error("MongoDB listDatabases response is missing the databases array.");
+  if (!databases.every(isRecord)) {
+    throw new Error("MongoDB listDatabases response contains an invalid database entry.");
+  }
+
+  const rowLimit = Number.isFinite(maxRows) ? Math.max(1, Math.trunc(maxRows)) : databases.length;
+  const rows = databases.slice(0, rowLimit).map((database) => [toCellValue(database.name), toCellValue(database.sizeOnDisk), toCellValue(database.empty)]);
+  const truncated = rows.length < databases.length;
+  return {
+    columns: ["name", "sizeOnDisk", "empty"],
+    rows,
+    affected_rows: databases.length,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+    truncated,
+    has_more: truncated,
   };
 }
 
@@ -1044,7 +1333,7 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
 
 function isMongoCommandLineStart(segment: string, index: number): boolean {
   const rest = segment.slice(index);
-  return /^use\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
+  return /^use\b/i.test(rest) || /^show\s+(?:dbs|databases)\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
 }
 
 function pushMongoSegment(segments: MongoTextRange[], source: string, from: number, to: number) {

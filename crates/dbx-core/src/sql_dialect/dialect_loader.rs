@@ -77,10 +77,15 @@ impl DialectRegistry {
         &self,
         db_type: crate::models::connection::DatabaseType,
     ) -> Option<DialectCapabilityDescriptor> {
+        if let Some(dialect_name) = crate::database_manifest::dialect_name(&db_type) {
+            if let Some(loaded) = self.get(dialect_name) {
+                return Some(loaded.descriptor);
+            }
+        }
         let kind = DialectKind::from_database_type(db_type);
         let label = kind.label();
-        let db_name = format!("{db_type:?}").to_ascii_lowercase();
-        self.get(&db_name).or_else(|| self.get(label)).map(|ld| ld.descriptor)
+        let db_name = db_type.as_str();
+        self.get(db_name).or_else(|| self.get(label)).map(|ld| ld.descriptor)
     }
 
     pub fn get_yaml(&self, name: &str) -> Option<DialectYaml> {

@@ -24,6 +24,7 @@ export function useSchemaOptions() {
 
   const schemaOptions = ref<Record<string, string[]>>({});
   const loadingSchemaOptions = ref<Record<string, boolean>>({});
+  const schemaRequests = new Map<string, Promise<void>>();
 
   function cacheKey(connectionId: string, database: string) {
     return schemaOptionsCacheKey(connectionId, database, connectionStore.getConfig(connectionId)?.show_system_schemas === true);
@@ -40,18 +41,24 @@ export function useSchemaOptions() {
     if (!database && !isSingleDatabase(dbType) && !usesTreeSchemaMode(dbType)) return;
     const key = cacheKey(connectionId, database);
     if (hasSchemaOptionsCacheEntry(schemaOptions.value, key)) return;
-    if (loadingSchemaOptions.value[key]) return;
+    const pending = schemaRequests.get(key);
+    if (pending) return pending;
 
-    loadingSchemaOptions.value[key] = true;
-    try {
-      await connectionStore.ensureConnected(connectionId);
-      schemaOptions.value[key] = schemaOptionsForConnection(await api.listSchemas(connectionId, database), connection, database);
-    } catch (e) {
-      schemaOptions.value[key] = [];
-      throw e;
-    } finally {
-      loadingSchemaOptions.value[key] = false;
-    }
+    const request = (async () => {
+      loadingSchemaOptions.value[key] = true;
+      try {
+        await connectionStore.ensureConnected(connectionId);
+        schemaOptions.value[key] = schemaOptionsForConnection(await api.listSchemas(connectionId, database), connection, database);
+      } catch (e) {
+        schemaOptions.value[key] = [];
+        throw e;
+      } finally {
+        loadingSchemaOptions.value[key] = false;
+        schemaRequests.delete(key);
+      }
+    })();
+    schemaRequests.set(key, request);
+    return request;
   }
 
   function getSchemaOptionsForDb(connectionId: string, database: string): string[] {

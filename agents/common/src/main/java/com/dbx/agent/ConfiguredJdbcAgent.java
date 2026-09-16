@@ -47,7 +47,7 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
     @Override
     public List<String> listSchemas() {
-        return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), profile);
+        return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), profile, configuredDatabase);
     }
 
     @Override
@@ -115,7 +115,7 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
     @Override
     public List<IndexInfo> listIndexes(String schema, String table) {
-        return StandardJdbcMetadata.INSTANCE.listIndexes(requireConnection(), schema, table);
+        return StandardJdbcMetadata.INSTANCE.listIndexes(requireConnection(), profile, configuredDatabase, schema, table);
     }
 
     @Override

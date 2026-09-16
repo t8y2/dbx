@@ -1,5 +1,5 @@
 import type { Component } from "vue";
-import { Archive, Braces, Columns3, Database, Eye, FileCode, FolderClosed, FolderOpen, Gauge, Key, Link, Link2, ListTree, Network, Package, Plus, ScrollText, Server, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
+import { Archive, Braces, Clock, Columns3, Database, Eye, FileCode, FolderClosed, FolderOpen, Gauge, Key, Link, Link2, ListTree, Network, Package, Plus, ScrollText, Server, ShieldCheck, Table, TableProperties, UsersRound, Zap } from "@lucide/vue";
 import type { ColumnInfo, TreeNode } from "@/types/database";
 
 export type TreeNodeIconInfo = {
@@ -15,6 +15,10 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
     case "database":
     case "mongo-db":
       return { icon: Database, colorClass: "text-yellow-500" };
+    case "tablespace":
+      return { icon: Database, colorClass: "text-orange-500" };
+    case "datafile":
+      return { icon: FileCode, colorClass: "text-slate-500" };
     case "vector-database":
       return { icon: Database, colorClass: "text-cyan-500" };
     case "linked-server-root":
@@ -29,12 +33,15 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: FolderOpen, colorClass: "text-emerald-500" };
     case "nacos-namespace":
     case "etcd-root":
+    case "mqtt-topic":
       return { icon: FolderOpen, colorClass: "text-sky-500" };
     case "etcd-dashboard":
       return { icon: Gauge, colorClass: "text-sky-500" };
+    case "nacos-access-control":
     case "etcd-access-control":
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
+    case "consul-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "table":
       return { icon: Table, colorClass: "text-green-500" };
@@ -44,6 +51,14 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: Eye, colorClass: "text-indigo-500" };
     case "column":
       return { icon: Columns3, colorClass: (node.meta as ColumnInfo | undefined)?.is_primary_key ? "text-orange-400" : "text-muted-foreground" };
+    case "type-attribute":
+      return { icon: Columns3, colorClass: "text-muted-foreground" };
+    case "type-method":
+      return { icon: Braces, colorClass: "text-amber-500" };
+    case "type-attributes":
+      return { icon: ListTree, colorClass: "text-green-400" };
+    case "type-methods":
+      return { icon: Braces, colorClass: "text-amber-500" };
     case "group-columns":
       return { icon: ListTree, colorClass: "text-green-400" };
     case "group-indexes":
@@ -57,6 +72,10 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: Zap, colorClass: "text-orange-400" };
     case "trigger":
       return { icon: Zap, colorClass: "text-orange-300" };
+    case "group-events":
+      return { icon: Clock, colorClass: "text-orange-400" };
+    case "event":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-constraints":
     case "constraint":
       return { icon: Key, colorClass: "text-amber-500" };
@@ -70,6 +89,10 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: TableProperties, colorClass: "text-primary" };
     case "user-admin":
       return { icon: UsersRound, colorClass: "text-primary" };
+    case "dameng-users":
+      return { icon: UsersRound, colorClass: "text-primary" };
+    case "dameng-roles":
+      return { icon: ShieldCheck, colorClass: "text-primary" };
     case "redis-db":
       return { icon: Database, colorClass: "text-red-400" };
     case "mongo-gridfs":
@@ -83,20 +106,28 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: TableProperties, colorClass: "text-cyan-400" };
     case "elasticsearch-index":
       return { icon: Table, colorClass: "text-emerald-400" };
+    case "meilisearch-system":
+      return { icon: Gauge, colorClass: "text-emerald-500" };
     case "procedure":
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "function":
       return { icon: Braces, colorClass: "text-amber-500" };
     case "sequence":
       return { icon: ListTree, colorClass: "text-emerald-500" };
+    case "oracle-db-links":
+    case "oracle-db-link":
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "job":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
       return { icon: FileCode, colorClass: "text-cyan-400" };
     case "group-tables":
       return { icon: Table, colorClass: "text-green-500" };
+    case "group-dolt-system-tables":
+      return { icon: Table, colorClass: "text-slate-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "group-materialized-views":
@@ -109,8 +140,14 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-synonyms":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "group-jobs":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
+    case "group-tablespaces":
+      return { icon: Database, colorClass: "text-orange-500" };
+    case "group-datafiles":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-slate-500" };
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":

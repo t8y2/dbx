@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+import { compareDataGridValues, databaseSortSupportedForDatabase, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+
+describe("databaseSortSupportedForDatabase", () => {
+  it("keeps database-side sorting for databases that support ORDER BY", () => {
+    expect(databaseSortSupportedForDatabase("postgres")).toBe(true);
+    expect(databaseSortSupportedForDatabase("mysql")).toBe(true);
+    expect(databaseSortSupportedForDatabase(undefined)).toBe(true);
+  });
+
+  it("disables database-side sorting for Cassandra browse queries", () => {
+    expect(databaseSortSupportedForDatabase("cassandra")).toBe(false);
+  });
+});
 
 describe("simpleDataGridOrderByColumn", () => {
   it.each([
@@ -44,5 +56,53 @@ describe("simpleDataGridOrderByMatchesSort", () => {
   it("does not treat a manual order as owned by a stale structured sort", () => {
     expect(simpleDataGridOrderByMatchesSort("LOWER(name) ASC", "old_name", "asc")).toBe(false);
     expect(simpleDataGridOrderByMatchesSort('"name" ASC', "old_name", "asc")).toBe(false);
+  });
+});
+
+describe("compareDataGridValues numeric ordering", () => {
+  it("sorts bigint string cells beyond the JS safe range numerically (issue #7832)", () => {
+    // BIGINT cells above ±(2^53 - 1) cross the backend boundary as decimal
+    // strings, like DECIMAL cells; numeric columns must still order them by
+    // magnitude instead of falling back to collation or double rounding.
+    const columnType = "bigint";
+    expect(compareDataGridValues("1391198305898897409", "1391198305898909792", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("1391198305898909792", "1391198305898897409", columnType)).toBeGreaterThan(0);
+    expect(compareDataGridValues("9007199254740993", "1391198305898897409", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues(42, "9007199254740993", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("-9007199254740992", "42", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("1391198305898897409", "1391198305898897409", columnType)).toBe(0);
+  });
+});
+
+describe("compareDataGridValues datetime ordering", () => {
+  it("orders space-separated timestamps with microsecond precision", () => {
+    expect(compareDataGridValues("2024-01-01 12:00:00.123456", "2024-01-01 12:00:00.500000")).toBeLessThan(0);
+    expect(compareDataGridValues("2024-01-01 12:00:00.500000", "2024-01-01 12:00:00.123456")).toBeGreaterThan(0);
+  });
+
+  it("orders dates before earlier-day late times across midnight", () => {
+    expect(compareDataGridValues("2024-01-02 00:00:00", "2024-01-01 23:59:59")).toBeGreaterThan(0);
+  });
+
+  it("normalizes numeric UTC offsets so equal instants compare equal", () => {
+    expect(compareDataGridValues("2024-01-01 12:00:00+08", "2024-01-01 13:00:00+09")).toBe(0);
+    expect(compareDataGridValues("2024-01-01 11:00:00+09", "2024-01-01 12:00:00+08")).toBeLessThan(0);
+  });
+
+  it("sorts PostgreSQL infinity sentinels beyond finite timestamps", () => {
+    expect(compareDataGridValues("infinity", "9999-12-31 23:59:59")).toBeGreaterThan(0);
+    expect(compareDataGridValues("-infinity", "0001-01-01 00:00:00")).toBeLessThan(0);
+  });
+
+  it("still parses ISO-T timestamps with Zulu suffix", () => {
+    expect(compareDataGridValues("2024-01-01T12:00:00Z", "2024-01-01T12:00:01Z")).toBeLessThan(0);
+  });
+
+  it("falls back to collation for non-datetime strings", () => {
+    expect(compareDataGridValues("zebra", "apple")).toBeGreaterThan(0);
+  });
+
+  it("keeps null values after populated datetime cells", () => {
+    expect(compareDataGridValues(null, "2024-01-01 00:00:00")).toBeGreaterThan(0);
   });
 });

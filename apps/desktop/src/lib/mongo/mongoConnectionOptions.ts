@@ -3,6 +3,20 @@ export function mongoUrlParam(urlParams: string | undefined, key: string): strin
   return params.get(key) || "";
 }
 
+export function mongoConnectionUsesOidc(urlParams: string | undefined, connectionString?: string): boolean {
+  const input = connectionString?.trim() || "";
+  if (input) {
+    if (!/^mongodb(?:\+srv)?:\/\//i.test(input)) return false;
+    const queryStart = input.indexOf("?");
+    if (queryStart < 0) return false;
+    const fragmentStart = input.indexOf("#", queryStart + 1);
+    const query = input.slice(queryStart + 1, fragmentStart < 0 ? undefined : fragmentStart);
+    return mongoUrlParamCaseInsensitive(query, "authMechanism").toUpperCase() === "MONGODB-OIDC";
+  }
+
+  return mongoUrlParamCaseInsensitive(urlParams, "authMechanism").toUpperCase() === "MONGODB-OIDC";
+}
+
 export function setMongoUrlParam(urlParams: string | undefined, key: string, value: string): string {
   const params = parseMongoUrlParams(urlParams);
   const normalized = value.trim();
@@ -75,9 +89,20 @@ export function mongodbAuthFailureHint(message: string): string {
   const source = message.match(/source='([^']+)'/)?.[1];
   if (!source || !message.includes("Exception authenticating MongoCredential")) return message;
 
-  return `${message}\n\nCurrent authentication database: ${source}. If this user was created in admin, set Authentication database to admin or add authSource=admin to URL params.`;
+  const verificationHint = `Current authentication database: ${source}. The server rejected these credentials. Verify the username and password, and confirm that the user was created in ${source}.`;
+  if (source.toLowerCase() === "admin") return `${message}\n\n${verificationHint}`;
+
+  return `${message}\n\n${verificationHint} If the user was created in admin, set Authentication database to admin or add authSource=admin to URL params.`;
 }
 
 function parseMongoUrlParams(urlParams: string | undefined): URLSearchParams {
   return new URLSearchParams((urlParams || "").trim().replace(/^\?/, ""));
+}
+
+function mongoUrlParamCaseInsensitive(urlParams: string | undefined, key: string): string {
+  const expectedKey = key.toLowerCase();
+  for (const [paramKey, value] of parseMongoUrlParams(urlParams)) {
+    if (paramKey.toLowerCase() === expectedKey) return value;
+  }
+  return "";
 }

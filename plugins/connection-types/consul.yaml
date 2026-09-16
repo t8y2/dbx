@@ -1,0 +1,30 @@
+schemaVersion: 1
+order: 700
+dbType: consul
+rustVariant: Consul
+label: Consul
+runtimeMode: native
+mcpMode: unsupported
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: false
+defaultPort: 8500
+supportLevel: connect
+specializedSurface: true
+capabilities:
+  queryExecution: false
+  metadataBrowse: false
+  objectBrowser: false
+  objectSource: false
+  schemaSearch: false
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: false
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: false

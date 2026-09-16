@@ -25,6 +25,7 @@ import {
   type NacosDashboardSample,
   type NullableMetric,
 } from "@/lib/nacos/nacosDashboard";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -33,14 +34,17 @@ const props = defineProps<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ autoRefreshInterval?: number }>({}, "NacosDashboard");
 const loading = ref(false);
 const fetching = ref(false);
 const error = ref("");
 const samples = ref<NacosDashboardSample[]>([]);
-const autoRefreshInterval = ref(10);
+const autoRefreshInterval = ref([0, 5, 10, 30, 60].includes(restoredUiState.autoRefreshInterval ?? -1) ? restoredUiState.autoRefreshInterval! : 10);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let activeRequestKey = "";
 let latestRequestId = 0;
+
+trackUiState(() => ({ autoRefreshInterval: autoRefreshInterval.value }));
 
 const latest = computed(() => samples.value[samples.value.length - 1]);
 const snapshot = computed(() => latest.value?.snapshot);
@@ -368,11 +372,11 @@ onUnmounted(() => {
           <MetricCard :label="t('nacos.dashboardNamespaces')" :value="optionalCount(snapshot?.namespaceCount)" :icon="Layers3" />
           <MetricCard :label="t('nacos.dashboardConfigs')" :value="optionalCount(snapshot?.configCount)" :sub="namespaceLabel" :icon="Braces" />
           <MetricCard :label="t('nacos.dashboardServices')" :value="optionalCount(snapshot?.serviceCount)" :sub="namespaceLabel" :icon="Boxes" />
-          <MetricCard :label="t('nacos.dashboardInstances')" :value="optionalCount(metrics?.instanceCount)" :icon="Network" />
-          <MetricCard :label="t('nacos.dashboardClients')" :value="optionalCount(metrics?.clientCount)" :sub="t('nacos.dashboardConnections', { count: optionalCount(metrics?.connectionBasedClientCount) })" :icon="Users" />
+          <MetricCard v-if="metrics" :label="t('nacos.dashboardInstances')" :value="optionalCount(metrics.instanceCount)" :icon="Network" />
+          <MetricCard v-if="metrics" :label="t('nacos.dashboardClients')" :value="optionalCount(metrics.clientCount)" :sub="t('nacos.dashboardConnections', { count: optionalCount(metrics.connectionBasedClientCount) })" :icon="Users" />
           <MetricCard :label="t('nacos.dashboardNodes')" :value="snapshot?.nodes.length ? `${healthyNodes} / ${snapshot.nodes.length}` : '—'" :icon="Server" />
-          <MetricCard :label="t('nacos.dashboardCpu')" :value="formatDashboardPercent(metrics?.cpu)" :icon="Cpu" />
-          <MetricCard :label="t('nacos.dashboardMemory')" :value="formatDashboardPercent(metrics?.mem)" :sub="t('nacos.dashboardLoad', { value: optionalMetric(metrics?.load) })" :icon="HardDrive" />
+          <MetricCard v-if="metrics" :label="t('nacos.dashboardCpu')" :value="formatDashboardPercent(metrics.cpu)" :icon="Cpu" />
+          <MetricCard v-if="metrics" :label="t('nacos.dashboardMemory')" :value="formatDashboardPercent(metrics.mem)" :sub="t('nacos.dashboardLoad', { value: optionalMetric(metrics.load) })" :icon="HardDrive" />
         </div>
 
         <div v-if="prometheus" class="grid shrink-0 grid-cols-2 gap-3 sm:grid-cols-4">

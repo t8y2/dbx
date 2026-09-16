@@ -52,6 +52,7 @@ describe("connectionStore MongoDB Legacy fallback", () => {
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -93,6 +94,7 @@ describe("connectionStore MongoDB Legacy fallback", () => {
       saveConnections: vi.fn().mockResolvedValue(undefined),
       saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");

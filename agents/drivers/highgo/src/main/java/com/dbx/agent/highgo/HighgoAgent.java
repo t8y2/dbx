@@ -14,6 +14,14 @@ public final class HighgoAgent extends PostgresLikeAgent {
         super(HIGHGO_PROFILE);
     }
 
+    @Override
+    public String setSchemaSQL(String schema) {
+        if ("public".equals(schema)) {
+            return super.setSchemaSQL(schema);
+        }
+        return super.setSchemaSQL(schema) + ", public";
+    }
+
     public static void main(String[] args) {
         new MultiSessionJsonRpcServer(HighgoAgent::new).run();
     }

@@ -48,6 +48,24 @@ class ValidateAgentsTest(unittest.TestCase):
 
             self.assertEqual([], validate_agents.validate_versions(root))
 
+    def test_versions_accept_crate_native_sqlite_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            root = repo / "agents"
+            crate = repo / "crates" / "dbx-sqlite-worker"
+            root.mkdir()
+            crate.mkdir(parents=True)
+            (root / "settings.gradle").write_text(
+                "include 'common', 'test-support', 'h2'\n",
+                encoding="utf-8",
+            )
+            (root / "versions.json").write_text(
+                json.dumps({"h2": "0.1.0", "sqlite-worker": "0.1.0"}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual([], validate_agents.validate_versions(root))
+
     def test_source_scan_rejects_old_execute_query_patterns(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -136,10 +154,24 @@ class ValidateAgentsTest(unittest.TestCase):
                 "include(*(infrastructureModules + driverModules))\n",
                 encoding="utf-8",
             )
-            for driver in ("oracle-go", "kingbase-go", "xugu", "duckdb", "rabbitmq"):
+            for driver in (
+                "cassandra-go",
+                "hive-go",
+                "oracle-go",
+                "kingbase-go",
+                "iotdb",
+                "neo4j-go",
+                "vastbase-go",
+                "xugu",
+                "duckdb",
+                "rabbitmq",
+                "rocketmq",
+                "zookeeper",
+                "tdengine",
+            ):
                 (root / "drivers" / driver).mkdir(parents=True)
             (root / "versions.json").write_text(
-                json.dumps({"h2": "0.1.0", "oracle": "0.1.0", "kingbase": "0.1.0", "xugu": "0.1.0", "rabbitmq": "0.1.0"}),
+                json.dumps({"h2": "0.1.0", "cassandra": "0.1.0", "hive": "0.1.0", "oracle": "0.1.0", "kingbase": "0.1.0", "iotdb": "0.1.0", "neo4j": "0.1.0", "vastbase": "0.1.0", "xugu": "0.1.0", "rabbitmq": "0.1.0", "rocketmq": "0.1.0", "zookeeper": "0.1.0", "tdengine": "0.1.0"}),
                 encoding="utf-8",
             )
 

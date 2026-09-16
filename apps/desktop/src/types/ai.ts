@@ -1,9 +1,30 @@
-export type AiProvider = "claude" | "openai" | "gemini" | "deepseek" | "qwen" | "minimax" | "ollama" | "anthropic-compatible" | "openai-compatible" | "claude-code-cli" | "pi-agent-cli" | "codex-cli" | "custom";
+export type AiProvider =
+  | "claude"
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "kimi"
+  | "qwen"
+  | "zhipu"
+  | "minimax"
+  | "ollama"
+  | "anthropic-compatible"
+  | "openai-compatible"
+  | "claude-code-cli"
+  | "pi-agent-cli"
+  | "codex-cli"
+  | "opencode-cli"
+  | "cursor-cli"
+  | "grok-cli"
+  | "codebuddy-cli"
+  | "qoder-cli"
+  | "custom";
 export type AiApiStyle = "completions" | "responses" | "anthropic-messages";
 export type AiAuthMethod = "api-key" | "bearer";
 export type AiEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 export type AiReasoningLevel = "default" | "minimal" | AiEffortLevel;
 export type AiCapabilitySource = "providerApi" | "localCli" | "officialRegistry" | "custom";
+export type AiAssistantMode = "ask" | "agent";
 
 export type AiEffortSelection = { kind: "providerDefault" } | { kind: "disabled" } | { kind: "enum"; value: string } | { kind: "integer"; value: number } | { kind: "boolean"; value: boolean } | { kind: "text"; value: string };
 
@@ -35,10 +56,16 @@ export interface AiConfig {
   model: string;
   models?: AiConfiguredModel[];
   apiStyle: AiApiStyle;
+  /** Additional HTTP headers sent to API-based AI providers. */
+  customHeaders?: Record<string, string>;
   proxyEnabled?: boolean;
   proxyUrl?: string;
+  /** Disable TLS certificate verification for the AI endpoint (self-signed/private CA only). */
+  skipTlsVerify?: boolean;
   enableThinking?: boolean;
   reasoningLevel?: AiReasoningLevel;
+  /** Optional per-configuration output budget sent as max_tokens/max_output_tokens. */
+  maxOutputTokens?: number;
   contextWindow?: number;
   codexCliPath?: string | null;
   codexCliEnv?: Record<string, string>;
@@ -46,6 +73,16 @@ export interface AiConfig {
   claudeCodeCliEnv?: Record<string, string>;
   piAgentCliPath?: string | null;
   piAgentCliEnv?: Record<string, string>;
+  opencodeCliPath?: string | null;
+  opencodeCliEnv?: Record<string, string>;
+  cursorCliPath?: string | null;
+  cursorCliEnv?: Record<string, string>;
+  grokCliPath?: string | null;
+  grokCliEnv?: Record<string, string>;
+  codebuddyCliPath?: string | null;
+  codebuddyCliEnv?: Record<string, string>;
+  qoderCliPath?: string | null;
+  qoderCliEnv?: Record<string, string>;
   runtimeEffort?: AiEffortSelection | null;
 }
 
@@ -78,4 +115,11 @@ export interface AiChatSelectionState {
   version: number;
   active?: AiActiveModelSelection;
   effortPreferences: AiModelEffortPreference[];
+  defaultMode?: AiAssistantMode;
+  /** Whether opening the AI panel restores the most recently updated conversation. */
+  restoreLastConversation?: boolean;
+  /** Prompt template ids auto-applied when the AI panel opens, keyed by connection db_type. */
+  defaultTemplatesByDbType?: Record<string, string[]>;
+  /** Prompt template ids from the most recent send, keyed by connection db_type. */
+  lastUsedTemplatesByDbType?: Record<string, string[]>;
 }

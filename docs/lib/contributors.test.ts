@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { contributorsFromActivity, dedupeContributors, type Contributor } from "./contributors";
+import { contributorAvatarUrl, contributorsFromActivity, dedupeContributors, type Contributor } from "./contributors";
 
 const contributor = (login: string): Contributor => ({
   login,
@@ -43,4 +43,9 @@ test("contributorsFromActivity strips snapshot-only fields from landing data", (
       },
     ],
   );
+});
+
+test("contributorAvatarUrl requests small GitHub avatars and preserves local images", () => {
+  assert.equal(contributorAvatarUrl("https://avatars.githubusercontent.com/u/1?v=4"), "https://avatars.githubusercontent.com/u/1?v=4&s=64");
+  assert.equal(contributorAvatarUrl("/avatars/contributor.png"), "/avatars/contributor.png");
 });

@@ -10,9 +10,13 @@ import {
   formatRedisStringValue,
   getRedisMemberSelectionKey,
   highlightRedisJsonDetail,
+  isJsonDerivedView,
+  jsonToXmlText,
+  jsonToYamlText,
   parseRedisJsonDetail,
   preferredRedisValueFormat,
   redisClipboardSafeText,
+  redisHashRowCopyText,
   redisMemberCopyText,
   redisValueCopyText,
 } from "../../apps/desktop/src/lib/redis/redisValuePresentation.ts";
@@ -110,13 +114,14 @@ test("string/blob formats stay text-oriented and binary-first where needed", () 
   assert.equal(binaryDetail.binaryText, "10101100111011010000000000000101");
 });
 
-test("detects Java-serialized payloads as a dedicated view", () => {
+test("detects Java-serialized payloads as a codec, not a view tab", () => {
   const javaSerializedString = formatRedisMemberDetail({
     raw_base64: "rO0ABXQACHNvbWV0ZXh0",
     encoding: "binary" as const,
   });
-  assert.deepEqual(javaSerializedString.availableFormats, ["javaserialize", "binary", "hex", "base64"]);
-  assert.equal(javaSerializedString.defaultFormat, "javaserialize");
+  assert.deepEqual(javaSerializedString.availableFormats, ["hex", "binary", "base64"]);
+  assert.equal(javaSerializedString.defaultFormat, "hex");
+  assert.equal(javaSerializedString.defaultCodec, "none");
   assert.equal(javaSerializedString.javaSerialized?.formattedText, '"sometext"');
 
   const javaSerializedMap = formatRedisMemberDetail({
@@ -132,10 +137,7 @@ test("detects Java-serialized payloads as a dedicated view", () => {
 
   const plainText = formatRedisMemberDetail(blobFromText("Ada"));
   assert.equal(canRenderRedisValueFormat(plainText, "json"), false);
-  assert.equal(canRenderRedisValueFormat(plainText, "javaserialize"), false);
   assert.equal(canRenderRedisValueFormat(plainText, "utf8"), true);
-
-  assert.equal(canRenderRedisValueFormat(javaSerializedMap, "javaserialize"), true);
 });
 
 test("normalizes self-referential Java maps without recursing forever", () => {
@@ -163,7 +165,7 @@ test("only payload views opt into JSON text formatting", () => {
 
   const payloadDetail = formatRedisMemberDetail(blobFromText('{"name":"Ada"}'), { allowJsonText: true });
   assert.equal(payloadDetail.rawLabel, "ASCII");
-  assert.deepEqual(payloadDetail.availableFormats, ["utf8", "ascii", "binary", "json", "hex", "base64"]);
+  assert.deepEqual(payloadDetail.availableFormats, ["utf8", "ascii", "binary", "json", "unicodejson", "yaml", "xml", "hex", "base64"]);
   assert.equal(payloadDetail.defaultFormat, "utf8");
   assert.equal(payloadDetail.json?.formattedText, '{\n  "name": "Ada"\n}');
 });
@@ -302,3 +304,47 @@ test("clamps Redis member detail sheet width to viewport and usable bounds", () 
   assert.equal(clampRedisMemberDetailSheetWidth(1200, 1400), 900);
   assert.equal(clampRedisMemberDetailSheetWidth(900, 500), 468);
 });
+
+test("exposes JSON-derived unicode/yaml/xml views only for JSON values", () => {
+  const jsonDetail = formatRedisMemberDetail(blobFromText('{"id":1}'), { allowJsonText: true });
+  const plainDetail = formatRedisMemberDetail("plain");
+
+  assert.equal(isJsonDerivedView("yaml"), true);
+  assert.equal(isJsonDerivedView("utf8"), false);
+  assert.equal(canRenderRedisValueFormat(jsonDetail, "yaml"), true);
+  assert.equal(canRenderRedisValueFormat(plainDetail, "yaml"), false);
+});
+
+test("renders JSON values as YAML and XML text", () => {
+  assert.equal(jsonToYamlText({ id: 1, tags: ["a", "b"] }), "id: 1\ntags:\n  - a\n  - b\n");
+  assert.equal(jsonToXmlText({ id: 1 }), '<?xml version="1.0" encoding="UTF-8"?>\n<root>\n  <id>1</id>\n</root>');
+});
+
+test("copies hash row field, value, and field+value targets", () => {
+  const field = blobFromText("1653624095260016668");
+  const value = blobFromText("S");
+
+  assert.equal(redisHashRowCopyText(field, value, "field"), "1653624095260016668");
+  assert.equal(redisHashRowCopyText(field, value, "value"), "S");
+  assert.equal(redisHashRowCopyText(field, value, "fieldValue"), "1653624095260016668\tS");
+});
+
+test("escapes clipboard-unsafe controls in hash row copies", () => {
+  const field = blobFromText("name\x00suffix");
+  const value = blobFromText("Ada");
+
+  assert.equal(redisHashRowCopyText(field, value, "field"), "name\\x00suffix");
+  assert.equal(redisHashRowCopyText(field, value, "fieldValue"), "name\\x00suffix\tAda");
+});
+
+test("copies plain string hash rows without JSON reformatting", () => {
+  assert.equal(redisHashRowCopyText('{"id":1}', "1", "field"), '{"id":1}');
+  assert.equal(redisHashRowCopyText('{"id":1}', "1", "fieldValue"), '{"id":1}\t1');
+});
+
+test("copies the value target without resolving the field", () => {
+  // The default row copy must stay a pure value read: a hash row always has a
+  // field, but the value path must not depend on the field being copyable.
+  assert.equal(redisHashRowCopyText(undefined, blobFromText("S"), "value"), "S");
+});
+

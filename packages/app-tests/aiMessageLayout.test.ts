@@ -60,12 +60,21 @@ test("assistant messages keep metadata aligned with the bubble and wrap long tex
 });
 
 test("AI request failures use localized backend diagnostics", () => {
-  assert.match(source, /messages\.value\[assistantIdx\]\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`/);
+  // The lookup is guarded (matching the `finally` block right below it) so that if
+  // clearMessages()/selectConversation() already replaced the transcript while this
+  // request was still in flight, writing the failure text doesn't throw and silently
+  // swallow the real error. See issue #5941. (`runMessages` is the send pipeline's
+  // array — `messages.value` for a visible conversation, the run's own array for a
+  // detached/background run.) The failure flag rides along with the prefix text
+  // (#6467 PR3): the export derives its failure marker from this state.
+  assert.match(source, /const msg = runMessages\[assistantIdx\];\s*\n\s*if \(msg\) \{/);
+  assert.match(source, /msg\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`;/);
+  assert.match(source, /msg\.failed = true;/);
 });
 
 test("AI analysis export keeps the connection that produced each assistant response", () => {
   assert.match(source, /sourceConnectionName\?: string/);
-  assert.match(source, /messages\.value\.push\(\{ role: "assistant", content: "", sourceConnectionName: connection\.name \}\)/);
+  assert.match(source, /runMessages\.push\(\{ role: "assistant", content: "", sourceConnectionName: connection\.name \}\)/);
   assert.match(source, /connectionName: msg\.sourceConnectionName \?\? props\.connection\?\.name/);
   assert.match(source, /sourceConnectionName: m\.role === "assistant" \? conv\.connectionName : undefined/);
 });

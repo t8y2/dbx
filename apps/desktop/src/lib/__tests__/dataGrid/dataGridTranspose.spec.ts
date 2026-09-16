@@ -7,6 +7,7 @@ import {
   minTransposeFieldWidth,
   shouldAutoTransposeSingleRow,
   transposeAnchorRowIndex,
+  transposeEndAlignmentSpacerWidth,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
   transposeRecordWidthsForDensity,
@@ -107,6 +108,39 @@ describe("dataGridTranspose density widths", () => {
 });
 
 describe("transpose record scrolling", () => {
+  it("aligns the fifth record at the start while nearest keeps an already-visible record in place", () => {
+    const endSpacerWidth = transposeEndAlignmentSpacerWidth({
+      viewportWidth: 1200,
+      pinnedWidth: 104,
+      lastRecordWidth: 168,
+    });
+
+    expect(endSpacerWidth).toBe(928);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 4,
+        totalRecords: 5,
+        viewportWidth: 1200,
+        pinnedWidth: 104,
+        recordWidth: 168,
+        currentScrollLeft: 0,
+        alignment: "start",
+        endSpacerWidth,
+      }),
+    ).toBe(672);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 4,
+        totalRecords: 5,
+        viewportWidth: 1200,
+        pinnedWidth: 104,
+        recordWidth: 168,
+        currentScrollLeft: 0,
+        endSpacerWidth,
+      }),
+    ).toBe(0);
+  });
+
   it("uses the scroll position after the sticky field for virtualization", () => {
     expect(
       visibleTransposeRecordWindow({
@@ -146,6 +180,42 @@ describe("transpose record scrolling", () => {
         currentScrollLeft: 450,
       }),
     ).toBe(450);
+  });
+
+  it("uses the end spacer to align a variable-width final record exactly at the start", () => {
+    const recordOffsets = [0, 500, 596, 692];
+    const endSpacerWidth = transposeEndAlignmentSpacerWidth({
+      viewportWidth: 300,
+      pinnedWidth: 100,
+      lastRecordWidth: 96,
+    });
+
+    expect(endSpacerWidth).toBe(104);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 2,
+        totalRecords: 3,
+        viewportWidth: 300,
+        pinnedWidth: 100,
+        recordWidth: 230,
+        recordOffsets,
+        currentScrollLeft: 0,
+        alignment: "start",
+        endSpacerWidth,
+      }),
+    ).toBe(596);
+    expect(
+      transposeScrollLeftForRecord({
+        recordIndex: 2,
+        totalRecords: 3,
+        viewportWidth: 300,
+        pinnedWidth: 100,
+        recordWidth: 230,
+        recordOffsets,
+        currentScrollLeft: 596,
+        endSpacerWidth,
+      }),
+    ).toBe(596);
   });
 });
 

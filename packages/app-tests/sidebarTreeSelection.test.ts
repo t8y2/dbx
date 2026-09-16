@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { selectedTreeNodesInVisibleOrder, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "../../apps/desktop/src/lib/sidebar/sidebarTreeSelection.ts";
+import { pruneTreeSelectionToVisibleNodes, selectedTreeNodesInVisibleOrder, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "../../apps/desktop/src/lib/sidebar/sidebarTreeSelection.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 const nodes: TreeNode[] = [
@@ -35,4 +35,20 @@ test("selected tree nodes are ordered and limited by visible nodes", () => {
     selectedTreeNodesInVisibleOrder(filtered, ["products", "customers", "order_lines"]).map((node) => node.id),
     ["order_lines", "customers"],
   );
+});
+
+test("hidden selections are removed before a filtered tree becomes visible again", () => {
+  const filtered = [nodes[1]];
+  const selection = pruneTreeSelectionToVisibleNodes(filtered, {
+    nodeIds: ["order_lines", "products"],
+    activeNodeId: "products",
+    anchorNodeId: "products",
+  });
+
+  assert.deepEqual(selection, {
+    nodeIds: ["order_lines"],
+    activeNodeId: "order_lines",
+    anchorNodeId: "order_lines",
+  });
+  assert.deepEqual(selectedTreeNodesInVisibleOrder(nodes, selection.nodeIds).map((node) => node.id), ["order_lines"]);
 });

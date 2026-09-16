@@ -99,14 +99,30 @@ GridFS 工作台用于管理 Bucket 和文件：
 
 删除 Bucket 会删除其中的文件和 Chunk。生产环境执行前先确认 Bucket 名称和备份。
 
-## 复制与导出
+## 导入与导出
 
-- 复制当前文档、选中文档或字段值
-- 复制为普通 JSON 或保留类型信息的 Extended JSON
-- 从表格结果使用多格式复制和导出
-- MongoDB `find` 查询结果导出会继续读取完整结果范围，而不是只导出当前已显示页（受查询和导出限制约束）
+Collection 文档提供独立的 CSV/JSON 导入和 CSV/NDJSON 导出，和关系型 Table Import 不是同一条工作流。CSV 每一行生成一个文档，嵌套值保持嵌套，`$oid`、`$date` 等 Extended JSON 类型可以保留。
 
-导出大型 Collection 前先缩小过滤范围，并关注服务端游标、网络和本地文件大小。
+### 导入数据
+
+1. 在集合上右键选择「导入数据」。
+2. 选择 `.csv`、`.json` 或 `.ndjson` 文件。桌面端读取本地路径，Web 端上传到临时文件。
+3. 对照预览调整编码、分隔符、表头、空值和类型策略。
+4. 确认以追加方式写入。重复 `_id` 会停止导入，已提交的批次不会回滚。
+
+CSV 按 MongoDB Compass：首行表头，嵌套字段用点号路径（`address.city`），数组索引（`tags[0]`、`matrix[0][1]`），ObjectId 写成 24 位十六进制，日期为 ISO-8601，空单元格为 null。导入采样前 1000 行推断列类型；`_id` 的十六进制会还原为 ObjectId，`recognizeObjectIdHex` 可将此规则扩展到其他列。JSON/NDJSON 使用 Extended JSON（`$oid`、`$date`）。全部按字符串会把每个单元格当文本。
+
+类型保真：`Double` 导出再导入会变为 `Decimal128`（十进制文本无损）。非 `_id` 的 ObjectId 字段会往返为 String，除非打开 `recognizeObjectIdHex`。小的 `Int64` 可能收窄为 `Int32`；ISO 日期格式的字符串会变为 `DateTime`。Extended JSON 类型（`$binary`、`$regularExpression`、`$timestamp`、`$minKey`、`$maxKey`、`$code`）通过 JSON 文本单元格往返。空数组 `[]` 和空对象 `{}` 往返正确。
+
+首期限制：只支持追加（无清空或 upsert），无按字段类型覆盖，CSV 导出从前 10000 个文档发现字段（之后的字段会被静默丢弃；变化 schema 请改用 NDJSON），无 JSON 数组导出格式，不支持 Excel/GridFS/BSON 二进制导入，失败批次不会自动重试。
+
+### 导出数据
+
+- 在集合上右键选择「导出数据」，再选 CSV 或 NDJSON，会像表导出一样直接打开保存文件对话框。
+- CSV 嵌套对象写为点号列（`address.city`），数组写为索引列（`tags[0]`、`tags[1]`）。NDJSON 每行一个规范 Extended JSON 文档。
+- 字段数超过 256 的 Collection 请改用 NDJSON。
+
+如果只需要当前可见选择，仍可从表格复制当前文档、选中文档或字段值为普通 JSON 或 Extended JSON。
 
 ## 安全与兼容边界
 

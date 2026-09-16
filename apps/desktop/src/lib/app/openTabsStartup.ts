@@ -20,21 +20,28 @@ export function createOpenTabsRestorationBarrier(): OpenTabsRestorationBarrier {
   };
 }
 
-interface InitializeDesktopOpenTabsOptions {
-  barrier: OpenTabsRestorationBarrier;
+interface InitializeOpenTabsOptions {
   initializeOptionalState: () => Promise<void>;
   restoreOpenTabs: () => Promise<void>;
   onOptionalStateError: (error: unknown) => void;
 }
 
-export async function initializeDesktopOpenTabs({ barrier, initializeOptionalState, restoreOpenTabs, onOptionalStateError }: InitializeDesktopOpenTabsOptions): Promise<void> {
+export async function initializeOpenTabs({ initializeOptionalState, restoreOpenTabs, onOptionalStateError }: InitializeOpenTabsOptions): Promise<void> {
   try {
-    try {
-      await initializeOptionalState();
-    } catch (error) {
-      onOptionalStateError(error);
-    }
-    await restoreOpenTabs();
+    await initializeOptionalState();
+  } catch (error) {
+    onOptionalStateError(error);
+  }
+  await restoreOpenTabs();
+}
+
+interface InitializeDesktopOpenTabsOptions extends InitializeOpenTabsOptions {
+  barrier: OpenTabsRestorationBarrier;
+}
+
+export async function initializeDesktopOpenTabs({ barrier, ...options }: InitializeDesktopOpenTabsOptions): Promise<void> {
+  try {
+    await initializeOpenTabs(options);
   } finally {
     barrier.settle();
   }

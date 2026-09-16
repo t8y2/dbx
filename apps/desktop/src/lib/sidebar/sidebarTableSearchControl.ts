@@ -1,4 +1,4 @@
-import type { FlatTreeNode } from "@/composables/useFlatTree";
+import { appendFlatTreeRenderKey, type FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
 const simpleObjectParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema"]);
@@ -59,6 +59,7 @@ export function insertSidebarTableSearchControls(
       node,
       depth: item.depth + 1,
       id: node.id,
+      renderKey: appendFlatTreeRenderKey(item.renderKey, node),
       type: node.type,
       poolType: `${node.type}:${node.id}`,
     });

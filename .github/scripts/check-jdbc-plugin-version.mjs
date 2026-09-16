@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 
-const POM_PATH = "plugins/jdbc/pom.xml";
+const BUILD_GRADLE_PATH = "plugins/jdbc/build.gradle";
 const MANIFEST_PATH = "plugins/jdbc/manifest.json";
 
-function firstProjectVersion(pomXml) {
-  const match = pomXml.match(/<project[\s\S]*?<version>([^<]+)<\/version>/);
+export function jdbcGradleVersion(buildGradle) {
+  const match = buildGradle.match(/^version\s*=\s*['"]([^'"]+)['"]/m);
   return match?.[1]?.trim() ?? "";
 }
 
@@ -13,10 +13,10 @@ function manifestVersion(manifestJson) {
   return JSON.parse(manifestJson).version ?? "";
 }
 
-export function evaluateJdbcPluginVersionChange({ headPomVersion, headManifestVersion }) {
+export function evaluateJdbcPluginVersionChange({ headGradleVersion, headManifestVersion }) {
   const errors = [];
-  if (headPomVersion !== headManifestVersion) {
-    errors.push(`JDBC plugin version mismatch: pom.xml is ${headPomVersion} but manifest.json is ${headManifestVersion}.`);
+  if (headGradleVersion !== headManifestVersion) {
+    errors.push(`JDBC plugin version mismatch: build.gradle is ${headGradleVersion} but manifest.json is ${headManifestVersion}.`);
     return errors;
   }
   return errors;
@@ -32,10 +32,10 @@ function readFileAt(ref, path) {
 
 function main() {
   const [, headRef = "HEAD"] = process.argv.slice(2);
-  const headPomVersion = firstProjectVersion(readFileAt(headRef, POM_PATH));
+  const headGradleVersion = jdbcGradleVersion(readFileAt(headRef, BUILD_GRADLE_PATH));
   const headManifestVersion = manifestVersion(readFileAt(headRef, MANIFEST_PATH));
   const errors = evaluateJdbcPluginVersionChange({
-    headPomVersion,
+    headGradleVersion,
     headManifestVersion,
   });
 
@@ -45,7 +45,7 @@ function main() {
     }
     process.exit(1);
   }
-  console.log(`JDBC plugin version check passed (${headPomVersion}).`);
+  console.log(`JDBC plugin version check passed (${headGradleVersion}).`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

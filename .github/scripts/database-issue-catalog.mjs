@@ -41,7 +41,7 @@ const extraAliases = {
   doris: ["selectdb"],
   manticoresearch: ["manticore"],
   dameng: ["dm8", "dameng", "达梦"],
-  kingbase: ["kingbasees", "kingbase", "人大金仓", "金仓"],
+  kingbase: ["kingbasees", "kingbase", "人大金仓", "金仓", "电科金仓"],
   highgo: ["瀚高"],
   yashandb: ["yashan", "崖山"],
   saphana: ["hana", "sap hana"],
@@ -55,6 +55,7 @@ const extraAliases = {
   db2: ["ibm db2"],
   informix: ["ibm informix"],
   bigquery: ["google bigquery"],
+  spanner: ["cloud spanner", "google spanner", "google cloud spanner"],
   kylin: ["apache kylin"],
   oscar: ["shentong", "oscar", "神通"],
   xugu: ["xugudb", "xugu", "虚谷"],
@@ -69,6 +70,7 @@ const extraAliases = {
 const supplementalDrivers = [
   { dbType: "turso", label: "Turso", aliases: ["libsql", "lib sql"] },
   { dbType: "nacos", label: "Nacos", aliases: ["r-nacos", "rnacos"] },
+  { dbType: "consul", label: "Consul", aliases: ["hashicorp consul"] },
   { dbType: "cloudberry", label: "Apache Cloudberry" },
   { dbType: "mariadb", label: "MariaDB" },
   { dbType: "tidb", label: "TiDB" },
@@ -84,11 +86,24 @@ const supplementalDrivers = [
   { dbType: "kafka", label: "Apache Kafka" },
   { dbType: "rocketmq", label: "Apache RocketMQ" },
   { dbType: "rabbitmq", label: "RabbitMQ" },
+  { dbType: "mqtt", label: "MQTT", aliases: ["emqx", "hivemq", "mosquitto"] },
 ];
 
 const manifestUrl = new URL("../../crates/dbx-core/assets/database-drivers.manifest.json", import.meta.url);
 const manifest = JSON.parse(fs.readFileSync(manifestUrl, "utf8"));
-const catalogEntries = [...manifest.drivers, ...supplementalDrivers];
+const manifestDbTypes = new Set(manifest.drivers.map((driver) => driver.dbType));
+const supplementalByDbType = new Map(supplementalDrivers.map((driver) => [driver.dbType, driver]));
+const catalogEntries = [
+  ...manifest.drivers.map((driver) => {
+    const supplemental = supplementalByDbType.get(driver.dbType);
+    if (!supplemental) return driver;
+    return {
+      ...driver,
+      aliases: [...new Set([...(driver.aliases || []), ...(supplemental.aliases || [])])],
+    };
+  }),
+  ...supplementalDrivers.filter((driver) => !manifestDbTypes.has(driver.dbType)),
+];
 const duplicateDbTypes = catalogEntries
   .map((driver) => driver.dbType)
   .filter((dbType, index, values) => values.indexOf(dbType) !== index);

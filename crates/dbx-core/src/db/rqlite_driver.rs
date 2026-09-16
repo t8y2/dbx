@@ -98,7 +98,7 @@ pub async fn test_connection(client: &RqliteClient, timeout: Duration) -> Result
 }
 
 pub async fn list_databases(_client: &RqliteClient) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: "main".to_string() }])
+    Ok(vec![DatabaseInfo { name: "main".to_string(), ..Default::default() }])
 }
 
 pub async fn list_tables(client: &RqliteClient, _schema: &str) -> Result<Vec<TableInfo>, String> {
@@ -179,6 +179,10 @@ pub async fn list_indexes(client: &RqliteClient, _schema: &str, table: &str) -> 
             index_type: None,
             included_columns: None,
             comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            key_options: Vec::new(),
+            constraint_backed: false,
         });
     }
 
@@ -238,6 +242,13 @@ pub async fn list_triggers(client: &RqliteClient, _schema: &str, table: &str) ->
                 name: value_as_string(row.first()).unwrap_or_default(),
                 event: event.to_string(),
                 timing: timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
                 statement: value_as_string(row.get(1)),
             }
         })
@@ -306,6 +317,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     }
 }
@@ -358,6 +370,7 @@ fn query_result_from_rqlite_result(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 

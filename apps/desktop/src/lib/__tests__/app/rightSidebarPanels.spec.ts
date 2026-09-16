@@ -21,6 +21,11 @@ describe("right sidebar panel entry points", () => {
     expect(appSource).toContain("@close=\"closeRightSidebarPanel('sqlFile')\"");
   });
 
+  it("toggles the AI panel through the configured global shortcut", () => {
+    expect(appSource).toContain("isToggleAiPanelShortcut(e, shortcuts)");
+    expect(appSource).toContain('toggleRightSidebarPanel("ai");');
+  });
+
   it("routes welcome, history analysis, selection, and error-fix opens through the same controller", () => {
     expect(appSource).toContain("@show-history=\"openRightSidebarPanel('history')\"");
     expect(functionSource("fixWithAi", "sendSelectionToAi")).toContain('openRightSidebarPanel("ai")');
@@ -48,5 +53,30 @@ describe("right sidebar panel entry points", () => {
       expect(toolbarSource).toContain(`@click="emit('${event}')"`);
     }
     expect(appSource).not.toMatch(/watch\([\s\S]{0,180}toolbarItems\.(ai|history|sqlLibrary|sqlFileTree)[\s\S]{0,180}closeRightSidebarPanel/);
+  });
+
+  it("keeps the maximized AI surface in the parent layout", () => {
+    expect(appSource).toContain("const isAiPanelMaximized = ref(false);");
+    expect(appSource).toContain(':maximized="isAiPanelMaximized"');
+    expect(appSource).toContain('@toggle-maximize="toggleAiPanelMaximized"');
+    expect(appSource).toContain("isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full'");
+    expect(appSource).toContain('v-show="!isAiPanelMaximized && !isZenMode"');
+    expect(functionSource("setRightSidebarPanelOpen", "toggleRightSidebarPanel")).toContain("isAiPanelMaximized.value = false;");
+  });
+
+  it("keeps Zen mode as a temporary data or Nacos-tab layout", () => {
+    expect(appSource).toContain("const isZenMode = ref(false);");
+    expect(appSource).toContain('return mode === "data" || mode === "nacos";');
+    expect(appSource).toContain("function toggleZenMode() {");
+    expect(appSource).toContain("if (!supportsZenMode(activeTab.value?.mode)) return;");
+    expect(appSource).toContain("isToggleZenModeShortcut(e, shortcuts) && supportsZenMode(activeTab.value?.mode)");
+    expect(appSource).toContain('@toggle-zen-mode="toggleZenMode"');
+    expect(appSource).toContain('v-show="sidebarOpen && !isZenMode"');
+    expect(appSource).toContain(':show-sidebar-expand="!sidebarOpen && !isZenMode"');
+    expect(toolbarSource).toContain('<Tooltip v-if="showSidebarExpand">');
+    expect(toolbarSource).toContain("@click=\"emit('expand-sidebar')\"");
+    expect(appSource).toContain('@expand-sidebar="setSidebarOpen(true)"');
+    expect(appSource).toContain('v-show="!isAiPanelMaximized || isZenMode"');
+    expect(appSource).toContain('v-show="!isZenMode"');
   });
 });

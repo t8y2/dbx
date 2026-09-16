@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
-import { dataGridScrollPosition, isDataGridNearScrollBottom, shouldCheckInfiniteScrollAfterScroll } from "../../apps/desktop/src/lib/dataGrid/dataGridInfiniteScroll.ts";
+import { dataGridScrollPosition, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll } from "../../apps/desktop/src/lib/dataGrid/dataGridInfiniteScroll.ts";
 
 test("horizontal-only scroll does not check infinite scroll", () => {
   assert.equal(shouldCheckInfiniteScrollAfterScroll(dataGridScrollPosition(240, 0), dataGridScrollPosition(240, 180)), false);
@@ -23,6 +23,21 @@ test("first scroll position only establishes the infinite scroll baseline", () =
 test("near-bottom check matches the grid threshold", () => {
   assert.equal(isDataGridNearScrollBottom({ scrollTop: 801, scrollHeight: 1000, clientHeight: 100 }), true);
   assert.equal(isDataGridNearScrollBottom({ scrollTop: 800, scrollHeight: 1000, clientHeight: 100 }), false);
+});
+
+test("prefix-only append preserves the existing result identity", () => {
+  const first = [1, "Ada"];
+  const second = [2, "Linus"];
+  const previous = { rows: [first, second] };
+  assert.equal(isDataGridPrefixAppend(previous, { rows: [first, second, [3, "Grace"]], appended_from_row_count: 2 }), true);
+});
+
+test("append marker does not preserve state when an existing row was replaced", () => {
+  const first = [1, "Ada"];
+  const second = [2, "Linus"];
+  const previous = { rows: [first, second] };
+  assert.equal(isDataGridPrefixAppend(previous, { rows: [first, [...second], [3, "Grace"]], appended_from_row_count: 2 }), false);
+  assert.equal(isDataGridPrefixAppend(previous, { rows: [first, second, [3, "Grace"]] }), false);
 });
 
 test("infinite scroll requests only the next bounded segment", () => {

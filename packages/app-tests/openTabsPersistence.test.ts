@@ -42,6 +42,27 @@ test("serializes unsaved query tabs with editor context", () => {
   ]);
 });
 
+test("round-trips query transaction mode", () => {
+  const saved = serializeOpenTabs([queryTab({ autoCommit: false })]);
+  const restored = restoreOpenTabsState(JSON.stringify(saved), "tab-1");
+
+  assert.equal(saved[0]?.autoCommit, false);
+  assert.equal(restored.tabs[0]?.autoCommit, false);
+});
+
+test("round-trips editor selection and viewport", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      editorSelection: { anchor: 8, head: 8 },
+      editorViewport: { scrollTop: 120, scrollLeft: 16 },
+    }),
+  ]);
+  const restored = restoreOpenTabsState(JSON.stringify(saved), "tab-1");
+
+  assert.deepEqual(restored.tabs[0]?.editorSelection, { anchor: 8, head: 8 });
+  assert.deepEqual(restored.tabs[0]?.editorViewport, { scrollTop: 120, scrollLeft: 16 });
+});
+
 test("serializes object source query tabs with save context", () => {
   const saved = serializeOpenTabs([
     queryTab({
@@ -171,6 +192,7 @@ test("serializes query result run metadata without row payloads", () => {
           sequence: 1,
           sql: "select 1",
           createdAt: 100,
+          pinned: true,
           result: {
             columns: ["id"],
             rows: [[1]],
@@ -192,6 +214,7 @@ test("serializes query result run metadata without row payloads", () => {
       sequence: 1,
       sql: "select 1",
       createdAt: 100,
+      pinned: true,
       activeResultIndex: undefined,
       resultCacheKey: "tab:tab-1:run:run-1",
       resultEvicted: true,
@@ -213,6 +236,7 @@ test("restores query result run metadata as disk-backed runtime state", () => {
           sequence: 1,
           sql: "select 1",
           createdAt: 100,
+          pinned: true,
           resultCacheKey: "tab:tab-1:run:run-1",
           resultEvicted: true,
         },
@@ -226,6 +250,7 @@ test("restores query result run metadata as disk-backed runtime state", () => {
   assert.equal(restored.tabs[0]?.resultRuns?.[0]?.id, "run-1");
   assert.equal(restored.tabs[0]?.resultRuns?.[0]?.resultCacheState, "disk");
   assert.equal(restored.tabs[0]?.resultRuns?.[0]?.result, undefined);
+  assert.equal(restored.tabs[0]?.resultRuns?.[0]?.pinned, true);
 });
 
 test("ignores legacy table data result cache handles on restore", () => {
@@ -299,6 +324,7 @@ test("restores data and structure tabs with table state", () => {
       resultPageOffset: 50,
       whereInput: "id > 10",
       orderByInput: "id DESC",
+      tableComment: "Application users",
       tableMeta: {
         schema: "public",
         tableName: "users",
@@ -339,6 +365,7 @@ test("restores data and structure tabs with table state", () => {
   assert.equal(restored.tabs[0]?.resultPageOffset, 50);
   assert.equal(restored.tabs[0]?.whereInput, "id > 10");
   assert.equal(restored.tabs[0]?.orderByInput, "id DESC");
+  assert.equal(restored.tabs[0]?.tableComment, "Application users");
   assert.equal(restored.tabs[1]?.structureTableName, "users");
 });
 

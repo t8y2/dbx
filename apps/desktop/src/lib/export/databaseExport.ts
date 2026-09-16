@@ -2,6 +2,8 @@ import type { DatabaseType, QueryResult } from "@/types/database.ts";
 import * as api from "@/lib/backend/api.ts";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
+import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 
 export const DATABASE_EXPORT_ROW_LIMIT = 10_000;
 export const DATABASE_EXPORT_PAGE_SIZE = 500;
@@ -17,6 +19,8 @@ export interface ExportedTableSql {
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
   columnExtras?: Array<string | null | undefined>;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
   truncated?: boolean;
 }
@@ -40,12 +44,15 @@ export interface BuildExportInsertStatementsOptions {
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
   columnExtras?: Array<string | null | undefined>;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
   batchSize?: number;
 }
 
 export interface BuildExportPageSqlOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   identifierQuote?: string;
   schema?: string;
   tableName: string;
@@ -57,6 +64,10 @@ export interface AllDatabaseExportPlanInput {
   databases: string[];
   schemaAware: boolean;
   schemasByDatabase?: Record<string, string[]>;
+  /** 数据库类型，用于判断是否为单数据库架构（如达梦、Oracle）。
+   * 对于这类数据库，选中的"数据库"实际上就是 schema 本身，
+   * 不应再对每个"数据库"展开所有 schema 做笛卡尔积。 */
+  dbType?: DatabaseType;
 }
 
 export interface AllDatabaseExportPlanItem {
@@ -66,6 +77,25 @@ export interface AllDatabaseExportPlanItem {
   displayName: string;
 }
 
+/**
+ * Return schemas that can be exported as ordinary schema-owned objects.
+ *
+ * Xugu exposes database-global namespaces (public synonyms and scheduler jobs)
+ * through reserved synthetic schema names so the sidebar can reuse its normal
+ * tree loading path. They are not real schemas and must not be offered by the
+ * schema export selector.
+ */
+export function filterExportableSchemas(schemas: readonly string[], databaseType?: DatabaseType): string[] {
+  if (databaseType !== "xugu") return [...schemas];
+  return schemas.filter((schema) => !isXuguSyntheticScope(schema));
+}
+
+export interface DatabaseBackupSnapshotOptions {
+  connectionId: string;
+  database: string;
+  enabled: boolean;
+}
+
 export function buildInsertStatements(options: BuildExportInsertStatementsOptions): Promise<string[]> {
   return api.buildExportInsertStatements(options);
 }
@@ -73,6 +103,7 @@ export function buildInsertStatements(options: BuildExportInsertStatementsOption
 export async function buildExportPageSql(options: BuildExportPageSqlOptions): Promise<string> {
   return buildTableSelectSql({
     databaseType: options.databaseType,
+    driverProfile: options.driverProfile,
     identifierQuote: options.identifierQuote,
     schema: options.schema,
     tableName: options.tableName,
@@ -83,6 +114,10 @@ export async function buildExportPageSql(options: BuildExportPageSqlOptions): Pr
 
 export function generateDatabaseExportId(): string {
   return uuid();
+}
+
+export function shouldUseDatabaseBackupSnapshot(databaseType: DatabaseType | undefined, includeData: boolean, desktopRuntime: boolean): boolean {
+  return desktopRuntime && includeData && (databaseType === "mysql" || databaseType === "postgres");
 }
 
 export async function runDatabaseExportUntilTerminal(request: api.DatabaseExportRequest, onProgress: (progress: api.ExportProgress) => void): Promise<api.ExportProgress> {
@@ -100,9 +135,50 @@ export async function runDatabaseExportUntilTerminal(request: api.DatabaseExport
   });
 }
 
+export async function runWithDatabaseBackupSnapshot<T>(options: DatabaseBackupSnapshotOptions, operation: (snapshotSessionId: string | undefined) => Promise<T>, shouldPropagateCleanupError: (result: T) => boolean = () => true): Promise<T> {
+  if (!options.enabled) return operation(undefined);
+
+  const snapshot = await api.beginDatabaseBackupSnapshot(options.connectionId, options.database);
+  let result: T | undefined;
+  let operationCompleted = false;
+  try {
+    result = await operation(snapshot.sessionId);
+    operationCompleted = true;
+    return result;
+  } finally {
+    await api.rollbackManualTransaction(snapshot.sessionId).catch((error) => {
+      if (operationCompleted && shouldPropagateCleanupError(result as T)) throw error;
+    });
+  }
+}
+
 export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput): AllDatabaseExportPlanItem[] {
+  // 对于 schema-aware 的单库类型（达梦、Oracle、OceanBase-Oracle 等），选中的"数据库"
+  // 实际上就是 schema 本身，不应再展开所有 schema 做笛卡尔积，直接将选中项作为 schema 导出。
+  // firebird/questdb/access 等单库但非 schema-aware 类型必须走 flatMap 保留真实 database，
+  // 否则 database:"" 会覆盖后端 db_config.database 破坏连接。
+  const singleDatabase = options.dbType ? SINGLE_DATABASE_TYPES.has(options.dbType) : false;
+  if (singleDatabase && options.schemaAware) {
+    return options.databases.map((schema) => ({
+      database: "",
+      schema,
+      fileStem: schema,
+      displayName: schema,
+    }));
+  }
+  // PostgreSQL supports multiple schemas in one database. Keep the database
+  // as the export unit so the backend can produce one restore script for all
+  // schemas instead of one file per schema.
+  if (options.dbType === "postgres" && options.schemaAware) {
+    return options.databases.map((database) => ({
+      database,
+      schema: "",
+      fileStem: database,
+      displayName: database,
+    }));
+  }
   return options.databases.flatMap((database) => {
-    const schemas = options.schemaAware ? (options.schemasByDatabase?.[database] ?? []).filter((schema) => schema.trim()) : [database];
+    const schemas = options.schemaAware ? filterExportableSchemas(options.schemasByDatabase?.[database] ?? [], options.dbType).filter((schema) => schema.trim()) : [database];
     const exportSchemas = schemas.length > 0 ? schemas : [database];
     const includeSchemaInFileName = options.schemaAware && exportSchemas.length > 1;
 

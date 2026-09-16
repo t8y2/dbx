@@ -1,0 +1,35 @@
+schemaVersion: 1
+order: 460
+dbType: access
+rustVariant: Access
+label: Microsoft Access
+dialect: Access
+runtimeMode: agent
+mcpMode: bridge
+agentKey: access
+driverStoreVisible: true
+driverStoreOrder: 17
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+localFile: true
+traits:
+  singleDatabase: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

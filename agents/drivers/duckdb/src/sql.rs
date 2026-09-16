@@ -193,6 +193,127 @@ fn parse_identifier_after_as(input: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// Works around a DuckDB binder bug: `CURRENT_DATE - 4` (a bare numeric literal directly
+/// against the `CURRENT_DATE` keyword node) fails with "No function matches ... (DATE,
+/// INTEGER_LITERAL)", while the functionally identical `current_date() - 4` binds fine.
+/// Rewrites only that narrow pattern (`CURRENT_DATE` immediately followed by `+`/`-` and a raw
+/// numeric literal) to the function-call form, so plain `CURRENT_DATE`, qualified references
+/// (`t.current_date`), aliases (`AS current_date`), and already-cast literals are left untouched.
+pub fn rewrite_duckdb_current_date_literal_arithmetic(sql: &str) -> std::borrow::Cow<'_, str> {
+    const KEYWORD: &str = "CURRENT_DATE";
+    let bytes = sql.as_bytes();
+    let mut rewritten: Option<String> = None;
+    let mut copied_to = 0usize;
+    let mut index = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' if !in_double => {
+                if in_single && bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                    continue;
+                }
+                in_single = !in_single;
+                index += 1;
+                continue;
+            }
+            b'"' if !in_single => {
+                if in_double && bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                in_double = !in_double;
+                index += 1;
+                continue;
+            }
+            b'-' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            b'/' if !in_single && !in_double && bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+                continue;
+            }
+            b'$' if !in_single && !in_double => {
+                if let Some(end) = dollar_quote_end(bytes, index) {
+                    index = end;
+                    continue;
+                }
+                index += 1;
+            }
+            _ if !in_single && !in_double && matches_keyword_at(bytes, index, KEYWORD) => {
+                let word_end = index + KEYWORD.len();
+                let preceded_by_dot = index > 0 && bytes[index - 1] == b'.';
+                let preceded_by_ident = index > 0 && is_ident_byte(bytes[index - 1]);
+                let followed_by_ident = bytes.get(word_end).copied().is_some_and(is_ident_byte);
+                if !preceded_by_dot
+                    && !preceded_by_ident
+                    && !followed_by_ident
+                    && has_raw_numeric_arithmetic_after(bytes, word_end)
+                {
+                    let buf = rewritten.get_or_insert_with(String::new);
+                    buf.push_str(&sql[copied_to..index]);
+                    buf.push_str("current_date()");
+                    copied_to = word_end;
+                }
+                index = word_end;
+                continue;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    match rewritten {
+        Some(mut buf) => {
+            buf.push_str(&sql[copied_to..]);
+            std::borrow::Cow::Owned(buf)
+        }
+        None => std::borrow::Cow::Borrowed(sql),
+    }
+}
+
+fn matches_keyword_at(bytes: &[u8], index: usize, keyword: &str) -> bool {
+    let keyword_bytes = keyword.as_bytes();
+    bytes.len() >= index + keyword_bytes.len()
+        && bytes[index..index + keyword_bytes.len()].eq_ignore_ascii_case(keyword_bytes)
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// After the `CURRENT_DATE` token: skip whitespace, require a `+`/`-` that isn't the start of a
+/// `--` comment, skip whitespace again, and require a raw numeric literal (not `CAST(`/`::`).
+fn has_raw_numeric_arithmetic_after(bytes: &[u8], from: usize) -> bool {
+    let mut index = from;
+    while bytes.get(index).copied().is_some_and(|b| b.is_ascii_whitespace()) {
+        index += 1;
+    }
+    let Some(&op) = bytes.get(index) else { return false };
+    if op != b'+' && op != b'-' {
+        return false;
+    }
+    if op == b'-' && bytes.get(index + 1) == Some(&b'-') {
+        return false;
+    }
+    index += 1;
+    while bytes.get(index).copied().is_some_and(|b| b.is_ascii_whitespace()) {
+        index += 1;
+    }
+    bytes.get(index).copied().is_some_and(|b| b.is_ascii_digit())
+}
+
 pub fn starts_with_duckdb_result_sql_keyword(sql: &str) -> bool {
     let Some(token) = first_executable_sql_token(sql) else {
         return false;
@@ -328,5 +449,72 @@ mod tests {
         assert!(starts_with_duckdb_result_sql_keyword("INSERT INTO items VALUES (1) RETURNING id"));
         assert!(!starts_with_duckdb_result_sql_keyword("INSERT INTO items(note) VALUES ('RETURNING')"));
         assert!(!starts_with_duckdb_result_sql_keyword("INSERT INTO items VALUES (1)"));
+    }
+
+    #[test]
+    fn rewrites_current_date_literal_arithmetic() {
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic("SELECT CURRENT_DATE - 4"),
+            "SELECT current_date() - 4"
+        );
+        assert_eq!(rewrite_duckdb_current_date_literal_arithmetic("SELECT CURRENT_DATE-4"), "SELECT current_date()-4");
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic("SELECT current_date + 1.5 AS d"),
+            "SELECT current_date() + 1.5 AS d"
+        );
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic("SELECT CURRENT_DATE - 4, CURRENT_DATE - 1"),
+            "SELECT current_date() - 4, current_date() - 1"
+        );
+        // Already-cast literals still match the narrow "digit right after the operator" check;
+        // rewriting them too is harmless since current_date() binds fine against any numeric form.
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic("SELECT CURRENT_DATE - 4::INTEGER"),
+            "SELECT current_date() - 4::INTEGER"
+        );
+    }
+
+    #[test]
+    fn leaves_non_literal_current_date_usage_untouched() {
+        for sql in [
+            "SELECT CURRENT_DATE",
+            "SELECT CURRENT_DATE::VARCHAR",
+            "SELECT CURRENT_DATE - CAST(4 AS INTEGER)",
+            "SELECT t.current_date - 4 FROM t",
+            "SELECT 1 AS current_date",
+            "CREATE TABLE cd_test (current_date INTEGER)",
+            "SELECT 4 - CURRENT_DATE",
+            "SELECT current_date() - 4",
+            "-- CURRENT_DATE - 4\nSELECT 1",
+            "SELECT '-- CURRENT_DATE - 4'",
+        ] {
+            assert_eq!(rewrite_duckdb_current_date_literal_arithmetic(sql), sql, "should not rewrite: {sql}");
+        }
+    }
+
+    #[test]
+    fn leaves_dollar_quoted_current_date_arithmetic_untouched() {
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic(
+                "SELECT $$CURRENT_DATE - 4$$ AS source, CURRENT_DATE - 1 AS actual"
+            ),
+            "SELECT $$CURRENT_DATE - 4$$ AS source, current_date() - 1 AS actual"
+        );
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic(
+                "SELECT $body_1$CURRENT_DATE + 2$body_1$ AS source, CURRENT_DATE + 3 AS actual"
+            ),
+            "SELECT $body_1$CURRENT_DATE + 2$body_1$ AS source, current_date() + 3 AS actual"
+        );
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic(
+                "SELECT $outer$CURRENT_DATE - 4 $inner$ CURRENT_DATE + 2 $inner$$outer$ AS source"
+            ),
+            "SELECT $outer$CURRENT_DATE - 4 $inner$ CURRENT_DATE + 2 $inner$$outer$ AS source"
+        );
+        assert_eq!(
+            rewrite_duckdb_current_date_literal_arithmetic("SELECT $body$CURRENT_DATE - 4"),
+            "SELECT $body$CURRENT_DATE - 4"
+        );
     }
 }

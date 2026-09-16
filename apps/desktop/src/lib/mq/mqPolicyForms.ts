@@ -8,6 +8,11 @@ export interface MqPolicyForms {
   retentionForm: RetentionPolicy;
 }
 
+export interface MqPolicyAccess {
+  readable: boolean;
+  unsupportedReason?: string;
+}
+
 export function defaultMqPolicyForms(): MqPolicyForms {
   return {
     publishForm: {
@@ -33,6 +38,15 @@ export function defaultMqPolicyForms(): MqPolicyForms {
       retentionTimeInMinutes: -1,
       retentionSizeInMb: -1,
     },
+  };
+}
+
+export function policyAccessFromEffectivePolicies(raw: unknown): MqPolicyAccess {
+  const root = objectRecord(raw);
+  const readable = root.configSupported !== false;
+  return {
+    readable,
+    unsupportedReason: readable ? undefined : stringField(root.unsupportedReason),
   };
 }
 

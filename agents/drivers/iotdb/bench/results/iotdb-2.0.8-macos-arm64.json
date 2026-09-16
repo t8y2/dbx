@@ -1,0 +1,839 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 6667
+  },
+  "config": {
+    "rows": 10000,
+    "fetch_size": 1024,
+    "warmups": 3
+  },
+  "artifact_bytes": {
+    "jdbc": 25864492,
+    "go": 6475202
+  },
+  "startup_ms": {
+    "jdbc": {
+      "count": 15,
+      "mean": 181.087,
+      "p50": 172.612,
+      "p95": 268.332,
+      "min": 160.077,
+      "max": 268.332
+    },
+    "go": {
+      "count": 15,
+      "mean": 35.459,
+      "p50": 9.315,
+      "p95": 406.199,
+      "min": 6.986,
+      "max": 406.199
+    }
+  },
+  "connected_rss_kb": {
+    "jdbc": {
+      "count": 5,
+      "mean": 62323.2,
+      "p50": 62368.0,
+      "p95": 62528.0,
+      "min": 62112.0,
+      "max": 62528.0
+    },
+    "go": {
+      "count": 5,
+      "mean": 7062.4,
+      "p50": 7008.0,
+      "p95": 7248.0,
+      "min": 6992.0,
+      "max": 7248.0
+    }
+  },
+  "results": {
+    "jdbc": {
+      "driver": "jdbc",
+      "client_version": "2.0.8",
+      "connect_ms": {
+        "count": 5,
+        "mean": 66.061,
+        "p50": 66.0,
+        "p95": 69.002,
+        "min": 63.535,
+        "max": 69.002
+      },
+      "workloads": {
+        "show_databases": {
+          "rows": 2,
+          "decoded_cells": 10,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 0.775,
+            "p50": 0.771,
+            "p95": 0.816,
+            "min": 0.733,
+            "max": 0.816
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 0.78,
+            "p50": 0.773,
+            "p95": 0.833,
+            "min": 0.726,
+            "max": 0.833
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 0.89,
+            "p50": 0.885,
+            "p95": 0.979,
+            "min": 0.796,
+            "max": 0.979
+          }
+        },
+        "point_query": {
+          "rows": 1,
+          "decoded_cells": 4,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 0.813,
+            "p50": 0.846,
+            "p95": 0.885,
+            "min": 0.722,
+            "max": 0.885
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 0.77,
+            "p50": 0.784,
+            "p95": 0.847,
+            "min": 0.688,
+            "max": 0.847
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 1.113,
+            "p50": 1.175,
+            "p95": 1.254,
+            "min": 0.94,
+            "max": 1.254
+          }
+        },
+        "range_100": {
+          "rows": 100,
+          "decoded_cells": 400,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 1.437,
+            "p50": 1.495,
+            "p95": 1.72,
+            "min": 1.205,
+            "max": 1.72
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 1.35,
+            "p50": 1.365,
+            "p95": 1.644,
+            "min": 1.143,
+            "max": 1.644
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 2.193,
+            "p50": 2.119,
+            "p95": 2.825,
+            "min": 1.639,
+            "max": 2.825
+          }
+        },
+        "scan_all": {
+          "rows": 10000,
+          "decoded_cells": 40000,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 5.455,
+            "p50": 5.476,
+            "p95": 5.715,
+            "min": 5.102,
+            "max": 5.715
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 5.146,
+            "p50": 5.254,
+            "p95": 5.351,
+            "min": 4.701,
+            "max": 5.351
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 6.962,
+            "p50": 7.04,
+            "p95": 7.809,
+            "min": 5.891,
+            "max": 7.809
+          }
+        }
+      },
+      "rounds": [
+        {
+          "driver": "jdbc",
+          "client_version": "2.0.8",
+          "connect_ms": 69.002,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.755,
+              "p50_ms": 0.753,
+              "p95_ms": 0.885,
+              "min_ms": 0.6,
+              "max_ms": 0.988
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.885,
+              "p50_ms": 0.847,
+              "p95_ms": 1.254,
+              "min_ms": 0.54,
+              "max_ms": 1.625
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.72,
+              "p50_ms": 1.644,
+              "p95_ms": 2.641,
+              "min_ms": 1.173,
+              "max_ms": 2.729
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.295,
+              "p50_ms": 5.254,
+              "p95_ms": 5.891,
+              "min_ms": 4.579,
+              "max_ms": 5.891
+            }
+          ]
+        },
+        {
+          "driver": "jdbc",
+          "client_version": "2.0.8",
+          "connect_ms": 67.177,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.816,
+              "p50_ms": 0.833,
+              "p95_ms": 0.979,
+              "min_ms": 0.62,
+              "max_ms": 1.151
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.865,
+              "p50_ms": 0.806,
+              "p95_ms": 1.223,
+              "min_ms": 0.573,
+              "max_ms": 2.011
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.495,
+              "p50_ms": 1.43,
+              "p95_ms": 2.825,
+              "min_ms": 0.972,
+              "max_ms": 3.059
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.689,
+              "p50_ms": 5.132,
+              "p95_ms": 6.746,
+              "min_ms": 5.001,
+              "max_ms": 6.746
+            }
+          ]
+        },
+        {
+          "driver": "jdbc",
+          "client_version": "2.0.8",
+          "connect_ms": 66.0,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.771,
+              "p50_ms": 0.773,
+              "p95_ms": 0.862,
+              "min_ms": 0.6,
+              "max_ms": 0.982
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.846,
+              "p50_ms": 0.784,
+              "p95_ms": 1.175,
+              "min_ms": 0.589,
+              "max_ms": 2.059
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.265,
+              "p50_ms": 1.166,
+              "p95_ms": 1.739,
+              "min_ms": 0.974,
+              "max_ms": 2.395
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.715,
+              "p50_ms": 5.351,
+              "p95_ms": 7.809,
+              "min_ms": 4.569,
+              "max_ms": 7.809
+            }
+          ]
+        },
+        {
+          "driver": "jdbc",
+          "client_version": "2.0.8",
+          "connect_ms": 63.535,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.798,
+              "p50_ms": 0.813,
+              "p95_ms": 0.928,
+              "min_ms": 0.618,
+              "max_ms": 0.963
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.722,
+              "p50_ms": 0.688,
+              "p95_ms": 0.94,
+              "min_ms": 0.567,
+              "max_ms": 1.719
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.205,
+              "p50_ms": 1.143,
+              "p95_ms": 1.639,
+              "min_ms": 0.94,
+              "max_ms": 2.42
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.102,
+              "p50_ms": 4.701,
+              "p95_ms": 7.04,
+              "min_ms": 4.094,
+              "max_ms": 7.04
+            }
+          ]
+        },
+        {
+          "driver": "jdbc",
+          "client_version": "2.0.8",
+          "connect_ms": 64.589,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.733,
+              "p50_ms": 0.726,
+              "p95_ms": 0.796,
+              "min_ms": 0.641,
+              "max_ms": 0.914
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.749,
+              "p50_ms": 0.723,
+              "p95_ms": 0.973,
+              "min_ms": 0.549,
+              "max_ms": 1.207
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.499,
+              "p50_ms": 1.365,
+              "p95_ms": 2.119,
+              "min_ms": 1.009,
+              "max_ms": 2.608
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.476,
+              "p50_ms": 5.292,
+              "p95_ms": 7.324,
+              "min_ms": 4.345,
+              "max_ms": 7.324
+            }
+          ]
+        }
+      ]
+    },
+    "go": {
+      "driver": "go",
+      "client_version": "2.0.8",
+      "connect_ms": {
+        "count": 5,
+        "mean": 1.932,
+        "p50": 1.9,
+        "p95": 2.455,
+        "min": 1.575,
+        "max": 2.455
+      },
+      "workloads": {
+        "show_databases": {
+          "rows": 2,
+          "decoded_cells": 10,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 0.428,
+            "p50": 0.417,
+            "p95": 0.478,
+            "min": 0.388,
+            "max": 0.478
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 0.408,
+            "p50": 0.398,
+            "p95": 0.437,
+            "min": 0.386,
+            "max": 0.437
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 0.543,
+            "p50": 0.552,
+            "p95": 0.619,
+            "min": 0.43,
+            "max": 0.619
+          }
+        },
+        "point_query": {
+          "rows": 1,
+          "decoded_cells": 4,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 0.595,
+            "p50": 0.565,
+            "p95": 0.723,
+            "min": 0.51,
+            "max": 0.723
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 0.567,
+            "p50": 0.538,
+            "p95": 0.702,
+            "min": 0.488,
+            "max": 0.702
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 0.785,
+            "p50": 0.788,
+            "p95": 0.929,
+            "min": 0.639,
+            "max": 0.929
+          }
+        },
+        "range_100": {
+          "rows": 100,
+          "decoded_cells": 400,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 1.01,
+            "p50": 1.009,
+            "p95": 1.061,
+            "min": 0.94,
+            "max": 1.061
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 0.977,
+            "p50": 0.995,
+            "p95": 1.023,
+            "min": 0.913,
+            "max": 1.023
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 1.319,
+            "p50": 1.304,
+            "p95": 1.749,
+            "min": 1.094,
+            "max": 1.749
+          }
+        },
+        "scan_all": {
+          "rows": 10000,
+          "decoded_cells": 40000,
+          "round_mean_ms": {
+            "count": 5,
+            "mean": 4.941,
+            "p50": 4.804,
+            "p95": 5.474,
+            "min": 4.624,
+            "max": 5.474
+          },
+          "round_p50_ms": {
+            "count": 5,
+            "mean": 4.858,
+            "p50": 4.838,
+            "p95": 5.15,
+            "min": 4.567,
+            "max": 5.15
+          },
+          "round_p95_ms": {
+            "count": 5,
+            "mean": 5.466,
+            "p50": 5.076,
+            "p95": 7.106,
+            "min": 4.858,
+            "max": 7.106
+          }
+        }
+      },
+      "rounds": [
+        {
+          "driver": "go",
+          "client_version": "2.0.8",
+          "connect_ms": 2.455,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.478,
+              "p50_ms": 0.434,
+              "p95_ms": 0.619,
+              "min_ms": 0.382,
+              "max_ms": 0.638
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.723,
+              "p50_ms": 0.702,
+              "p95_ms": 0.929,
+              "min_ms": 0.498,
+              "max_ms": 1.183
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.061,
+              "p50_ms": 1.021,
+              "p95_ms": 1.323,
+              "min_ms": 0.901,
+              "max_ms": 1.38
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.474,
+              "p50_ms": 5.129,
+              "p95_ms": 7.106,
+              "min_ms": 4.77,
+              "max_ms": 7.106
+            }
+          ]
+        },
+        {
+          "driver": "go",
+          "client_version": "2.0.8",
+          "connect_ms": 1.575,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.449,
+              "p50_ms": 0.437,
+              "p95_ms": 0.546,
+              "min_ms": 0.364,
+              "max_ms": 0.561
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.651,
+              "p50_ms": 0.616,
+              "p95_ms": 0.884,
+              "min_ms": 0.481,
+              "max_ms": 1.035
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.046,
+              "p50_ms": 1.023,
+              "p95_ms": 1.304,
+              "min_ms": 0.882,
+              "max_ms": 1.401
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 5.157,
+              "p50_ms": 5.15,
+              "p95_ms": 5.39,
+              "min_ms": 4.891,
+              "max_ms": 5.39
+            }
+          ]
+        },
+        {
+          "driver": "go",
+          "client_version": "2.0.8",
+          "connect_ms": 1.9,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.417,
+              "p50_ms": 0.398,
+              "p95_ms": 0.569,
+              "min_ms": 0.343,
+              "max_ms": 0.585
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.565,
+              "p50_ms": 0.538,
+              "p95_ms": 0.788,
+              "min_ms": 0.404,
+              "max_ms": 0.86
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 0.94,
+              "p50_ms": 0.932,
+              "p95_ms": 1.094,
+              "min_ms": 0.822,
+              "max_ms": 1.166
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 4.647,
+              "p50_ms": 4.606,
+              "p95_ms": 4.858,
+              "min_ms": 4.48,
+              "max_ms": 4.858
+            }
+          ]
+        },
+        {
+          "driver": "go",
+          "client_version": "2.0.8",
+          "connect_ms": 1.707,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.388,
+              "p50_ms": 0.387,
+              "p95_ms": 0.43,
+              "min_ms": 0.328,
+              "max_ms": 0.433
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.525,
+              "p50_ms": 0.493,
+              "p95_ms": 0.685,
+              "min_ms": 0.423,
+              "max_ms": 1.744
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 1.009,
+              "p50_ms": 0.913,
+              "p95_ms": 1.749,
+              "min_ms": 0.829,
+              "max_ms": 2.153
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 4.624,
+              "p50_ms": 4.567,
+              "p95_ms": 4.901,
+              "min_ms": 4.413,
+              "max_ms": 4.901
+            }
+          ]
+        },
+        {
+          "driver": "go",
+          "client_version": "2.0.8",
+          "connect_ms": 2.024,
+          "fetch_size": 1024,
+          "workloads": [
+            {
+              "name": "show_databases",
+              "iterations": 20,
+              "rows": 2,
+              "decoded_cells": 10,
+              "mean_ms": 0.409,
+              "p50_ms": 0.386,
+              "p95_ms": 0.552,
+              "min_ms": 0.321,
+              "max_ms": 0.554
+            },
+            {
+              "name": "point_query",
+              "iterations": 100,
+              "rows": 1,
+              "decoded_cells": 4,
+              "mean_ms": 0.51,
+              "p50_ms": 0.488,
+              "p95_ms": 0.639,
+              "min_ms": 0.355,
+              "max_ms": 1.366
+            },
+            {
+              "name": "range_100",
+              "iterations": 30,
+              "rows": 100,
+              "decoded_cells": 400,
+              "mean_ms": 0.994,
+              "p50_ms": 0.995,
+              "p95_ms": 1.125,
+              "min_ms": 0.891,
+              "max_ms": 1.197
+            },
+            {
+              "name": "scan_all",
+              "iterations": 5,
+              "rows": 10000,
+              "decoded_cells": 40000,
+              "mean_ms": 4.804,
+              "p50_ms": 4.838,
+              "p95_ms": 5.076,
+              "min_ms": 4.501,
+              "max_ms": 5.076
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "environment": {
+    "date": "2026-08-10",
+    "machine": "Apple M2 Pro",
+    "os": "macOS Darwin 24.5.0 arm64",
+    "java": "21.0.7",
+    "go": "1.26.5",
+    "iotdb_server": "2.0.8 standalone",
+    "jdbc_client": "2.0.8",
+    "go_client": "2.0.8"
+  }
+}

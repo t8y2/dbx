@@ -301,9 +301,11 @@ fn effective_connect_timeout_secs(value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{script_url, validate_script_url, HttpTunnelManager};
+    use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify};
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn script_url_preserves_existing_query_and_appends_action() {
@@ -331,16 +333,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_forwards_bytes_through_http_script_protocol() {
+    async fn manager_forwards_sequential_round_trips_and_closes_session() {
         let script = MockScript::start().await;
         let manager = HttpTunnelManager::new();
         let local_port = manager.start_tunnel("test", &script.url, "secret", 5, "mysql.internal", 3306).await.unwrap();
         let mut client = TcpStream::connect(("127.0.0.1", local_port)).await.unwrap();
-        client.write_all(b"ping").await.unwrap();
-        let mut response = [0_u8; 4];
-        client.read_exact(&mut response).await.unwrap();
+        let close_notification = script.closed.notified();
 
-        assert_eq!(&response, b"ping");
+        timeout(Duration::from_secs(10), async {
+            for index in 0..100_u32 {
+                let payload = format!("request-{index:03}-{}", "x".repeat((index % 17) as usize));
+                client.write_all(payload.as_bytes()).await.unwrap();
+                let mut response = vec![0_u8; payload.len()];
+                client.read_exact(&mut response).await.unwrap();
+
+                assert_eq!(response, payload.as_bytes());
+            }
+        })
+        .await
+        .expect("100 sequential HTTP tunnel round trips timed out");
+
+        drop(client);
+        timeout(Duration::from_secs(2), close_notification).await.expect("HTTP tunnel session was not closed");
 
         manager.stop_tunnel("test").await;
         script.handle.abort();
@@ -348,6 +362,7 @@ mod tests {
 
     struct MockScript {
         url: String,
+        closed: Arc<Notify>,
         handle: tokio::task::JoinHandle<()>,
     }
 
@@ -355,26 +370,29 @@ mod tests {
         async fn start() -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let addr = listener.local_addr().unwrap();
-            let buffered = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+            let buffered = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let closed = Arc::new(Notify::new());
             let handle = {
                 let buffered = buffered.clone();
+                let closed = closed.clone();
                 tokio::spawn(async move {
                     loop {
                         let Ok((stream, _)) = listener.accept().await else {
                             break;
                         };
                         let buffered = buffered.clone();
+                        let closed = closed.clone();
                         tokio::spawn(async move {
-                            handle_mock_http_request(stream, buffered).await;
+                            handle_mock_http_request(stream, buffered, closed).await;
                         });
                     }
                 })
             };
-            Self { url: format!("http://{addr}/dbx_tunnel.php"), handle }
+            Self { url: format!("http://{addr}/dbx_tunnel.php"), closed, handle }
         }
     }
 
-    async fn handle_mock_http_request(stream: TcpStream, buffered: std::sync::Arc<Mutex<Vec<u8>>>) {
+    async fn handle_mock_http_request(stream: TcpStream, buffered: Arc<Mutex<Vec<u8>>>, closed: Arc<Notify>) {
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
         reader.read_line(&mut request_line).await.unwrap();
@@ -407,6 +425,9 @@ mod tests {
             } else {
                 write_http_response(&mut stream, "200 OK", &bytes).await;
             }
+        } else if request_line.contains("dbx_action=close") {
+            write_http_response(&mut stream, "200 OK", b"OK").await;
+            closed.notify_one();
         } else {
             write_http_response(&mut stream, "200 OK", b"OK").await;
         }

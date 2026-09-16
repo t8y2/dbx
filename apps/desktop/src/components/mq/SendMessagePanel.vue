@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { MqSystemKind, PeekedMessage, TopicInfo, TopicRef, SendMessageRequest, SendMessageResponse } from "@/types/mq";
-import { mqSendMessage, mqListTopics, mqPeekMessages } from "@/lib/backend/api";
+import type { MqSystemKind, TopicInfo, TopicRef, SendMessageRequest, SendMessageResponse } from "@/types/mq";
+import { mqSendMessage, mqListTopics } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
-import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
 import { resolveRabbitMqSendNamespace } from "@/lib/mq/mqConsoleDefaults";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
+import MessageBrowser from "./MessageBrowser.vue";
 import RocketMqTopicSelect from "./shared/RocketMqTopicSelect.vue";
 
 interface Props {
@@ -17,12 +18,14 @@ interface Props {
   mqSystemKind?: MqSystemKind;
   isFlatMqCluster?: boolean;
   supportsPeekMessages?: boolean;
+  fixedTopic?: boolean;
   /** Hide outer toolbar when embedded in a dialog. */
   embedded?: boolean;
 }
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const topicName = ref("");
 const messageKey = ref("");
@@ -38,13 +41,6 @@ const availableTopics = ref<TopicInfo[]>([]);
 const topicsLoading = ref(false);
 const rocketMqTopicSelectRef = ref<InstanceType<typeof RocketMqTopicSelect>>();
 const headersExpanded = ref(false);
-const peekAdvancedExpanded = ref(false);
-const peekLoading = ref(false);
-const peekError = ref<string>();
-const peekMessages = ref<PeekedMessage[]>([]);
-const peekPartition = ref<string | number>("");
-const peekOffset = ref<string | number>("");
-const peekCount = ref(20);
 
 let successTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -76,11 +72,6 @@ const selectedTopicRef = computed<TopicRef | null>(() => {
 });
 
 const canBrowseMessages = computed(() => props.isFlatMqCluster === true && props.supportsPeekMessages !== false && !isRocketMqCluster.value);
-
-function flatMqPeekGroupName(): string {
-  if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
-  return "__dbx_kafka_viewer__";
-}
 const topicListId = computed(() => `mq-topic-options-${props.connectionId}`);
 
 function clearSuccessLater() {
@@ -94,15 +85,20 @@ onUnmounted(() => {
   if (successTimer) clearTimeout(successTimer);
 });
 
-function guardWritable() {
+async function guardWritable() {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
     return false;
   }
-  return true;
+  return confirmMqWrite(t("mqMessages.sendMessage"));
 }
 
 async function loadTopics() {
+  if (props.fixedTopic) {
+    availableTopics.value = props.topic ? [props.topic] : [];
+    topicName.value = props.topic?.shortName ?? "";
+    return;
+  }
   if (isRocketMqCluster.value) {
     await rocketMqTopicSelectRef.value?.loadTopics();
     return;
@@ -150,7 +146,7 @@ function parseHeaders(): Record<string, string> {
 }
 
 async function sendMessage() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable())) return;
   error.value = undefined;
   success.value = undefined;
 
@@ -206,55 +202,6 @@ async function sendMessage() {
   }
 }
 
-async function loadMessages() {
-  const topic = selectedTopicRef.value;
-  if (!topic) {
-    peekError.value = t("mqMessages.selectTopicBeforeLoad");
-    return;
-  }
-  peekLoading.value = true;
-  peekError.value = undefined;
-  try {
-    const count = Math.max(1, Math.min(100, Number(peekCount.value) || 20));
-    peekCount.value = count;
-    const options: { partition?: number; offset?: number } = {};
-    const partitionText = String(peekPartition.value).trim();
-    const offsetText = String(peekOffset.value).trim();
-    if (partitionText !== "") {
-      const partition = parseNonNegativeSafeInteger(partitionText);
-      if (partition == null) {
-        throw new Error(t("mqMessages.partitionMustBeNonNegativeInt"));
-      }
-      options.partition = partition;
-      peekPartition.value = String(partition);
-    }
-    if (offsetText !== "") {
-      const offset = parseNonNegativeSafeInteger(offsetText);
-      if (offset == null) {
-        throw new Error(t("mqMessages.offsetMustBeNonNegativeInt"));
-      }
-      options.offset = offset;
-      peekOffset.value = String(offset);
-    }
-    peekMessages.value = await mqPeekMessages(props.connectionId, topic, flatMqPeekGroupName(), count, options);
-  } catch (e: unknown) {
-    peekError.value = formatError(e);
-  } finally {
-    peekLoading.value = false;
-  }
-}
-
-function messagePayload(message: PeekedMessage): string {
-  return message.payloadText ?? message.payloadBase64;
-}
-
-function formatMessageTimestamp(value?: string): string {
-  if (!value) return "-";
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return value;
-  return new Date(numeric).toLocaleString();
-}
-
 function formatJson() {
   try {
     const parsed = JSON.parse(messageValue.value);
@@ -283,14 +230,12 @@ watch(
   { immediate: true },
 );
 
-watch(topicName, () => {
-  peekError.value = undefined;
-  peekMessages.value = [];
-});
-
 watch(
   () => props.topic,
   (newTopic) => {
+    if (props.fixedTopic) {
+      availableTopics.value = newTopic ? [newTopic] : [];
+    }
     if (newTopic) {
       topicName.value = newTopic.shortName;
     }
@@ -319,7 +264,8 @@ watch(
 
       <div class="form-group">
         <label>{{ t("mqMessages.targetTopic") }} <span class="required">*</span></label>
-        <RocketMqTopicSelect v-if="isRocketMqCluster" ref="rocketMqTopicSelectRef" v-model="topicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="readOnly" @loaded="handleRocketMqTopicsLoaded" />
+        <input v-if="fixedTopic" :value="topicName" type="text" class="topic-input" disabled />
+        <RocketMqTopicSelect v-else-if="isRocketMqCluster" ref="rocketMqTopicSelectRef" v-model="topicName" :connection-id="connectionId" :tenant="tenant" :namespace="namespace" grouping="business" :show-type-filter="false" :disabled="readOnly" @loaded="handleRocketMqTopicsLoaded" />
         <template v-else>
           <div class="topic-select-row">
             <input v-model="topicName" :list="topicListId" :disabled="readOnly || topicsLoading" class="topic-input" :placeholder="topicsLoading ? t('mqMessages.topicLoading') : t('mqMessages.topicSearchPlaceholder')" autocomplete="off" />
@@ -387,63 +333,14 @@ watch(
         </button>
       </div>
 
-      <section v-if="canBrowseMessages" class="message-browser">
-        <div class="message-browser-header">
-          <h4>{{ t("mqMessages.messageList") }}</h4>
-          <button type="button" class="btn-sm" :disabled="peekLoading || !selectedTopicRef" @click="loadMessages">
-            {{ peekLoading ? t("mqMessages.loading") : t("mqMessages.loadMessages") }}
-          </button>
-        </div>
-
-        <p class="peek-default-hint">{{ t("mqMessages.peekDefaultHint", { count: peekCount }) }}</p>
-
-        <div class="peek-controls">
-          <label>
-            <span>{{ t("mqMessages.count") }}</span>
-            <input v-model.number="peekCount" type="number" min="1" max="100" :disabled="peekLoading" />
-          </label>
-        </div>
-
-        <button type="button" class="collapse-toggle peek-advanced-toggle" @click="peekAdvancedExpanded = !peekAdvancedExpanded">
-          <span class="collapse-arrow" :class="{ expanded: peekAdvancedExpanded }">▶</span>
-          <span>{{ t("mqMessages.advancedFilter") }}</span>
-          <span v-if="(peekPartition || peekOffset) && !peekAdvancedExpanded" class="collapse-badge">·</span>
-        </button>
-        <div v-if="peekAdvancedExpanded" class="peek-controls collapse-body">
-          <label>
-            <span>{{ t("mqMessages.partition") }}</span>
-            <input v-model="peekPartition" type="number" min="0" :placeholder="t('mqMessages.partitionPlaceholderAll')" :disabled="peekLoading" />
-          </label>
-          <label>
-            <span>{{ t("mqMessages.offset") }}</span>
-            <input v-model="peekOffset" type="number" min="0" :placeholder="t('mqMessages.offsetPlaceholderEarliest')" :disabled="peekLoading" />
-          </label>
-        </div>
-
-        <div v-if="peekError" class="panel-error">{{ peekError }}</div>
-        <div v-else-if="peekLoading" class="message-empty">{{ t("mqMessages.messagesLoading") }}</div>
-        <div v-else-if="!peekMessages.length" class="message-empty">{{ t("mqMessages.noMessages") }}</div>
-        <div v-else class="message-list">
-          <article v-for="message in peekMessages" :key="`${message.properties?.partition ?? 'p'}-${message.messageId || message.position}`" class="message-row">
-            <div class="message-meta">
-              <span>#{{ message.position }}</span>
-              <span v-if="message.properties?.partition != null">{{ t("mqMessages.metaPartition", { partition: message.properties.partition }) }}</span>
-              <span>{{ t("mqMessages.metaOffset", { offset: message.messageId || "-" }) }}</span>
-              <span v-if="message.key">{{ t("mqMessages.metaKey", { key: message.key }) }}</span>
-              <span>{{ formatMessageTimestamp(message.publishTime) }}</span>
-            </div>
-            <pre class="message-payload">{{ messagePayload(message) }}</pre>
-            <div v-if="Object.keys(message.headers || {}).length" class="message-headers">
-              <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
-            </div>
-          </article>
-        </div>
-      </section>
+      <MessageBrowser v-if="canBrowseMessages" :connection-id="connectionId" :topic="selectedTopicRef" :mq-system-kind="mqSystemKind" />
     </div>
   </div>
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .send-message-panel {
   height: 100%;
   display: flex;
@@ -580,27 +477,6 @@ watch(
   box-shadow: 0 0 0 2px var(--color-primary-alpha);
 }
 
-.btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: 16px;
-  transition: all 0.15s;
-  flex-shrink: 0;
-}
-
-.btn-icon:hover:not(:disabled) {
-  background: var(--color-background-secondary);
-  color: var(--color-text);
-}
-
 .spin {
   display: inline-block;
   animation: spin-anim 0.8s linear infinite;
@@ -704,178 +580,9 @@ input[type="number"]:focus {
   padding-top: 4px;
 }
 
-.btn-primary,
-.btn-sm {
-  padding: 7px 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-  transition: all 0.15s;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 12px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: white;
-  font-weight: 500;
+/* Keep send CTA visually balanced next to optional secondary actions */
+.form-actions .btn-primary {
   min-width: 100px;
-}
-
-.btn-primary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.query-mode-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.query-mode-tabs .btn-sm.active {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  background: var(--color-primary-alpha);
-}
-
-.message-browser {
-  margin-top: 4px;
-  padding: 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background-secondary);
-}
-
-.message-browser-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.message-browser-header h4 {
-  margin: 0;
-  color: var(--color-text);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.peek-default-hint {
-  margin: 0 0 12px;
-  padding: 8px 10px;
-  border-radius: var(--dbx-radius-fixed-6);
-  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.peek-advanced-toggle {
-  margin-bottom: 10px;
-}
-
-.peek-controls {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.peek-controls label {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.peek-controls input {
-  width: 100%;
-}
-
-.message-empty {
-  padding: 18px;
-  border: 1px dashed var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  color: var(--color-text-tertiary);
-  text-align: center;
-  font-size: 13px;
-}
-
-.message-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  max-height: 360px;
-  overflow: auto;
-}
-
-.message-row {
-  padding: 10px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-}
-
-.message-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-}
-
-.message-meta span:first-child {
-  color: var(--color-primary);
-  font-weight: 700;
-}
-
-.message-payload {
-  margin: 8px 0 0;
-  padding: 10px;
-  max-height: 160px;
-  overflow: auto;
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background-tertiary, var(--color-background-secondary));
-  color: var(--color-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.message-headers {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-
-.message-headers span {
-  padding: 2px 6px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  color: var(--color-text-secondary);
-  background: var(--color-background-secondary);
-  font-size: 12px;
-}
-
-@media (max-width: 720px) {
-  .peek-controls {
-    grid-template-columns: 1fr;
-  }
 }
 
 button:disabled,

@@ -1,0 +1,9 @@
+<!-- OpenTenBase symbol adapted from the official docs main logo. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 194 129" fill="none">
+  <path d="M36.9849 64.0449L73.9615 128.09H0.00836182L36.9849 64.0449Z" fill="#006EFF"/>
+  <path d="M73.9532 0L110.93 64.0453H36.9766L73.9532 0Z" fill="#006EFF"/>
+  <path d="M156.123 0L193.1 64.0453H119.147L156.123 0Z" fill="#1EECFF"/>
+  <path d="M73.9523 128.079L110.929 64.0335H36.9758L73.9523 128.079Z" fill="#00A4FF"/>
+  <path d="M36.9766 64.0453L73.9532 0H0.0000610352L36.9766 64.0453Z" fill="#00A4FF"/>
+  <path d="M119.147 64.0453L156.123 0H82.1703L119.147 64.0453Z" fill="#00C8DC"/>
+</svg>

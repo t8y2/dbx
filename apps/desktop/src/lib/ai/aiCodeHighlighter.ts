@@ -1,4 +1,5 @@
 import type { AppThemeAppearance } from "@/lib/app/appTheme";
+import { supportsRegExpLookbehind } from "@/lib/ui/legacyWebView";
 
 export type AiCodeHighlighter = (content: string, lang: string, appearance?: AppThemeAppearance) => string;
 
@@ -58,15 +59,53 @@ export async function createAiShikiCodeHighlighter(options: AiShikiCodeHighlight
     });
 }
 
+/**
+ * Like `createAiShikiCodeHighlighter`, but keeps shiki's per-line `.line`
+ * wrappers (structure "classic") instead of flattening them away. Callers
+ * that lay out code as a block — one line per row, e.g. with CSS-counter
+ * line numbers — need this; `structure: "inline"` discards the `.line`
+ * elements entirely, so counters/line-based layout silently no-op.
+ */
+export async function createAiShikiBlockCodeHighlighter(options: AiShikiCodeHighlighterOptions): Promise<AiCodeHighlighter> {
+  const highlighter = await getAiShikiHighlighter();
+  return (content, lang, appearance = options.appearance()) => {
+    const html = highlighter.codeToHtml(content, {
+      lang: resolveShikiLanguage(lang),
+      structure: "classic",
+      theme: SHIKI_THEMES[appearance],
+    });
+    return extractShikiCodeInnerHtml(html);
+  };
+}
+
+/**
+ * Shiki's "classic" structure wraps lines in `<pre ...><code ...>...</code></pre>`;
+ * callers that supply their own `<pre>/<code>` shell only want what's inside.
+ * It also joins `<span class="line">` siblings with a literal "\n" text node —
+ * redundant once `.line{display:block}` already breaks each line, and doubles
+ * the visual line spacing under `white-space:pre` if left in.
+ */
+function extractShikiCodeInnerHtml(html: string): string {
+  const match = /<code[^>]*>([\s\S]*)<\/code>/.exec(html);
+  const inner = match ? match[1] : html;
+  return inner.replace(/<\/span>\n/g, "</span>");
+}
+
 function getAiShikiHighlighter(): Promise<ShikiHighlighter> {
   highlighterPromise ??= loadAiShikiHighlighter();
   return highlighterPromise;
 }
 
 async function loadAiShikiHighlighter(): Promise<ShikiHighlighter> {
-  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, bash, css, go, html, java, javascript, json, markdown, php, python, rust, shellscript, sql, tsx, typescript, vue, xml, yaml] = await Promise.all([
+  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, onigurumaEngineModules, githubDark, githubLight, bash, css, go, html, java, javascript, json, markdown, php, python, rust, shellscript, sql, tsx, typescript, vue, xml, yaml] = await Promise.all([
     import("shiki/core"),
     import("shiki/engine/javascript"),
+    // Old WebKit (Safari < 16.4) throws SyntaxError while compiling the
+    // lookbehind / named-group patterns the JavaScript engine generates from
+    // TextMate grammars (code snapshots and AI code blocks then lose all
+    // highlighting). Only fetch the heavier inlined-Oniguruma WASM bundle on
+    // engines that need it.
+    supportsRegExpLookbehind() ? Promise.resolve(null) : Promise.all([import("shiki/engine/oniguruma"), import("shiki/wasm")]),
     import("shiki/themes/github-dark.mjs"),
     import("shiki/themes/github-light.mjs"),
     import("shiki/langs/bash.mjs"),
@@ -90,7 +129,7 @@ async function loadAiShikiHighlighter(): Promise<ShikiHighlighter> {
   ]);
 
   return createHighlighterCore({
-    engine: createJavaScriptRegexEngine(),
+    engine: onigurumaEngineModules ? await onigurumaEngineModules[0].createOnigurumaEngine(onigurumaEngineModules[1]) : createJavaScriptRegexEngine(),
     langs: [bash.default, css.default, go.default, html.default, java.default, javascript.default, json.default, markdown.default, php.default, python.default, rust.default, shellscript.default, sql.default, tsx.default, typescript.default, vue.default, xml.default, yaml.default],
     themes: [githubDark.default, githubLight.default],
   });

@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
-import { canDownloadAndInstallUpdate, normalizeUpdateDownloadSource, resolveUpdateReleaseUrl, tagVersion } from "../../apps/desktop/src/composables/useAppUpdater.ts";
-import { downloadAndInstallUpdateWhenIdle, installDownloadedUpdateWhenIdle } from "../../apps/desktop/src/lib/app/appUpdateInstallFlow.ts";
+import { canDownloadAndInstallUpdate, isUpdateIgnored, normalizeUpdateDownloadSource, resolveUpdateReleaseUrl, tagVersion } from "../../apps/desktop/src/composables/useAppUpdater.ts";
+import { installDownloadedUpdateWhenIdle } from "../../apps/desktop/src/lib/app/appUpdateInstallFlow.ts";
 import { countActiveUpdateBlockingTasks, shouldBlockAppUpdate } from "../../apps/desktop/src/lib/app/appUpdateTaskGuard.ts";
 import type { UpdateInfo } from "../../apps/desktop/src/lib/backend/api.ts";
 
@@ -13,6 +13,7 @@ function updateInfo(overrides: Partial<UpdateInfo> = {}): UpdateInfo {
     latest_version: "0.5.26",
     update_available: true,
     portable_mode: false,
+    manual_update_only: false,
     release_name: "DBX v0.5.26",
     release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.26",
     release_notes: "",
@@ -34,6 +35,39 @@ test("blocks in-app update installation outside desktop runtime or without an up
   assert.equal(canDownloadAndInstallUpdate(null, true), false);
 });
 
+test("keeps the ignored state for the same or an older stable version", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.25" }), "0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.27" }), "0.5.26"), false);
+});
+
+test("keeps the ignored state when an update source lags behind", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.69" }), "0.5.70"), true);
+});
+
+test("does not ignore updates when the stored version is absent", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), ""), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), undefined), false);
+  assert.equal(isUpdateIgnored(null, "0.5.26"), false);
+});
+
+test("normalizes v-prefixed ignored versions before comparing", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "0.5.26" }), "v0.5.26"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: " v0.5.26 " }), " 0.5.26 "), true);
+});
+
+test("uses SemVer precedence for prereleases and ignores build metadata", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0-beta.1" }), "1.0.0-beta.2"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0-beta.11" }), "1.0.0-beta.2"), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0" }), "1.0.0-rc.1"), false);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "1.0.0+mirror.2" }), "1.0.0+github.1"), true);
+});
+
+test("falls back conservatively when either version is not valid SemVer", () => {
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "release-next" }), "vrelease-next"), true);
+  assert.equal(isUpdateIgnored(updateInfo({ latest_version: "release-next" }), "release-later"), false);
+});
+
 test("normalizes update download source", () => {
   assert.equal(normalizeUpdateDownloadSource("official"), "official");
   assert.equal(normalizeUpdateDownloadSource("cnb"), "cnb");
@@ -50,7 +84,7 @@ test("resolves release page URL from update download source", () => {
   const fallbackUrl = "https://github.com/t8y2/dbx/releases/latest";
   assert.equal(resolveUpdateReleaseUrl(updateInfo({ latest_version: "0.5.39" }), "cnb", fallbackUrl), "https://cnb.cool/dbxio.com/dbx/-/releases/tag/v0.5.39");
   assert.equal(resolveUpdateReleaseUrl(updateInfo({ release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.39" }), "official", fallbackUrl), "https://github.com/t8y2/dbx/releases/tag/v0.5.39");
-  assert.equal(resolveUpdateReleaseUrl(null, "cnb", fallbackUrl), fallbackUrl);
+  assert.equal(resolveUpdateReleaseUrl(null, "cnb", fallbackUrl), "https://cnb.cool/dbxio.com/dbx/-/releases");
 });
 
 test("counts background and query tasks that must finish before updating", () => {
@@ -60,48 +94,37 @@ test("counts background and query tasks that must finish before updating", () =>
   assert.equal(shouldBlockAppUpdate(1), true);
 });
 
-test("retains a downloaded update when a task starts during download and installs it later without downloading again", async () => {
+test("blocks installing an already-downloaded update while tasks are active, then allows it once idle", async () => {
   let activeTaskCount = 0;
-  let downloadCount = 0;
   let installCount = 0;
-  let finishDownload!: () => void;
-  const downloadGate = new Promise<void>((resolve) => {
-    finishDownload = resolve;
-  });
   const operations = {
     getActiveTaskCount: () => activeTaskCount,
-    download: async () => {
-      downloadCount += 1;
-      await downloadGate;
-    },
     install: async () => {
       installCount += 1;
     },
   };
 
-  const firstAttempt = downloadAndInstallUpdateWhenIdle(operations);
-  assert.equal(downloadCount, 1);
-  assert.equal(installCount, 0);
-
   activeTaskCount = 1;
-  finishDownload();
-  assert.equal(await firstAttempt, "downloaded");
+  assert.equal(await installDownloadedUpdateWhenIdle(operations), false);
   assert.equal(installCount, 0);
 
   activeTaskCount = 0;
   assert.equal(await installDownloadedUpdateWhenIdle(operations), true);
-  assert.equal(downloadCount, 1);
   assert.equal(installCount, 1);
 });
 
-test("wires the active task guard into update installation and restart", () => {
+test("wires the active task guard into update installation and restart, but not into starting a background download", () => {
   const appSource = readFileSync("apps/desktop/src/App.vue", "utf8");
   const updaterSource = readFileSync("apps/desktop/src/composables/useAppUpdater.ts", "utf8");
   const dialogSource = readFileSync("apps/desktop/src/components/layout/UpdateDialog.vue", "utf8");
 
   assert.match(appSource, /countActiveUpdateBlockingTasks\(activeBackgroundTaskCount\.value, queryStore\.tabs\)/);
   assert.match(appSource, /getActiveTaskCount: \(\) => trackedUpdateTaskCount\.value/);
-  assert.equal(updaterSource.match(/if \(blockUpdateForActiveTasks\(\)\) return;/g)?.length, 2);
+  // Only restarting/exiting to finish the install has to wait on active work;
+  // starting the background download itself never blocks.
+  assert.match(updaterSource, /shouldBlockAppUpdate\(activeTaskCount.value\)/);
   assert.match(dialogSource, /role="alert"[\s\S]*updates\.activeTasksBlockUpdate/);
-  assert.equal(dialogSource.match(/:disabled="activeTaskCount > 0"/g)?.length, 3);
+  assert.equal(dialogSource.match(/:disabled="activeTaskCount > 0 \|\| isIgnoringUpdate"/g)?.length, 2);
+  assert.match(dialogSource, /ignore-version/);
+  assert.match(updaterSource, /ignoreCurrentVersion/);
 });

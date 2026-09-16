@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext } from "@/lib/table/tableClipboard";
+import { tableClipboardMatchesTarget, tableClipboardMenuState, tableClipboardSourceContext, tablePasteFeedback } from "@/lib/table/tableClipboard";
 
 describe("table clipboard contexts", () => {
   const source = { connectionId: "source", database: "app", schema: "public" };
@@ -22,5 +22,12 @@ describe("table clipboard contexts", () => {
 
     expect(tableClipboardMenuState([sourceTable], targetTable)).toBe("copy");
     expect(tableClipboardMenuState([sourceTable], targetTable, true)).toBe("copy-and-paste");
+  });
+
+  it("keeps batch feedback bounded to the first paste error", () => {
+    const firstError = { code: "permission-denied" };
+    const feedback = tablePasteFeedback(0, 3, firstError);
+
+    expect(feedback).toEqual({ successCount: 0, failedCount: 3, firstError });
   });
 });

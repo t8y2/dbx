@@ -20,9 +20,32 @@ test("uses driver profile for connection option icon identity", () => {
   assert.equal(connectionIconType(baseConnection), "tidb");
 });
 
+test("presents a JDBC-backed Phoenix connection with its product identity", () => {
+  const connection = {
+    ...baseConnection,
+    db_type: "jdbc" as const,
+    driver_profile: "phoenix",
+    driver_label: "Apache Phoenix",
+    host: "",
+    port: 0,
+    database: undefined,
+  };
+
+  assert.equal(connectionIconType(connection), "phoenix");
+  assert.equal(connectionDriverLabel(connection), "Apache Phoenix");
+  assert.equal(connectionOptionSubtitle(connection), "Apache Phoenix");
+});
+
 test("displays the configured GaussDB protocol in connection URLs", () => {
   assert.equal(connectionDisplayUrlScheme({ db_type: "gaussdb", driver_profile: "gaussdb" }), "postgresql");
   assert.equal(connectionDisplayUrlScheme({ db_type: "gaussdb", driver_profile: "gaussdb-m" }), "jdbc:gaussdb");
+});
+
+test("normalizes legacy single-host GaussDB endpoint labels", () => {
+  const connection = { ...baseConnection, db_type: "gaussdb" as const, host: "db.example.com:5433", port: 5432 };
+
+  assert.equal(connectionEndpointLabel(connection), "db.example.com:5433");
+  assert.equal(connectionRedactedEndpointLabel(connection), "db.***.com:****");
 });
 
 test("builds a compact subtitle for duplicate connection names", () => {

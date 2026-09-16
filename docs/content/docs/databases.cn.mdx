@@ -3,7 +3,7 @@ title: 数据库支持
 description: 了解 DBX 的连接 profile、驱动运行时、专用工作区和按能力启用的高级功能。
 ---
 
-DBX 的新建连接窗口提供 70+ 数据库和服务 profile。Profile 决定默认端口、表单字段、图标和驱动入口，但“能建立连接”不等于“支持所有高级功能”。
+DBX 的新建连接窗口提供 90+ 数据库和服务 profile。Profile 决定默认端口、表单字段、图标和驱动入口，但“能建立连接”不等于“支持所有高级功能”。
 
 <Callout type="info">当前版本的连接选择器和 `crates/dbx-core/assets/database-drivers.manifest.json` 是数据库类型与能力的权威来源。文档不维护容易过期的全量静态矩阵。</Callout>
 
@@ -12,10 +12,11 @@ DBX 的新建连接窗口提供 70+ 数据库和服务 profile。Profile 决定�
 ### SQL 和兼容协议
 
 - MySQL、PostgreSQL、SQLite、SQL Server、ClickHouse、Oracle、Redshift 等核心 SQL 数据库
-- MariaDB、TiDB、OceanBase、Doris、SelectDB、StarRocks、Manticore Search、GoldenDB 等 MySQL 协议或语法兼容 profile
-- openGauss、GaussDB、KingBase、HighGo、Vastbase、CockroachDB 等 PostgreSQL 兼容 profile
+- MariaDB、TiDB、OceanBase、Doris、SelectDB、StarRocks、Manticore Search、GoldenDB、Dolt 等 MySQL 协议或语法兼容 profile
+- openGauss、GaussDB、KingbaseES、HighGo、Vastbase、CockroachDB 等 PostgreSQL 兼容 profile
 - DM、KWDB、YashanDB、GBase、Teradata、Vertica、Exasol、Firebird、SAP HANA 等厂商数据库
 - Snowflake、Trino、PrestoSQL、Hive、Spark、DB2、Informix、Databricks、BigQuery 等 Agent/JDBC 分析数据库
+- Google Cloud Spanner 等云托管关系型服务（Agent/JDBC，支持 GoogleSQL 与 PostgreSQL 两种方言）
 
 兼容协议只说明连接和部分方言可以复用。数据库版本、系统表、DDL、权限和管理接口不同，DBX 会用独立 profile 或能力覆盖避免错误地启用功能。
 
@@ -30,11 +31,11 @@ Desktop 的文件路径属于本机。Docker/Web 的文件路径属于服务器�
 ### 专用数据模型和服务
 
 - Redis、MongoDB
-- Elasticsearch、Easysearch、Manticore Search
+- Elasticsearch、Easysearch、Meilisearch、Manticore Search
 - Qdrant、Milvus、Weaviate、ChromaDB
 - HBase
 - Pulsar、Kafka、RocketMQ、RabbitMQ
-- etcd、ZooKeeper、Nacos
+- etcd、ZooKeeper、Nacos、Consul KV
 - InfluxDB、IoTDB、TDengine 和其它时序/IoT profile
 
 这些连接使用键值、文档、搜索、向量、消息或配置中心工作区，不应套用关系型表格和 SQL 的全部概念。入口详见 [专用工作区](/cn/docs/specialized-workspaces)。
@@ -44,7 +45,7 @@ Desktop 的文件路径属于本机。Docker/Web 的文件路径属于服务器�
 | 运行方式 | 说明 | 典型边界 |
 | --- | --- | --- |
 | 内置原生 | Rust 驱动编译进 DBX | 安装后可直接使用 |
-| 原生 Agent / sidecar | DBX 管理独立 Go/Rust/外部进程 | 需要匹配平台文件；DuckDB、Oracle、KingBase、XuguDB、RabbitMQ 等路径可能使用独立运行时 |
+| 原生 Agent / sidecar | DBX 管理独立 Go/Rust/外部进程 | 需要匹配平台文件；DuckDB、Oracle、KingbaseES、XuguDB、RabbitMQ 等路径可能使用独立运行时 |
 | JDBC Agent | Java Agent 加厂商 JDBC 驱动 | 需要 JRE、Agent 和可合法获取的厂商 JAR |
 | JDBC 插件 | 可选通用 JDBC 扩展 | 未识别数据库按通用 JDBC 能力运行 |
 
@@ -94,7 +95,7 @@ Redis、MongoDB、搜索、向量、HBase、配置中心和消息队列工作区
 
 ## 默认端口和连接 URL
 
-连接 profile 会填入常见默认端口，例如 MySQL `3306`、PostgreSQL `5432`、Redis `6379`、MongoDB `27017`、SQL Server `1433`、Oracle `1521`、Elasticsearch `9200`、RabbitMQ AMQP `5672`。这些只是默认值，可以按部署修改。
+连接 profile 会填入常见默认端口，例如 MySQL `3306`、PostgreSQL `5432`、Redis `6379`、MongoDB `27017`、SQL Server `1433`、Oracle `1521`、Elasticsearch `9200`、Meilisearch `7700`、RabbitMQ AMQP `5672`。这些只是默认值，可以按部署修改。
 
 RabbitMQ 等服务可能同时有业务端口和管理 API 端口；自定义 AMQP 端口不能用于推断 Management API 端口。SSH 隧道、HTTP 代理、TLS SNI 和实际拨号目标也应分别确认。
 

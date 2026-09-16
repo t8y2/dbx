@@ -5,6 +5,8 @@ description: Install the DBX JDBC plugin, import vendor JDBC driver JARs, and cr
 
 DBX uses native Rust database drivers by default. JDBC is optional: install the JDBC plugin when you need to connect to a database that DBX does not support natively, or when you specifically need a vendor JDBC driver.
 
+<Callout type="info">This page covers the JDBC plugin and vendor driver JARs. To build SSH, SFTP, file-manager, or other DBX extensions and submit them to the official Marketplace, read [Develop and Submit DBX Plugins](/en/docs/plugin-development).</Callout>
+
 <Callout type="info">The JDBC plugin is not bundled with the main DBX app, and it does not include vendor JDBC drivers. Install the DBX JDBC plugin first, then import the database vendor's JDBC driver JAR.</Callout>
 
 <Callout type="warn">A successful JDBC connection does not imply every capability of a native DBX profile. Object trees, source definitions, structure editing, import, transfer, and admin views depend on JDBC metadata, the detected effective database type, and the driver capability manifest. Unknown engines run with generic JDBC capabilities.</Callout>
@@ -115,6 +117,8 @@ Common examples:
 | Snowflake  | `net.snowflake:snowflake-jdbc`         | `net.snowflake.client.jdbc.SnowflakeDriver`    | `jdbc:snowflake://account.region.snowflakecomputing.com/?db=DEMO` |
 
 <Callout type="warn">JDBC URL parameters vary by database and driver version. Follow the vendor documentation. If a driver depends on multiple JARs, import or list all required JAR paths.</Callout>
+
+<Callout type="info">For Oracle, also import `com.oracle.database.nls:orai18n` with the same version as `ojdbc`. The base ojdbc jar cannot convert multibyte charsets such as `ZHS16GBK`, so table and column comments fail to load without it. Maven installs of `com.oracle.database.jdbc:ojdbc*` fetch the matching `orai18n` jar automatically. DBX's built-in Oracle connection (default driver) supports these charsets without any extra JAR.</Callout>
 
 ## Step 4: Import JDBC Driver JARs
 

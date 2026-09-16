@@ -30,7 +30,7 @@ function mountEditor(kind: DataGridConditionHistoryKind, initialValue: string, o
   );
   app.mount(host);
   mountedApps.push({ app, host });
-  return { value, input: host.querySelector("textarea") as HTMLTextAreaElement };
+  return { value, input: host.querySelector("textarea") as HTMLTextAreaElement, host };
 }
 
 function mockTextareaMetrics(input: HTMLTextAreaElement, options: { clientWidth: number; scrollWidth?: number; clientHeight?: number; scrollHeight?: number }) {
@@ -62,6 +62,20 @@ afterEach(() => {
 });
 
 describe("DataGridConditionEditor quote completion", () => {
+  it("does not open suggestions for a programmatic value update while unfocused", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["status", "started_at"] });
+
+    value.value = "sta";
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+
+    input.focus();
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+  });
+
   it("inserts paired quotes in WHERE and places the caret between them", async () => {
     const { value, input } = mountEditor("where", "id = ");
     input.focus();
@@ -107,6 +121,44 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it.each([
+    ["where", "z", { ctrlKey: true }],
+    ["orderBy", "z", { metaKey: true }],
+    ["where", "z", { ctrlKey: true, shiftKey: true }],
+    ["orderBy", "y", { ctrlKey: true }],
+  ] as const)("keeps %s undo/redo shortcuts in the condition editor", (kind, key, modifiers) => {
+    const { input, host } = mountEditor(kind, "id = 123");
+    let bubbled = 0;
+    host.addEventListener("keydown", () => bubbled++);
+
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(bubbled).toBe(0);
+  });
+
+  it("keeps WHERE and ORDER BY undo history independent", async () => {
+    const where = mountEditor("where", "id = 123");
+    const orderBy = mountEditor("orderBy", "id ASC");
+
+    where.input.value = "id = 456";
+    where.input.dispatchEvent(new Event("input", { bubbles: true }));
+    orderBy.input.value = "id DESC";
+    orderBy.input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    orderBy.input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(where.value.value).toBe("id = 456");
+    expect(orderBy.value.value).toBe("id ASC");
+
+    orderBy.input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(where.value.value).toBe("id = 456");
+    expect(orderBy.value.value).toBe("id DESC");
+  });
+
   it("passes the textarea caret range through when accepting a suggestion", async () => {
     const { value, input } = mountEditor("where", "status = cus AND enabled = 1", { columns: ["customer_id"] });
     input.focus();
@@ -143,6 +195,21 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it("selects the first WHERE field suggestion with Enter", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
+    input.focus();
+    input.value = "cus";
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("customer_id");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("customer_id");
+  });
+
   it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
     const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
     input.focus();
@@ -174,17 +241,39 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("name");
   });
 
-  it("keeps expanded input first-line indent and wraps long tokens", () => {
+  it("keeps suggestions closed after Enter applies a complete condition", async () => {
+    const { input } = mountEditor("where", "", { columns: ["id", "order0", "status"] });
+    input.focus();
+    input.value = "id > 0";
+    input.setSelectionRange(6, 6);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    input.setSelectionRange(0, 0);
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    await nextTick();
+
+    expect(document.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it("keeps the wrapped input caret aligned with its syntax highlight layer", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+    const expandedHighlightCss = source.match(/\.data-grid-condition-highlight--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+    const prefixPadding = "calc(var(--data-grid-condition-prefix-indent) + 0.125rem)";
 
     expect(expandedInputCss).toContain("padding:");
-    expect(expandedInputCss).toContain("0.0625rem 0.125rem");
-    expect(expandedInputCss).toContain("text-indent: var(--data-grid-condition-prefix-indent)");
+    expect(expandedInputCss).toContain(prefixPadding);
+    expect(expandedHighlightCss).toContain(prefixPadding);
+    expect(expandedInputCss).not.toContain("text-indent:");
+    expect(expandedHighlightCss).not.toContain("text-indent:");
     expect(expandedInputCss).toContain("overflow-wrap: anywhere");
     expect(source).toContain("white-space:pre-wrap;overflow-wrap:anywhere;");
-    expect(source).toContain("text-indent:${style.textIndent};");
-    expect(source).toContain("textIndent: rect.prefix");
+    expect(source).not.toContain("textIndent: rect.prefix");
+    expect(source).toContain("paddingLeft: rect.prefix + 2");
+    expect(source).toContain("paddingRight: rect.suffix + 8");
     expect(source).toContain("width: Math.max(1, rect.width - 8)");
     expect(source).toContain("function fitExpandedHeightToOverlay()");
     expect(source).toContain("expandedHeight.value + overflow");
@@ -301,6 +390,33 @@ describe("DataGridConditionEditor quote completion", () => {
     vi.unstubAllGlobals();
   });
 
+  it("expands when a multiline value is pasted even if each line fits", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const width = 320;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "where id in ()");
+    mockTextareaMetrics(input, { clientWidth: 320, scrollWidth: 320, clientHeight: 24, scrollHeight: 72 });
+    input.focus();
+    await nextTick();
+    expect(document.body.querySelector(".data-grid-topbar-condition-input--expanded")).toBeNull();
+
+    input.value = "where id in (60792411\n580019433\n1035062084)";
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    expect(document.body.querySelector(".data-grid-topbar-condition-input--expanded")).toBeTruthy();
+    vi.unstubAllGlobals();
+  });
+
   it("preserves the caret offset when focus moves into the expanded textarea", async () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : 140;
@@ -329,6 +445,34 @@ describe("DataGridConditionEditor quote completion", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not carry the collapsed horizontal scroll into the expanded highlight layer", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "test_item_id=12 and test_item_name=''");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.scrollLeft = 128;
+    input.dispatchEvent(new Event("scroll", { bubbles: true }));
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
+    expect(expandedHighlight).toBeTruthy();
+    expect(expandedHighlight?.style.transform).toBe("translate(0px, 0px)");
+    vi.unstubAllGlobals();
+  });
+
   it("positions suggestions below the measured expanded editor height", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedPaneCss = source.match(/\.data-grid-topbar-condition-pane--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
@@ -336,5 +480,46 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(source).toContain("bottom: expandedRect.value.top + expandedHeight.value");
     expect(expandedPaneCss).toContain("transition: box-shadow 150ms ease");
     expect(expandedPaneCss).not.toContain("height 150ms");
+  });
+});
+
+describe("DataGridConditionEditor Chinese column matching", () => {
+  function mountChineseColumns() {
+    return mountEditor("where", "", { columns: ["总租金", "租赁日期", "amount"] });
+  }
+
+  async function typeToken(input: HTMLTextAreaElement, token: string) {
+    input.focus();
+    input.value = token;
+    input.setSelectionRange(token.length, token.length);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  it("matches a single Han character anywhere in the column name", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "金");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("matches pinyin initials and initials subsequences", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "zzj");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+
+    await typeToken(input, "zj");
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("总租金");
+  });
+
+  it("still matches plain English columns", async () => {
+    const { input } = mountChineseColumns();
+    await typeToken(input, "am");
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(1));
+    expect(document.querySelector('[role="option"]')?.textContent).toContain("amount");
   });
 });

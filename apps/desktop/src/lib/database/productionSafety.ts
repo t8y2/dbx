@@ -1,4 +1,5 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
+import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 import { classifySqlRisk, isSqlRiskMutation } from "@/lib/sql/sqlRisk";
 
 export type ProductionContextReason = "connection" | "database" | "sql_target";
@@ -25,6 +26,7 @@ const COPY_TARGET_RE = new RegExp(String.raw`^\s*COPY\s+(${TARGET_NAME_PATTERN})
 const TRUNCATE_TARGET_RE = new RegExp(String.raw`\bTRUNCATE\s+(?:TABLE\s+)?(${TARGET_NAME_PATTERN})`, "gi");
 const RENAME_TABLE_TARGET_RE = new RegExp(String.raw`\bRENAME\s+TABLE\s+(${TARGET_NAME_PATTERN})\s+TO\s+(${TARGET_NAME_PATTERN})`, "gi");
 const MAINTENANCE_TABLE_TARGET_RE = new RegExp(String.raw`\b(?:ANALYZE|OPTIMIZE|REPAIR|CHECK)\s+(?:NO_WRITE_TO_BINLOG\s+|LOCAL\s+)?TABLE\s+(${TARGET_NAME_PATTERN})`, "gi");
+const VACUUM_TABLE_TARGET_RE = new RegExp(String.raw`\bVACUUM(?:\s+FULL)?(?:\s+ANALYZE)?\s+(${TARGET_NAME_PATTERN})`, "gi");
 const COMMENT_TARGET_RE = new RegExp(String.raw`\bCOMMENT\s+ON\s+(?:TABLE|VIEW|COLUMN|INDEX|SEQUENCE|FUNCTION|PROCEDURE|TYPE)\s+(${TARGET_NAME_PATTERN})`, "gi");
 const ROUTINE_CALL_TARGET_RE = new RegExp(String.raw`\b(?:CALL|EXEC|EXECUTE)\s+(${QUALIFIED_NAME_PATTERN})`, "gi");
 const PRIVILEGE_TARGET_RE = new RegExp(String.raw`\b(?:GRANT|REVOKE|DENY)\b[\s\S]*?\bON\s+(?:(?:TABLE|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|OBJECT)\s+|OBJECT\s*::\s*)?(${QUALIFIED_NAME_PATTERN})`, "gi");
@@ -93,6 +95,9 @@ export function normalizeProductionDatabase(value: string | undefined | null): s
 
 export function productionDatabases(connection: ConnectionConfig | undefined): string[] {
   if (!connection?.production_databases?.length) return [];
+  if (connection.db_type === "nacos") {
+    return [...new Set(connection.production_databases.map(nacosNamespaceIdentity))];
+  }
   return [...new Set(connection.production_databases.map(normalizeProductionDatabase).filter(Boolean))];
 }
 
@@ -100,10 +105,10 @@ export function productionContextForDatabase(connection: ConnectionConfig | unde
   if (!connection) return { active: false, databases: [] };
   if (connection.is_production) return { active: true, reason: "connection", databases: [] };
 
-  const normalizedDatabase = normalizeProductionDatabase(database);
+  const normalizedDatabase = connection.db_type === "nacos" ? nacosNamespaceIdentity(String(database ?? "")) : normalizeProductionDatabase(database);
   const marked = productionDatabases(connection);
   if (normalizedDatabase && marked.includes(normalizedDatabase)) {
-    return { active: true, reason: "database", databases: [String(database)] };
+    return { active: true, reason: "database", databases: [connection.db_type === "nacos" ? normalizedDatabase : String(database)] };
   }
   return { active: false, databases: [] };
 }
@@ -155,7 +160,22 @@ function referencedDatabases(statements: string[], dbType: DatabaseType, activeD
     if (!statementIsMutation) continue;
     const currentDatabase = useDatabase || normalizedActiveDatabase;
 
-    collectQualifiedTargetDatabases(statement, dbType, quotedIdentifiers, currentDatabase, statementDatabases, DML_TARGET_RE, DDL_OBJECT_TARGET_RE, INDEX_ON_TARGET_RE, TRUNCATE_TARGET_RE, MAINTENANCE_TABLE_TARGET_RE, COMMENT_TARGET_RE, ROUTINE_CALL_TARGET_RE, PRIVILEGE_TARGET_RE);
+    collectQualifiedTargetDatabases(
+      statement,
+      dbType,
+      quotedIdentifiers,
+      currentDatabase,
+      statementDatabases,
+      DML_TARGET_RE,
+      DDL_OBJECT_TARGET_RE,
+      INDEX_ON_TARGET_RE,
+      TRUNCATE_TARGET_RE,
+      MAINTENANCE_TABLE_TARGET_RE,
+      VACUUM_TABLE_TARGET_RE,
+      COMMENT_TARGET_RE,
+      ROUTINE_CALL_TARGET_RE,
+      PRIVILEGE_TARGET_RE,
+    );
     collectQualifiedTargetDatabaseGroups(statement, dbType, quotedIdentifiers, currentDatabase, statementDatabases, RENAME_TABLE_TARGET_RE, [1, 2]);
     for (const match of statement.matchAll(DATABASE_TARGET_RE)) {
       const database = databaseTargetKindMeansDatabase(match[1], dbType) ? normalizeTargetDatabase(match[2], quotedIdentifiers) : "";

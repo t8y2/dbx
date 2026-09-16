@@ -57,7 +57,10 @@ test("send() acquires the guard synchronously before the first await", () => {
 
   const entryCheck = body.search(/\|\|\s*isGenerating\.value\)\s*return/);
   const guardSet = body.indexOf("isGenerating.value = true");
-  const firstAwait = body.indexOf("await");
+  // `await` as a whole word (not the substring inside e.g. the
+  // `awaiting_write_confirmation` run status), so the first suspension point is
+  // genuinely the first await statement.
+  const firstAwait = body.search(/\bawait\b/);
 
   assert.notEqual(entryCheck, -1, "send() should early-return when isGenerating is already set");
   assert.notEqual(guardSet, -1, "send() should set the isGenerating guard");

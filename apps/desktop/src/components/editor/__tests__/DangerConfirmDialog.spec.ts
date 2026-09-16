@@ -9,6 +9,17 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 const DANGER_PREVIEW_MAX_CHARACTERS = 8192;
 const DANGER_PREVIEW_MAX_LINES = 200;
 const highlight = vi.fn((sql: string) => `<span>${sql}</span>`);
+const focusMocks = vi.hoisted(() => {
+  const focus = vi.fn();
+  return {
+    focus,
+    findFromDOM: vi.fn(() => ({ focus })),
+  };
+});
+
+vi.mock("@codemirror/view", () => ({
+  EditorView: { findFromDOM: focusMocks.findFromDOM },
+}));
 
 vi.mock("@/composables/useSqlHighlighter", () => ({
   useSqlHighlighter: () => ({ highlight }),
@@ -20,7 +31,7 @@ vi.mock("@/lib/common/clipboard", () => ({
 
 const mountedApps: App[] = [];
 
-async function mountDialog(sql: string) {
+async function mountDialog(sql: string, extraProps: Record<string, unknown> = {}, listeners: Record<string, (...args: any[]) => void> = {}) {
   const state = reactive({ open: true });
   const container = document.createElement("div");
   document.body.append(container);
@@ -30,6 +41,8 @@ async function mountDialog(sql: string) {
         h(DangerConfirmDialog, {
           open: state.open,
           sql,
+          ...extraProps,
+          ...listeners,
           "onUpdate:open": (value: boolean) => {
             state.open = value;
           },
@@ -48,6 +61,8 @@ afterEach(() => {
   document.body.innerHTML = "";
   highlight.mockClear();
   vi.mocked(copyToClipboard).mockClear();
+  focusMocks.findFromDOM.mockClear();
+  focusMocks.focus.mockClear();
 });
 
 describe("DangerConfirmDialog SQL preview", () => {
@@ -104,5 +119,73 @@ describe("DangerConfirmDialog SQL preview", () => {
     await nextTick();
 
     expect(copyToClipboard).toHaveBeenCalledWith(sql);
+  });
+
+  it("restores a previously focused CodeMirror editor through EditorView on close", async () => {
+    const editorRoot = document.createElement("div");
+    editorRoot.className = "cm-editor";
+    const editorContent = document.createElement("div");
+    editorContent.className = "cm-content";
+    editorContent.tabIndex = 0;
+    editorRoot.append(editorContent);
+    document.body.append(editorRoot);
+    editorContent.focus();
+
+    await mountDialog("DROP TABLE users;");
+    const cancelButton = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Cancel");
+    cancelButton?.click();
+
+    await vi.waitFor(() => {
+      expect(focusMocks.findFromDOM).toHaveBeenCalledWith(editorRoot);
+    });
+    expect(focusMocks.focus).toHaveBeenCalledOnce();
+  });
+});
+
+describe("DangerConfirmDialog running/cancel footer state", () => {
+  function footerButtons() {
+    const footer = document.body.querySelectorAll("button");
+    return Array.from(footer);
+  }
+
+  it("keeps the default Cancel button unchanged when cancelable is not set (existing callers)", async () => {
+    await mountDialog("DROP TABLE users;", { loading: true });
+
+    const buttons = footerButtons();
+    const cancelButton = buttons.find((button) => button.textContent?.trim() === "Cancel");
+    expect(cancelButton).toBeDefined();
+    expect(cancelButton?.disabled).toBe(true);
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel Query")).toBe(false);
+  });
+
+  it("shows an active Cancel Query button while loading when cancelable is true", async () => {
+    const onCancelRunning = vi.fn();
+    await mountDialog("DELETE FROM big_orders;", { loading: true, cancelable: true }, { onCancelRunning });
+
+    const buttons = footerButtons();
+    const cancelRunningButton = buttons.find((button) => button.textContent?.trim() === "Cancel Query");
+    expect(cancelRunningButton).toBeDefined();
+    expect(cancelRunningButton?.disabled).toBe(false);
+
+    cancelRunningButton?.click();
+    await nextTick();
+
+    expect(onCancelRunning).toHaveBeenCalledOnce();
+  });
+
+  it("disables the Cancel Query button while the cancel itself is in flight", async () => {
+    await mountDialog("DELETE FROM big_orders;", { loading: true, cancelable: true, cancelRunningLoading: true });
+
+    const buttons = footerButtons();
+    const cancelRunningButton = buttons.find((button) => button.textContent?.trim() === "Cancel Query");
+    expect(cancelRunningButton?.disabled).toBe(true);
+  });
+
+  it("does not show the Cancel Query button when cancelable is true but not loading", async () => {
+    await mountDialog("DELETE FROM big_orders;", { loading: false, cancelable: true });
+
+    const buttons = footerButtons();
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel Query")).toBe(false);
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel")).toBe(true);
   });
 });

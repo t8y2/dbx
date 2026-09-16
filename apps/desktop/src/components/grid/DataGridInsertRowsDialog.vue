@@ -16,7 +16,7 @@ const emit = defineEmits<{ insert: [count: number, position: GridInsertRowPositi
 
 const canUsePosition = computed(() => props.canPlaceAtSelection !== false);
 
-const rowCount = ref("1");
+const rowCount = ref<string | number>("1");
 const position = ref<GridInsertRowPosition>("below");
 
 watch(
@@ -36,8 +36,8 @@ watch(canUsePosition, (canUse) => {
   if (!canUse) position.value = "end";
 });
 
-function parseIntegerOrNull(raw: string): number | null {
-  const trimmed = raw.trim();
+function parseIntegerOrNull(raw: string | number): number | null {
+  const trimmed = String(raw).trim();
   if (!/^\d+$/.test(trimmed)) return null;
   const value = Number(trimmed);
   return Number.isInteger(value) && value >= 1 ? value : null;
@@ -50,7 +50,7 @@ const parsedCount = computed<number | null>(() => {
 });
 
 const inputInvalid = computed(() => {
-  const raw = rowCount.value.trim();
+  const raw = String(rowCount.value).trim();
   if (raw === "") return false;
   return parseIntegerOrNull(raw) === null;
 });

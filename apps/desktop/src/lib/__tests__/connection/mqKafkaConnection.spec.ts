@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, normalizeMqKafkaZooKeeperServers, resolveMqKafkaConnectionSource } from "@/lib/connection/mqKafkaConnection";
+import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget, normalizeMqKafkaZooKeeperServers, resolveMqKafkaConnectionSource } from "../../connection/mqKafkaConnection";
 
 describe("MQ Kafka connection", () => {
   it("keeps existing configurations on the Bootstrap source", () => {
@@ -72,5 +72,14 @@ describe("MQ Kafka connection", () => {
         securityProtocol: "SASL_SSL",
       }),
     ).toEqual({ host: "zk-1", port: 2281, ssl: false });
+
+    expect(
+      mqKafkaConnectionTarget({
+        connectionSource: "bootstrap",
+        bootstrapServers: "[fe80::1%12]:9092",
+        zookeeperServers: "",
+        securityProtocol: "",
+      }),
+    ).toEqual({ host: "fe80::1%12", port: 9092, ssl: false });
   });
 });

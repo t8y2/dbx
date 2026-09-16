@@ -1,4 +1,4 @@
-import { parseKafkaBootstrapServers, resolveKafkaSecurityProtocol } from "@/lib/connection/kafkaBootstrapServers";
+import { parseKafkaBootstrapServerAddress, parseKafkaBootstrapServers, resolveKafkaSecurityProtocol } from "@/lib/connection/kafkaBootstrapServers";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
 
 export type MqKafkaConnectionSource = "bootstrap" | "zookeeper";
@@ -72,12 +72,11 @@ export function mqKafkaConnectionTarget(input: MqKafkaConnectionInput): MqKafkaC
   }
 
   const parsed = parseKafkaBootstrapServers(input.bootstrapServers);
-  const first = parsed.bootstrapServers.split(",")[0];
-  const endpoint = new URL(`kafka://${first}`);
+  const first = parseKafkaBootstrapServerAddress(parsed.bootstrapServers.split(",")[0]);
   const securityProtocol = resolveKafkaSecurityProtocol(input.securityProtocol || "", parsed.inferredSecurityProtocol);
   return {
-    host: endpoint.hostname,
-    port: Number(endpoint.port),
+    host: first.host,
+    port: first.port,
     ssl: securityProtocol === "SSL" || securityProtocol === "SASL_SSL",
   };
 }

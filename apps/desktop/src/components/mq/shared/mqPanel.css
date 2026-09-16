@@ -1,3 +1,6 @@
+/* Shared MQ panel chrome + button system.
+ * Prefer .mq-btn-* in new code; .btn-* aliases keep existing panels consistent. */
+
 .mq-panel-toolbar {
   display: flex;
   justify-content: space-between;
@@ -51,9 +54,20 @@
   font-size: 12px;
 }
 
+/* ---- Buttons (canonical + legacy aliases) ---- */
+
 .mq-btn-primary,
 .mq-btn-secondary,
-.mq-btn-sm {
+.mq-btn-sm,
+.mq-btn-danger,
+.btn-primary,
+.btn-secondary,
+.btn-sm,
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 6px 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
@@ -61,35 +75,115 @@
   color: var(--color-text);
   cursor: pointer;
   font-size: 13px;
-  transition: all 0.2s;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    filter 0.15s ease;
 }
 
-.mq-btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: var(--color-primary-foreground);
-}
-
+/* MQ chrome stays on the page surface in light theme — avoid solid --color-primary
+ * fills (often near-black) that clash with toolbar/refresh and table action buttons. */
+.mq-btn-primary:hover:not(:disabled),
 .mq-btn-secondary:hover:not(:disabled),
-.mq-btn-sm:hover:not(:disabled) {
+.mq-btn-sm:hover:not(:disabled),
+.btn-primary:hover:not(:disabled),
+.btn-secondary:hover:not(:disabled),
+.btn-sm:hover:not(:disabled) {
   background: var(--color-hover);
 }
 
-.mq-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.05);
+.mq-btn-danger,
+.mq-btn-sm.mq-btn-danger,
+.mq-btn-sm.btn-danger,
+.btn-danger,
+.btn-sm.btn-danger,
+.btn-sm.danger {
+  color: var(--color-error);
+  border-color: var(--color-error);
+  background: var(--color-background);
+}
+
+.mq-btn-danger:hover:not(:disabled),
+.mq-btn-sm.mq-btn-danger:hover:not(:disabled),
+.mq-btn-sm.btn-danger:hover:not(:disabled),
+.btn-danger:hover:not(:disabled),
+.btn-sm.btn-danger:hover:not(:disabled),
+.btn-sm.danger:hover:not(:disabled) {
+  background: var(--color-error);
+  color: #fff;
+  filter: none;
+}
+
+.mq-btn-sm,
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .mq-btn-primary:disabled,
 .mq-btn-secondary:disabled,
-.mq-btn-sm:disabled {
+.mq-btn-sm:disabled,
+.mq-btn-danger:disabled,
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-sm:disabled,
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: none;
+}
+
+/* Icon buttons only — do not style .btn-icon on nested SVG/icons */
+.mq-btn-icon,
+button.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-background);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  flex-shrink: 0;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.mq-btn-icon:hover:not(:disabled),
+button.btn-icon:hover:not(:disabled) {
+  background: var(--color-background-secondary);
+  color: var(--color-text);
+}
+
+.mq-btn-icon:disabled,
+button.btn-icon:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.mq-btn-sm.btn-danger,
-.mq-btn-sm.mq-btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
+.mq-btn-close,
+.btn-close {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.mq-btn-close:hover,
+.btn-close:hover {
+  color: var(--color-text);
 }
 
 .mq-query-mode-tabs {
@@ -152,26 +246,6 @@
   border-color: var(--color-primary);
   color: var(--color-primary);
   background: var(--color-primary-alpha);
-}
-
-.mq-btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-6);
-  background: var(--color-background);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
-.mq-btn-icon:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .mq-spin {

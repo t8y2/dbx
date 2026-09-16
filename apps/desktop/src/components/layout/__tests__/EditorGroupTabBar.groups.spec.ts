@@ -1,0 +1,879 @@
+// @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import { createI18n } from "vue-i18n";
+import { createApp, nextTick, reactive } from "vue";
+import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import type { ConnectionConfig } from "@/types/database";
+
+vi.mock("@/components/ui/tooltip", () => ({
+  Tooltip: { name: "TooltipStub", template: `<div><slot /></div>` },
+  TooltipTrigger: { name: "TooltipTriggerStub", template: `<div><slot /></div>` },
+  TooltipContent: { name: "TooltipContentStub", template: `<div><slot /></div>` },
+}));
+
+vi.mock("@/components/ui/popover", () => ({
+  Popover: { name: "PopoverStub", props: ["open"], template: `<div v-if="open"><slot /></div>` },
+  PopoverContent: { name: "PopoverContentStub", template: `<div><slot /></div>` },
+  PopoverTrigger: { name: "PopoverTriggerStub", template: `<div><slot /></div>` },
+}));
+
+vi.mock("@/lib/plugins/pluginIconResolver", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/plugins/pluginIconResolver")>()),
+  resolvePluginIcon: vi.fn(() => Promise.resolve("assets/plugin.svg")),
+}));
+
+vi.mock("@/lib/backend/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/backend/api")>()),
+  readPluginAsset: vi.fn(() => Promise.resolve({ contentType: "image/svg+xml", dataBase64: "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=" })),
+}));
+
+const specDir = dirname(fileURLToPath(import.meta.url));
+const source = readFileSync(resolve(specDir, "../EditorGroupTabBar.vue"), "utf8");
+const sharedStyles = readFileSync(resolve(specDir, "../appTabBar.css"), "utf8");
+
+describe("EditorGroupTabBar semantic tab groups", () => {
+  it("keeps separate collapsed state for pinned and regular clusters under the same key", () => {
+    expect(source).toContain("const collapsedTabGroups = ref<Set<string>>(new Set());");
+    expect(source).toContain('return `${tab.pinned ? "fixed" : "regular"}:${settingsStore.editorSettings.tabGroupMode}:${tabGroupKey(tab)}`;');
+    expect(source).toContain("function toggleTabGroup(tab: QueryTab)");
+    expect(source).toContain(':aria-expanded="!isTabGroupCollapsed(entry.tab)"');
+  });
+
+  it("counts group entries in linear time instead of rescanning the section", () => {
+    const builder = sourceBetween("function buildStripEntries", "const pinnedStripEntries");
+    expect(builder).toContain("const groupKeys = grouping ? section.map(tabGroupKey) : [];");
+    expect(builder).toContain("const groupCounts = new Map<string, number>();");
+    expect(builder).toContain("groupCounts.get(groupKey!) ?? 0");
+    expect(builder).not.toContain("section.filter(");
+  });
+
+  it("computes the active group once instead of scanning every group", () => {
+    const activeGroup = sourceBetween("const activeTabGroupId", "function isTabGroupActive");
+    expect(activeGroup).toContain("const activeTab = props.tabs.find((item) => isTabActive(item));");
+    expect(source).toContain("return activeTabGroupId.value === tabGroupId(tab);");
+  });
+
+  it("expands a collapsed group when one of its tabs becomes active", () => {
+    expect(source).toContain("expandTabGroupForTab(tabId);");
+  });
+
+  it("supports persistent names and colors from the group header context menu", () => {
+    expect(source).toContain('["#2563eb", "#d97706", "#7c3aed", "#059669", "#dc2626", "#0891b2", "#db2777", "#475569"]');
+    expect(source).toContain("tabGroupCustomizations: customizations");
+    expect(source).toContain("data-tab-group-name-input");
+    expect(source).toContain('type="color"');
+  });
+
+  it("keeps placement, grouping, and sorting out of the group context menu", () => {
+    const groupMenu = sourceBetween("function getTabGroupMenuItems", "function openTabGroupContextMenu");
+    expect(groupMenu).not.toContain("getTabPreferenceMenuItems");
+  });
+
+  it("exposes preferences and the group close from each tab context menu", () => {
+    const menuStart = source.indexOf("function getTabMenuItems");
+    const menuEnd = source.indexOf("function handleTabDoubleClick");
+    expect(menuStart).toBeGreaterThanOrEqual(0);
+    expect(menuEnd).toBeGreaterThan(menuStart);
+    const menu = source.slice(menuStart, menuEnd);
+    expect(menu).not.toContain("getTabPreferenceMenuItems");
+    expect(menu).toContain("action: () => closeTabGroup(tab)");
+    expect(menu).toContain('visible: settingsStore.editorSettings.tabGroupMode !== "none"');
+  });
+
+  it("closes the global semantic group by key, not just this pane's cluster", () => {
+    // D1 (amended): closing a cluster is destructive and stays bar-local —
+    // scoped to this pane's tabs (props.tabs), still within the trigger's
+    // pinned section. Profile edits (rename/color/reset) keep global reach.
+    const closeGroup = sourceBetween("function tabsInSemanticGroup", "function getTabGroupMenuItems");
+    expect(closeGroup).toContain("props.tabs.filter((item) => item.pinned === tab.pinned && tabGroupKey(item) === groupKey)");
+    expect(closeGroup).toContain("queryStore.closeTabsByIds(tabsToClose, finalActiveTabId)");
+  });
+
+  it("waits for tab preference persistence and treats the whole group title as the context target", () => {
+    expect(source).toContain("await settingsStore.updateEditorSettingsAndPersist(partial)");
+    expect(source).toContain("openTabGroupContextMenu($event, onContextMenu)");
+    expect(source).toContain("document.getSelection()?.removeAllRanges()");
+  });
+
+  it("applies the group rail classes to clustered pills", () => {
+    // Grouped pills carry tab-group-tab for the entry underline and the
+    // vertical rail, with first/last markers available for side layouts.
+    expect(source).toContain("'tab-group-tab': entry.grouping,");
+    expect(source).toContain("'tab-group-tab--first': entry.grouping && entry.groupFirst,");
+    expect(source).toContain("'tab-group-tab--last': entry.grouping && entry.groupLast,");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-tab::after\s*\{[^}]*bottom:\s*-0\.5px;/s);
+    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after");
+    expect(sharedStyles).toMatch(/\.tab-group-tab\[data-active-tab="true"\]::after,[\s\S]*?\.tab-group-entry:has\(\.tab-group-tab\[data-active-tab="true"\]\)::after\s*\{[^}]*z-index:\s*2;[^}]*var\(--foreground\) 72%/s);
+  });
+
+  it("hides collapsed cluster pills but reveals them while searching", () => {
+    expect(source).toContain("grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab)");
+    expect(sharedStyles).toContain(".tab-group-entry--collapsed");
+  });
+
+  it("remeasures overflow after a single-row group expansion finishes", () => {
+    expect(source).toContain('@transitionend.self="handleTabGroupTransitionEnd"');
+    expect(source).toContain(':data-tab-group-id="entry.grouping ? tabGroupId(entry.tab) : undefined"');
+    expect(source).toContain("captureExpandedTabGroupWidths(new Set(pending))");
+    expect(source).toContain("'tab-group-entry--collapsing'");
+    expect(source).toContain("window.setTimeout(() =>");
+    expect(sharedStyles).toContain("@keyframes tab-group-collapse");
+    expect(sharedStyles).toMatch(/\.tab-group-entry--collapsing\s*\{[^}]*animation:\s*tab-group-collapse 140ms ease forwards;/s);
+    expect(source).toContain('entry.style.removeProperty("--tab-group-entry-expanded-width")');
+    expect(sharedStyles).toContain("max-width: var(--tab-group-entry-expanded-width, 100%)");
+    expect(sharedStyles).toMatch(/\.tab-group-entry\[data-tab-group-id\] > \.tab-group-tab\s*\{[^}]*width:\s*var\(--tab-group-entry-expanded-width, auto\);[^}]*min-width:\s*var\(--tab-group-entry-expanded-width, max-content\) !important;[^}]*flex:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*min-width:\s*0;/s);
+    const handler = sourceBetween("function handleTabGroupTransitionEnd", "function toggleTabGroup");
+    expect(handler).toContain('event.propertyName !== "max-width"');
+    expect(handler).toContain("refreshHorizontalTabOverflow();");
+    expect(source).toContain('return "tab-tail-overflow-spacer flex-none self-stretch";');
+    expect(sharedStyles).toContain(".tab-tail-overflow-spacer[data-tauri-drag-region]");
+  });
+
+  it("keeps the overflow search scoped to the popover list without filtering the strip", () => {
+    // Regression: the popover's "search opened tabs" box shared the strip's
+    // query, so typing a term with no match emptied the top tab bar while the
+    // active tab's content stayed on screen.
+    const overflowFilter = sourceBetween("const filteredGroupTabs", "watch(tabOverflowOpen");
+    expect(overflowFilter).toContain("tabOverflowSearchQuery.value.trim()");
+    expect(overflowFilter).not.toContain("tabSearchQuery");
+    const overflowOpenWatch = sourceBetween("watch(tabOverflowOpen", "const showOverflowControl");
+    expect(overflowOpenWatch).toContain('tabOverflowSearchQuery.value = "";');
+    const stripFilter = sourceBetween("const filteredPinnedTabs", "function buildStripEntries");
+    expect(stripFilter).toContain("tabSearchQuery.value.trim()");
+    expect(stripFilter).not.toContain("tabOverflowSearchQuery");
+    expect(source).toContain('<Input v-model="tabOverflowSearchQuery" data-group-tab-search-input');
+  });
+
+  it("keeps wrap layout out of the vertical placement", () => {
+    expect(source).toContain('const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");');
+  });
+
+  it("uses compact group pills and places the accent next to content for horizontal bars", () => {
+    expect(source).toContain('isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout"');
+    expect(source).toContain(':data-placement="settingsStore.editorSettings.tabPlacement"');
+    expect(source).toContain(':data-group-mode="settingsStore.editorSettings.tabGroupMode"');
+    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-group-mode="none"\] \.app-tab-pill\s*\{[^}]*border-right-width:\s*0\.5px;/s);
+    expect(sharedStyles).toMatch(
+      /\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="top"\]\[data-group-mode="none"\] \.app-tab-pill\[data-active-tab="true"\]\s*\{[^}]*border-top-color:\s*transparent;[^}]*border-right-color:\s*transparent;[^}]*border-left-color:\s*transparent;/s,
+    );
+    expect(sharedStyles).toMatch(/\.tab-overflow-control\s*\{[^}]*width:\s*34px;[^}]*flex:\s*0 0 34px;/s);
+    expect(sharedStyles).toContain("padding-inline-end: 2.125rem;");
+    expect(sharedStyles).toContain("inset-inline-end: 2.125rem;");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\)\[data-placement="top"\] \.tab-overflow-control::before\s*\{[^}]*inset-inline:\s*-0\.25rem 0;[^}]*background:\s*transparent;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header,[\s\S]*?\.tab-group-header-content\s*\{[^}]*height:\s*2rem !important;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header:not\(\.tab-group-header--collapsed\)::after\s*\{[^}]*right:\s*-1px;/s);
+    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\) \.tab-group-header::after\s*\{[^}]*bottom:\s*0;/s);
+    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\) \.tab-group-tab::after\s*\{[^}]*bottom:\s*-0\.5px;[^}]*background:\s*var\(--tab-group-color\);/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;[^}]*bottom:\s*auto;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;/s);
+    expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
+    expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
+    expect(sharedStyles).toContain("row-gap: 0.375rem;");
+    expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)");
+    expect(sharedStyles).toContain('[data-group-mode="none"] .tab-section--horizontal');
+    expect(sharedStyles).toContain("column-gap: 4px;");
+    expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout.horizontal-fixed-tabs .app-tab-scroll:not(.wrap-mode)");
+    expect(sharedStyles).toContain(".horizontal-fixed-tabs-scroll.wrap-mode");
+    expect(sharedStyles).toContain("row-gap: 0.375rem !important;");
+    expect(sharedStyles).toMatch(/\.horizontal-fixed-tabs-scroll\.wrap-mode\.classic-wrap\s*\{[^}]*row-gap:\s*0\.25rem !important;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*height:\s*100%;[^}]*max-height:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\) \.tab-group-entry:has\(\.tab-group-tab\)::after\s*\{[^}]*bottom:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="top"\] \.app-tab-pill\s*\{[^}]*border-top-width:\s*0;/s);
+    expect(sharedStyles).toContain("scroll-margin-inline-end: 1px;");
+  });
+
+  function sourceBetween(start: string, end: string): string {
+    const startIndex = source.indexOf(start);
+    const endIndex = source.indexOf(end, startIndex + start.length);
+    expect(startIndex).toBeGreaterThanOrEqual(0);
+    expect(endIndex).toBeGreaterThan(startIndex);
+    return source.slice(startIndex, endIndex);
+  }
+});
+
+describe("EditorGroupTabBar vertical placement", () => {
+  const groupSource = readFileSync(resolve(specDir, "../EditorGroup.vue"), "utf8");
+  const workspaceSource = readFileSync(resolve(specDir, "../SqlEditorWorkspace.vue"), "utf8");
+  const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../App.vue"), "utf8");
+
+  it("renders each pane's own bar as a vertical strip when placement is left/right", () => {
+    expect(source).toContain('const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");');
+    expect(source).toContain('isVerticalLayout.value && props.tabBarCollapsed ? "vertical-tab-layout--collapsed" : ""');
+    // The strip flips to a column with vertical scrolling; no horizontal strip remains.
+    expect(source).toContain("isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1'");
+  });
+
+  it("keeps vertical rows fixed and aligns the sidebar toolbar with content headers", () => {
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout\s*\{[^}]*--tab-group-root-rail-x:\s*1\.16rem;[^}]*--tab-group-tab-inset:\s*1\.8rem;[^}]*--tab-group-branch-width:\s*0\.5rem;/s);
+    expect(sharedStyles).toContain("width: calc(100% - var(--tab-group-tab-inset) - 0.25rem);");
+    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.25rem;");
+    expect(sharedStyles).toContain("padding-inline: 0.2rem 0.25rem !important;");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*flex:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-scroll\s*\{[^}]*overflow-x:\s*hidden;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-pill\s*\{[^}]*border-radius:\s*var\(--dbx-radius-md\);/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*max-height:\s*2rem;/s);
+    expect(sharedStyles).toContain("max-height 140ms ease,");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry--collapsed\s*\{[^}]*max-height:\s*0;[^}]*opacity:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout--collapsed \.tab-group-entry\s*\{[^}]*max-height:\s*2\.5rem;[^}]*overflow:\s*visible;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout--collapsed \.tab-group-entry--collapsed\s*\{[^}]*max-height:\s*0;[^}]*overflow:\s*hidden;/s);
+    expect(source).toContain("if (isWrapLayout.value || isVerticalLayout.value) return;");
+    expect(source).toContain("if (isWrapLayout.value) {");
+    expect(source).toContain('inline: isVerticalLayout.value ? "nearest" : "center"');
+    expect(source).toContain('class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1"');
+    expect(source).toContain('class="h-7 w-full pl-7 text-sm"');
+  });
+
+  it("positions each pane's bar by the global placement without mixing directions", () => {
+    expect(groupSource).toContain('case "bottom":');
+    expect(groupSource).toContain('return "flex-col-reverse";');
+    expect(groupSource).toContain('case "left":');
+    expect(groupSource).toContain('return "flex-row";');
+    expect(groupSource).toContain('case "right":');
+    expect(groupSource).toContain('return "flex-row-reverse";');
+    // The editor toolbar stays atop the pane's content column in every placement.
+    expect(groupSource).toContain('class="flex min-h-0 min-w-0 flex-1 flex-col"');
+  });
+
+  it("shares the vertical width/collapse state from App through the pane chain", () => {
+    expect(appSource).toContain(':tab-bar-width="tabBarWidth"');
+    expect(appSource).toContain(':tab-bar-collapsed="tabBarCollapsed"');
+    expect(appSource).toContain('@start-resize="startTabBarResize"');
+    expect(appSource).toContain('@toggle-collapse="toggleTabBarCollapsed"');
+    expect(workspaceSource).toContain(':tab-bar-width="tabBarWidth"');
+    expect(workspaceSource).toContain("@start-resize=\"emit('start-resize', $event)\"");
+    expect(groupSource).toContain(':tab-bar-width="tabBarWidth"');
+    // Dragging any pane's handle drives the shared resize handler.
+    expect(source).toContain("@pointerdown=\"emit('start-resize', $event)\"");
+    expect(source).toContain("@click=\"emit('toggle-collapse')\"");
+  });
+
+  it("keeps horizontal placements immune to the persisted collapse state", () => {
+    expect(source).toContain("const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);");
+    expect(source).toContain("if (!isVerticalLayout.value) return undefined;");
+  });
+
+  it("uses the sidebar rail and soft active shadow for vertical pills", () => {
+    expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-tab::before");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-tab::before\s*\{[^}]*top:\s*-0\.25rem;[^}]*bottom:\s*-0\.25rem;/s);
+    expect(sharedStyles).toContain('.vertical-tab-layout .app-tab-pill[data-active-tab="true"]');
+    expect(sharedStyles).toContain("inset 0 0 0 1px color-mix");
+    expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed)::after");
+    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.25rem;");
+  });
+});
+
+function createHost(): HTMLDivElement {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  return host;
+}
+
+async function settle() {
+  await nextTick();
+  await nextTick();
+}
+
+function mountBar(groupId: string, tabs: ReturnType<ReturnType<typeof useQueryStore>["tabs"]>[number][], activeTabId: string | null, activePinia: ReturnType<typeof createPinia>, extraProps: Record<string, unknown> = {}) {
+  const host = createHost();
+  const app = createApp(EditorGroupTabBar, {
+    groupId,
+    tabs,
+    activeTabId,
+    ...extraProps,
+  });
+  app.use(activePinia);
+  app.use(
+    createI18n({
+      legacy: false,
+      locale: "en",
+      messages: {
+        en: {
+          contextMenu: {
+            renameTab: "Rename",
+            duplicateTab: "Duplicate",
+            copyName: "Copy name",
+            closeTab: "Close",
+            closeOtherTabs: "Close other tabs",
+            closeLeftTabs: "Close left tabs",
+            closeRightTabs: "Close right tabs",
+            closeAllTabs: "Close all tabs",
+            closeTabGroup: "Close group",
+            editTabGroup: "Edit group",
+            resetTabGroup: "Reset group",
+            pinTab: "Pin",
+            unpinTab: "Unpin",
+            fullTabTitle: "Full title",
+            compactTabTitle: "Compact title",
+            splitRight: "Split right",
+            splitDown: "Split down",
+            changeOrientation: "Change orientation",
+            unsplit: "Unsplit",
+          },
+          sidebar: { locateActiveTab: "Locate" },
+          settings: {
+            tabPlacement: "Tab placement",
+            tabPlacementTop: "Top",
+            tabPlacementBottom: "Bottom",
+            tabPlacementLeft: "Left",
+            tabPlacementRight: "Right",
+            tabGroup: "Group tabs by",
+            tabGroupNone: "None",
+            tabGroupDatabaseType: "Database type",
+            tabGroupConnection: "Connection",
+            tabSort: "Sort tabs",
+            tabSortManual: "Manual",
+            tabSortCreated: "Created",
+            tabSortTitle: "Title",
+          },
+          tabs: {
+            openInNewWindow: "Open in new window",
+            settingsSaveFailed: "Save failed: {message}",
+            editGroupTitle: "Edit group {name}",
+            groupName: "Name",
+            groupColor: "Color",
+            groupColorAuto: "Auto",
+            groupColorCustom: "Custom",
+            resetGroup: "Reset",
+            openTabs: "Open tabs",
+            searchOpenTabs: "Search",
+            noMatchingTabs: "No matching tabs",
+          },
+          common: { cancel: "Cancel", save: "Save" },
+          toolbar: { formatSqlFailed: "Format failed" },
+          grid: { copyFailed: "Copy failed: {message}" },
+          connection: { copied: "Copied" },
+        },
+      },
+    }),
+  );
+  app.mount(host);
+  return { app, host };
+}
+
+describe("EditorGroupTabBar group behavior", () => {
+  let pinia: ReturnType<typeof createPinia>;
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    pinia = createPinia();
+    setActivePinia(pinia);
+  });
+
+  it.each((["none", "connection"] as const).flatMap((groupMode) => (["top", "bottom"] as const).flatMap((placement) => (["wrap", "scroll"] as const).map((tabLayout) => ({ groupMode, placement, tabLayout })))))(
+    "preserves classic $placement $tabLayout row heights with $groupMode grouping in both sections",
+    async ({ groupMode, placement, tabLayout }) => {
+      const store = useQueryStore();
+      const settings = useSettingsStore();
+      settings.editorSettings.appLayout = "classic";
+      settings.editorSettings.tabLayout = tabLayout;
+      settings.editorSettings.tabGroupMode = groupMode;
+      settings.editorSettings.tabPlacement = placement;
+      for (let index = 0; index < 8; index += 1) {
+        store.createTab("pg-1", "app", `Query ${index}`, "query");
+      }
+      store.tabs[0]!.pinned = true;
+      const { app, host } = mountBar(store.focusedGroupId, store.tabs.slice(), store.activeTabId, pinia);
+      const styles = document.createElement("style");
+      styles.textContent = `html { font-size: 16px; } .h-full { height: 100%; }\n${sharedStyles}`;
+      document.head.appendChild(styles);
+
+      try {
+        await settle();
+        expect(host.querySelectorAll(".tab-section--horizontal")).toHaveLength(2);
+        const entries = host.querySelectorAll<HTMLElement>(".tab-group-entry");
+        expect(entries).toHaveLength(8);
+        for (const entry of entries) {
+          const row = tabLayout === "wrap" && groupMode !== "none" ? entry.querySelector<HTMLElement>(".tab-group-tab")! : entry;
+          expect(getComputedStyle(row).height).toBe(tabLayout === "wrap" ? "32px" : "100%");
+        }
+      } finally {
+        app.unmount();
+        host.remove();
+        styles.remove();
+      }
+    },
+  );
+
+  it("renders one header per connection cluster and collapses it to a count badge", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const pgA = store.createTab("pg-1", "app", "PG 1", "query");
+    store.createTab("pg-1", "app", "PG 2", "query");
+    const my = store.createTab("mysql-1", "app", "MY 1", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgA, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    // Sorted by group key: mysql-1 clusters before pg-1.
+    expect(headers.map((header) => header.title)).toEqual(["mysql-1", "pg-1"]);
+    expect(host.querySelectorAll("[data-tab-id]").length).toBe(3);
+
+    // Collapse the pg cluster: its pills contract, the count badge appears.
+    headers[1]!.click();
+    await settle();
+    expect(host.querySelectorAll(".tab-group-entry--collapsed")).toHaveLength(2);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(3);
+    const pgHeader = host.querySelectorAll<HTMLButtonElement>(".tab-group-header")[1]!;
+    expect(pgHeader.querySelector(".tab-group-count")?.textContent).toBe("2");
+    expect(pgHeader.getAttribute("aria-expanded")).toBe("false");
+
+    // Expand again.
+    pgHeader.click();
+    await settle();
+    expect(host.querySelectorAll("[data-tab-id]").length).toBe(3);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("only reveals a right-edge group when expansion leaves every member offscreen", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabLayout = "scroll";
+    const mysql = store.createTab("mysql-1", "app", "MY 1", "query");
+    store.createTab("pg-1", "app", "PG 1", "query");
+    store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), mysql, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    const pgHeader = headers.find((header) => header.title === "pg-1")!;
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+
+    const container = host.querySelector<HTMLElement>(".app-tab-scroll")!;
+    container.getBoundingClientRect = () => ({ left: 0, right: 300 }) as DOMRect;
+    const pgEntries = Array.from(host.querySelectorAll<HTMLElement>('[data-tab-group-id="regular:connection:pg-1"]'));
+    const pgPills = pgEntries.map((entry) => entry.querySelector<HTMLElement>(".tab-group-tab")!);
+    pgPills.forEach((pill, index) => {
+      pill.getBoundingClientRect = () => ({ left: 320 + index * 100, right: 420 + index * 100 }) as DOMRect;
+    });
+    const scrollBy = vi.fn();
+    container.scrollBy = scrollBy;
+
+    const transitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(transitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(transitionEnd);
+
+    expect(scrollBy).toHaveBeenCalledWith({ left: 124, behavior: "smooth" });
+
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+    pgPills[0]!.getBoundingClientRect = () => ({ left: 250, right: 350 }) as DOMRect;
+    const partialScrollBy = vi.fn();
+    container.scrollBy = partialScrollBy;
+    const visibleTransitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(visibleTransitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(visibleTransitionEnd);
+
+    expect(partialScrollBy).toHaveBeenCalledWith({ left: 54, behavior: "smooth" });
+
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+    pgPills[0]!.getBoundingClientRect = () => ({ left: 100, right: 200 }) as DOMRect;
+    const fullyVisibleScrollBy = vi.fn();
+    container.scrollBy = fullyVisibleScrollBy;
+    const fullyVisibleTransitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(fullyVisibleTransitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(fullyVisibleTransitionEnd);
+
+    expect(fullyVisibleScrollBy).not.toHaveBeenCalled();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("groups by database identity, disambiguating same-name databases across connections", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "database";
+    const pgApp = store.createTab("pg-1", "app", "PG app", "query");
+    store.createTab("mysql-1", "app", "MY app", "query");
+    const pgConn = store.createTab("pg-1", "", "PG conn", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgApp, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    // Sorted by group key: the same-name "app" databases stay separate clusters
+    // disambiguated by connection label, and the database-less tab clusters by connection.
+    expect(headers.map((header) => header.title)).toEqual(["app · mysql-1", "pg-1", "app · pg-1"]);
+    expect(host.querySelectorAll("[data-tab-id]").length).toBe(3);
+
+    // Collapsing one "app" cluster leaves the other same-name cluster expanded.
+    headers[0]!.click();
+    await settle();
+    expect(host.querySelectorAll(".tab-group-entry--collapsed")).toHaveLength(1);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(3);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps Redis logical databases in one database group", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "redis-1", name: "Redis Cache", db_type: "redis", driver_profile: "redis", host: "127.0.0.1", port: 6379, color: "" } as ConnectionConfig];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "database";
+    const db0 = store.createTab("redis-1", "0", "Redis 0", "redis");
+    const db1 = store.createTab("redis-1", "1", "Redis 1", "redis");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), db0, pinia);
+    await settle();
+
+    // db0 and db1 are logical databases of one connection, so a single header
+    // labeled by the connection owns both pills instead of one cluster per db.
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    expect(headers.map((header) => header.title)).toEqual(["Redis Cache"]);
+    const groupIds = new Set(Array.from(host.querySelectorAll("[data-tab-group-id]"), (entry) => entry.getAttribute("data-tab-group-id")));
+    expect(groupIds.size).toBe(1);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(2);
+    expect(host.querySelector(`[data-tab-id="${db0}"]`)?.textContent).toContain("db0");
+    expect(host.querySelector(`[data-tab-id="${db1}"]`)?.textContent).toContain("db1");
+
+    // Collapsing the cluster folds both logical databases into one count badge.
+    headers[0]!.click();
+    await settle();
+    expect(host.querySelector(".tab-group-count")?.textContent).toBe("2");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("sizes the header chevron and rotates it only while the cluster is collapsed", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const tabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), tabId, pinia);
+    const styles = document.createElement("style");
+    styles.textContent = `html { font-size: 16px; }\n${sharedStyles}`;
+    document.head.appendChild(styles);
+
+    try {
+      await settle();
+      const header = host.querySelector<HTMLButtonElement>(".tab-group-header")!;
+      // Group headers consistently expose the placement marker.
+      expect(header.querySelector(".tab-group-database-icon")).not.toBeNull();
+      expect(header.querySelector(".tab-group-marker")).not.toBeNull();
+      const chevron = header.querySelector<HTMLElement>(".tab-group-chevron")!;
+      expect(getComputedStyle(chevron).width).toBe("14px");
+      expect(getComputedStyle(chevron).height).toBe("14px");
+      expect(getComputedStyle(chevron).transition).toContain("transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)");
+      expect(getComputedStyle(chevron).transform).toBe("rotate(0deg)");
+
+      header.click();
+      await settle();
+      expect(chevron.classList.contains("tab-group-chevron--collapsed")).toBe(true);
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+      expect(getComputedStyle(chevron).transform).toBe("rotate(-90deg)");
+
+      header.click();
+      await settle();
+      expect(chevron.classList.contains("tab-group-chevron--collapsed")).toBe(false);
+      expect(getComputedStyle(chevron).transform).toBe("rotate(0deg)");
+
+      // The rail marker appears only under a vertical placement.
+      settings.editorSettings.tabPlacement = "left";
+      await settle();
+      expect(host.querySelector(".tab-group-header .tab-group-marker")).not.toBeNull();
+    } finally {
+      app.unmount();
+      host.remove();
+      styles.remove();
+    }
+  });
+
+  it("exposes the drag-back hit-test anchor and highlights itself as the detached drop target", async () => {
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), tabId, pinia, { detachedDropTarget: true });
+    await settle();
+
+    const bar = host.querySelector<HTMLElement>(".app-tab-bar");
+    // Dropping a detached window over any pane's strip returns the tab, so
+    // every strip must carry the hit-test anchor App unions rects over.
+    expect(bar?.hasAttribute("data-main-tab-bar")).toBe(true);
+    expect(bar?.classList.contains("ring-2")).toBe(true);
+    expect(bar?.classList.contains("ring-inset")).toBe(true);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("closing a group stays within the invoking pane, sparing the same-key cluster elsewhere", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const pgA = store.createTab("pg-1", "app", "PG 1", "query");
+    const pgB = store.createTab("pg-1", "app", "PG 2", "query");
+    const my = store.createTab("mysql-1", "app", "MY 1", "query");
+    const mainGroup = store.groups[0];
+    store.groups = [mainGroup, { id: "second-group", tabIds: [], activeTabId: null }];
+    store.moveTabToGroup(pgB, "second-group");
+    const mountedTabs = store.tabs.filter((tab) => tab.id === pgA || tab.id === my);
+    const { app, host } = mountBar(mainGroup.id, mountedTabs, pgA, pinia);
+    await settle();
+
+    // The pg cluster spans main (pgA) and second-group (pgB). Closing the
+    // group from THIS pane's menu is bar-local: main loses its pg cluster,
+    // while the same-key cluster in second-group survives untouched.
+    const pgPill = host.querySelector<HTMLElement>(`[data-tab-id="${pgA}"]`)!;
+    expect(pgPill).not.toBeNull();
+    pgPill.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    expect(menu).not.toBeNull();
+    const closeGroupItem = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Close group"));
+    expect(closeGroupItem).toBeDefined();
+    closeGroupItem!.click();
+    await settle();
+
+    const remainingIds = store.tabs.map((tab) => tab.id);
+    expect(remainingIds).not.toContain(pgA);
+    expect(remainingIds).toEqual(expect.arrayContaining([pgB, my]));
+    // second-group keeps its tab, so it is not pruned either.
+    expect(store.groups.map((group) => group.id)).toEqual(expect.arrayContaining(["second-group"]));
+    expect(store.groups.find((group) => group.id === "second-group")?.tabIds).toEqual([pgB]);
+    expect(store.groups.find((group) => group.id === mainGroup.id)?.tabIds).toEqual([my]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("closing a group spares the pinned cluster that shares its key", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const pgA = store.createTab("pg-1", "app", "PG 1", "query");
+    const pgB = store.createTab("pg-1", "app", "PG 2", "query");
+    store.togglePinnedTab(pgB);
+    const mainGroup = store.groups[0];
+    const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgA, pinia);
+    await settle();
+
+    const pgPill = host.querySelector<HTMLElement>(`[data-tab-id="${pgA}"]`)!;
+    pgPill.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const closeGroupItem = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Close group"));
+    expect(closeGroupItem).toBeDefined();
+    closeGroupItem!.click();
+    await settle();
+
+    // The regular cluster is gone; the pinned tab with the same key survives.
+    const remainingIds = store.tabs.map((tab) => tab.id);
+    expect(remainingIds).toEqual([pgB]);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("offers the detach entry only for query and data tabs and emits the tab upward", async () => {
+    const store = useQueryStore();
+    const queryId = store.createTab("pg-1", "app", "PG 1", "query");
+    const mongoId = store.createTab("mongo-1", "app", "MG 1", "mongo");
+    const mainGroup = store.groups[0];
+    const detached: string[] = [];
+    const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), queryId, pinia, { canDetachTabs: true, "onDetach-tab": (tab: { id: string }) => detached.push(tab.id) });
+    await settle();
+
+    const openMenu = async (tabId: string) => {
+      host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      await settle();
+      const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+      return Array.from(menu.querySelectorAll<HTMLButtonElement>("button"));
+    };
+
+    // Query tab: the entry exists and routes the whole tab object upward.
+    const queryItems = await openMenu(queryId);
+    const detachItem = queryItems.find((button) => button.textContent?.includes("Open in new window"));
+    expect(detachItem).toBeDefined();
+    detachItem!.click();
+    await settle();
+    expect(detached).toEqual([queryId]);
+
+    // Non-query/data tab: the entry is not rendered at all.
+    const mongoItems = await openMenu(mongoId);
+    expect(mongoItems.find((button) => button.textContent?.includes("Open in new window"))).toBeUndefined();
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("renders plugin workbench tabs with the plugin icon instead of the code fallback", async () => {
+    const store = useQueryStore();
+    const pluginTabId = store.openPluginWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench", { title: "SSH server", connectionId: "ssh-1", forceNew: true });
+    const { app, host } = mountBar(store.groups[0].id, store.tabs.slice(), pluginTabId, pinia);
+    await settle();
+    // PluginIcon loads the asset asynchronously; wait for the blob <img> to appear.
+    for (let i = 0; i < 20 && !host.querySelector(`[data-tab-id="${pluginTabId}"] img`); i += 1) {
+      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 5));
+    }
+
+    const pill = host.querySelector<HTMLElement>(`[data-tab-id="${pluginTabId}"]`);
+    expect(pill).toBeTruthy();
+    expect(pill!.querySelector("img")).toBeTruthy();
+    // The pill and the overflow popup list both render via TabModeIcon, whose
+    // per-mode chain must keep the plugin-workbench plugin icon branch.
+    const tabModeIconSource = readFileSync(resolve(specDir, "../TabModeIcon.vue"), "utf8");
+    expect(tabModeIconSource).toContain("tab.mode === 'plugin-workbench' && tab.pluginWorkbench");
+    expect(tabModeIconSource).toContain(':contribution-id="tab.pluginWorkbench.contributionId"');
+    expect(source).toContain('<TabModeIcon :tab="entry.tab"');
+
+    app.unmount();
+    host.remove();
+  });
+});
+
+describe("EditorGroupTabBar special page navigation", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    setActivePinia(createPinia());
+  });
+
+  function mountSpecialBar(extraProps: Record<string, unknown> = {}) {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const tabId = store.createTab("pg-1", "app", "Query", "query");
+    const specialPageTabs = reactive({ settingsOpen: true, settingsActive: true, driverStoreOpen: true, driverStoreActive: false, driverUpdateCount: 105 });
+    const events: string[] = [];
+    const mounted = mountBar(store.focusedGroupId, store.tabs.slice(), tabId, pinia, {
+      specialPageTabs,
+      "onActivate-settings": () => events.push("activate-settings"),
+      "onActivate-driver-store": () => events.push("activate-driver-store"),
+      "onClose-settings": () => events.push("close-settings"),
+      "onClose-driver-store": () => events.push("close-driver-store"),
+      ...extraProps,
+    });
+    return { ...mounted, store, settings, tabId, specialPageTabs, events };
+  }
+
+  it.each(["classic", "separated"] as const)("keeps grouped tabs and both special pages at every placement in %s layout", async (layout) => {
+    const { app, host, settings, store, tabId } = mountSpecialBar();
+    settings.editorSettings.appLayout = layout;
+    for (const placement of ["top", "bottom", "left", "right"] as const) {
+      settings.editorSettings.tabPlacement = placement;
+      await settle();
+      expect(host.querySelectorAll(".tab-group-header")).toHaveLength(1);
+      expect(host.querySelectorAll("[data-settings-page-tab]")).toHaveLength(1);
+      expect(host.querySelectorAll("[data-driver-store-tab]")).toHaveLength(1);
+      expect(host.querySelector(`[data-tab-id="${tabId}"]`)?.getAttribute("data-active-tab")).toBe("false");
+      expect(host.querySelector(".tab-group-header--active")).toBeNull();
+      expect(store.activeTabId).toBe(tabId);
+      const vertical = placement === "left" || placement === "right";
+      expect(host.querySelector(".app-tab-bar")?.classList.contains("vertical-tab-layout")).toBe(vertical);
+      const special = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
+      expect(special.classList.contains("h-8")).toBe(vertical);
+      expect(special.style.boxShadow).toBe(vertical ? "" : layout === "classic" ? "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)" : "");
+    }
+    app.unmount();
+    host.remove();
+  });
+
+  it.each(["left", "right"] as const)("keeps collapsed %s special tabs accessible and closable without labels or badges", async (placement) => {
+    const { app, host, settings, events } = mountSpecialBar({ tabBarCollapsed: true });
+    settings.editorSettings.tabPlacement = placement;
+    await settle();
+    for (const [selector, action] of [
+      ["[data-settings-page-tab]", "settings"],
+      ["[data-driver-store-tab]", "driver-store"],
+    ]) {
+      const tab = host.querySelector<HTMLElement>(selector!)!;
+      expect(tab.getAttribute("aria-label")).toBe(tab.title);
+      expect(tab.getAttribute("tabindex")).toBe("0");
+      expect(tab.textContent?.trim()).toBe("");
+      expect(tab.querySelector("button")).toBeNull();
+      tab.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      tab.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+      tab.dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }));
+      expect(events).toEqual(expect.arrayContaining([`activate-${action}`, `close-${action}`]));
+      expect(events.filter((event) => event === `activate-${action}`)).toHaveLength(2);
+    }
+    app.unmount();
+    host.remove();
+  });
+
+  it.each(["classic", "separated"] as const)("lets side-tab wrappers size to their rows while preserving the %s horizontal layout", async (layout) => {
+    const { app, host, settings, tabId } = mountSpecialBar();
+    settings.editorSettings.appLayout = layout;
+    for (const placement of ["top", "left", "bottom", "right", "top"] as const) {
+      settings.editorSettings.tabPlacement = placement;
+      await settle();
+      const tab = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+      const wrapper = tab.closest<HTMLElement>(".app-tab-scroll > div")!;
+      expect(wrapper).not.toBeNull();
+      expect(wrapper).not.toBe(tab);
+      const horizontal = placement === "top" || placement === "bottom";
+      expect(wrapper.classList.contains("h-full")).toBe(layout === "classic" && horizontal);
+    }
+    app.unmount();
+    host.remove();
+  });
+
+  it("restores normal activation without resetting a collapsed semantic group", async () => {
+    const { app, host, specialPageTabs, tabId, store } = mountSpecialBar();
+    await settle();
+    const header = host.querySelector<HTMLButtonElement>(".tab-group-header")!;
+    header.click();
+    await settle();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    specialPageTabs.settingsActive = false;
+    await settle();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(store.activeTabId).toBe(tabId);
+    header.click();
+    await settle();
+    expect(host.querySelector(`[data-tab-id="${tabId}"]`)?.getAttribute("data-active-tab")).toBe("true");
+    expect(host.querySelector(".tab-group-header--active")).not.toBeNull();
+    app.unmount();
+    host.remove();
+  });
+
+  it("preserves special-tab context menu close scope and prevents close-button activation", async () => {
+    const { app, host, events, store, tabId } = mountSpecialBar();
+    await settle();
+    const tab = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
+    tab.querySelector<HTMLButtonElement>("button")!.click();
+    expect(events).toEqual(["close-settings"]);
+    tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const closeOther = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Close other tabs"))!;
+    expect(closeOther).toBeDefined();
+    closeOther.click();
+    await settle();
+    expect(events).toEqual(["close-settings", "close-driver-store"]);
+    expect(store.tabs.map((item) => item.id)).toEqual([tabId]);
+    app.unmount();
+    host.remove();
+  });
+});

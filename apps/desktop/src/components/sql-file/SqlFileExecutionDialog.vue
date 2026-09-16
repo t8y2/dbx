@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -16,12 +16,14 @@ import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
-import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
-import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
+import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
+import { cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
-import { useExportTracker } from "@/composables/useExportTracker";
-import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { translateBackendError } from "@/i18n/backend-errors";
+import { Check, CheckSquare, ChevronRight, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -92,8 +94,24 @@ const executionId = ref("");
 const progress = ref<SqlFileProgress | null>(null);
 const terminalStatus = ref<SqlFileStatus | "idle">("idle");
 const terminalError = ref("");
+const activeExecutionTask = ref<ExportTask | null>(null);
+const failureDetailsExpanded = ref(false);
 const refreshedTarget = ref(false);
-const MAX_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
+const DEFAULT_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
+const webSqlFileUploadMaxBytes = ref(DEFAULT_WEB_SQL_FILE_BYTES);
+
+// The web server caps SQL file uploads via DBX_SQL_FILE_UPLOAD_MAX_MB; fetch the
+// effective limit once so the client-side pre-check matches the server rule.
+onMounted(async () => {
+  if (isDesktopRuntime) return;
+  try {
+    const { loadSqlFileUploadMaxBytes } = await import("@/lib/backend/http");
+    const value = await loadSqlFileUploadMaxBytes();
+    if (Number.isFinite(value) && value > 0) webSqlFileUploadMaxBytes.value = value;
+  } catch {
+    // Fall back to the built-in default; the server still rejects oversized uploads.
+  }
+});
 
 // Per-file results accumulated from backend file-boundary events during
 // multi-file execution.  Populated only when previews.length > 1.
@@ -113,13 +131,63 @@ function resetPerFileState() {
   currentFileName.value = "";
 }
 
-const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "mq", "nacos"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
+
+const restoreSelectedTables = ref(false);
+const backupTables = ref<SqlFileTable[]>([]);
+const selectedTableKeys = ref(new Set<string>());
+const tableSearch = ref("");
+const loadingTables = ref(false);
+const tableScanError = ref("");
+let tableScanGeneration = 0;
+const canSelectTables = computed(() => previews.value.length === 1 && supportsConnectionLevelDatabaseBootstrap(selectedConnection.value));
+const tableKey = (table: SqlFileTable) => JSON.stringify([table.database, table.name]);
+const tableLabel = (table: SqlFileTable) => (table.database ? `${table.database}.${table.name}` : table.name);
+const filteredBackupTables = computed(() => backupTables.value.filter((table) => tableLabel(table).toLocaleLowerCase().includes(tableSearch.value.trim().toLocaleLowerCase())));
+const selectedTables = computed(() => backupTables.value.filter((table) => selectedTableKeys.value.has(tableKey(table))));
+const allFilteredTablesSelected = computed(() => filteredBackupTables.value.length > 0 && filteredBackupTables.value.every((table) => selectedTableKeys.value.has(tableKey(table))));
+
+function toggleTable(table: SqlFileTable) {
+  const key = tableKey(table);
+  if (selectedTableKeys.value.has(key)) selectedTableKeys.value.delete(key);
+  else selectedTableKeys.value.add(key);
+}
+
+function toggleFilteredTables() {
+  const deselect = allFilteredTablesSelected.value;
+  for (const table of filteredBackupTables.value) {
+    if (deselect) selectedTableKeys.value.delete(tableKey(table));
+    else selectedTableKeys.value.add(tableKey(table));
+  }
+}
+
+watch([restoreSelectedTables, canSelectTables, () => previews.value[0]?.filePath, connectionId, open], async () => {
+  const generation = ++tableScanGeneration;
+  backupTables.value = [];
+  selectedTableKeys.value = new Set();
+  tableSearch.value = "";
+  tableScanError.value = "";
+  loadingTables.value = false;
+  if (!canSelectTables.value) restoreSelectedTables.value = false;
+  if (!open.value || !restoreSelectedTables.value || !canSelectTables.value) return;
+  loadingTables.value = true;
+  try {
+    const tables = await inspectSqlFileTables(previews.value[0]!.filePath);
+    if (generation !== tableScanGeneration) return;
+    backupTables.value = tables;
+  } catch (error: any) {
+    if (generation === tableScanGeneration) tableScanError.value = error?.message || String(error);
+  } finally {
+    if (generation === tableScanGeneration) loadingTables.value = false;
+  }
+});
 
 const canStart = computed(() => {
   const connection = selectedConnection.value;
   if (previews.value.length === 0 || !connection || running.value || loadingPreview.value || loadingDatabases.value) return false;
+  if (restoreSelectedTables.value && (loadingTables.value || tableScanError.value || selectedTables.value.length === 0)) return false;
   let hasDatabaseContext = false;
   const canExecuteWithoutSelectedDatabase = previews.value.every((item) => {
     if (!hasDatabaseContext && !item.canExecuteWithoutSelectedDatabase) return false;
@@ -151,6 +219,13 @@ const progressPercent = computed(() => {
   const current = Math.max(progress.value.statementIndex, attempted);
   if (current <= 0) return running.value ? 8 : 0;
   return Math.min(95, Math.max(8, Math.round((attempted / current) * 100)));
+});
+const sqlFileFailures = computed(() => activeExecutionTask.value?.sqlFileFailures ?? []);
+const sqlFileFailureCount = computed(() => sqlFileFailures.value.length + (activeExecutionTask.value?.sqlFileFailuresOmitted ?? 0));
+const unlistedTerminalError = computed(() => {
+  const error = progress.value?.error || terminalError.value;
+  if (!error || sqlFileFailures.value.some((failure) => failure.error === error)) return "";
+  return error;
 });
 function previewLineCount(item: SqlFilePreview) {
   return item.preview.split(/\r\n|\r|\n/).length;
@@ -196,6 +271,7 @@ function resolveInitialConnectionId() {
   if (props.prefillConnectionId && sqlConnections.value.some((c) => c.id === props.prefillConnectionId)) {
     return props.prefillConnectionId;
   }
+  if (props.prefillFilePath) return "";
   return sqlConnections.value[0]?.id ?? "";
 }
 
@@ -218,6 +294,8 @@ function resetExecution() {
   progress.value = null;
   terminalStatus.value = "idle";
   terminalError.value = "";
+  activeExecutionTask.value = null;
+  failureDetailsExpanded.value = false;
   refreshedTarget.value = false;
   resetPerFileState();
 }
@@ -231,6 +309,7 @@ function resetState() {
   databaseOptions.value = [];
   loadingDatabases.value = false;
   continueOnError.value = false;
+  restoreSelectedTables.value = false;
   resetExecution();
 }
 
@@ -271,8 +350,9 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
     return previewSqlFile(fileOrPath as string);
   }
   const file = fileOrPath as File;
-  if (file.size > MAX_WEB_SQL_FILE_BYTES) {
-    throw new Error(`File too large: ${file.size} bytes (max ${MAX_WEB_SQL_FILE_BYTES} bytes)`);
+  const uploadLimit = webSqlFileUploadMaxBytes.value;
+  if (file.size > uploadLimit) {
+    throw new Error(`File too large: ${file.size} bytes (max ${uploadLimit} bytes)`);
   }
   const { previewSqlFile: previewWebSqlFile } = await import("@/lib/backend/http");
   return previewWebSqlFile(file);
@@ -306,7 +386,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
+      filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -356,6 +436,12 @@ async function refreshTargetAfterImport() {
 
 async function startExecution() {
   if (!canStart.value || previews.value.length === 0) return;
+  // Await the unlock guard only when it can actually prompt/block (effectively
+  // read-only); writable or already-unlocked connections stay synchronous so
+  // the running state flips in the same tick as the click.
+  if (connectionIsEffectivelyReadOnly(selectedConnection.value)) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: selectedConnection.value, source: t("readOnlyUnlock.sourceSqlFile"), treatAsMutation: true }))) return;
+  }
   const productionContext = productionContextForDatabase(selectedConnection.value, database.value);
   if (productionContext.active) {
     // File previews are truncated, so production file execution is always reviewed instead of inferring safety from a partial preview.
@@ -383,8 +469,10 @@ async function startExecution() {
   terminalStatus.value = "running";
   terminalError.value = "";
   progress.value = null;
+  activeExecutionTask.value = null;
+  failureDetailsExpanded.value = false;
   const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
-  addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
+  activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
 
   try {
     await store.ensureConnected(connectionId.value);
@@ -407,7 +495,6 @@ async function startExecution() {
         progress.value = next;
         terminalStatus.value = next.status;
         terminalError.value = next.error ?? terminalError.value;
-        updateSqlFileTask(batchId, next);
 
         // Detect per-file boundary events from the backend (populated only
         // during multi-file execution).  The backend emits a file-start
@@ -437,6 +524,12 @@ async function startExecution() {
           }
         }
 
+        updateSqlFileTask(batchId, next, {
+          fileIndex: currentFileIndex.value >= 0 ? currentFileIndex.value : previews.value.length === 1 ? 0 : undefined,
+          fileName: currentFileName.value || (previews.value.length === 1 ? (displayFileNames.value.get(previews.value[0]!.filePath) ?? previews.value[0]!.fileName) : undefined),
+        });
+        if (next.status === "statementFailed") failureDetailsExpanded.value = true;
+
         if (isTerminalProgress(next.status)) {
           resolveTerminalProgress(next);
         }
@@ -453,6 +546,7 @@ async function startExecution() {
           database: database.value.trim(),
           filePath: previews.value[0]!.filePath,
           continueOnError: continueOnError.value,
+          ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
         },
         previews.value.map((item) => item.filePath),
       );
@@ -562,7 +656,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,text/sql" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,text/sql,application/gzip" multiple class="hidden" @change="handleFileInputChange" />
             <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
@@ -660,6 +754,33 @@ watch(
           </div>
         </div>
 
+        <div v-if="canSelectTables" class="min-w-0 space-y-2.5" data-table-restore>
+          <Label class="text-xs">{{ t("sqlFile.restoreScope") }}</Label>
+          <div class="flex items-center gap-4 text-xs">
+            <label class="flex items-center gap-2"><input v-model="restoreSelectedTables" type="radio" :value="false" :disabled="running" name="sql-file-restore-scope" />{{ t("sqlFile.restoreAll") }}</label>
+            <label class="flex items-center gap-2"><input v-model="restoreSelectedTables" type="radio" :value="true" :disabled="running" name="sql-file-restore-scope" />{{ t("sqlFile.restoreSelectedTables") }}</label>
+          </div>
+          <template v-if="restoreSelectedTables">
+            <p class="text-xs text-muted-foreground">{{ t("sqlFile.restoreTablesOnly") }}</p>
+            <div v-if="loadingTables" class="flex items-center gap-2 text-xs" role="status"><Loader2 class="h-3.5 w-3.5 animate-spin" />{{ t("sqlFile.scanningTables") }}</div>
+            <p v-else-if="tableScanError" class="break-words text-xs text-destructive" role="alert">{{ tableScanError }}</p>
+            <template v-else>
+              <Input v-model="tableSearch" :placeholder="t('sqlFile.searchBackupTables')" :aria-label="t('sqlFile.searchBackupTables')" :disabled="running" class="h-8 text-xs" />
+              <div class="flex items-center justify-between gap-3 text-xs">
+                <label class="flex items-center gap-2"><input type="checkbox" :checked="allFilteredTablesSelected" :disabled="running || filteredBackupTables.length === 0" @change="toggleFilteredTables" />{{ t("sqlFile.selectVisibleTables") }}</label>
+                <span>{{ t("sqlFile.selectedTableCount", { selected: selectedTables.length, total: backupTables.length }) }}</span>
+              </div>
+              <div class="max-h-44 overflow-y-auto border rounded-md p-2 text-xs">
+                <label v-for="table in filteredBackupTables" :key="tableKey(table)" class="flex min-w-0 items-center gap-2 py-1">
+                  <input type="checkbox" :checked="selectedTableKeys.has(tableKey(table))" :disabled="running" @change="toggleTable(table)" />
+                  <span class="min-w-0 break-all">{{ tableLabel(table) }}</span>
+                </label>
+                <p v-if="filteredBackupTables.length === 0" class="text-muted-foreground">{{ t("sqlFile.noBackupTables") }}</p>
+              </div>
+            </template>
+          </template>
+        </div>
+
         <div class="min-w-0 space-y-2.5">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.options") }}
@@ -691,7 +812,7 @@ watch(
 
           <div v-if="running && previews.length > 1 && currentFileIndex >= 0" class="flex items-center gap-1.5 text-xs text-muted-foreground">
             <FileCode class="w-3.5 h-3.5 shrink-0" />
-            <span class="truncate">{{ t("sqlFile.fileProgress", { current: currentFileIndex + 1, total: previews.length }) }} — {{ currentFileName }}</span>
+            <span class="truncate tabular-nums">{{ t("sqlFile.fileProgress", { current: currentFileIndex + 1, total: previews.length }) }} — {{ currentFileName }}</span>
           </div>
 
           <template v-if="!running && previews.length > 1 && perFileResults.length > 0">
@@ -740,23 +861,23 @@ watch(
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               <div class="border rounded-md px-2 py-1.5 min-w-0">
                 <div class="text-muted-foreground truncate">{{ t("sqlFile.statement") }}</div>
-                <div class="font-medium truncate">{{ progress?.statementIndex ?? 0 }}</div>
+                <div class="font-medium truncate tabular-nums">{{ progress?.statementIndex ?? 0 }}</div>
               </div>
               <div class="border rounded-md px-2 py-1.5 min-w-0">
                 <div class="text-muted-foreground truncate">{{ t("sqlFile.succeeded") }}</div>
-                <div class="font-medium text-green-600 truncate">
+                <div class="font-medium text-green-600 truncate tabular-nums">
                   {{ progress?.successCount ?? 0 }}
                 </div>
               </div>
               <div class="border rounded-md px-2 py-1.5 min-w-0">
                 <div class="text-muted-foreground truncate">{{ t("sqlFile.failed") }}</div>
-                <div class="font-medium text-destructive truncate">
+                <div class="font-medium text-destructive truncate tabular-nums">
                   {{ progress?.failureCount ?? 0 }}
                 </div>
               </div>
               <div class="border rounded-md px-2 py-1.5 min-w-0">
                 <div class="text-muted-foreground truncate">{{ t("sqlFile.affectedRows") }}</div>
-                <div class="font-medium truncate">
+                <div class="font-medium truncate tabular-nums">
                   {{ (progress?.affectedRows ?? 0).toLocaleString() }}
                 </div>
               </div>
@@ -770,8 +891,29 @@ watch(
             </div>
           </div>
 
-          <div v-if="progress?.error || terminalError" class="max-w-full overflow-auto rounded-md border bg-destructive/5 p-2 text-xs text-destructive whitespace-pre-wrap">
-            {{ progress?.error || terminalError }}
+          <div v-if="sqlFileFailureCount > 0" class="min-w-0 space-y-1.5">
+            <button type="button" class="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary" :aria-expanded="failureDetailsExpanded" @click="failureDetailsExpanded = !failureDetailsExpanded">
+              <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': failureDetailsExpanded }" />
+              {{ failureDetailsExpanded ? t("exportProgress.hideFailureDetails") : t("exportProgress.showFailureDetails", { count: sqlFileFailureCount }) }}
+            </button>
+            <div v-if="failureDetailsExpanded" class="max-h-[min(30vh,280px)] min-w-0 overflow-y-auto rounded-md border border-destructive/20 bg-destructive/5 text-xs">
+              <div v-for="failure in sqlFileFailures" :key="`${failure.fileIndex ?? -1}:${failure.statementIndex}`" class="border-b border-destructive/15 p-2.5 last:border-b-0">
+                <div class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
+                  <span class="shrink-0">#{{ failure.statementIndex }}</span>
+                  <span v-if="failure.fileName" class="truncate text-muted-foreground" :title="failure.fileName">{{ failure.fileName }}</span>
+                </div>
+                <div v-if="failure.statementSummary" class="mt-1 max-w-full overflow-auto font-mono whitespace-pre-wrap break-words text-foreground">{{ failure.statementSummary }}</div>
+                <div class="mt-1 select-text whitespace-pre-wrap break-words text-destructive">{{ translateBackendError(t, failure.error) }}</div>
+                <div v-if="failure.truncated" class="mt-1 text-muted-foreground">{{ t("exportProgress.failureDetailTruncated") }}</div>
+              </div>
+              <div v-if="activeExecutionTask?.sqlFileFailuresOmitted" class="p-2.5 text-muted-foreground">
+                {{ t("exportProgress.failureDetailsOmitted", { count: activeExecutionTask.sqlFileFailuresOmitted }) }}
+              </div>
+            </div>
+          </div>
+
+          <div v-if="unlistedTerminalError" class="max-w-full overflow-auto rounded-md border bg-destructive/5 p-2 text-xs text-destructive whitespace-pre-wrap">
+            {{ translateBackendError(t, unlistedTerminalError) }}
           </div>
         </div>
       </div>

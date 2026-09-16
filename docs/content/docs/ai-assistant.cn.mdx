@@ -24,7 +24,7 @@ DBX 内置以下配置预设：
 - Anthropic Compatible
 - Custom
 
-兼容或自定义配置可以设置端点、模型、API 风格、认证方式、代理和上下文窗口。API 风格包括 OpenAI 风格 completions、Responses API 和 Anthropic Messages。供应商支持时，DBX 会读取模型列表并过滤掉不适合对话/Agent 的模型。
+兼容或自定义配置可以设置端点、模型、API 风格、认证方式、代理、上下文窗口和额外 HTTP 请求头。API 风格包括 OpenAI 风格 completions、Responses API 和 Anthropic Messages。供应商支持时，DBX 会读取模型列表并过滤掉不适合对话/Agent 的模型。
 
 ### 本地 CLI Agent
 
@@ -54,7 +54,7 @@ Desktop 还可以直接调用已安装并登录的：
   <Step>
     ### 配置认证和推理参数
 
-    API 模式填写 API Key、认证方式、端点和代理。支持的模型可以选择 effort、reasoning 或 thinking；具体选项来自供应商能力，而不是对所有模型统一显示。
+    API 模式填写 API Key、认证方式、端点、代理和自定义 HTTP 请求头。请求头可用于网关认证或租户路由，例如 `X-GoModel-User-Path: /dbx-assistant`；模型发现、连接测试、对话和 Agent 请求都会携带它们。支持的模型可以选择 effort、reasoning 或 thinking；具体选项来自供应商能力，而不是对所有模型统一显示。
 
   </Step>
   <Step>
@@ -65,7 +65,7 @@ Desktop 还可以直接调用已安装并登录的：
   </Step>
 </Steps>
 
-API Key、CLI 环境变量和自定义端点可能具有敏感性。不要把设置截图、导出的配置或调试日志发送到不可信位置。
+API Key、自定义请求头的值、CLI 环境变量和自定义端点可能具有敏感性。不要把设置截图、导出的配置或调试日志发送到不可信位置。
 
 ## Ask 和 Agent
 

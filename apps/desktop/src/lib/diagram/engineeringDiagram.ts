@@ -65,7 +65,9 @@ export interface EngineeringRelationshipNode {
   id: string;
   label: string;
   sourceTable: string;
+  sourceColumn: string;
   targetTable: string;
+  targetColumn: string;
   sourceCardinality: "1" | "N";
   targetCardinality: "1" | "N";
   x: number;
@@ -283,6 +285,13 @@ function normalizeDiagram(diagram: Omit<EngineeringDiagram, "canvas">): Engineer
   };
 }
 
+function attributeCenter(attribute: EngineeringAttributeNode): DiagramPosition {
+  return {
+    x: attribute.x + attribute.width / 2,
+    y: attribute.y + attribute.height / 2,
+  };
+}
+
 export function buildEngineeringDiagram(tables: DiagramTable[], relationships: DiagramRelationship[], positions: Record<string, DiagramPosition>): EngineeringDiagram {
   const clusters = new Map(tables.map((table) => [table.name, buildEngineeringCluster(table)]));
   const rows = orderedTableRows(tables, positions);
@@ -321,21 +330,26 @@ export function buildEngineeringDiagram(tables: DiagramTable[], relationships: D
     nextRowY += rowHeight + ENGINEERING_CLUSTER_GAP_Y;
   });
   const entityMap = new Map(entities.map((entity) => [entity.name, entity]));
+  const attributeMap = new Map(attributes.map((attr) => [`${attr.tableName}:${attr.columnName}`, attr]));
   const orderedEntities = tables.map((table) => entityMap.get(table.name)).filter((entity): entity is EngineeringEntityNode => entity !== undefined);
 
   const relationshipNodes: EngineeringRelationshipNode[] = relationships.flatMap((relationship) => {
-    const source = entityMap.get(relationship.sourceTable);
-    const target = entityMap.get(relationship.targetTable);
-    if (!source || !target) return [];
+    const sourceEntity = entityMap.get(relationship.sourceTable);
+    const targetEntity = entityMap.get(relationship.targetTable);
+    const sourceAttr = attributeMap.get(`${relationship.sourceTable}:${relationship.sourceColumn}`);
+    const targetAttr = attributeMap.get(`${relationship.targetTable}:${relationship.targetColumn}`);
+    if (!sourceEntity || !targetEntity) return [];
 
-    const sourceCenter = entityCenter(source);
-    const targetCenter = entityCenter(target);
+    const sourceCenter = sourceAttr ? attributeCenter(sourceAttr) : entityCenter(sourceEntity);
+    const targetCenter = targetAttr ? attributeCenter(targetAttr) : entityCenter(targetEntity);
     return [
       {
         id: relationship.id,
         label: relationshipLabel(relationship),
         sourceTable: relationship.sourceTable,
+        sourceColumn: relationship.sourceColumn,
         targetTable: relationship.targetTable,
+        targetColumn: relationship.targetColumn,
         sourceCardinality: relationship.sourceCardinality ?? "N",
         targetCardinality: relationship.targetCardinality ?? "1",
         x: (sourceCenter.x + targetCenter.x) / 2 - ENGINEERING_RELATIONSHIP_WIDTH / 2,

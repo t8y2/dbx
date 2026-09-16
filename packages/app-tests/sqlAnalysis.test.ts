@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, isBinaryType, queryEditabilityMessageKey, resolveMetadataColumnName, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, isBinaryType, queryEditabilityMessageKey, resolveMetadataColumnName, sourceColumnsForResult } from "../../apps/desktop/src/lib/sql/sqlAnalysis.ts";
 
 test("recognizes a simple single-table SELECT as editable", () => {
   const result = analyzeEditableQueryEditability("select id, name from public.users where active = true order by id");
@@ -50,6 +50,41 @@ test("ignores MINUS in strings, comments, and nested queries", () => {
 
     assert.equal(result.editable, true, sql);
     assert.equal(result.analysis.tableName, "users", sql);
+  }
+});
+
+test("ignores semicolons inside literals, identifiers, and comments", () => {
+  for (const sql of [
+    "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111'",
+    "SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';",
+    "SELECT * FROM users WHERE name = 'a;b'  ",
+    'SELECT * FROM "weird;name"',
+    "SELECT * FROM `weird;name`",
+    "SELECT * FROM [weird;name]",
+    "SELECT * FROM users -- keep; going\nWHERE active = 1",
+    "SELECT * FROM users /* keep; going */ WHERE active = 1",
+  ]) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+  }
+
+  const issue = analyzeEditableQueryEditability("SELECT c.*  FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';");
+  assert.equal(issue.editable, true);
+  assert.equal(issue.analysis.tableName, "CONTAINER");
+  assert.equal(issue.analysis.tableAlias, "c");
+  assert.equal(issue.analysis.selectStar, true);
+
+  const display = analyzeSelectStructureForDisplay("SELECT c.* FROM CONTAINER c WHERE c.CONTAINERNAME = '00390360;081111';");
+  assert.ok(display);
+  assert.equal(display.tableName, "CONTAINER");
+  assert.equal(display.tableAlias, "c");
+});
+
+test("treats top-level semicolons as a complex source", () => {
+  for (const sql of ["SELECT * FROM users; SELECT * FROM orders", "SELECT * FROM users WHERE name = 'a;b'; SELECT 1"]) {
+    assert.deepEqual(analyzeEditableQueryEditability(sql), { editable: false, reason: "complex-source" }, sql);
+    assert.equal(analyzeSelectStructureForDisplay(sql), null, sql);
   }
 });
 
@@ -132,6 +167,7 @@ test("treats DISTINCT single-table projections as update-only", () => {
 
   assert.equal(result.editable, true);
   assert.equal(result.analysis.distinct, true);
+  assert.equal(result.analysis.allowInsert, false);
   assert.equal(result.analysis.allowInsertDelete, false);
   assert.deepEqual(result.analysis.columns, [
     { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
@@ -140,13 +176,25 @@ test("treats DISTINCT single-table projections as update-only", () => {
 });
 
 test("maps a DISTINCT qualified star to one joined source", () => {
-  const result = analyzeEditableQueryEditability("select distinct u.* from users u left join orders o on o.user_id = u.id");
+  const result = analyzeEditableQueryEditability(`select distinct t4.*
+    from TASK_CHECK_BASE t1
+    left join TASK_FORMULATE_EXECUTE t20 on t1.EXECUTE_UID = t20.EXECUTE_UID
+    left join TASK_FORMULATE_BASE t40 on t20.FORMULATE_UID = t40.FORMULATE_UID
+    left join TASK_EXECUTE_FORM t30 on t20.EXECUTE_UID = t30.EXECUTE_UID
+    left join TASK_CHECK_ORG t2 on t1.TASK_ID = t2.TASK_ID
+    left join TASK_CHECK_ORG_INNER_DEPT t3 on t2.TASK_ORG_ID = t3.TASK_ORG_ID
+    left join TASK_CHECK_ENT t4 on t1.TASK_ID = t4.TASK_ID
+    left join TASK_EXECUTE_OBJ_ENT t44 on t1.EXECUTE_UID = t44.EXECUTE_UID
+    left join TASK_CHECK_DEPT_RESULT t5 on t4.TASK_ID = t5.TASK_ID and t4.TASK_ENT_ID = t5.TASK_ENT_ID
+    left join TASK_EXECUTE_PERSON_AGENT t6 on t1.EXECUTE_UID = t6.EXECUTE_UID`);
 
   assert.equal(result.editable, true);
   assert.equal(result.analysis.distinct, true);
   assert.equal(result.analysis.multiSource, true);
+  assert.equal(result.analysis.allowInsert, false);
   assert.equal(result.analysis.allowInsertDelete, false);
-  assert.deepEqual(result.analysis.columns, [{ star: true, sourceQualifier: "u", sourceKey: "u:0", resultName: "*", expression: "u.*" }]);
+  assert.equal(result.analysis.sources?.length, 10);
+  assert.deepEqual(result.analysis.columns, [{ star: true, sourceQualifier: "t4", sourceKey: "t4:6", resultName: "*", expression: "t4.*" }]);
 });
 
 test("keeps ambiguous DISTINCT projections read-only", () => {
@@ -224,6 +272,47 @@ test("accepts unquoted Unicode aliases in editable MySQL and SQL Server queries"
   });
 });
 
+test("accepts MySQL string-quoted column aliases", () => {
+  for (const [sql, resultName] of [
+    ["SELECT id, report_type '计划类型' FROM biz_work_log", "计划类型"],
+    ["SELECT id, report_type AS '计划类型' FROM biz_work_log", "计划类型"],
+    ["SELECT id, report_type '计划''类型' FROM biz_work_log", "计划'类型"],
+    ["SELECT id, report_type AS '计划''类型' FROM biz_work_log", "计划'类型"],
+  ] as const) {
+    const result = analyzeEditableQueryEditability(sql);
+
+    assert.equal(result.editable, true, sql);
+    assert.deepEqual(result.analysis.columns, [
+      { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
+      { sourceName: "report_type", sourceNameQuoted: false, resultName, expression: "report_type" },
+    ]);
+    assert.deepEqual(sourceColumnsForResult(result.analysis, ["id", resultName]), ["id", "report_type"], sql);
+    assert.equal(allPrimaryKeysPresent(["id"], ["id", resultName], result.analysis), true, sql);
+    assert.equal(allEditableColumnsWriteable(result.analysis, ["id", resultName]), true, sql);
+  }
+});
+
+test("keeps string literals computed and rejects malformed string aliases", () => {
+  for (const sql of ["SELECT id, report_type '计划类型 FROM biz_work_log", "SELECT id, report_type '计划类型' trailing FROM biz_work_log"]) {
+    assert.equal(analyzeEditableQueryEditability(sql).editable, false, sql);
+  }
+
+  for (const sql of ["SELECT id, 'constant' '固定值' FROM biz_work_log", "SELECT id, 'constant' AS '固定值' FROM biz_work_log"]) {
+    const computed = analyzeEditableQueryEditability(sql);
+    assert.equal(computed.editable, true, sql);
+    assert.deepEqual(computed.analysis.columns[1], {
+      sourceName: undefined,
+      sourceNameQuoted: false,
+      resultName: "固定值",
+      expression: "'constant'",
+    });
+  }
+
+  for (const sql of ["SELECT id, report_type AS 计划类型 FROM biz_work_log", "SELECT id, report_type AS `计划类型` FROM biz_work_log", 'SELECT id, report_type AS "计划类型" FROM biz_work_log']) {
+    assert.equal(analyzeEditableQueryEditability(sql).editable, true, sql);
+  }
+});
+
 test("resolves metadata columns with dialect and quote aware identifier rules", () => {
   const postgresColumns = ["id", "ID", "name"];
   assert.equal(resolveMetadataColumnName("postgres", "ID", false, postgresColumns), "id");
@@ -251,6 +340,53 @@ test("rejects ambiguous case-only result column mapping", () => {
 
   assert.ok(analysis);
   assert.equal(sourceColumnsForResult(analysis, ["Id"]), undefined);
+});
+
+test("does not bind non-Oracle same-arity label mismatches by projection order", () => {
+  const analysis = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(analysis);
+  assert.equal(sourceColumnsForResult(analysis, ["id", "amount"]), undefined);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "amount"]), false);
+  assert.equal(sourceColumnsForResult(analysis, ["id", "amount"], undefined, "mysql"), undefined);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "amount"], undefined, "mysql"), false);
+});
+
+test("keeps Oracle queries with a NUM column or alias editable when result labels disagree", () => {
+  const byName = analyzeEditableQuery("select id, num from users");
+  assert.ok(byName);
+  assert.deepEqual(
+    byName.columns,
+    [
+      { sourceName: "id", sourceNameQuoted: false, resultName: "id", expression: "id" },
+      { sourceName: "num", sourceNameQuoted: false, resultName: "num", expression: "num" },
+    ],
+  );
+  assert.deepEqual(sourceColumnsForResult(byName, ["ID", "NUM"], undefined, "oracle"), ["id", "num"]);
+  assert.equal(allEditableColumnsWriteable(byName, ["ID", "NUM"], undefined, "oracle"), true);
+  assert.deepEqual(sourceColumnsForResult(byName, ["ID", "ROWNUM"], undefined, "oracle"), ["id", undefined]);
+  assert.equal(sourceColumnsForResult(byName, ["ID", "ROWNUM"], undefined, "oracle")?.[1], undefined);
+
+  const byAlias = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(byAlias);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "AMOUNT"], undefined, "oracle"), ["id", "amount"]);
+  assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "AMOUNT"], undefined, "oracle"), true);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "NUM", "ROWNUM"], undefined, "oracle"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "NUM", "ROWNUM"], undefined, "oracle"), true);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "AMOUNT", "__dbx_row_num"], undefined, "oracle"), ["id", "amount", undefined]);
+  assert.deepEqual(sourceColumnsForResult(byAlias, ["ID", "AMOUNT", "dbx_rn"], undefined, "oracle"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "AMOUNT", "__dbx_row_num"], undefined, "oracle"), true);
+});
+
+test("tolerates trailing pagination labels for non-Oracle engines", () => {
+  const analysis = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(analysis);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "__dbx_row_num"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "__dbx_row_num"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "dbx_rn"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "dbx_rn"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "ROWNUM"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "ROWNUM"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "rownum"], undefined, "mysql"), ["id", "amount", undefined]);
 });
 
 test("maps ClickHouse simple query results when identifier columns are returned", () => {

@@ -4,7 +4,7 @@ services:
     container_name: dbx-clickhouse-24.8
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8124}:8123"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10600}:8123"
     environment:
       CLICKHOUSE_DB: dbx
       CLICKHOUSE_USER: default

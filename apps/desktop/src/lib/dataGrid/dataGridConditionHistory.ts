@@ -1,7 +1,7 @@
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 const STORAGE_KEY = "dbx-data-grid-condition-history";
-const MAX_HISTORY_PER_SCOPE = 12;
+const MAX_HISTORY_PER_SCOPE = 20;
 
 export type DataGridConditionHistoryKind = "where" | "orderBy";
 

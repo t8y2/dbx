@@ -30,13 +30,15 @@ Value search reads matching content and applies type-aware matching for String, 
 
 | Type | Main capabilities |
 | --- | --- |
-| String | Text, JSON, and multiple display formats; binary strings are shown as escaped read-only text |
+| String | Text, JSON, and multiple display formats; gzip and zlib values can be opened in the read-only Decompressed format, while raw DEFLATE requires **Retry as DEFLATE** after the initial attempt fails; decompressed output is limited to 50 MiB; binary strings are shown as escaped read-only text |
 | Hash | Field/value table, search, sorting, add, edit, and delete |
 | List | Paged elements with index, add, edit, and delete |
 | Set | Member browsing, add, and delete |
 | Sorted Set | Member and score browsing, editing, and deletion |
 | Stream | Entries, consumer groups, consumers, pending messages, lag, and delivery details |
 | RedisJSON | JSON tree/source editing, formatting, and compact saves; requires the RedisJSON server module |
+
+List, Set, Hash, Sorted Set, and Stream member details provide the same Decompressed format and Gzip shortcut for compressed member values.
 
 Large collection types load in pages and display total and loaded counts where available.
 
@@ -107,10 +109,21 @@ Key statistics and Slowlog require additional Redis commands. Limit scope and en
 
 - Delete selected keys
 - Delete keys loaded under the current group
+- Set a relative TTL, a local absolute expiration time, or no expiry on selected keys
 - Flush the active Redis database
 - Run supported bulk field/member operations
 
 Flush, bulk delete, and `FLUSH*` operations cannot be undone. Read-only connections reject writes, while production and dangerous-command checks remain active.
+
+## Live MONITOR
+
+![Live Redis MONITOR logs](/screenshots/redis-monitor.png)
+
+Run `MONITOR` on its own in the Redis query editor to receive live command logs instead of only the initial `OK`. Monitoring covers all databases on the connected node, regardless of the database selected in the editor.
+
+Use **Stop listening**, the execution toolbar's stop button, or close the tab to release the dedicated connection. The result retains the latest 1,000 entries, with each entry limited to 16,384 characters. Stopping preserves the displayed results.
+
+Direct Redis node connections, including their TLS and tunnel settings, are supported. For Sentinel or Cluster, create a direct connection to the node to inspect; logs are not aggregated across nodes. The Redis account needs permission to execute `MONITOR`, which adds server overhead while active.
 
 ## Safety and Performance Guidance
 
@@ -119,6 +132,7 @@ Flush, bulk delete, and `FLUSH*` operations cannot be undone. Read-only connecti
 - Value search, memory statistics, and Slowlog can increase server load
 - Stream consumer-group details read pending and consumer state; avoid unbounded high-frequency refresh
 - Binary values, module commands, and vendor extensions may require the command line
+- Decompressing a value is read-only and capped at 50 MiB of output; larger results show a non-blocking notice instead of being expanded
 - MCP applies different permission levels to ordinary Redis writes and destructive `FLUSH*` commands
 
 <Cards>

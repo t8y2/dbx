@@ -59,6 +59,30 @@ describe("customContextMenuRegistry", () => {
     registration.dispose();
   });
 
+  it("atomically reactivates a host after the capture listener clears it", () => {
+    const documentTarget = new EventTarget();
+    const windowTarget = new EventTarget();
+    const registry = createContextMenuRegistry(documentTarget, windowTarget);
+    const closeFirst = vi.fn();
+    const closeSecond = vi.fn();
+    const first = registry.register(closeFirst);
+    const second = registry.register(closeSecond);
+
+    first.activate();
+    documentTarget.dispatchEvent(new Event("contextmenu"));
+    first.activate();
+    second.activate();
+
+    expect(closeFirst).toHaveBeenCalledTimes(2);
+    expect(closeSecond).not.toHaveBeenCalled();
+
+    windowTarget.dispatchEvent(new Event("resize"));
+    expect(closeSecond).toHaveBeenCalledOnce();
+
+    first.dispose();
+    second.dispose();
+  });
+
   it("removes disposed callbacks and detaches listeners after the final host", () => {
     const documentTarget = new EventTarget();
     const windowTarget = new EventTarget();

@@ -13,6 +13,13 @@ pub struct LoginRateLimit {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebExportFile {
+    pub file_path: String,
+    pub download_filename: String,
+    pub format: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NacosImportContext {
     pub owner_session: Option<String>,
     pub connection_id: String,
@@ -33,8 +40,8 @@ pub struct WebState {
     pub sql_file_executions: RwLock<HashMap<String, CancellationToken>>,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
-    /// Table export temp files: export_id -> (file_path, format)
-    pub export_files: RwLock<HashMap<String, (String, String)>>,
+    /// Completed Web export temp files waiting for the browser download.
+    pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
 }
 

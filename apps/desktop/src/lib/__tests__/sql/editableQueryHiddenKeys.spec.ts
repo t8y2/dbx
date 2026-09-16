@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes } from "@/lib/sql/editableQueryHiddenKeys";
-import { analyzeEditableQueryEditability } from "@/lib/sql/sqlAnalysis";
+import { analyzeEditableQueryEditability, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sql/sqlAnalysis";
 
 describe("editable query hidden primary keys", () => {
   it("appends quoted MySQL primary keys without changing the visible projection", () => {
@@ -60,6 +60,21 @@ describe("editable query hidden primary keys", () => {
       }),
     ).toEqual({
       sql: 'SELECT t.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
+      projections: [{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_0" }],
+    });
+  });
+
+  it("supports Xugu's unqualified ROWID expression for keyless base tables", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT * FROM APP.USERS t WHERE t.ACTIVE = 1",
+        databaseType: "xugu",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWID" },
+      }),
+    ).toEqual({
+      sql: 'SELECT *, ROWID AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
       projections: [{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_0" }],
     });
   });
@@ -155,6 +170,93 @@ describe("editable query hidden primary keys", () => {
       expect(result.editable, sql).toBe(true);
       if (result.editable) expect(result.analysis.columns.map((column) => column.sourceName)).toEqual(["name", "note"]);
     }
+  });
+
+  it("maps MySQL JSON expressions with implicit aliases without making them writeable", () => {
+    const result = analyzeEditableQueryEditability("select id, status, extra->>'$.mode' mode, extra->>'$.template' tmpl from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(result.analysis.columns).toEqual([
+      expect.objectContaining({ sourceName: "id", resultName: "id", expression: "id" }),
+      expect.objectContaining({ sourceName: "status", resultName: "status", expression: "status" }),
+      expect.objectContaining({ sourceName: undefined, resultName: "mode", expression: "extra->>'$.mode'" }),
+      expect.objectContaining({ sourceName: undefined, resultName: "tmpl", expression: "extra->>'$.template'" }),
+    ]);
+    expect(sourceColumnsForResult(result.analysis, ["id", "status", "mode", "tmpl"])).toEqual(["id", "status", undefined, undefined]);
+  });
+
+  it("uses MySQL expression text as the result label when no alias is present", () => {
+    const result = analyzeEditableQueryEditability("select id, status, extra->>'$.mode', extra->>'$.template' from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(sourceColumnsForResult(result.analysis, ["id", "status", "extra->>'$.mode'", "extra->>'$.template'"])).toEqual(["id", "status", undefined, undefined]);
+  });
+
+  it("preserves direct columns and explicit aliases while keeping computed projections read-only", () => {
+    const result = analyzeEditableQueryEditability("select id, status as state, lower(name) normalized, count_value + 1 from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(sourceColumnsForResult(result.analysis, ["id", "state", "normalized", "count_value + 1"])).toEqual(["id", "status", undefined, undefined]);
+  });
+
+  it("does not mistake the right operand of an unaliased expression for an alias", () => {
+    const result = analyzeEditableQueryEditability("select id, id + status, lower(status) from jobs");
+
+    expect(result.editable).toBe(true);
+    if (!result.editable) return;
+    expect(sourceColumnsForResult(result.analysis, ["id", "id + status", "lower(status)"])).toEqual(["id", undefined, undefined]);
+  });
+
+  it("keeps aggregate, join-star, and set-operation boundaries read-only", () => {
+    expect(analyzeEditableQueryEditability("select id, count(*) total from jobs group by id")).toEqual({ editable: false, reason: "aggregation" });
+    expect(analyzeEditableQueryEditability("select * from jobs j join users u on u.id = j.user_id")).toEqual({ editable: false, reason: "complex-source" });
+    expect(analyzeEditableQueryEditability("select id from jobs union select id from archived_jobs")).toEqual({ editable: false, reason: "set-operation" });
+  });
+
+  it("keeps Oracle NUM columns and aliases mapped when result labels disagree", () => {
+    const named = analyzeEditableQueryEditability("select id, num from users");
+    expect(named.editable).toBe(true);
+    if (!named.editable) return;
+    expect(sourceColumnsForResult(named.analysis, ["ID", "NUM"], undefined, "oracle")).toEqual(["id", "num"]);
+    expect(sourceColumnsForResult(named.analysis, ["ID", "ROWNUM"], undefined, "oracle")).toEqual(["id", undefined]);
+
+    const aliased = analyzeEditableQueryEditability("select id, amount as num from users");
+    expect(aliased.editable).toBe(true);
+    if (!aliased.editable) return;
+    expect(sourceColumnsForResult(aliased.analysis, ["ID", "AMOUNT"], undefined, "oracle")).toEqual(["id", "amount"]);
+    expect(sourceColumnsForResult(aliased.analysis, ["ID", "NUM", "ROWNUM"], undefined, "oracle")).toEqual(["id", "amount", undefined]);
+  });
+
+  it("maps a qualified Oracle ROWID projection to the synthetic row key", () => {
+    const analysis: EditableQueryInfo = {
+      schema: "APP",
+      tableName: "USERS",
+      selectStar: false,
+      columns: [
+        { sourceName: "ROWID", sourceQualifier: "t", sourceKey: "t:0", resultName: "ROWID", expression: "t.ROWID" },
+        { sourceName: "NAME", sourceQualifier: "t", sourceKey: "t:0", resultName: "NAME", expression: "t.NAME" },
+        { sourceName: "LABEL", sourceQualifier: "o", sourceKey: "o:1", resultName: "LABEL", expression: "o.LABEL" },
+      ],
+    };
+
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "t:0", "oracle")).toBe(true);
+    expect(sourceColumnsForResult(analysis, ["ROWID", "NAME", "LABEL"], "t:0", "oracle", ["__DBX_ROWID"])).toEqual(["__DBX_ROWID", "NAME", undefined]);
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "o:1", "oracle")).toBe(false);
+  });
+
+  it("does not assign an unqualified multi-source ROWID to a target table", () => {
+    const analysis: EditableQueryInfo = {
+      schema: "APP",
+      tableName: "USERS",
+      selectStar: false,
+      columns: [{ sourceName: "ROWID", resultName: "ROWID", expression: "ROWID" }],
+    };
+
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID"], analysis, "t:0", "oracle")).toBe(false);
+    expect(sourceColumnsForResult(analysis, ["ROWID"], "t:0", "oracle", ["__DBX_ROWID"])).toEqual([undefined]);
   });
 
   it("resolves appended aliases to result indexes", () => {

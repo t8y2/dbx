@@ -1,5 +1,7 @@
-import type { ColumnInfo, DatabaseObjectType, DatabaseType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseObjectType, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { createColumnDrafts, createForeignKeyDrafts, createIndexDrafts, createTriggerDrafts } from "@/lib/table/tableStructureEditorState";
+import type { BuildTableStructureChangeSqlOptions } from "@/lib/table/tableStructureEditorSql";
 
 export interface DropObjectSqlOptions {
   databaseType?: DatabaseType;
@@ -7,6 +9,10 @@ export interface DropObjectSqlOptions {
   schema?: string | null;
   name: string;
   signature?: string | null;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export interface TableAdminSqlOptions {
@@ -14,6 +20,26 @@ export interface TableAdminSqlOptions {
   schema?: string | null;
   tableName: string;
   cascade?: boolean;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
+}
+
+export interface VacuumTableSqlOptions {
+  databaseType?: DatabaseType;
+  schema?: string | null;
+  tableName: string;
+  full?: boolean;
+  analyze?: boolean;
+}
+
+export interface MysqlAutoIncrementSqlOptions {
+  databaseType: DatabaseType;
+  driverProfile?: string | null;
+  schema?: string | null;
+  tableName: string;
+  value: string;
 }
 
 export type TableChildObjectType = "COLUMN" | "INDEX" | "FOREIGN_KEY" | "TRIGGER";
@@ -57,6 +83,29 @@ export interface DuplicateTableStructureSqlOptions {
   targetName: string;
   tableComment?: string | null;
   columnComments?: Array<{ name: string; comment: string }>;
+  /** SQL Server only: source primary-key columns recreated on the clone, because
+   * `SELECT ... INTO` copies columns (and IDENTITY) but drops constraints. */
+  primaryKeyColumns?: string[];
+  /** SQL Server only: pre-computed PK constraint name for the clone (respecting
+   * the 128-character identifier limit and source-table index names). */
+  primaryKeyConstraintName?: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
+}
+
+export interface DuplicateTableStructurePlanOptions extends DuplicateTableStructureSqlOptions {
+  connectionId: string;
+  database: string;
+  catalog?: string;
+  sourceColumns?: ColumnInfo[];
+}
+
+export interface DuplicateTableStructurePlan {
+  sql: string;
+  sourceColumns?: ColumnInfo[];
+  executeAsScript: boolean;
 }
 
 export function collectDuplicateTableColumnComments(columns: readonly Pick<ColumnInfo, "name" | "comment">[]): Array<{ name: string; comment: string }> {
@@ -64,6 +113,217 @@ export function collectDuplicateTableColumnComments(columns: readonly Pick<Colum
     const comment = column.comment;
     return comment?.trim() ? [{ name: column.name, comment }] : [];
   });
+}
+
+const ORACLE_LEGACY_IDENTIFIER_LIMIT = 30;
+const DAMENG_IDENTIFIER_LIMIT = 128;
+
+function oracleCloneObjectName(targetName: string, kind: string, index: number): string {
+  const normalized =
+    targetName
+      .trim()
+      .replace(/[^a-zA-Z0-9_$#]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .toUpperCase() || "TABLE";
+  const suffix = `_${kind}${index + 1}`;
+  return `${normalized.slice(0, Math.max(1, ORACLE_LEGACY_IDENTIFIER_LIMIT - suffix.length))}${suffix}`;
+}
+
+export function oracleDuplicateTableCreateOptions(options: { schema?: string | null; targetName: string; tableComment?: string | null; columns: ColumnInfo[]; indexes: IndexInfo[]; foreignKeys: ForeignKeyInfo[]; triggers: TriggerInfo[] }): BuildTableStructureChangeSqlOptions {
+  return {
+    databaseType: "oracle",
+    schema: options.schema || undefined,
+    tableName: options.targetName,
+    tableComment: options.tableComment || undefined,
+    columns: createColumnDrafts(options.columns, "oracle").map((column, index) => ({
+      ...column,
+      id: `clone:column:${index}`,
+      original: undefined,
+      originalPosition: undefined,
+    })),
+    indexes: createIndexDrafts(options.indexes)
+      .filter((index) => !index.isPrimary)
+      .map((index, position) => ({
+        ...index,
+        id: `clone:index:${position}`,
+        name: oracleCloneObjectName(options.targetName, "IDX", position),
+        nameEdited: true,
+        original: undefined,
+      })),
+    foreignKeys: createForeignKeyDrafts(options.foreignKeys).map((foreignKey, index) => ({
+      ...foreignKey,
+      id: `clone:foreign-key:${index}`,
+      name: oracleCloneObjectName(options.targetName, "FK", index),
+      original: undefined,
+    })),
+    triggers: createTriggerDrafts(options.triggers).map((trigger, index) => ({
+      ...trigger,
+      id: `clone:trigger:${index}`,
+      name: oracleCloneObjectName(options.targetName, "TRG", index),
+      original: undefined,
+    })),
+  };
+}
+
+function damengDuplicateTableName(targetName: string): string {
+  const hasLower = /[a-z]/.test(targetName);
+  const hasUpper = /[A-Z]/.test(targetName);
+  const hasSpecial = /[^a-zA-Z0-9_$#]/.test(targetName);
+  const hasInvalidStart = !/^[a-zA-Z_]/.test(targetName);
+  return (hasLower && hasUpper) || hasSpecial || hasInvalidStart ? targetName : targetName.toUpperCase();
+}
+
+function damengCloneIndexName(targetName: string, index: number): string {
+  const normalized =
+    targetName
+      .trim()
+      .replace(/[^\p{L}\p{N}_$#]+/gu, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .toUpperCase() || "TABLE";
+  const suffix = `_IDX${index + 1}`;
+  const prefixLength = Math.max(1, DAMENG_IDENTIFIER_LIMIT - Array.from(suffix).length);
+  return `${Array.from(normalized).slice(0, prefixLength).join("")}${suffix}`;
+}
+
+function isSupportedDamengCloneIndex(index: IndexInfo): boolean {
+  if (index.is_primary) return false;
+  const indexType = (index.index_type ?? "").trim().toUpperCase();
+  if (indexType.includes("INNER") || indexType.includes("INTERNAL")) return false;
+  return indexType === "" || indexType === "NORMAL" || indexType === "BITMAP";
+}
+
+export function damengDuplicateTableCreateOptions(options: { schema?: string | null; targetName: string; tableComment?: string | null; columns: ColumnInfo[]; indexes: IndexInfo[] }): BuildTableStructureChangeSqlOptions {
+  return {
+    databaseType: "dameng",
+    schema: options.schema || undefined,
+    tableName: damengDuplicateTableName(options.targetName),
+    tableComment: options.tableComment || undefined,
+    columns: createColumnDrafts(options.columns, "dameng").map((column, index) => ({
+      ...column,
+      id: `clone:column:${index}`,
+      original: undefined,
+      originalPosition: undefined,
+    })),
+    indexes: createIndexDrafts(options.indexes.filter(isSupportedDamengCloneIndex)).map((index, position) => ({
+      ...index,
+      id: `clone:index:${position}`,
+      name: damengCloneIndexName(options.targetName, position),
+      nameEdited: true,
+      original: undefined,
+    })),
+    foreignKeys: [],
+    triggers: [],
+  };
+}
+
+/** SQL Server caps identifiers at 128 characters. */
+export const SQLSERVER_IDENTIFIER_MAX_LENGTH = 128;
+
+/**
+ * Derives the clone's primary-key constraint name from `PK_{target}`, capped at
+ * SQL Server's 128-character identifier limit and de-duplicated against the
+ * source table's index names (schema-wide constraint names cannot be listed
+ * through the table-level index metadata, so a name taken by a *different*
+ * table still surfaces as a server-side error the user can act on).
+ */
+export function sqlServerClonePrimaryKeyConstraintName(indexes: IndexInfo[], targetName: string): string {
+  const base = `PK_${targetName}`;
+  const taken = new Set(indexes.map((index) => index.name.toLowerCase()));
+  let name = base.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH);
+  let suffix = 2;
+  while (taken.has(name.toLowerCase())) {
+    const tail = `_${suffix}`;
+    name = `${base.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH - tail.length)}${tail}`;
+    suffix += 1;
+  }
+  return name;
+}
+
+export async function buildDuplicateTableStructurePlan(options: DuplicateTableStructurePlanOptions): Promise<DuplicateTableStructurePlan> {
+  if (options.databaseType === "oracle") {
+    const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const tableCommentPromise =
+      options.tableComment == null
+        ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog).catch((error) => {
+            console.warn(`Failed to load Oracle table comment for table clone: ${options.sourceName}`, error);
+            return null;
+          })
+        : Promise.resolve(options.tableComment);
+    const [columns, indexes, foreignKeys, triggers, tableComment] = await Promise.all([
+      columnsPromise,
+      api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      api.listForeignKeys(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      api.listTriggers(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog),
+      tableCommentPromise,
+    ]);
+    const result = await api.buildCreateTableSql(
+      oracleDuplicateTableCreateOptions({
+        schema: options.schema,
+        targetName: options.targetName,
+        tableComment,
+        columns,
+        indexes,
+        foreignKeys,
+        triggers,
+      }),
+    );
+    if (result.warnings.length > 0 || result.statements.length === 0) {
+      throw new Error(result.warnings.join("\n") || "Failed to generate Oracle clone DDL.");
+    }
+    return { sql: result.statements.join("\n"), sourceColumns: columns, executeAsScript: true };
+  }
+
+  if (options.databaseType === "dameng") {
+    const columnsPromise = options.sourceColumns ? Promise.resolve(options.sourceColumns) : api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const [columns, indexes] = await Promise.all([columnsPromise, api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog)]);
+    const result = await api.buildCreateTableSql(
+      damengDuplicateTableCreateOptions({
+        schema: options.schema,
+        targetName: options.targetName,
+        tableComment: options.tableComment,
+        columns,
+        indexes,
+      }),
+    );
+    if (result.warnings.length > 0 || result.statements.length === 0) {
+      throw new Error(result.warnings.join("\n") || "Failed to generate Dameng clone DDL.");
+    }
+    return { sql: result.statements.join("\n"), sourceColumns: columns, executeAsScript: true };
+  }
+
+  // `SELECT TOP 0 * INTO` copies columns and the IDENTITY property but drops constraints, so the
+  // cloned table silently loses its primary key (t8y2/dbx#8931). Load the source primary key and
+  // let the backend append an `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY` for it.
+  if (options.databaseType === "sqlserver") {
+    const indexes = await api.listIndexes(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
+    const primaryKeyColumns = indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
+    const primaryKeyConstraintName = sqlServerClonePrimaryKeyConstraintName(indexes, options.targetName);
+    const sql = await buildDuplicateTableStructureSql({
+      databaseType: options.databaseType,
+      schema: options.schema,
+      sourceName: options.sourceName,
+      targetName: options.targetName,
+      tableComment: options.tableComment,
+      columnComments: [],
+      primaryKeyColumns,
+      primaryKeyConstraintName,
+      identifierQuote: options.identifierQuote,
+    });
+    return { sql, sourceColumns: options.sourceColumns, executeAsScript: primaryKeyColumns.length > 0 || duplicateTableStructureRequiresScript(sql) };
+  }
+
+  const sql = await buildDuplicateTableStructureSql({
+    databaseType: options.databaseType,
+    schema: options.schema,
+    sourceName: options.sourceName,
+    targetName: options.targetName,
+    tableComment: options.tableComment,
+    columnComments: [],
+    identifierQuote: options.identifierQuote,
+  });
+  return { sql, sourceColumns: options.sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };
 }
 
 export interface CopyTableDataSqlOptions {
@@ -75,6 +335,10 @@ export interface CopyTableDataSqlOptions {
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
   normalizeNewTargetName?: boolean;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 }
 
 export function buildDropObjectSql(options: DropObjectSqlOptions): Promise<string> {
@@ -95,6 +359,20 @@ export function buildEmptyTableSql(options: TableAdminSqlOptions): Promise<strin
 
 export function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return api.buildTruncateTableSql(options);
+}
+
+export function buildVacuumTableSql(options: VacuumTableSqlOptions): Promise<string> {
+  return api.buildVacuumTableSql(options);
+}
+
+export function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return api.buildMysqlAutoIncrementSql(options);
+}
+
+export function supportsNativeMysqlAutoIncrement(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined): boolean {
+  if (connection?.db_type !== "mysql") return false;
+  const profile = connection.driver_profile?.trim().toLowerCase();
+  return !profile || profile === "mysql";
 }
 
 const DROP_TABLE_CASCADE_DATABASE_TYPES: readonly DatabaseType[] = ["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss"];

@@ -33,20 +33,6 @@ vi.mock("@/components/ui/button", async () => {
   };
 });
 
-vi.mock("@/components/ui/input", async () => {
-  const { defineComponent, h } = await import("vue");
-  return {
-    Input: defineComponent({
-      inheritAttrs: false,
-      props: { modelValue: String },
-      emits: ["update:modelValue"],
-      setup(props, { attrs, emit }) {
-        return () => h("input", { ...attrs, value: props.modelValue, onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value) });
-      },
-    }),
-  };
-});
-
 import DataGridInsertRowsDialog from "../DataGridInsertRowsDialog.vue";
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
@@ -79,5 +65,28 @@ describe("DataGridInsertRowsDialog", () => {
     [...host.querySelectorAll("button")].find((button) => button.textContent === "Insert")!.click();
     await nextTick();
     expect(onInsert).toHaveBeenCalledWith(1, "end");
+  });
+
+  it("accepts a numeric value emitted by the number input", async () => {
+    const onInsert = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridInsertRowsDialog, {
+      open: true,
+      canPlaceAtSelection: true,
+      onInsert,
+    });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+
+    const input = host.querySelector("#insert-rows-count") as HTMLInputElement;
+    input.value = "3";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    [...host.querySelectorAll("button")].find((button) => button.textContent === "Insert")!.click();
+    await nextTick();
+    expect(onInsert).toHaveBeenCalledWith(3, "below");
   });
 });

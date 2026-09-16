@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -19,17 +19,9 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-// Local copy of options
+// The panel is a transactional editor: it is recreated each time it opens and
+// only commits its local snapshot when the user clicks Done.
 const localOptions = ref<SchemaDiffCompareOptions>(normalizeSchemaDiffCompareOptions(props.options));
-
-// Watch for external changes
-watch(
-  () => props.options,
-  (newOptions) => {
-    localOptions.value = normalizeSchemaDiffCompareOptions(newOptions);
-  },
-  { deep: true },
-);
 
 function isChecked(id: BooleanSchemaDiffCompareOptionKey): boolean {
   return !!localOptions.value[id];

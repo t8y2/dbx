@@ -23,6 +23,25 @@ export interface EditorSearchMatch {
   to: number;
 }
 
+export interface EditorSearchMatchCount {
+  count: number;
+  currentIndex: number;
+}
+
+export function countEditorSearchMatches(query: SearchQuery, state: EditorState, from: number, to: number, current?: EditorSearchMatch): EditorSearchMatchCount {
+  let count = 0;
+  let currentIndex = 0;
+  const cursor = query.getCursor(state);
+
+  for (let result = cursor.next(); !result.done; result = cursor.next()) {
+    if (result.value.from < from || result.value.to > to) continue;
+    count++;
+    if (current && result.value.from === current.from && result.value.to === current.to) currentIndex = count;
+  }
+
+  return { count, currentIndex };
+}
+
 export function collectEditorSearchMatches(query: SearchQuery, state: EditorState, from: number, to: number, limit = Number.POSITIVE_INFINITY): EditorSearchMatch[] {
   const matches: EditorSearchMatch[] = [];
   const cursor = query.getCursor(state);

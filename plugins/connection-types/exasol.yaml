@@ -1,0 +1,36 @@
+schemaVersion: 1
+order: 410
+dbType: exasol
+rustVariant: Exasol
+label: Exasol
+dialect: Exasol
+runtimeMode: agent
+mcpMode: bridge
+agentKey: exasol
+driverStoreVisible: true
+driverStoreOrder: 13
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 8563
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

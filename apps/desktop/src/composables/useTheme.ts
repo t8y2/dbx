@@ -1,16 +1,26 @@
 import { computed, ref } from "vue";
 import {
   APP_CORNER_STYLE_STORAGE_KEY,
+  APP_CUSTOM_UI_COLOR_DEFS,
+  APP_CUSTOM_UI_DARK_STORAGE_KEY,
+  APP_CUSTOM_UI_DERIVED_VAR_NAMES,
+  APP_CUSTOM_UI_STORAGE_KEY,
+  deriveCustomUiColors,
   APP_THEME_PALETTE_CLASS_NAMES,
   APP_THEME_PALETTE_STORAGE_KEY,
   APP_THEME_STORAGE_KEY,
+  DEFAULT_APP_CUSTOM_UI_COLORS,
+  DEFAULT_APP_CUSTOM_UI_COLORS_DARK,
+  appCustomUiColorValue,
   getAppThemePaletteClass,
   getTauriThemeForMode,
   isSystemAppThemeMode,
+  normalizeAppCustomUiColors,
   normalizeAppThemeMode,
   normalizeAppCornerStyle,
   normalizeAppThemePalette,
   resolveAppThemeAppearance,
+  type AppCustomUiColors,
   type AppThemeMode,
   type AppThemePalette,
   type AppCornerStyle,
@@ -25,13 +35,33 @@ function isLinuxTauriRuntime() {
 const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
 const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
-const themePalette = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const savedThemePaletteValue = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const previewedThemePalette = ref<AppThemePalette | null>(null);
+// Consumers use the effective palette so editor and canvas surfaces preview in
+// lockstep with the document-level theme classes.
+const themePalette = computed<AppThemePalette>(() => previewedThemePalette.value ?? savedThemePaletteValue.value);
+function parseStoredCustomUiColors(raw: string | null): AppCustomUiColors | null {
+  if (!raw) return null;
+  try {
+    return normalizeAppCustomUiColors(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+const customUiColors = ref<AppCustomUiColors>(parseStoredCustomUiColors(safeLocalStorageGet(APP_CUSTOM_UI_STORAGE_KEY)) ?? DEFAULT_APP_CUSTOM_UI_COLORS);
+const customUiColorsDark = ref<AppCustomUiColors>(parseStoredCustomUiColors(safeLocalStorageGet(APP_CUSTOM_UI_DARK_STORAGE_KEY)) ?? DEFAULT_APP_CUSTOM_UI_COLORS_DARK);
+const activeCustomUiColors = computed<AppCustomUiColors>(() => (isDark.value ? customUiColorsDark.value : customUiColors.value));
 const savedCornerStyle = safeLocalStorageGet(APP_CORNER_STYLE_STORAGE_KEY);
 const cornerStyle = ref<AppCornerStyle>(normalizeAppCornerStyle(savedCornerStyle));
 if (savedThemeMode && savedThemeMode !== themeMode.value) safeLocalStorageSet(APP_THEME_STORAGE_KEY, themeMode.value);
 if (savedCornerStyle && savedCornerStyle !== cornerStyle.value) safeLocalStorageSet(APP_CORNER_STYLE_STORAGE_KEY, cornerStyle.value);
 const systemPrefersDark = ref(readSystemPrefersDark());
 const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemPrefersDark.value) === "dark");
+// Bumped at the end of every applyTheme(): theme changes are DOM mutations
+// (classes / inline vars), so watchers keyed on reactive sources like isDark
+// miss palette switches and custom-color edits. Consumers that mirror the
+// resolved token set (plugin iframe bridge) watch this revision instead.
+const themeRevision = ref(0);
 
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
@@ -54,6 +84,16 @@ function setupSystemThemeListener() {
   isListeningForSystemTheme = true;
 }
 
+function applyThemePalette() {
+  if (typeof document === "undefined") return;
+
+  const doc = document.documentElement;
+  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
+  const paletteClass = getAppThemePaletteClass(themePalette.value);
+  if (paletteClass) doc.classList.add(paletteClass);
+  applyCustomUiColors();
+}
+
 function applyTheme() {
   if (typeof document === "undefined") return;
 
@@ -62,14 +102,13 @@ function applyTheme() {
 
   doc.classList.add("disable-transitions");
   doc.classList.toggle("dark", dark);
-  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
-  const paletteClass = getAppThemePaletteClass(themePalette.value);
-  if (paletteClass) doc.classList.add(paletteClass);
+  applyThemePalette();
   doc.dataset.cornerStyle = cornerStyle.value;
   doc.style.colorScheme = dark ? "dark" : "light";
 
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
+  themeRevision.value += 1;
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
   if (!isTauriRuntime()) return;
 
@@ -101,9 +140,63 @@ function setThemeMode(mode: AppThemeMode) {
 }
 
 function setThemePalette(palette: AppThemePalette) {
-  themePalette.value = palette;
+  savedThemePaletteValue.value = palette;
+  previewedThemePalette.value = null;
   safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
   applyTheme();
+}
+
+function previewThemePalette(palette: AppThemePalette) {
+  if (themePalette.value === palette) return;
+  previewedThemePalette.value = palette;
+  // Palette previews do not change the OS/window mode, so avoid the native
+  // Tauri write performed by applyTheme().
+  applyThemePalette();
+}
+
+function clearThemePalettePreview() {
+  if (previewedThemePalette.value === null) return;
+  previewedThemePalette.value = null;
+  applyThemePalette();
+}
+
+function applyCustomUiColors() {
+  if (typeof document === "undefined") return;
+  const doc = document.documentElement;
+  const clear = () => {
+    for (const def of APP_CUSTOM_UI_COLOR_DEFS) {
+      doc.style.removeProperty(def.varName);
+      if (def.rgbVarName) doc.style.removeProperty(def.rgbVarName);
+    }
+    for (const name of APP_CUSTOM_UI_DERIVED_VAR_NAMES) doc.style.removeProperty(name);
+  };
+  if (themePalette.value !== "custom") {
+    clear();
+    return;
+  }
+  for (const def of APP_CUSTOM_UI_COLOR_DEFS) {
+    const { color, rgbTriplet } = appCustomUiColorValue(activeCustomUiColors.value[def.key]);
+    doc.style.setProperty(def.varName, color);
+    if (def.rgbVarName) doc.style.setProperty(def.rgbVarName, rgbTriplet);
+  }
+  const derived = deriveCustomUiColors(activeCustomUiColors.value);
+  for (const name of APP_CUSTOM_UI_DERIVED_VAR_NAMES) doc.style.setProperty(name, derived[name]);
+}
+
+function setCustomUiColors(colors: AppCustomUiColors) {
+  const next = normalizeAppCustomUiColors(colors);
+  if (isDark.value) {
+    customUiColorsDark.value = next;
+    safeLocalStorageSet(APP_CUSTOM_UI_DARK_STORAGE_KEY, JSON.stringify(next));
+  } else {
+    customUiColors.value = next;
+    safeLocalStorageSet(APP_CUSTOM_UI_STORAGE_KEY, JSON.stringify(next));
+  }
+  applyCustomUiColors();
+}
+
+function resetCustomUiColors() {
+  setCustomUiColors({ ...(isDark.value ? DEFAULT_APP_CUSTOM_UI_COLORS_DARK : DEFAULT_APP_CUSTOM_UI_COLORS) });
 }
 
 function setCornerStyle(style: AppCornerStyle) {
@@ -119,5 +212,5 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, cornerStyle, applyTheme, setThemeMode, setThemePalette, setCornerStyle, toggleTheme };
+  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, themeRevision, cornerStyle, applyTheme, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
 }

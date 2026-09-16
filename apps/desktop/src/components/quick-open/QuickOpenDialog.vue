@@ -196,11 +196,20 @@ watch(
 </template>
 
 <style scoped>
-:deep(.bg-yellow-200) {
-  background-color: rgb(254 227 92);
+:deep([data-slot="dialog-content"]) {
+  border-color: color-mix(in srgb, var(--border) 80%, var(--ring));
+  box-shadow: 0 24px 70px rgb(0 0 0 / 0.32);
 }
 
+:deep(.divide-y > div.bg-accent) {
+  background-color: var(--info-bg) !important;
+  box-shadow: inset 3px 0 0 var(--info) !important;
+}
+
+:deep(.bg-yellow-200),
 :deep(.dark .bg-yellow-800) {
-  background-color: rgb(92 51 0);
+  background-color: var(--warning-bg) !important;
+  border-radius: 0.1875rem;
+  padding: 0 0.0625rem;
 }
 </style>

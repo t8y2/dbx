@@ -51,5 +51,16 @@ test("returns every column for empty searches and preserves match order", () => 
 test("keeps the data-grid table properties search on the shared column filter", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
 
-  assert.match(source, /filterObjectBrowserTableColumns\(props\.tableMeta\?\.columns \?\? \[\], searchQuery\.value\)/);
+  assert.match(source, /filterObjectBrowserTableColumns\(tableInfoColumns\.value, searchQuery\.value\)/);
+});
+
+test("both table DDL surfaces use the persisted wrapping preference", () => {
+  const sources = ["apps/desktop/src/components/grid/DataGrid.vue", "apps/desktop/src/components/objects/ObjectBrowser.vue"].map((path) => readFileSync(path, "utf8"));
+
+  for (const source of sources) {
+    assert.doesNotMatch(source, /const (?:ddlWrap|tableInfoWrap) = ref\(true\)/);
+    assert.match(source, /:class="\{ 'bg-accent': settingsStore\.editorSettings\.tableDdlWordWrap \}"/);
+    assert.match(source, /:class="settingsStore\.editorSettings\.tableDdlWordWrap \? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"/);
+    assert.match(source, /settingsStore\.updateEditorSettings\(\{\s*tableDdlWordWrap: !settingsStore\.editorSettings\.tableDdlWordWrap,?\s*\}\)/);
+  }
 });

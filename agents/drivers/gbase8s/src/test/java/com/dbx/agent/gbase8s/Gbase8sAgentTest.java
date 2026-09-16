@@ -14,6 +14,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
@@ -24,6 +25,18 @@ import java.util.Set;
 
 class Gbase8sAgentTest {
     @Test
+    void mapsMysqlCompatExtendedColumnTypes() {
+        Assertions.assertEquals("BIGINT UNSIGNED", Gbase8sAgent.mapColType(66));
+        Assertions.assertEquals("TINYINT", Gbase8sAgent.mapColType(67));
+        Assertions.assertEquals("MEDIUMINT", Gbase8sAgent.mapColType(68));
+        Assertions.assertEquals("BIT", Gbase8sAgent.mapColType(69));
+        // Nullable flag bits above the base type must not change the mapping.
+        Assertions.assertEquals("BIGINT UNSIGNED", Gbase8sAgent.mapColType(66 + 256));
+        Assertions.assertEquals("BIGINT", Gbase8sAgent.mapColType(43));
+        Assertions.assertEquals("UNKNOWN(99)", Gbase8sAgent.mapColType(99));
+    }
+
+    @Test
     void declaresGbase8sProfile() {
         Gbase8sAgent agent = new Gbase8sAgent();
 
@@ -31,6 +44,7 @@ class Gbase8sAgentTest {
         Assertions.assertEquals("jdbc:gbasedbt-sqli://{host}:{port}/{database}:GBASEDBTSERVER=gbase8s", agent.getProfile().getUrlTemplate());
         Assertions.assertEquals(9088, agent.getProfile().getDefaultPort());
         Assertions.assertTrue(agent.getProfile().getSkipExecutionContext());
+        Assertions.assertFalse(agent.supportsConnectionPooling());
     }
 
     @Test
@@ -112,6 +126,71 @@ class Gbase8sAgentTest {
         );
 
         Assertions.assertEquals("jdbc:gbasedbt-sqli://db.example.com:20013/app:GBASEDBTSERVER=gbase01", url);
+    }
+
+    @Test
+    void buildsSysmasterUrlWithoutChangingTheConfiguredDatabase() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com",
+            20013,
+            "appdb",
+            "user",
+            "password",
+            "CLIENT_LOCALE=zh_cn.utf8",
+            "",
+            false
+        );
+        params.setGbase_server("gbase01");
+
+        Assertions.assertEquals(
+            "jdbc:gbasedbt-sqli://db.example.com:20013/sysmaster:GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8",
+            Gbase8sAgent.buildUrlForDatabase(params, "sysmaster")
+        );
+    }
+
+    @Test
+    void replacesDatabaseInCustomConnectionStringForDatabaseListing() {
+        ConnectParams params = new ConnectParams(
+            "",
+            0,
+            "",
+            "user",
+            "password",
+            "",
+            "jdbc:gbasedbt-sqli://db.example.com:20013/appdb:GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8",
+            false
+        );
+
+        Assertions.assertEquals(
+            "jdbc:gbasedbt-sqli://db.example.com:20013/sysmaster:GBASEDBTSERVER=gbase01;CLIENT_LOCALE=zh_cn.utf8",
+            Gbase8sAgent.buildUrlForDatabase(params, "sysmaster")
+        );
+    }
+
+    @Test
+    void omitsOwnerSchemasWhenTheDatabaseCannotUseThemInDml() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(
+            agent,
+            schemaConnection(false, sql, resultSet(new String[]{"owner"}, new Object[][]{{"gbasedbt"}}))
+        );
+
+        Assertions.assertTrue(agent.listSchemas().isEmpty());
+        Assertions.assertTrue(sql.isEmpty());
+    }
+
+    @Test
+    void listsOwnerSchemasWhenTheDatabaseSupportsThemInDml() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(
+            agent,
+            schemaConnection(true, sql, resultSet(new String[]{"owner"}, new Object[][]{{"gbasedbt"}}))
+        );
+
+        Assertions.assertEquals(List.of("gbasedbt"), agent.listSchemas());
+        Assertions.assertEquals(1, sql.size());
     }
 
     @Test
@@ -355,6 +434,37 @@ class Gbase8sAgentTest {
         return proxy(Connection.class, (method, args) -> {
             if ("getCatalog".equals(method.getName())) {
                 return "appdb";
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection schemaConnection(boolean supportsSchemasInDml, List<String> sql, ResultSet resultSet) {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("supportsSchemasInDataManipulation".equals(method.getName())) {
+                return supportsSchemasInDml;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        PreparedStatement statement = proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                return resultSet;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("getCatalog".equals(method.getName())) {
+                return "appdb";
+            }
+            if ("getMetaData".equals(method.getName())) {
+                return metadata;
             }
             if ("prepareStatement".equals(method.getName())) {
                 sql.add(String.valueOf(args[0]));

@@ -1,3 +1,5 @@
+import { extractSingleSqlCodeBlock } from "@/lib/ai/aiSqlExecutionPolicy";
+
 /**
  * Pure detectors for recognizing AI assistant action proposals and user
  * short replies (affirmative / negative). Used by the chat UI to render
@@ -236,6 +238,35 @@ export function looksLikeWriteSqlProposal(content: string): boolean {
 }
 
 /**
+ * A write proposal is actionable only when the user can review exactly one
+ * SQL statement. A generic “execute this INSERT?” prompt cannot safely bind
+ * the next agent run, so the UI must not present it as an executable action.
+ */
+export function isActionableWriteSqlProposal(content: string): boolean {
+  return looksLikeWriteSqlProposal(content) && extractSingleSqlCodeBlock(content) !== undefined;
+}
+
+/** A chat message that the write-confirmation gate inspects. */
+export interface WriteSqlGrantMessage {
+  role: "user" | "assistant";
+  content: string;
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+}
+
+/**
+ * True when a chat message can bind the next agent run to one exact SQL
+ * statement. Backend-generated confirmations are marked with a structural
+ * `kind` and carry exactly one SQL block, so they are actionable regardless of
+ * the locale their localized wording is in; model-authored proposals still
+ * have to pass the English/Chinese text detectors.
+ */
+export function isActionableWriteProposalMessage(msg: WriteSqlGrantMessage): boolean {
+  if (msg.role !== "assistant" || !msg.content) return false;
+  if (msg.kind === "writeSqlConfirmation") return extractSingleSqlCodeBlock(msg.content) !== undefined;
+  return isActionableWriteSqlProposal(msg.content);
+}
+
+/**
  * Returns true when the proposal line explicitly references a write/DDL
  * SQL operation (not a read-only action that happens to coexist with a
  * write keyword elsewhere in the message).
@@ -279,7 +310,7 @@ export interface WriteSqlGrantParams {
    * The function scans backward from the last message, skipping
    * contextSummary entries, and stops at the first user message.
    */
-  messages: Array<{ role: "user" | "assistant"; content: string; kind?: "contextSummary" }>;
+  messages: WriteSqlGrantMessage[];
 }
 
 /**
@@ -296,7 +327,7 @@ export function shouldGrantWriteSqlOnShortAffirmative(params: WriteSqlGrantParam
   for (let i = params.messages.length - 1; i >= 0; i--) {
     const msg = params.messages[i];
     if (msg.kind === "contextSummary") continue;
-    if (msg.role === "assistant" && msg.content && looksLikeWriteSqlProposal(msg.content)) return true;
+    if (isActionableWriteProposalMessage(msg)) return true;
     if (msg.role === "user") return false;
   }
   return false;

@@ -99,4 +99,19 @@ describe("debug log local timestamps", () => {
     expect(text).toContain(`[${timestamp}] [INFO] hello`);
     expect(text).not.toContain(".882Z");
   });
+
+  it("redacts Consul and nested identity-provider secrets", () => {
+    localStorage.setItem(DEBUG_LOG_ENABLED_KEY, "1");
+    appendDebugLog("error", {
+      SecretID: "acl-secret",
+      peering_token: "peering-secret",
+      nested: { OIDCClientSecret: "oidc-secret", safe: "visible" },
+    });
+
+    const text = getDebugLogText();
+    expect(text).not.toContain("acl-secret");
+    expect(text).not.toContain("peering-secret");
+    expect(text).not.toContain("oidc-secret");
+    expect(text).toContain("visible");
+  });
 });

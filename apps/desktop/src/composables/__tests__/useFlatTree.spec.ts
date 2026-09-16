@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createFlatTreeIndex, flattenTree, mutateFlatTreeExpansion, replaceFlatTreeChildren, type FlatTreeNode } from "@/composables/useFlatTree";
+import { createFlatTreeIndex, flatTreeRowsChanged, flattenTree, mutateFlatTreeExpansion, replaceFlatTreeChildren, type FlatTreeNode } from "@/composables/useFlatTree";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 
 function item(id: string, type: TreeNodeType, depth: number, children?: TreeNode[]): FlatTreeNode {
   const node: TreeNode = { id, label: id, type, children };
-  return { id, type, depth, node, poolType: type };
+  return { id, renderKey: `test:${depth}:${type}:${id}`, type, depth, node, poolType: type };
 }
 
 function createIndex(nodes: FlatTreeNode[]) {
@@ -90,16 +90,26 @@ describe("flat-tree range mutations", () => {
     const connection: TreeNode = { id: "connection", label: "connection", type: "connection", isExpanded: true, children: [database] };
     const sibling: TreeNode = { id: "sibling", label: "sibling", type: "connection" };
     const initial = flattenTree([connection, sibling]);
+    const connectionRenderKey = initial[0].renderKey;
+    const databaseRenderKey = initial[1].renderKey;
+    const siblingRenderKey = initial[2].renderKey;
 
     const expandedDatabase = mutateFlatTreeExpansion(initial, 1, database, true);
     expect(expandedDatabase.map((entry) => entry.id)).toEqual(["connection", "database", "schema", "sibling"]);
+    expect(expandedDatabase[0].renderKey).toBe(connectionRenderKey);
+    expect(expandedDatabase[1].renderKey).toBe(databaseRenderKey);
+    expect(expandedDatabase.at(-1)?.renderKey).toBe(siblingRenderKey);
     expect(expandedDatabase.at(-1)?.node).toBe(sibling);
 
     const expandedSchema = mutateFlatTreeExpansion(expandedDatabase, 2, schema, true);
     expect(expandedSchema.map((entry) => entry.id)).toEqual(["connection", "database", "schema", "table", "sibling"]);
+    expect(expandedSchema[0].renderKey).toBe(connectionRenderKey);
+    expect(expandedSchema[1].renderKey).toBe(databaseRenderKey);
+    expect(expandedSchema.at(-1)?.renderKey).toBe(siblingRenderKey);
 
     const collapsedDatabase = mutateFlatTreeExpansion(expandedSchema, 1, database, false);
     expect(collapsedDatabase.map((entry) => entry.id)).toEqual(["connection", "database", "sibling"]);
+    expect(collapsedDatabase.map((entry) => entry.renderKey)).toEqual([connectionRenderKey, databaseRenderKey, siblingRenderKey]);
     expect(collapsedDatabase[2].node).toBe(sibling);
   });
 
@@ -115,6 +125,10 @@ describe("flat-tree range mutations", () => {
     const refreshed = replaceFlatTreeChildren(initial, 1, database);
 
     expect(refreshed.map((entry) => entry.id)).toEqual(["connection", "database", "new-table", "sibling"]);
+    expect(refreshed[0].renderKey).toBe(initial[0].renderKey);
+    expect(refreshed[1].renderKey).toBe(initial[1].renderKey);
+    expect(refreshed[3].renderKey).toBe(initial[3].renderKey);
+    expect(refreshed[2].renderKey).not.toBe(initial[2].renderKey);
     expect(refreshed[0]).toBe(initial[0]);
     expect(refreshed[3]).toBe(initial[3]);
   });
@@ -127,5 +141,52 @@ describe("flat-tree range mutations", () => {
 
     expect(result).toEqual(nodes);
     expect(result).not.toBe(nodes);
+  });
+});
+
+describe("flat-tree render identities", () => {
+  it("detects same-length table-search row replacements for #6951", () => {
+    const previous = [item("table-a", "table", 1), item("table-b", "table", 1)];
+    const unchanged = previous.map((entry) => ({ ...entry }));
+    const next = [item("table-c", "table", 1), item("table-b", "table", 1)];
+
+    expect(flatTreeRowsChanged(unchanged, previous)).toBe(false);
+    expect(flatTreeRowsChanged(next, previous)).toBe(true);
+  });
+
+  it("isolates equal business ids that belong to different lineages", () => {
+    const collidingId = "connection:a:b";
+    const collidingSchemaId = "connection:a:b:c";
+    const directDatabaseSchema: TreeNode = { id: collidingSchemaId, label: "c", type: "schema" };
+    const directDatabase: TreeNode = { id: collidingId, label: "a:b", type: "database", isExpanded: true, children: [directDatabaseSchema] };
+    const schema: TreeNode = { id: collidingId, label: "b", type: "schema" };
+    const sameTypeSchema: TreeNode = { id: collidingSchemaId, label: "b:c", type: "schema" };
+    const parentDatabase: TreeNode = { id: "connection:a", label: "a", type: "database", isExpanded: true, children: [schema, sameTypeSchema] };
+    const connection: TreeNode = { id: "connection", label: "connection", type: "connection", isExpanded: true, children: [directDatabase, parentDatabase] };
+
+    const flattened = flattenTree([connection]);
+    const collisions = flattened.filter((entry) => entry.id === collidingId);
+    const sameTypeCollisions = flattened.filter((entry) => entry.id === collidingSchemaId);
+
+    expect(collisions.map((entry) => entry.type)).toEqual(["database", "schema"]);
+    expect(new Set(collisions.map((entry) => entry.renderKey))).toHaveLength(2);
+    expect(sameTypeCollisions.map((entry) => entry.type)).toEqual(["schema", "schema"]);
+    expect(new Set(sameTypeCollisions.map((entry) => entry.renderKey))).toHaveLength(2);
+    expect(new Set(flattened.map((entry) => entry.renderKey))).toHaveLength(flattened.length);
+  });
+
+  it("keeps unique and default database business identities unchanged", () => {
+    const defaultDatabase: TreeNode = { id: "connection:", label: "Default", type: "database" };
+    const namedDatabase: TreeNode = { id: "connection:app", label: "app", type: "database" };
+    const connection: TreeNode = { id: "connection", label: "connection", type: "connection", isExpanded: true, children: [defaultDatabase, namedDatabase] };
+
+    const flattened = flattenTree([connection]);
+
+    expect(flattened.map(({ id, type, poolType }) => ({ id, type, poolType }))).toEqual([
+      { id: "connection", type: "connection", poolType: "connection" },
+      { id: "connection:", type: "database", poolType: "database" },
+      { id: "connection:app", type: "database", poolType: "database" },
+    ]);
+    expect(new Set(flattened.map((entry) => entry.renderKey))).toHaveLength(flattened.length);
   });
 });

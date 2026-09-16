@@ -1,14 +1,29 @@
 use super::dialect::{database_label, StructureDialect};
 use super::types::{EditableStructureForeignKey, ForeignKeyInfo, TableStructureSqlOptions};
-use super::util::{clean, qualified_table, quote_ident};
+use super::util::{clean, qualified_new_table, qualified_table, quote_ident, quote_new_ident};
 
 pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
+    build_foreign_key_sql_with_mode(options, warnings, false)
+}
+
+pub(super) fn build_foreign_key_sql_for_new_table(
+    options: &TableStructureSqlOptions,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    build_foreign_key_sql_with_mode(options, warnings, true)
+}
+
+fn build_foreign_key_sql_with_mode(
+    options: &TableStructureSqlOptions,
+    warnings: &mut Vec<String>,
+    for_new_table: bool,
+) -> Vec<String> {
     if options.foreign_keys.is_empty() {
         return Vec::new();
     }
 
     let database_label = database_label(options.database_type);
-    let capabilities = super::dialect::capabilities_for(options.database_type);
+    let capabilities = super::dialect::capabilities_for(options.database_type, options.driver_profile.as_deref());
     let dialect = capabilities.dialect;
     if !capabilities.foreign_key {
         if has_foreign_key_edits(&options.foreign_keys) {
@@ -17,7 +32,11 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
         return Vec::new();
     }
 
-    let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
+    let table = if for_new_table {
+        qualified_new_table(options.database_type, dialect, options.schema.as_deref(), &options.table_name)
+    } else {
+        qualified_table(dialect, options.schema.as_deref(), &options.table_name)
+    };
     let mut statements = Vec::new();
 
     for foreign_key in &options.foreign_keys {
@@ -35,7 +54,9 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
             statements.push(drop_foreign_key_sql(dialect, &table, &original.name));
         }
 
-        if let Some(sql) = create_foreign_key_sql(dialect, &table, foreign_key, warnings) {
+        if let Some(sql) =
+            create_foreign_key_sql(options.database_type, dialect, &table, foreign_key, warnings, for_new_table)
+        {
             statements.push(sql);
         }
     }
@@ -79,16 +100,20 @@ fn has_foreign_key_change(foreign_key: &EditableStructureForeignKey, original: &
 fn drop_foreign_key_sql(dialect: StructureDialect, table: &str, name: &str) -> String {
     match dialect {
         StructureDialect::Mysql => format!("ALTER TABLE {table} DROP FOREIGN KEY {};", quote_ident(dialect, name)),
-        StructureDialect::Postgres => format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name)),
+        StructureDialect::Postgres | StructureDialect::Oracle => {
+            format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, name))
+        }
         _ => unreachable!("foreign key SQL requested for unsupported dialect"),
     }
 }
 
 fn create_foreign_key_sql(
+    database_type: Option<crate::models::connection::DatabaseType>,
     dialect: StructureDialect,
     table: &str,
     foreign_key: &EditableStructureForeignKey,
     warnings: &mut Vec<String>,
+    for_new_table: bool,
 ) -> Option<String> {
     let name = clean(&foreign_key.name);
     let columns = identifier_list(&foreign_key.column);
@@ -109,19 +134,31 @@ fn create_foreign_key_sql(
         format!("{}.{}", quote_ident(dialect, &foreign_key.ref_schema), quote_ident(dialect, &ref_table))
     };
 
+    let constraint_name =
+        if for_new_table { quote_new_ident(database_type, dialect, &name) } else { quote_ident(dialect, &name) };
+    let local_columns =
+        columns
+            .iter()
+            .map(|column| {
+                if for_new_table {
+                    quote_new_ident(database_type, dialect, column)
+                } else {
+                    quote_ident(dialect, column)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+    let referenced_columns =
+        ref_columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ");
     let mut sql = format!(
-        "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {ref_target} ({}",
-        quote_ident(dialect, &name),
-        columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", "),
-        ref_columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ")
+        "ALTER TABLE {table} ADD CONSTRAINT {constraint_name} FOREIGN KEY ({local_columns}) REFERENCES {ref_target} ({referenced_columns})"
     );
-    sql.push(')');
 
-    if let Some(action) = action_clause("ON DELETE", &foreign_key.on_delete, warnings) {
+    if let Some(action) = action_clause(dialect, "ON DELETE", &foreign_key.on_delete, warnings) {
         sql.push(' ');
         sql.push_str(&action);
     }
-    if let Some(action) = action_clause("ON UPDATE", &foreign_key.on_update, warnings) {
+    if let Some(action) = action_clause(dialect, "ON UPDATE", &foreign_key.on_update, warnings) {
         sql.push(' ');
         sql.push_str(&action);
     }
@@ -129,10 +166,26 @@ fn create_foreign_key_sql(
     Some(sql)
 }
 
-fn action_clause(prefix: &str, value: &str, warnings: &mut Vec<String>) -> Option<String> {
+fn action_clause(dialect: StructureDialect, prefix: &str, value: &str, warnings: &mut Vec<String>) -> Option<String> {
     let action = normalize_action(value);
     if action.is_empty() {
         return None;
+    }
+    if dialect == StructureDialect::Oracle {
+        if prefix == "ON UPDATE" {
+            if action != "NO ACTION" {
+                warnings.push(format!("Oracle does not support {prefix} {action}."));
+            }
+            return None;
+        }
+        return match action.as_str() {
+            "CASCADE" | "SET NULL" => Some(format!("{prefix} {action}")),
+            "NO ACTION" => None,
+            _ => {
+                warnings.push(format!("Unsupported Oracle foreign key action \"{}\".", clean(value)));
+                None
+            }
+        };
     }
     match action.as_str() {
         "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" => Some(format!("{prefix} {action}")),

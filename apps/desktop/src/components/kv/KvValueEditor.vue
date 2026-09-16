@@ -13,6 +13,7 @@ import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { KvValueFormat } from "@/lib/kv/kvValueFormat";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const props = withDefaults(
   defineProps<{
@@ -28,8 +29,10 @@ const props = withDefaults(
 
 const emit = defineEmits<{ "update:modelValue": [value: string] }>();
 const host = ref<HTMLElement>();
+const settingsStore = useSettingsStore();
 const languageCompartment = new Compartment();
 const readOnlyCompartment = new Compartment();
+const wordWrapCompartment = new Compartment();
 let view: EditorView | null = null;
 
 function languageExtension(format: KvValueFormat) {
@@ -48,6 +51,10 @@ function readOnlyExtensions(readOnly: boolean) {
   return [EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)];
 }
 
+function wordWrapExtension(wordWrap = settingsStore.editorSettings.wordWrap) {
+  return wordWrap ? EditorView.lineWrapping : [];
+}
+
 onMounted(() => {
   if (!host.value) return;
   view = new EditorView({
@@ -58,7 +65,7 @@ onMounted(() => {
         basicSetup,
         languageCompartment.of(languageExtension(props.format)),
         readOnlyCompartment.of(readOnlyExtensions(props.readOnly)),
-        EditorView.lineWrapping,
+        wordWrapCompartment.of(wordWrapExtension()),
         EditorView.theme({
           "&": { height: "100%", fontSize: "13px", backgroundColor: "transparent" },
           ".cm-scroller": { fontFamily: "var(--dbx-editor-font-family, ui-monospace)", overflow: "auto" },
@@ -89,6 +96,11 @@ watch(
 watch(
   () => props.readOnly,
   (readOnly) => view?.dispatch({ effects: readOnlyCompartment.reconfigure(readOnlyExtensions(readOnly)) }),
+);
+
+watch(
+  () => settingsStore.editorSettings.wordWrap,
+  (wordWrap) => view?.dispatch({ effects: wordWrapCompartment.reconfigure(wordWrapExtension(wordWrap)) }),
 );
 
 onBeforeUnmount(() => {

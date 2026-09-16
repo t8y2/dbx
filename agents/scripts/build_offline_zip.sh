@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Build offline ZIP bundles for each platform.
 # Usage: ./scripts/build_offline_zip.sh <release-dir>
-# The release-dir must contain agent-registry.json, raw driver artifacts, and dbx-jre-*.tar.zst
+# The release-dir must contain agent-registry.json, raw driver artifacts, and dbx-jre-*.tar.zst.
+# If offline-jdbc/jdbc is present, it is included as the managed JDBC payload.
 
 RELEASE_DIR="$(cd "${1:?Usage: build_offline_zip.sh <release-dir>}" && pwd)"
 
@@ -29,6 +30,10 @@ for platform in "${PLATFORMS[@]}"; do
   mkdir -p "$WORK/jre" "$WORK/drivers"
 
   cp "$RELEASE_DIR/agent-registry.json" "$WORK/"
+
+  if [ -d "$RELEASE_DIR/offline-jdbc/jdbc" ]; then
+    cp -R "$RELEASE_DIR/offline-jdbc/jdbc" "$WORK/"
+  fi
 
   # Copy all JRE archives for this platform
   JRE_COUNT=0
@@ -56,7 +61,9 @@ for platform in "${PLATFORMS[@]}"; do
   done
 
   ZIP_NAME="dbx-agents-offline-${platform}.zip"
-  (cd "$WORK" && zip -r "$RELEASE_DIR/$ZIP_NAME" agent-registry.json jre/ drivers/)
+  ZIP_ENTRIES=(agent-registry.json jre/ drivers/)
+  [ -d "$WORK/jdbc" ] && ZIP_ENTRIES+=(jdbc/)
+  (cd "$WORK" && zip -r "$RELEASE_DIR/$ZIP_NAME" "${ZIP_ENTRIES[@]}")
   SIZE=$(du -h "$RELEASE_DIR/$ZIP_NAME" | cut -f1)
   echo "Created $ZIP_NAME ($SIZE)"
 done

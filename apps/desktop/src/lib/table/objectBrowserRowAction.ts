@@ -1,17 +1,26 @@
+import type { DatabaseType } from "@/types/database";
+import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
-export type ObjectBrowserRowAction = "table-info" | "open-table" | "open-source" | "none";
+export type ObjectBrowserRowAction = "table-info" | "type-info" | "open-table" | "open-source" | "none";
 
 /**
  * Determine the action for a single click on an object browser row.
  * - TABLE → table-info (show table properties panel)
- * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
+ * - TYPE → type-info (read-only type details) on verified PG-family databases
+ * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE_BODY → open-source
  * - otherwise → none
+ *
+ * TYPE/TYPE_BODY only open source for connections with a real type source
+ * implementation (Xugu); other databases list types without a DDL getter.
  */
-export function singleClickRowAction(row: ObjectBrowserRow | null | undefined): ObjectBrowserRowAction {
+export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
+  if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
   if (row.type === "TABLE") return "table-info";
-  if (canOpenSource(row)) return "open-source";
+  if (row.type === "EVENT") return "none";
+  if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
+  if (canOpenSource(row, dbType)) return "open-source";
   return "none";
 }
 
@@ -21,10 +30,13 @@ export function singleClickRowAction(row: ObjectBrowserRow | null | undefined): 
  * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
  * - otherwise → none
  */
-export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined): ObjectBrowserRowAction {
+export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
+  if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
   if (row.type === "TABLE") return "open-table";
-  if (canOpenSource(row)) return "open-source";
+  if (row.type === "EVENT") return "open-source";
+  if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
+  if (canOpenSource(row, dbType)) return "open-source";
   return "none";
 }
 
@@ -38,14 +50,14 @@ export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined): 
  * the caller defers the single-click via shouldDeferSingleClick so the second
  * click can cancel it.
  */
-export function resolveRowClickAction(row: ObjectBrowserRow | null | undefined, detail: number, activation: "single" | "double"): { action: ObjectBrowserRowAction; isDouble: boolean } {
+export function resolveRowClickAction(row: ObjectBrowserRow | null | undefined, detail: number, activation: "single" | "double", dbType?: DatabaseType): { action: ObjectBrowserRowAction; isDouble: boolean } {
   if (activation === "double") {
-    if (detail === 2) return { action: doubleClickRowAction(row), isDouble: true };
-    return { action: singleClickRowAction(row), isDouble: false };
+    if (detail === 2) return { action: doubleClickRowAction(row, dbType), isDouble: true };
+    return { action: singleClickRowAction(row, dbType), isDouble: false };
   }
   // single-click activation
-  if (detail > 1) return { action: doubleClickRowAction(row), isDouble: true };
-  return { action: singleClickRowAction(row), isDouble: false };
+  if (detail > 1) return { action: doubleClickRowAction(row, dbType), isDouble: true };
+  return { action: singleClickRowAction(row, dbType), isDouble: false };
 }
 
 /**
@@ -55,10 +67,10 @@ export function resolveRowClickAction(row: ObjectBrowserRow | null | undefined, 
  * open-table). For rows whose single and double actions are identical
  * (e.g. VIEW → open-source both), no deferral is needed.
  */
-export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined, action: ObjectBrowserRowAction): boolean {
+export function shouldDeferSingleClick(row: ObjectBrowserRow | null | undefined, action: ObjectBrowserRowAction, dbType?: DatabaseType): boolean {
   if (action === "none") return false;
-  const single = singleClickRowAction(row);
-  const double = doubleClickRowAction(row);
+  const single = singleClickRowAction(row, dbType);
+  const double = doubleClickRowAction(row, dbType);
   return single !== double && action === single;
 }
 
@@ -70,6 +82,16 @@ export function isSourceOnlyObjectBrowserRow(row: ObjectBrowserRow): boolean {
   return row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
 }
 
-function canOpenSource(row: ObjectBrowserRow): boolean {
-  return row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "TRIGGER" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY";
+function mongoObjectBrowserRowAction(row: ObjectBrowserRow): ObjectBrowserRowAction {
+  return row.type === "TABLE" || row.type === "VIEW" ? "open-table" : "none";
+}
+
+function canOpenSource(row: ObjectBrowserRow, dbType?: DatabaseType): boolean {
+  // Verified PG-family TYPE rows open the read-only details panel instead;
+  // Xugu keeps its source editor entry through supportsTypeObjectSource below.
+  if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return false;
+  if ((row.type === "TYPE" || row.type === "TYPE_BODY") && !supportsTypeObjectSource(dbType)) return false;
+  return (
+    row.type === "VIEW" || row.type === "MATERIALIZED_VIEW" || row.type === "PROCEDURE" || row.type === "FUNCTION" || row.type === "TRIGGER" || row.type === "EVENT" || row.type === "SEQUENCE" || row.type === "PACKAGE" || row.type === "PACKAGE_BODY" || row.type === "TYPE" || row.type === "TYPE_BODY"
+  );
 }

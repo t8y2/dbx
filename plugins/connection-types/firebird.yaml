@@ -1,0 +1,35 @@
+schemaVersion: 1
+order: 400
+dbType: firebird
+rustVariant: Firebird
+label: Firebird
+dialect: Firebird
+runtimeMode: agent
+mcpMode: bridge
+agentKey: firebird
+driverStoreVisible: true
+driverStoreOrder: 12
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 3050
+traits:
+  singleDatabase: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

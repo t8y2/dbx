@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionIsDorisFamilyCatalogCapable, isDorisFamilyCatalogCapable, isInternalDorisCatalog } from "@/lib/database/databaseFeatureSupport";
+import { connectionIsDorisFamilyCatalogCapable, isDorisFamilyCatalogCapable, isInternalDorisCatalog, shouldShowDorisCatalogTree } from "@/lib/database/databaseFeatureSupport";
 import type { ConnectionConfig } from "@/types/database";
 
 function conn(db_type: ConnectionConfig["db_type"], driver_profile?: string | null): Pick<ConnectionConfig, "db_type" | "driver_profile"> {
@@ -40,6 +40,23 @@ describe("connectionIsDorisFamilyCatalogCapable", () => {
 
   it("returns false for a plain MySQL connection", () => {
     expect(connectionIsDorisFamilyCatalogCapable(conn("mysql"))).toBe(false);
+  });
+});
+
+describe("shouldShowDorisCatalogTree", () => {
+  const catalog = (name: string, catalog_type: string): { name: string; catalog_type: string } => ({ name, catalog_type });
+
+  it("keeps a single external catalog scoped in the tree", () => {
+    expect(shouldShowDorisCatalogTree([catalog("hive_catalog", "hive")])).toBe(true);
+  });
+
+  it("flattens a single built-in catalog", () => {
+    expect(shouldShowDorisCatalogTree([catalog("internal", "internal")])).toBe(false);
+    expect(shouldShowDorisCatalogTree([catalog("default_catalog", "Internal")])).toBe(false);
+  });
+
+  it("keeps the catalog layer when internal and external catalogs are visible", () => {
+    expect(shouldShowDorisCatalogTree([catalog("internal", "internal"), catalog("iceberg", "iceberg")])).toBe(true);
   });
 });
 

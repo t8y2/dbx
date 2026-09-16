@@ -14,17 +14,20 @@ import {
 
 const knownDatabaseTypes = new Set([
   "access",
+  "cassandra",
   "doris",
   "jdbc",
   "mongodb",
   "mq",
   "mysql",
+  "neo4j",
   "oceanbase-oracle",
   "oracle",
   "postgres",
   "redis",
   "sqlite",
   "sqlserver",
+  "vastbase",
 ]);
 
 test("labels a desktop MySQL UI fix", () => {
@@ -54,11 +57,14 @@ test("maps agent and dialect paths to existing database types", () => {
   assert.deepEqual(
     inferDatabaseTypes([
       "agents/drivers/oracle-go/go.mod",
+      "agents/drivers/cassandra-go/go.mod",
+      "agents/drivers/neo4j-go/go.mod",
+      "agents/drivers/vastbase-go/go.mod",
       "agents/drivers/kafka/build.gradle",
       "plugins/dialects/postgresql.yaml",
       "plugins/dialects/oceanbase.yaml",
     ], knownDatabaseTypes),
-    ["mq", "oceanbase-oracle", "oracle", "postgres"],
+    ["cassandra", "mq", "neo4j", "oceanbase-oracle", "oracle", "postgres", "vastbase"],
   );
 });
 

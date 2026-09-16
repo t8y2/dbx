@@ -1,0 +1,36 @@
+schemaVersion: 1
+order: 550
+dbType: informix
+rustVariant: Informix
+label: IBM Informix
+dialect: Informix
+runtimeMode: agent
+mcpMode: bridge
+agentKey: informix
+driverStoreVisible: true
+driverStoreOrder: 25
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 9088
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

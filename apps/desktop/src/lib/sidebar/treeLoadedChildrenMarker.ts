@@ -7,13 +7,13 @@ const TABLE_STRUCTURE_GROUP_TYPES = new Set<TreeNode["type"]>(["group-columns", 
 
 /** Whether a node's in-memory children match a valid "loaded" marker (scheme A). */
 export function treeNodeLoadedChildrenContentPresent(node: TreeNode, sidebarObjectDisplay: SidebarObjectDisplayMode): boolean {
-  const childCount = node.children?.length ?? 0;
+  const childCount = node.children?.filter((child) => child.type !== "saved-sql-root").length ?? 0;
   if (node.type === "database" || node.type === "schema" || node.type === "linked-server-schema") {
     if (childCount > 0) return true;
     // Grouped mode always materializes object-group placeholders; empty means a stale shell.
     return sidebarObjectDisplay === "simple";
   }
-  if (objectTypesForGroupNode(node.type) || TABLE_STRUCTURE_GROUP_TYPES.has(node.type) || node.type === "group-extensions") {
+  if (objectTypesForGroupNode(node.type) || TABLE_STRUCTURE_GROUP_TYPES.has(node.type) || node.type === "group-extensions" || node.type === "group-tablespaces" || node.type === "group-datafiles") {
     return true;
   }
   return childCount > 0;
@@ -23,5 +23,5 @@ export function treeNodeLoadedChildrenContentPresent(node: TreeNode, sidebarObje
 export function simpleModeEmptyShellNeedsConfirmedLoad(node: TreeNode, sidebarObjectDisplay: SidebarObjectDisplayMode): boolean {
   if (sidebarObjectDisplay !== "simple") return false;
   if (node.type !== "database" && node.type !== "schema" && node.type !== "linked-server-schema") return false;
-  return (node.children?.length ?? 0) === 0;
+  return (node.children?.filter((child) => child.type !== "saved-sql-root").length ?? 0) === 0;
 }

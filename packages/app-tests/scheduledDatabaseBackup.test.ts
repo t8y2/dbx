@@ -5,6 +5,8 @@ import {
   DatabaseBackupConnectionQueue,
   databaseBackupAggregateExportStatus,
   databaseBackupFilePath,
+  databaseBackupRunDirectory,
+  databaseBackupRunDirectoryPatternIsValid,
   databaseBackupProgressPercent,
   databaseBackupRunsToPrune,
   databaseBackupScheduleIsDue,
@@ -131,6 +133,22 @@ test("backup file names are unique and safe for schema-aware exports", () => {
   const path = databaseBackupFilePath("C:\\backups", "Nightly: prod", "app/private", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd");
 
   assert.equal(path, "C:\\backups\\dbx-backup__Nightly_ prod__20260716-020304__app_private__12345678.sql");
+});
+
+test("backup file names retain the target suffix without an implicit run suffix", () => {
+  const path = databaseBackupFilePath("C:\\backups", "Nightly", "app", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd", "gzip", "before-migration");
+
+  assert.equal(path, "C:\\backups\\before-migration__app.sql.gz");
+});
+
+test("scheduled runs render a user-defined relative directory template", () => {
+  const directory = databaseBackupRunDirectory("C:\\backups", "archives/{schedule}/{date}/{timestamp}-{runId}", "Nightly: prod", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd");
+
+  assert.equal(directory, "C:\\backups\\archives\\Nightly_ prod\\20260716\\20260716020304-12345678");
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("{schedule}/{runId}"), true);
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("dbx-backup_{timestamp}"), true);
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("../{runId}"), false);
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("daily"), true);
 });
 
 test("retention pruning keeps the newest successful runs", () => {
@@ -268,6 +286,7 @@ test("explicit backup databases fail when any configured target is missing", () 
 test("scheduled backups are limited to databases with consistent snapshot support", () => {
   assert.equal(supportsScheduledDatabaseBackup("postgres"), true);
   assert.equal(supportsScheduledDatabaseBackup("mysql"), true);
+  assert.equal(supportsScheduledDatabaseBackup("dameng"), false);
   assert.equal(supportsScheduledDatabaseBackup("sqlite"), false);
   assert.equal(supportsScheduledDatabaseBackup("sqlserver"), false);
 });
@@ -333,7 +352,20 @@ test("scheduled backup history exposes rename and overall percentage controls", 
 
   assert.match(source, /run\.displayName \|\| run\.scheduleName/);
   assert.match(source, /role="progressbar"/);
-  assert.match(scheduler, /databaseBackupConnectionQueue\.run\(schedule\.connectionId/);
+  assert.match(scheduler, /databaseBackupConnectionQueue\.run\(config\.connectionId/);
   assert.match(scheduler, /status: databaseBackupAggregateExportStatus\(progress\.status, false\)/);
   assert.match(scheduler, /overallPercent: progressPercent/);
+});
+
+test("scheduled backups prepare table scope before opening a consistent snapshot", () => {
+  const scheduler = readFileSync("apps/desktop/src/composables/useScheduledDatabaseBackups.ts", "utf8");
+  const exportCore = readFileSync("crates/dbx-core/src/database_export.rs", "utf8");
+  const schemaIndex = scheduler.indexOf("await api.listSchemas(config.connectionId, database)");
+  const snapshotIndex = scheduler.indexOf("await api.beginDatabaseBackupSnapshot(config.connectionId, database, runId)");
+  const exportIndex = scheduler.indexOf("await runDatabaseExportUntilTerminal(");
+
+  assert.ok(schemaIndex >= 0);
+  assert.ok(snapshotIndex > schemaIndex);
+  assert.ok(exportIndex > snapshotIndex);
+  assert.match(exportCore, /keep_manual_transaction_alive\(state, snapshot_session_id\)\.await/);
 });

@@ -9,7 +9,7 @@ test("SQL library imports use the charset-aware external SQL reader", () => {
   const end = source.indexOf("async function chooseSyncDirectory", start);
   const handler = start >= 0 && end > start ? source.slice(start, end) : "";
 
-  assert.match(handler, /await api\.readExternalSqlFile\(path\)/);
+  assert.match(handler, /await api\.readExternalSqlFile\(path, externalSqlEditorMaxBytes\(settingsStore\.editorSettings\.externalSqlEditorMaxMb\)\)/);
   assert.doesNotMatch(handler, /readTextFile/);
 });
 
@@ -20,6 +20,16 @@ test("SQL library directory imports use the native pruned folder scanner", () =>
 
   assert.match(scanner, /await api\.listSqlFilesInFolder\(dir\)/);
   assert.doesNotMatch(scanner, /@tauri-apps\/plugin-fs|readDir/);
+});
+
+test("SQL library directory imports preserve nested folder paths", () => {
+  const start = source.indexOf("async function importDirectoryIntoLibrary");
+  const end = source.indexOf("async function chooseSyncDirectory", start);
+  const handler = start >= 0 && end > start ? source.slice(start, end) : "";
+
+  assert.match(handler, /resolveImportedFolder\(folderConnectionId, targetFolder\?\.id, file\.folderNames, folderCache\)/);
+  assert.match(handler, /uniqueImportedName\(file\.name, takenNames\)/);
+  assert.doesNotMatch(handler, /relativeImportName/);
 });
 
 test("SQL library file menu can open a file with the current tab target", () => {

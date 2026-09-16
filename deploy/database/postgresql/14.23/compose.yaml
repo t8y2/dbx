@@ -4,7 +4,7 @@ services:
     container_name: dbx-postgresql-14.23
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-5433}:5432"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10300}:5432"
     environment:
       POSTGRES_PASSWORD: "${DB_PASSWORD:-123456}"
       POSTGRES_DB: dbx

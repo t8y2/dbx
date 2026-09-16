@@ -14,7 +14,8 @@ function occurrences(source: string, pattern: RegExp): number {
 test("sidebar rows stay within the hot-path source budget", () => {
   assert.ok(treeItem.split("\n").length <= 2_200, "TreeItem must stay below 2,200 lines");
   assert.ok(occurrences(treeItem, /^(?:async )?function /gm) <= 90, "TreeItem must stay below 90 top-level functions");
-  assert.ok(occurrences(treeItem, /^const [A-Za-z0-9_]+ = computed\(/gm) <= 25, "TreeItem must stay below 25 computed values");
+  // +1 for the plugin-platform connection visual (provider SVG on plugin rows).
+  assert.ok(occurrences(treeItem, /^const [A-Za-z0-9_]+ = computed\(/gm) <= 26, "TreeItem must stay below 26 computed values");
   assert.doesNotMatch(treeItem, /ContextMenuItem|emit\("open-data"|getTreeItemDialogController|executeWithProductionSqlGuard/);
 });
 
@@ -31,6 +32,18 @@ test("one tree-level runtime serves every row renderer", () => {
   assert.match(dataOpenRuntime, /findExistingDataTabCandidate/);
   assert.match(dataOpenRuntime, /loadTableMetadata/);
   assert.match(dataOpenRuntime, /canApplyDataTabMetadata/);
+});
+
+test("connection detail tooltips expose every known visible-filter count", () => {
+  assert.match(treeItem, /connectionStore\.getSidebarVisibleFilterSummary\(node\.connectionId\)/);
+  assert.match(treeItem, /visibleFilterSummary\?\.selected != null && visibleFilterSummary\.total != null/);
+  assert.doesNotMatch(treeItem, /visibleFilterSummary\?\.isActive/);
+  assert.match(treeItem, /visibleSchemas\.detailLabel/);
+  assert.match(treeItem, /visibleDatabases\.detailLabel/);
+  assert.match(treeItem, /treeRuntime\.openPrimaryVisibleFilter\(node\)/);
+  assert.match(runtimeHost, /function openPrimaryVisibleFilter\(node: TreeNode\)/);
+  assert.match(runtimeHost, /openVisibleDatabasesDialog\(\)/);
+  assert.doesNotMatch(treeItem, /SidebarVisibleFilterControl/);
 });
 
 test("the persistent runtime releases detached tree nodes", () => {

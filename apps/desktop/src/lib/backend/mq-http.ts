@@ -13,6 +13,7 @@ import type {
   ListTopicsOpts,
   TopicStats,
   SubscriptionInfo,
+  KafkaConsumerGroupSnapshot,
   ResetPosition,
   SkipCount,
   ConsumerInfo,
@@ -30,7 +31,7 @@ import type {
   MqIssuedToken,
   BacklogStats,
   RocketMqConsumerGroupConfig,
-  PeekedMessage,
+  PeekMessagesResult,
   PeekMessagesOptions,
   MqRawRequest,
   MqRawResponse,
@@ -217,6 +218,14 @@ export async function mqListSubscriptions(connectionId: string, topic: TopicRef)
   return post("/api/mq/subscriptions/list", { connectionId, topic });
 }
 
+export async function mqEnrichSubscriptions(connectionId: string, topic: TopicRef): Promise<SubscriptionInfo[]> {
+  return post("/api/mq/subscriptions/enrich", { connectionId, topic });
+}
+
+export async function mqGetKafkaConsumerGroupSnapshot(connectionId: string): Promise<KafkaConsumerGroupSnapshot> {
+  return post("/api/mq/kafka/consumer-groups", { connectionId });
+}
+
 export async function mqCreateSubscription(connectionId: string, topic: TopicRef, sub: string, pos: ResetPosition): Promise<void> {
   return post("/api/mq/subscriptions/create", { connectionId, topic, sub, pos });
 }
@@ -237,7 +246,7 @@ export async function mqClearBacklog(connectionId: string, topic: TopicRef, sub:
   return post("/api/mq/subscriptions/clear-backlog", { connectionId, topic, sub });
 }
 
-export async function mqPeekMessages(connectionId: string, topic: TopicRef, sub: string, count: number, options?: PeekMessagesOptions): Promise<PeekedMessage[]> {
+export async function mqPeekMessages(connectionId: string, topic: TopicRef, sub: string, count: number, options?: PeekMessagesOptions): Promise<PeekMessagesResult> {
   return post("/api/mq/subscriptions/peek-messages", { connectionId, topic, sub, count, options });
 }
 

@@ -1,25 +1,11 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { useI18n } from "vue-i18n";
-import type { SchemaDiffObject, DiffOperationType, DiffObjectKind } from "@/lib/schema/schemaDiff";
-import { Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, ListTree, Link2, Zap, ChevronDown, ChevronRight, ArrowRightLeft, PlusCircle, XCircle, MinusCircle } from "@lucide/vue";
+import { schemaDiffObjectSelectionState, schemaDiffSelectionTargets, type SchemaDiffObject, type DiffOperationType, type DiffObjectKind, type OperationGroup } from "@/lib/schema/schemaDiff";
+import { Table, Eye, FunctionSquare, ListOrdered, ScrollText, UserCog, Columns3, ListTree, Link2, Zap, SlidersHorizontal, ChevronDown, ChevronRight, ArrowRightLeft, PlusCircle, XCircle, MinusCircle } from "@lucide/vue";
 
 const { t } = useI18n();
-
-interface ObjectTypeGroup {
-  kind: DiffObjectKind;
-  label: string;
-  objects: SchemaDiffObject[];
-  expanded: boolean;
-}
-
-interface OperationGroup {
-  operationType: DiffOperationType;
-  label: string;
-  count: number;
-  selectedCount: number;
-  expanded: boolean;
-  typeGroups: ObjectTypeGroup[];
-}
+const expandedObjectIds = ref(new Set<string>());
 
 const props = defineProps<{
   groups: OperationGroup[];
@@ -28,10 +14,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "toggleGroup", operationType: DiffOperationType): void;
-  (e: "toggleTypeGroup", operationType: DiffOperationType, kind: DiffObjectKind): void;
   (e: "toggleGroupSelection", operationType: DiffOperationType, selected: boolean): void;
-  (e: "toggleTypeSelection", operationType: DiffOperationType, kind: DiffObjectKind, selected: boolean): void;
-  (e: "toggleObjectSelection", objectId: string, selected: boolean): void;
+  (e: "toggleObjectSelection", object: SchemaDiffObject, selected: boolean): void;
   (e: "selectObject", object: SchemaDiffObject): void;
 }>();
 
@@ -70,12 +54,16 @@ function getObjectIcon(kind: DiffObjectKind) {
       return ScrollText;
     case "owner":
       return UserCog;
+    case "column":
+      return Columns3;
     case "index":
       return ListTree;
     case "foreignKey":
       return Link2;
     case "trigger":
       return Zap;
+    case "tableOption":
+      return SlidersHorizontal;
     default:
       return Table;
   }
@@ -95,147 +83,145 @@ function getObjectIconColor(kind: DiffObjectKind): string {
       return "text-pink-500";
     case "owner":
       return "text-indigo-500";
+    case "column":
+      return "text-sky-500";
     case "index":
       return "text-teal-500";
     case "foreignKey":
       return "text-lime-500";
     case "trigger":
       return "text-rose-500";
+    case "tableOption":
+      return "text-muted-foreground";
     default:
       return "text-muted-foreground";
   }
 }
 
-function getObjectTypeLabel(kind: DiffObjectKind): string {
-  switch (kind) {
-    case "table":
-      return "diff.objectKindLabel.table";
-    case "view":
-      return "diff.objectKindLabel.view";
-    case "function":
-      return "diff.objectKindLabel.function";
-    case "sequence":
-      return "diff.objectKindLabel.sequence";
-    case "rule":
-      return "diff.objectKindLabel.rule";
-    case "owner":
-      return "diff.objectKindLabel.owner";
-    case "index":
-      return "diff.objectKindLabel.index";
-    case "foreignKey":
-      return "diff.objectKindLabel.foreignKey";
-    case "trigger":
-      return "diff.objectKindLabel.trigger";
-    default:
-      return kind;
-  }
+function groupObjects(group: OperationGroup): SchemaDiffObject[] {
+  return group.typeGroups.flatMap((typeGroup) => typeGroup.objects);
 }
 
-function isGroupFullySelected(group: OperationGroup): boolean {
-  return group.count > 0 && group.selectedCount === group.count;
+function groupSelectionState(group: OperationGroup): { checked: boolean; indeterminate: boolean } {
+  const targets = groupObjects(group).flatMap(schemaDiffSelectionTargets);
+  const selectedCount = targets.filter((target) => target.selected).length;
+  return {
+    checked: targets.length > 0 && selectedCount === targets.length,
+    indeterminate: selectedCount > 0 && selectedCount < targets.length,
+  };
 }
 
-function isGroupPartiallySelected(group: OperationGroup): boolean {
-  return group.selectedCount > 0 && group.selectedCount < group.count;
+function toggleObjectExpanded(objectId: string) {
+  const next = new Set(expandedObjectIds.value);
+  if (next.has(objectId)) next.delete(objectId);
+  else next.add(objectId);
+  expandedObjectIds.value = next;
 }
 
-function isTypeGroupFullySelected(typeGroup: ObjectTypeGroup): boolean {
-  return typeGroup.objects.length > 0 && typeGroup.objects.every((o) => o.selected);
-}
-
-function isTypeGroupPartiallySelected(typeGroup: ObjectTypeGroup): boolean {
-  const selectedCount = typeGroup.objects.filter((o) => o.selected).length;
-  return selectedCount > 0 && selectedCount < typeGroup.objects.length;
+function isObjectExpanded(objectId: string): boolean {
+  return expandedObjectIds.value.has(objectId);
 }
 
 function onGroupCheckboxChange(group: OperationGroup, event: Event) {
-  const checked = (event.target as HTMLInputElement).checked;
-  emit("toggleGroupSelection", group.operationType, checked);
+  emit("toggleGroupSelection", group.operationType, (event.target as HTMLInputElement).checked);
 }
 
-function onTypeCheckboxChange(group: OperationGroup, typeGroup: ObjectTypeGroup, event: Event) {
-  const checked = (event.target as HTMLInputElement).checked;
-  emit("toggleTypeSelection", group.operationType, typeGroup.kind, checked);
+function onObjectCheckboxChange(object: SchemaDiffObject, event: Event) {
+  emit("toggleObjectSelection", object, (event.target as HTMLInputElement).checked);
 }
 
-function onObjectCheckboxChange(obj: SchemaDiffObject, event: Event) {
-  const checked = (event.target as HTMLInputElement).checked;
-  emit("toggleObjectSelection", obj.id, checked);
+function displayObjectName(object: SchemaDiffObject): string {
+  if (object.objectKind === "tableOption") return t("diff.objectKindLabel.tableOption");
+  if (object.objectKind === "function" && object.arguments) return `${object.name}(${object.arguments})`;
+  return object.name;
 }
 
-function formatObjectName(obj: SchemaDiffObject): string {
-  if (obj.objectKind === "function" && obj.arguments) {
-    return `${obj.name}(${obj.arguments})`;
-  }
-  return obj.name;
+function sourceObjectName(object: SchemaDiffObject): string {
+  return object.sourceName ?? displayObjectName(object);
+}
+
+function targetObjectName(object: SchemaDiffObject): string {
+  return object.targetName ?? displayObjectName(object);
 }
 </script>
 
 <template>
   <div class="space-y-1">
-    <!-- Header -->
     <div class="grid grid-cols-[1fr_60px_1fr] gap-2 px-2 py-1.5 text-xs font-medium text-muted-foreground border-b">
       <div class="text-center">{{ t("diff.sourceObject") }}</div>
       <div class="text-center">{{ t("diff.operation") }}</div>
       <div class="text-center">{{ t("diff.targetObject") }}</div>
     </div>
 
-    <!-- Operation Groups -->
-    <div v-for="group in groups" :key="group.operationType" class="border rounded-md overflow-hidden">
-      <!-- Operation Group Header -->
+    <div v-for="group in props.groups" :key="group.operationType" class="border rounded-md overflow-hidden">
       <button class="flex items-center gap-2 w-full px-3 py-2 text-sm font-medium transition-colors" :class="operationBgColors[group.operationType]" @click="$emit('toggleGroup', group.operationType)">
         <ChevronDown v-if="group.expanded" class="w-4 h-4 shrink-0" />
         <ChevronRight v-else class="w-4 h-4 shrink-0" />
-
-        <input type="checkbox" class="accent-primary shrink-0" :checked="isGroupFullySelected(group)" :indeterminate="isGroupPartiallySelected(group)" @click.stop @change="onGroupCheckboxChange(group, $event)" />
-
+        <input type="checkbox" class="accent-primary shrink-0" :checked="groupSelectionState(group).checked" :indeterminate="groupSelectionState(group).indeterminate" :disabled="group.count === 0" @click.stop @change="onGroupCheckboxChange(group, $event)" />
         <component :is="operationIcons[group.operationType]" class="w-4 h-4 shrink-0" :class="operationColors[group.operationType]" />
         <span :class="operationColors[group.operationType]">{{ t(group.label) }}</span>
-        <span class="text-xs text-muted-foreground ml-1"> ({{ t("diff.selectedCount", { selected: group.selectedCount, total: group.count }) }}) </span>
+        <span class="text-xs text-muted-foreground ml-1">({{ t("diff.selectedCount", { selected: group.selectedCount, total: group.count }) }})</span>
       </button>
 
-      <!-- Type Groups -->
       <div v-if="group.expanded" class="divide-y divide-border/30">
-        <div v-for="typeGroup in group.typeGroups" :key="typeGroup.kind" class="border-l-2 border-l-border/50 ml-2">
-          <!-- Type Group Header -->
-          <button class="flex items-center gap-2 w-full px-3 py-1.5 text-xs font-medium hover:bg-accent/20 transition-colors" @click="$emit('toggleTypeGroup', group.operationType, typeGroup.kind)">
-            <ChevronDown v-if="typeGroup.expanded" class="w-3.5 h-3.5 shrink-0" />
-            <ChevronRight v-else class="w-3.5 h-3.5 shrink-0" />
+        <div v-for="object in groupObjects(group)" :key="object.id">
+          <div class="grid grid-cols-[1fr_60px_1fr] gap-2 px-3 py-1.5 items-center hover:bg-accent/30 cursor-pointer" :class="{ 'bg-primary/10': selectedObjectId === object.id }" @click="$emit('selectObject', object)">
+            <div v-if="object.operationType !== 'delete'" class="flex items-center gap-2 min-w-0 pl-6">
+              <button v-if="object.children?.length" type="button" class="shrink-0" @click.stop="toggleObjectExpanded(object.id)">
+                <ChevronDown v-if="isObjectExpanded(object.id)" class="w-3.5 h-3.5" />
+                <ChevronRight v-else class="w-3.5 h-3.5" />
+              </button>
+              <span v-else class="w-3.5 shrink-0" />
+              <input type="checkbox" class="accent-primary shrink-0" :checked="schemaDiffObjectSelectionState(object).checked" :indeterminate="schemaDiffObjectSelectionState(object).indeterminate" @click.stop @change="onObjectCheckboxChange(object, $event)" />
+              <component :is="getObjectIcon(object.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(object.objectKind)" />
+              <span class="text-xs truncate" :class="object.operationType === 'create' ? 'text-green-500' : ''">{{ sourceObjectName(object) }}</span>
+              <span v-if="object.children?.length" class="text-[10px] text-muted-foreground shrink-0">{{ schemaDiffSelectionTargets(object).filter((child) => child.selected).length }}/{{ schemaDiffSelectionTargets(object).length }}</span>
+            </div>
+            <div v-else />
 
-            <input type="checkbox" class="accent-primary shrink-0" :checked="isTypeGroupFullySelected(typeGroup)" :indeterminate="isTypeGroupPartiallySelected(typeGroup)" @click.stop @change="onTypeCheckboxChange(group, typeGroup, $event)" />
+            <div class="flex justify-center">
+              <component :is="operationIcons[object.operationType]" class="w-3.5 h-3.5" :class="operationColors[object.operationType]" />
+            </div>
 
-            <component :is="getObjectIcon(typeGroup.kind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(typeGroup.kind)" />
-            <span>{{ t(getObjectTypeLabel(typeGroup.kind)) }}</span>
-            <span class="text-xs text-muted-foreground">({{ typeGroup.objects.length }})</span>
-          </button>
+            <div v-if="object.operationType !== 'create'" class="flex items-center gap-2 min-w-0 pl-6">
+              <button v-if="object.operationType === 'delete' && object.children?.length" type="button" class="shrink-0" @click.stop="toggleObjectExpanded(object.id)">
+                <ChevronDown v-if="isObjectExpanded(object.id)" class="w-3.5 h-3.5" />
+                <ChevronRight v-else class="w-3.5 h-3.5" />
+              </button>
+              <span v-else-if="object.operationType === 'delete'" class="w-3.5 shrink-0" />
+              <input
+                v-if="object.operationType === 'delete'"
+                type="checkbox"
+                class="accent-primary shrink-0"
+                :checked="schemaDiffObjectSelectionState(object).checked"
+                :indeterminate="schemaDiffObjectSelectionState(object).indeterminate"
+                @click.stop
+                @change="onObjectCheckboxChange(object, $event)"
+              />
+              <component :is="getObjectIcon(object.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(object.objectKind)" />
+              <span class="text-xs truncate" :class="object.operationType === 'delete' ? 'text-red-500 line-through' : ''">{{ targetObjectName(object) }}</span>
+              <span v-if="object.children?.length" class="text-[10px] text-muted-foreground shrink-0">{{ schemaDiffSelectionTargets(object).filter((child) => child.selected).length }}/{{ schemaDiffSelectionTargets(object).length }}</span>
+            </div>
+            <div v-else />
+          </div>
 
-          <!-- Objects -->
-          <div v-if="typeGroup.expanded" class="divide-y divide-border/20">
-            <div v-for="obj in typeGroup.objects" :key="obj.id" class="grid grid-cols-[1fr_60px_1fr] gap-2 px-3 py-1 items-center hover:bg-accent/30 cursor-pointer ml-8" :class="{ 'bg-primary/10': selectedObjectId === obj.id }" @click="$emit('selectObject', obj)">
-              <!-- Source (hide for delete objects) -->
-              <div v-if="obj.operationType !== 'delete'" class="flex items-center gap-2 min-w-0">
-                <input type="checkbox" class="accent-primary shrink-0" :checked="obj.selected" @click.stop @change="onObjectCheckboxChange(obj, $event)" />
-                <component :is="getObjectIcon(obj.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(obj.objectKind)" />
-                <span class="text-xs truncate" :class="obj.operationType === 'create' ? 'text-green-500' : ''">
-                  {{ obj.sourceName ? (obj.objectKind === "function" && obj.arguments ? `${obj.sourceName}(${obj.arguments})` : obj.sourceName) : formatObjectName(obj) }}
-                </span>
+          <div v-if="object.children?.length && isObjectExpanded(object.id)" class="border-t border-border/20 bg-muted/10">
+            <div v-for="child in object.children" :key="child.id" class="grid grid-cols-[1fr_60px_1fr] gap-2 px-3 py-1 items-center hover:bg-accent/30 cursor-pointer" :class="{ 'bg-primary/10': selectedObjectId === child.id }" @click="$emit('selectObject', child)">
+              <div v-if="child.operationType !== 'delete'" class="flex items-center gap-2 min-w-0 pl-16">
+                <input type="checkbox" class="accent-primary shrink-0" :checked="child.selected" @click.stop @change="onObjectCheckboxChange(child, $event)" />
+                <component :is="getObjectIcon(child.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(child.objectKind)" />
+                <span class="text-xs truncate">{{ sourceObjectName(child) }}</span>
               </div>
-              <div v-else></div>
-
-              <!-- Operation -->
+              <div v-else />
               <div class="flex justify-center">
-                <component :is="operationIcons[obj.operationType]" class="w-3.5 h-3.5" :class="operationColors[obj.operationType]" />
+                <component :is="operationIcons[child.operationType]" class="w-3.5 h-3.5" :class="operationColors[child.operationType]" />
               </div>
-
-              <!-- Target (hide for create objects) -->
-              <div v-if="obj.operationType !== 'create'" class="flex items-center gap-2 min-w-0">
-                <input v-if="obj.operationType === 'delete'" type="checkbox" class="accent-primary shrink-0" :checked="obj.selected" @click.stop @change="onObjectCheckboxChange(obj, $event)" />
-                <component :is="getObjectIcon(obj.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(obj.objectKind)" />
-                <span class="text-xs truncate" :class="obj.operationType === 'delete' ? 'text-red-500 line-through' : ''">
-                  {{ obj.targetName ? (obj.objectKind === "function" && obj.arguments ? `${obj.targetName}(${obj.arguments})` : obj.targetName) : formatObjectName(obj) }}
-                </span>
+              <div v-if="child.operationType !== 'create'" class="flex items-center gap-2 min-w-0 pl-16">
+                <input v-if="child.operationType === 'delete'" type="checkbox" class="accent-primary shrink-0" :checked="child.selected" @click.stop @change="onObjectCheckboxChange(child, $event)" />
+                <component :is="getObjectIcon(child.objectKind)" class="w-3.5 h-3.5 shrink-0" :class="getObjectIconColor(child.objectKind)" />
+                <span class="text-xs truncate" :class="child.operationType === 'delete' ? 'text-red-500 line-through' : ''">{{ targetObjectName(child) }}</span>
               </div>
-              <div v-else></div>
+              <div v-else />
             </div>
           </div>
         </div>

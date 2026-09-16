@@ -63,7 +63,7 @@ async fn cloudberry_metadata_and_ddl_round_trip() {
             ("external_events", "CREATE FOREIGN TABLE"),
         ];
         for (table, expected) in cases {
-            let ddl = schema::cloudberry_ddl(&pool, &source_schema, table).await?;
+            let ddl = schema::cloudberry_ddl(&pool, &source_schema, table, false).await?;
             assert!(ddl.contains(expected), "{table} DDL did not contain {expected}: {ddl}");
             if table == "external_events" {
                 assert!(ddl.contains("SERVER \"gp_exttable_server\""), "external DDL: {ddl}");

@@ -1,0 +1,571 @@
+---
+title: Develop and Submit DBX Plugins
+description: Build DBX plugins with the CLI, Manifest, Workbench and Sidecar APIs, then debug, package, automatically submit, and publish them through the official Marketplace.
+---
+
+DBX plugins are independently installed `.dbxp` packages that can contribute connection types, workbenches, filesystems, and native sidecars. Plugin source, the DBX plugin platform, and the official Marketplace catalog are owned by different repositories.
+
+<Callout type="info">
+  **Recommended path:** create a project with `dbx-plugin create`, develop and publish unsigned candidates from the plugin's own repository, then let `dbx-store` create or update the candidate PR. A maintainer reviews and signs the candidates before they enter the official catalog.
+</Callout>
+
+<Callout type="warn">
+  **Marketplace listing pull requests go to [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store), not `t8y2/dbx`.** A plugin's feature code normally remains in its author's source repository. Open a PR against [`t8y2/dbx`](https://github.com/t8y2/dbx) only when changing the DBX host, SDK, CLI, protocol, schemas, documentation, or official examples.
+</Callout>
+
+## Which Repository Receives the Change
+
+| Change | Destination | Official DBX PR? |
+| --- | --- | --- |
+| Your plugin frontend, Rust/Go backend, tests, and release scripts | The plugin's source repository | Do not submit it to `dbx`; develop and release it in its own repository |
+| A new Marketplace listing, version update, icon, or description | [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) | Yes, target `main` |
+| DBX plugin host, Manifest/Marketplace schemas, SDK, CLI, or packager | [`t8y2/dbx`](https://github.com/t8y2/dbx) | Yes, target `main` |
+| Official examples or plugin-development documentation | [`t8y2/dbx`](https://github.com/t8y2/dbx) | Yes |
+| A bug in a specific third-party plugin | That plugin's source repository | Do not submit it to `dbx-store` |
+| A custom or enterprise private repository | Your private repository | No official Marketplace submission is required |
+| A vendor JDBC driver JAR | Do not commit it to either repository | Users import it locally or on the server |
+
+DBX-maintained plugins that need an independent release cadence should normally use separate source repositories as well. Only tightly coupled host examples, SDK verification projects, or components explicitly accepted by maintainers belong in `t8y2/dbx`.
+
+## Plugin Project Layout
+
+```text
+my-plugin/
+├── manifest.json
+├── dbx-plugin.toml
+├── assets/
+├── ui/
+├── backend/                       # absent from the frontend template
+├── .github/workflows/
+│   └── plugin-release.yml
+└── dist/                          # generated; do not commit
+```
+
+- `manifest.json` declares identity, version, permissions, entrypoints, and contributions.
+- `ui/` runs in a sandboxed workbench and talks to DBX through Host APIs.
+- `backend/` is an optional native sidecar. Rust and Go SDKs are provided, while other languages may implement the DBX JSON-RPC protocol directly.
+- `.dbxp` is an installable artifact, not the source repository.
+- Frontend-only plugins can publish one `universal` package. Native sidecars require packages for each operating-system and CPU target.
+
+## Complete Manifest Reference
+
+`manifest.json` is the runtime contract and must be at the root of the plugin package. Manifest v1 rejects undeclared fields. Reference the repository's [`plugins/manifest.schema.json`](https://github.com/t8y2/dbx/blob/main/plugins/manifest.schema.json) from your editor. A minimal frontend-only Manifest looks like this:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "com.example.files",
+  "name": "Example Files",
+  "version": "0.1.0",
+  "publisher": "example",
+  "description": "Browse files from an example service.",
+  "icon": "assets/plugin.svg",
+  "source": "https://github.com/example/dbx-plugin-files",
+  "homepage": "https://github.com/example/dbx-plugin-files",
+  "engines": { "host_api": "1" },
+  "permissions": [],
+  "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+  "contributions": [
+    { "type": "workbench", "id": "com.example.files.main", "label": "Files", "icon": "assets/plugin.svg" }
+  ]
+}
+```
+
+Manifest paths are relative to the package root. They cannot start with `/`, contain `..`, backslashes, or duplicate slashes. `ui.entry` must be inside `ui.root`: with root `ui`, use `ui/index.html`, not `index.html`. `signingKeyId` belongs to Marketplace artifact metadata, not the Manifest.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `$schema` | No | JSON Schema URL for editor support; it does not establish identity. |
+| `manifest_version` | Yes | Must currently be the number `1`. |
+| `id` | Yes | Stable global ID using lowercase letters, digits, `.`, `_`, and `-`, such as `io.github.example.files`; never change it after publishing. |
+| `name` | Yes | Default display name. |
+| `icon` | No | Relative path to the default package icon; SVG or PNG is recommended. |
+| `version` | Yes | Semantic version `major.minor.patch`, optionally with prerelease/build suffixes. Official packages cannot overwrite the same ID and version. |
+| `publisher` | Yes | Publisher identifier; keep it stable after the first listing. |
+| `description` | No | Plugin description. |
+| `source` | No | HTTPS source repository URL, also shown from installed-plugin details. |
+| `homepage` | No | Project, documentation, or support URL. |
+| `engines` | Yes | Compatibility declaration; it must contain `host_api`. |
+| `permissions` | No | Minimal capability set, described below. |
+| `entrypoints` | No | UI and native-sidecar entrypoints. |
+| `contributions` | No | Connection, workbench, filesystem, connection-menu, and result-view declarations. |
+| `localizations` | No | Locale-specific names, descriptions, fields, and action labels. |
+
+### Engines, Permissions, and Entrypoints
+
+```json
+{
+  "engines": { "dbx": ">=0.6.0", "host_api": "1" },
+  "permissions": [
+    "host.workbench",
+    "host.events",
+    "host.filesystem",
+    "host.binary",
+    "host.network:https://s3.example.com:443"
+  ],
+  "entrypoints": {
+    "ui": { "root": "ui", "entry": "ui/index.html" },
+    "backend": {
+      "protocol_versions": [1],
+      "transport": "stdio-jsonl",
+      "executable": "bin/linux-x64/backend"
+    }
+  }
+}
+```
+
+- `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
+- `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
+- `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
+- `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
+- `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
+
+### Connection Providers
+
+A connection provider declares a form; DBX renders the form and owns the connection lifecycle, while the plugin handles its protocol. `binding` gives a field its meaning: `config` is persisted as external configuration, `secret` goes to the Secret Store, and `name`, `host`, `port`, `username`, `password`, and `database` map to standard connection fields.
+
+```json
+{
+  "type": "connection-provider",
+  "id": "com.example.files.connection",
+  "label": "Example Service",
+  "icon": "assets/connection.svg",
+  "database_type": "example-files",
+  "description": "Connect to an Example Service.",
+  "fields": [
+    { "key": "display_name", "label": "Name", "type": "text", "binding": "name", "required": true },
+    { "key": "endpoint", "label": "Endpoint", "type": "text", "binding": "host", "required": true },
+    { "key": "port", "label": "Port", "type": "number", "binding": "port", "default": 443 },
+    { "key": "region", "label": "Region", "type": "radio", "options": [{ "label": "US", "value": "us" }, { "label": "EU", "value": "eu" }], "binding": "config" },
+    { "key": "token", "label": "Access token", "type": "password", "binding": "secret", "required": true }
+  ],
+  "workbench": "com.example.files.main",
+  "capabilities": ["test", "connect", "disconnect"],
+  "actions": [
+    { "id": "refresh", "label": "Refresh metadata", "variant": "outline", "when": "edit", "requires_valid_form": true, "timeout_ms": 30000 }
+  ]
+}
+```
+
+Field types are `text`, `password`, `number`, `boolean`, `select`, `radio`, and `textarea`. `select` and `radio` require non-empty `options`, each with a `label` and string `value`. `binding: "port"` requires `number`. Never put passwords, tokens, or private keys in config, workbench context, events, or logs.
+
+Fields require `key`, `label`, and `type`; optional fields are `description`, `placeholder`, `required`, `default`, `options`, and `binding`. Defaults must match the field type. A password field without an explicit binding defaults to `secret`. `database_type` is a plugin-defined identifier, not an extension to DBX's built-in database enum.
+
+The fixed lifecycle methods are `connection/test`, `connection/connect`, and `connection/disconnect`; custom form actions use `connection/action`. Parameters include `provider`, `connection`, and `runtime`, plus `action: { id }` for actions. Keep sessions keyed by `connection.id` and connect to `runtime.host`/`runtime.port`, which include DBX tunnel/proxy resolution. Hydrated secrets are provided only to backend lifecycle requests; the frontend uses `connectionId` to access an established session.
+
+Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`, `outline`, `secondary`, `destructive`, or `ghost`; `timeout_ms` is 1–120000. `requires_valid_form` requires a complete form and `close_on_success` closes the dialog on success. Return `{ "success": true, "message": "...", "fieldValues": { "port": 443 } }` to update declared fields; `success: false` is a failure.
+
+### Other Contributions
+
+| Type | Required fields | Purpose |
+| --- | --- | --- |
+| `workbench` | `type`, `id`, `label` | Registers a workbench opened from the sidebar or plugin entry. |
+| `filesystem-provider` | `type`, `id`, `label`, `schemes` | Registers a virtual filesystem; `root_uri` can be `s3://bucket`, with optional `read`, `write`, `delete`, `rename`, and `mkdir` capabilities. |
+| `context-menu` | `type`, `id`, `label`, `menu: "connection"` | Adds an action to a connection context menu. |
+| `result-view` | `type`, `id`, `label` | Registers a query or task result view. |
+
+Reference contributions by ID: a connection provider's `workbench` must point to a declared workbench and `filesystem_provider` to a declared filesystem provider. A contribution icon takes precedence over the plugin-level icon.
+
+Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. `context-menu` invokes `contextMenu/<contribution-id>` on the backend; `result-view` receives a result snapshot in workbench context. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
+
+### Filesystem Protocol
+
+Implement these backend methods when using the DBX generic file manager. A custom workbench can use them through its own RPC calls as well; declaring a contribution does not implement business logic.
+
+| Method | Parameters and return values |
+| --- | --- |
+| `filesystem/list` | `providerId`, optional `connectionId`, `uri`, optional `cursor`, `limit`; returns `{ entries, nextCursor? }`. |
+| `filesystem/read` | The same identity fields, `uri`, `maxBytes`; returns `{ dataBase64, contentType?, truncated, etag? }`. |
+| `filesystem/write` | `uri`, `dataBase64`, `create`, `overwrite`, optional `etag`; requires `write`. |
+| `filesystem/createDirectory` | `uri`; requires `mkdir`. |
+| `filesystem/delete` | `uri`, `recursive`; requires `delete`. |
+| `filesystem/rename` | `sourceUri`, `targetUri`, `overwrite`; requires `rename`. |
+
+Every method carries `providerId` and optional `connectionId`. Entries contain a single filename `name`, full `uri`, `kind` (`file`, `directory`, `symlink`, or `other`), and optional `size`, `modifiedAt`, and `contentType`. Names cannot include `/` or `\\`, or equal `.`/`..`; put full paths in `uri`. Omit `nextCursor` on the last page and never repeat a consumed cursor. Image previews need the actual MIME type and base64 bytes, not UTF-8-decoded binary content.
+
+Mutations return `{ success, message?, entry? }`; inline read/write payloads are capped at 4 MiB. Use a chunked transfer protocol with progress/cancellation for large files, not one giant JSON/base64 value.
+
+### Localization
+
+Use locale keys such as `zh-CN` and `en` in `localizations`. You can override the plugin name, description, and every contribution's labels, descriptions, fields, and actions. This does not translate text inside the plugin UI.
+
+```json
+{
+"localizations": {
+  "zh-CN": {
+    "name": "示例文件",
+    "contributions": {
+      "com.example.files.connection": {
+        "label": "示例服务",
+        "fields": { "token": { "label": "访问令牌" } }
+      }
+    }
+  }
+}
+}
+```
+
+## Workbench Context Contract
+
+Workbench context is a JSON data snapshot across the DBX/plugin boundary. The host recursively removes Vue reactivity and sends an independent copy, so plugins must not expect Vue refs, proxies, DOM nodes, functions, component instances, or credentials.
+
+Context may contain `null`, booleans, finite numbers, strings, arrays, and plain objects. Undefined object properties are omitted and undefined array entries become `null`. Dates, Maps, Sets, symbols, bigints, non-finite numbers, circular references, and custom class instances are rejected with an error. The UTF-8 encoded context is limited to 2 MiB.
+
+Connection provider fields using `binding: "config"` are persisted in `external_config`; fields using `binding: "secret"` are persisted in the Secret Store. Plugin connection configuration keeps `external_config` through create, edit, save, and reconnect flows.
+
+## Frontend Host API
+
+The UI runs in an isolated iframe. DBX exposes the bridge as `window.dbxPlugin`; do not import DBX Vue/Tauri modules or assume that Node.js, local files, or arbitrary network access are available.
+
+The following custom `objects/list` and `objects/changed` methods must be implemented by your backend. The asset example assumes the package contains `ui/assets/empty-state.svg`:
+
+```js
+await window.dbxPlugin.ready;
+
+const context = window.dbxPlugin.context;
+const result = await window.dbxPlugin.invoke("objects/list", { prefix: "docs/" }, { timeoutMs: 30000 });
+const off = window.dbxPlugin.onContext((nextContext) => render(nextContext));
+
+await window.dbxPlugin.notify("objects/changed", { count: result.items.length });
+const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
+```
+
+| API | Purpose |
+| --- | --- |
+| `ready` | Waits for Host initialization; start application logic after `await dbxPlugin.ready`. |
+| `context` / `onContext(fn)` | Reads or observes the current workbench context. |
+| `locale` | Reads the current DBX locale; the plugin translates its own UI. |
+| `theme` | Reads `appearance` and DBX design tokens for light/dark support. |
+| `request(method, params)` | Calls a Host API method, including `host.getContext` and `ui.readAsset`. |
+| `invoke(method, params, { timeoutMs })` | Sends an RPC request to the plugin's Sidecar. |
+| `notify(method, params)` | Sends a notification without a business result. |
+| `sendBinary(channel, data)` / `onBinary(fn)` | Sends or receives binary data; requires framed transport and `host.binary`. |
+| `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
+| `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
+| `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
+| `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
+
+Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
+
+`readAsset` paths are relative to `ui.root`: `assets/empty-state.svg` resolves to the package's `ui/assets/empty-state.svg`. Call `URL.revokeObjectURL(assetUrl)` when done, and call the unsubscribe functions returned by `onContext`/`onEvent` when a component is destroyed.
+
+### Themes, Layout, and Static Assets
+
+DBX injects theme tokens on the document root and updates `data-dbx-theme`. Custom libraries, including Svelte and shadcn-svelte, should consume these variables; parent-page CSS does not cross the iframe:
+
+```css
+body {
+  margin: 0;
+  background: var(--color-background, #fff);
+  color: var(--color-foreground, #18181b);
+}
+button {
+  background: var(--color-primary, #2563eb);
+  color: var(--color-primary-foreground, #fff);
+  cursor: pointer;
+}
+```
+
+Listen with `window.addEventListener("dbx-plugin-env", handler)` for locale/theme changes. Initialize from `dbxPlugin.locale`/`theme`, then refresh your state on events. DBX includes lightweight `dbx-btn` and `dbx-input` styles, but the development host does not emulate the complete component kit; custom token-based styles work more consistently in both.
+
+Build the UI as packaged static assets, not references to a Vite server or CDN scripts. The host converts the entry and assets into sandbox-loadable content. For CSP errors, verify build outputs and confinement under `ui.root`, and reproduce with the matching CLI version. Use plugin-owned dialogs for delete/rename rather than relying on native `alert`/`confirm`/`prompt` inside the sandbox.
+
+## Native Sidecars and RPC
+
+Use a native backend only when the browser sandbox cannot provide the capability, such as S3/SSH protocols, system credentials, long-lived connections, or CPU-heavy work. A Sidecar is not an OS sandbox and runs with the current user's privileges.
+
+The Rust and Go SDKs implement Sidecar Protocol v1:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"host":{"protocolVersions":[1]}}}
+{"jsonrpc":"2.0","id":2,"method":"objects/list","params":{"prefix":"docs/"}}
+```
+
+Responses must reuse the request `id`; success uses `result` and failures use a JSON-RPC `error`. Initialization includes `protocolVersion`, `capabilities`, and `plugin: { id, version }`. ID/version must match the Manifest and the protocol must be supported by both sides, otherwise `Sidecar identity or protocol does not match manifest` is reported. Backend capabilities are not the Manifest's Host permission list.
+
+```rust
+use dbx_plugin_sdk::{PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext};
+use serde_json::{json, Value};
+
+struct Plugin;
+
+impl PluginHandler for Plugin {
+    fn handle(&self, _context: RequestContext, method: &str, _params: Value, _emitter: &PluginEmitter) -> Result<Value, PluginError> {
+        match method {
+            "example/ping" => Ok(json!({ "ok": true })),
+            _ => Err(PluginError::method_not_found(method)),
+        }
+    }
+}
+
+fn main() -> std::io::Result<()> {
+    let metadata = PluginMetadata::new("com.example.files", env!("CARGO_PKG_VERSION"));
+    PluginServer::new(metadata, Plugin).serve()
+}
+```
+
+Sidecar rules: reserve stdout for protocol messages and write logs to stderr; correlate concurrent requests by ID; make connect/disconnect idempotent; design timeouts, cancellation, and chunk acknowledgements for long tasks; never expose secrets through events, context, or error messages.
+
+The example can replace the Rust template's `backend/src/main.rs`; keep its Cargo package version equal to the Manifest. Go templates use `dbxpluginsdk.NewServer(metadata, handler).Serve()`. The current Go SDK supports JSONL; the Rust SDK also supports framed transport. Changing a Go Manifest's transport alone does not implement binary framing. See the [Rust SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk) and [Go SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/go/dbx-plugin-sdk) for complete interfaces.
+
+## Create a Plugin
+
+Install the precompiled CLI without Rust or a DBX source checkout:
+
+```bash
+npm install --global @dbx-app/plugin-cli
+dbx-plugin --help
+```
+
+Or run it directly through `npx`:
+
+```bash
+npx @dbx-app/plugin-cli create my-ui-plugin --template frontend
+```
+
+The npm package selects the precompiled binary for the current platform and bundles the matching Rust and Go plugin SDK sources. Frontend-only plugins do not need Rust or Go; native toolchains are required only to compile the plugin's own sidecar.
+
+Create a project:
+
+```bash
+# Frontend only and cross-platform
+dbx-plugin create my-ui-plugin --template frontend
+
+# Svelte + Vite and cross-platform
+dbx-plugin create my-svelte-plugin --template svelte
+
+# Rust sidecar plus frontend
+dbx-plugin create my-rust-plugin --template rust
+
+# Go sidecar plus frontend
+dbx-plugin create my-go-plugin --template go
+```
+
+Choose `frontend` for plain HTML or a self-managed Vue/React UI, `svelte` for the Svelte 5 + Vite starter, or `rust`/`go` when a native Sidecar is needed. `--backend none|svelte|rust|go` is a template alias and `--language rust|go` remains a native-project compatibility alias. Use `--yes` for scripts and CI:
+
+```bash
+dbx-plugin create my-plugin \
+  --template svelte \
+  --id com.example.my-plugin \
+  --name "My Plugin" \
+  --publisher example \
+  --description "A DBX plugin." \
+  --version 0.1.0 \
+  --yes
+```
+
+The Svelte template writes Vite output to `ui/` and emits `DBX_UI_BUILD_SUCCESS` after a successful build:
+
+```bash
+cd my-svelte-plugin
+npm install
+npm run build
+dbx-plugin dev --port 5190
+```
+
+Develop, test, and version the generated project in the plugin's own source repository. Do not copy an ordinary plugin source tree into `t8y2/dbx` merely to publish it.
+
+## Build Review Candidates
+
+From the plugin project root, run:
+
+```bash
+dbx-plugin package .
+```
+
+The command produces **unsigned review candidates** only:
+
+```text
+dist/<plugin-id>-<version>-<target>.dbxp
+dist/<plugin-id>-<version>-<target>.artifact.json
+```
+
+Frontend-only projects default to the `universal` target; Rust/Go projects use the current platform target. Use `--output-dir` to change the output location and `--artifact-url` to record the eventual HTTPS URL:
+
+```bash
+dbx-plugin package . --target universal --output-dir dist --artifact-url https://downloads.example.com/my-plugin.dbxp
+```
+
+The CLI packages only directories declared by `[package].include` in `dbx-plugin.toml` and rejects symlinks, traversal paths, `.dbx-dev`, oversized files, and unsafe output locations. Do not use `dist/` or development data as a nested package input.
+
+Official plugin authors do not create or possess the DBX Store private key. The generated GitHub Release workflow builds candidates for each target and merges their metadata into `release-candidates.json`.
+
+To install an unsigned package during local development, explicitly enable **Allow unsigned development packages** in Plugin Center. This option never relaxes official Marketplace verification.
+
+## Local Development and Verification
+
+Run the standalone browser development host from the plugin root when you need live UI and Sidecar diagnostics; it does not start the DBX desktop application:
+
+```bash
+dbx-plugin dev --path . --port 5190
+```
+
+Open the `http://127.0.0.1:5190/` URL printed by the command. Use `--port 0`, or let a busy port fall back to an available one. Move development data outside the project with `--data-dir`:
+
+```bash
+dbx-plugin dev --path . --data-dir /tmp/my-plugin-dev
+```
+
+`dbx-plugin dev` does not install project dependencies. Configure frontend builds in `dbx-plugin.toml`:
+
+```toml
+[dev]
+ui_build = ["npm", "run", "build"]
+ui_watch = ["npm", "run", "build:watch"]
+```
+
+When `ui_watch` is configured, it must print a standalone `DBX_UI_BUILD_SUCCESS` line only after a complete successful build has written every output. Do not print it on failure or from an unconditional exit hook.
+
+The debug page can switch locale, theme, auto-reload, and diagnostic views. It keeps only the latest 500 in-memory entries, redacts passwords, tokens, and Manifest secret fields, and omits or truncates binary and oversized values. `.dbx-dev/` may contain plaintext credentials: keep it in `.gitignore` and never share it.
+
+Read redacted diagnostics from a script:
+
+```bash
+curl -sS 'http://127.0.0.1:5190/api/diagnostics?after=0&limit=100&level=error'
+```
+
+Pass `nextAfter` and `instanceId` from the response to the next request. The development host implements a supported Host API subset; validate installation, signing, the real Secret Store, desktop lifecycle, and production permissions in DBX itself.
+
+### Local Acceptance Checklist
+
+- Remove unused permissions and verify that declared permissions match actual calls.
+- Test empty configuration, invalid credentials, timeouts, offline behavior, and Sidecar restarts.
+- Test DBX light/dark themes and `zh-CN`/`en`; the host does not translate plugin UI text.
+- Test reconnect, closing a workbench, opening the same workbench twice, and empty context.
+- Check packaged paths, executable permissions, and that no development data or secrets enter the artifact.
+
+## Complete Official Marketplace Flow
+
+### Step 1: Publish Source and a Candidate Release
+
+Create a version tag and GitHub Release in the plugin's source repository. The Release should contain:
+
+- one unsigned `.dbxp` candidate for each supported target;
+- the corresponding `.artifact.json` files;
+- merged `release-candidates.json`;
+- release notes and the matching source tag.
+
+Candidate packages may live in GitHub Releases, a CDN, or object storage. Do not commit `.dbxp` binaries to Git history.
+
+### Step 2: Let dbx-store Create the Candidate PR
+
+The `dbx-store` synchronizer periodically checks public plugin repositories registered in `automation/plugin-sources.json` with `autoUpdate: true`. It reads the newest Release's `release-candidates.json` and creates or updates exactly one:
+
+```text
+candidates/<plugin-id>.json
+```
+
+For an auto-updated plugin, authors **do not need to create a manual Issue or PR for every version**, and do not configure Marketplace signing secrets in the plugin repository. The source Release, candidate metadata, and an accessible source tag are the important inputs. For a first listing or an intentional Marketplace metadata change, follow the [`dbx-store` contribution guide](https://github.com/t8y2/dbx-store/blob/main/CONTRIBUTING.md).
+
+`.dbx-store.json` is optional Marketplace metadata. Use it for first registration or deliberate changes to the store name, tags, license, homepage, or similar listing fields. A version-only release does not need a new `.dbx-store.json`; it is not the runtime Manifest and must never contain a private signing key.
+
+Example:
+
+```json
+{
+  "name": "Example Files",
+  "description": "Browse files from an example service.",
+  "icon": "assets/plugin.svg",
+  "tags": ["files", "storage"],
+  "permissions": ["host.workbench"],
+  "source": "https://github.com/example/dbx-plugin-files",
+  "homepage": "https://github.com/example/dbx-plugin-files",
+  "license": "Apache-2.0",
+  "releaseNotes": "Initial release."
+}
+```
+
+Allowed store fields are `name`, `description`, `icon`, `tags`, `permissions`, `source`, `homepage`, `license`, `releaseNotes`, and `localizations`. A package-relative `icon` is converted to an HTTPS URL under the source tag during synchronization. `autoUpdate` belongs to the repository registration in `dbx-store/automation/plugin-sources.json`, not this file.
+
+Automation only creates or updates a candidate PR; it **never approves, signs, or merges** it. The PR targets [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) on `main`, not `t8y2/dbx`.
+
+If the plugin is not registered for automatic synchronization, fork `dbx-store` and open **one** PR against `main` containing `publishers/<publisher-id>.json` for a first publisher submission and `candidates/<plugin-id>.json`. There is no separate submission Issue. Before signing, CI intentionally stays red with `open candidate(s) awaiting DBX Store signing`; the signing workflow writes the finalized catalog back to the PR and makes it green. Authors can submit a PR to register their public repository for synchronization or ask a maintainer to register it; no App private key belongs in the plugin repository.
+
+The candidate's essential shape is below. It references unsigned assets from the plugin repository and must not contain an official `signingKeyId`:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "com.example.files",
+  "publisher": "example",
+  "version": "0.1.0",
+  "name": "Example Files",
+  "source": "https://github.com/example/dbx-plugin-files/tree/v0.1.0",
+  "license": "Apache-2.0",
+  "targets": [{
+    "target": "universal",
+    "url": "https://github.com/example/dbx-plugin-files/releases/download/v0.1.0/com.example.files-0.1.0-universal.dbxp",
+    "sha256": "<64 hexadecimal SHA-256 characters>",
+    "size": 123456
+  }]
+}
+```
+
+For a new version, submit only the new version's candidate data. Never hand-edit generated `plugins/<plugin-id>.json` or `catalog/index.json`.
+
+### Step 3: DBX Store Reviews and Signs
+
+Maintainers review the source, Manifest, permissions, candidate SHA-256 values, sizes, and native behavior. After approval, the protected DBX Store workflow:
+
+1. downloads the candidate using its reviewed SHA-256 and size;
+2. confirms that it is unsigned and matches the expected plugin ID and version;
+3. adds an Ed25519 signature using the DBX Store repository key;
+4. publishes the final `.dbxp`, final artifact metadata, and signing receipt.
+
+Plugin authors never receive the official repository private key.
+
+### Step 4: Merge the Candidate PR
+
+After signing, the workflow writes finalized `plugins/<plugin-id>.json` and generated `catalog/index.json` back to the same candidate PR. It publishes the signed package, artifact metadata, and signing receipt to a `dbx-store` Release. Once checks pass, a maintainer reviews and merges the PR.
+
+Do not include the following in a submission or update PR:
+
+- `.dbxp` binaries;
+- a copied plugin source tree;
+- Ed25519 private keys, tokens, or download credentials;
+- unsigned candidate URLs as final install artifacts;
+- a self-assigned `verified: true` value.
+
+## Update an Existing Plugin
+
+Every update uses a new semantic version. Existing Release assets cannot be replaced:
+
+1. Change the source and increment `manifest.json`'s `version`; never reuse a published version.
+2. Publish a new source tag and candidate Release; existing Release assets are immutable.
+3. Wait for the synchronizer to create or update `automation/plugin-release/<plugin-id>/<version>`.
+4. A maintainer reviews, signs, and merges the PR; the catalog then contains the new version and target artifacts.
+
+If the repository is not registered for automatic synchronization, submit `candidates/<plugin-id>.json` manually according to the `dbx-store` contribution guide. For an update, submit only the new version's candidate data; do not hand-edit generated `plugins/` or `catalog/` files.
+
+Fix plugin-code problems in the plugin source repository. Only catalog metadata, review status, final URLs, hashes, sizes, and Marketplace copy belong in `dbx-store`.
+
+## Signatures and Publisher Identity
+
+DBX currently uses one repository signature:
+
+- `publisher` records authorship and Marketplace ownership;
+- `signingKeyId` identifies the repository key that published the final installable package;
+- DBX Store reviews and signs official plugins centrally;
+- custom and private repository operators manage their own repository keys;
+- developer signatures and dual signatures are not current listing requirements.
+
+Human review determines whether a plugin may appear in the Marketplace. Ed25519 repository signing ensures that the reviewed package was not replaced afterward. A signature does not replace source review and is not an operating-system sandbox for native sidecars.
+
+Official Marketplace plugin authors must not run `keygen` or invent a `signingKeyId`. Private or custom repository operators can use the advanced CLI signing tool:
+
+```bash
+dbx-plugin keygen company.plugins.release
+source .dbx-repository-signing-key.env
+```
+
+The command creates a protected 32-byte Ed25519 seed environment file (mode `0600` on Unix) and prints the Key ID and Base64 public key; never commit the private file. A custom repository must add the public key to its own DBX trust configuration. The official Marketplace private key remains in a protected `dbx-store` Environment Secret, while DBX ships the public key in its official trust list.
+
+`artifact.json` fields `target`, `url`, `sha256`, and `size` bind the exact bytes. Official signing adds `signingKeyId` only afterward. Published assets are immutable; any byte change requires a new plugin version and another review.
+
+## Related Documentation
+
+- [JDBC Plugin and Database Drivers](/en/docs/plugins)
+- [Contribute to the DBX Core Repository](/en/docs/contributing)
+- [`t8y2/dbx` plugin platform source](https://github.com/t8y2/dbx/tree/main/plugins)
+- [`t8y2/dbx-store` official Marketplace repository](https://github.com/t8y2/dbx-store)

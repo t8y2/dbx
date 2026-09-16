@@ -6,6 +6,7 @@ describe("dataGridPreviewLabelKey", () => {
     expect(dataGridPreviewLabelKey("mongodb")).toBe("toolbar.previewQuery");
     expect(dataGridPreviewLabelKey("elasticsearch")).toBe("toolbar.previewQuery");
     expect(dataGridPreviewLabelKey("easysearch")).toBe("toolbar.previewQuery");
+    expect(dataGridPreviewLabelKey("meilisearch")).toBe("toolbar.previewQuery");
   });
 
   it("keeps the SQL wording for SQL databases", () => {

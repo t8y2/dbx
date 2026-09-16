@@ -8,6 +8,8 @@ export const DATA_GRID_COL_AUTO_FIT_MAX_WIDTH = 1200;
 export const DATA_GRID_HEADER_MAX_WIDTH = 500;
 export const DATA_GRID_CHAR_WIDTH = 8;
 export const DATA_GRID_HEADER_CONTROL_WIDTH = 80;
+/** 12px index icon plus the 4px flex gap before the column name. */
+export const DATA_GRID_HEADER_INDEX_INDICATOR_WIDTH = 16;
 export const DATA_GRID_CELL_PADDING = 28;
 export const DATA_GRID_SAMPLE_ROWS = 50;
 export const DATA_GRID_VALUE_TEXT_LIMIT = 60;
@@ -94,7 +96,17 @@ export function percentileValue(values: number[], percentile: number): number {
   return sorted[idx];
 }
 
-export function calculateDataGridColumnWidth(options: { columnName: string; sampleValues: readonly CellValue[]; maxWidth?: number; valueTextLimit?: number; density?: ColumnWidthDensity; compactColumnHeaderActions?: boolean; includeValues?: boolean; headerTextWidth?: number }): number {
+export function calculateDataGridColumnWidth(options: {
+  columnName: string;
+  sampleValues: readonly CellValue[];
+  maxWidth?: number;
+  valueTextLimit?: number;
+  density?: ColumnWidthDensity;
+  compactColumnHeaderActions?: boolean;
+  includeValues?: boolean;
+  headerTextWidth?: number;
+  hasIndexIndicator?: boolean;
+}): number {
   const density = options.density ?? "standard";
   const preset = COLUMN_WIDTH_DENSITY_PRESETS[density];
   const maxAllowedWidth = options.maxWidth ?? preset.maxWidth;
@@ -102,7 +114,8 @@ export function calculateDataGridColumnWidth(options: { columnName: string; samp
   const headerControl = options.compactColumnHeaderActions ? preset.headerControlWidthCompact : preset.headerControlWidth;
   const headerTextWidth = options.headerTextWidth ?? estimateTextWidth(options.columnName, 0, preset.charWidth);
   // Protect the grid from pathological identifiers while keeping normal names density-independent.
-  const headerWidth = Math.min(DATA_GRID_HEADER_MAX_WIDTH, headerTextWidth + headerControl);
+  const indexIndicatorWidth = options.hasIndexIndicator ? DATA_GRID_HEADER_INDEX_INDICATOR_WIDTH : 0;
+  const headerWidth = Math.min(DATA_GRID_HEADER_MAX_WIDTH, headerTextWidth + headerControl + indexIndicatorWidth);
 
   // Density limits cell content, never the column name and its header controls.
   if (density === "compact" && !options.includeValues) {

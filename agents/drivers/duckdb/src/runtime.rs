@@ -148,6 +148,27 @@ impl DuckDbWorkerSession {
         Ok(connection.interrupt_handle())
     }
 
+    /// Takes and closes the connection so DuckDB's shutdown checkpoint runs and
+    /// the database WAL is removed before this worker exits. Returns false —
+    /// leaving the connection untouched — when the connection is poisoned
+    /// (dropping it aborts the process) so the caller falls back to an
+    /// immediate exit and the WAL replays on the next open.
+    fn close_connection_for_shutdown(&mut self) -> bool {
+        if self.connection.is_none() {
+            return true;
+        }
+        if !self.is_connection_healthy() {
+            return false;
+        }
+        match self.connection.take() {
+            Some(connection) => {
+                crate::connection::close_connection(connection);
+                true
+            }
+            None => true,
+        }
+    }
+
     /// Probes whether the connection is still usable after an execute error.
     ///
     /// duckdb-rs 1.10503.1 has a bug where `Connection::prepare()` failing at the
@@ -205,6 +226,21 @@ struct WorkerHandleResult {
 }
 
 impl DuckDbWorkerRuntime {
+    /// Closes the session connection when the worker is idle and the connection
+    /// is healthy, so the DuckDB shutdown checkpoint removes the WAL. Returns
+    /// false when a query is running (the session is locked or an interrupt is
+    /// registered) or the connection is poisoned; callers then keep the legacy
+    /// immediate-exit behavior and rely on WAL replay at the next open.
+    fn close_session_for_shutdown(&self) -> bool {
+        if self.active_interrupt.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+            return false;
+        }
+        match self.session.try_lock() {
+            Ok(mut session) => session.close_connection_for_shutdown(),
+            Err(_) => false,
+        }
+    }
+
     async fn handle_request(
         &self,
         request: DuckDbWorkerRequest,
@@ -327,10 +363,18 @@ impl DuckDbWorkerRuntime {
                     shutdown: false,
                 }
             }
-            DuckDbWorkerMethod::Shutdown => WorkerHandleResult {
-                response: Some(DuckDbWorkerResponse::ok(request.id, serde_json::json!({ "shutdown": true }))),
-                shutdown: true,
-            },
+            DuckDbWorkerMethod::Shutdown => {
+                // Close the connection before acking: the checkpoint that removes
+                // the WAL must finish before the parent observes this response
+                // (or the process exit it waits for). Busy or poisoned sessions
+                // skip the close; the parent's kill fallback and WAL replay on
+                // the next open cover them.
+                self.close_session_for_shutdown();
+                WorkerHandleResult {
+                    response: Some(DuckDbWorkerResponse::ok(request.id, serde_json::json!({ "shutdown": true }))),
+                    shutdown: true,
+                }
+            }
         }
     }
 
@@ -377,7 +421,15 @@ pub async fn run_stdio_worker() -> Result<(), String> {
     loop {
         let line = lines.next_line().await.map_err(|e| e.to_string())?;
         let Some(line) = line else {
-            std::process::exit(0);
+            // Parent closed stdin (exit or crash). Idle workers checkpoint and
+            // remove their WAL on the normal return path; a worker still running
+            // a query must not wait for it (nor drop a poisoned connection),
+            // so it keeps the legacy immediate exit and the WAL replays on the
+            // next open.
+            if !runtime.close_session_for_shutdown() {
+                std::process::exit(0);
+            }
+            break;
         };
         if line.trim().is_empty() {
             continue;

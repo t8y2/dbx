@@ -3,7 +3,15 @@ import { useQueryStore } from "@/stores/queryStore";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { QueryResult } from "@/types/database";
 
-export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarget) => Promise<void>; openSqlFilePath: (path: string) => Promise<void>; openDbFilePath: (path: string) => Promise<void>; openConnectionDeepLink: (url: string) => Promise<void> }) {
+export function useTauriEvents(deps: {
+  openTableTarget: (target: NavigationTarget) => Promise<void>;
+  openSqlFilePath: (path: string) => Promise<void>;
+  openDbFilePath: (path: string) => Promise<void>;
+  openConnectionDeepLink: (url: string) => Promise<void>;
+  openAiConfigDeepLink: (url: string) => Promise<void>;
+  openPluginInstallDeepLink: (url: string) => Promise<void>;
+  closeActiveSurface: () => void;
+}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const unlistenHandles: Array<() => void> = [];
@@ -37,6 +45,41 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
             focusCurrentWindow();
           } catch (e) {
             console.error("[DBX] mcp-open-table error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen<{ connection_id: string }>("mcp-open-connection-workbench", async (event) => {
+          try {
+            const { connection_id } = event.payload;
+            if (!connectionStore.connections.length) await connectionStore.initFromDisk();
+            const config = connectionStore.getConfig(connection_id);
+            if (!config) return;
+            connectionStore.activeConnectionId = connection_id;
+            // Dedup + tab switch happen inside the store; also ensures the
+            // plugin workbench session (and its PTY) exists before returning.
+            // Deliberately no window focus here: agent-terminal calls open
+            // the tab so the command lands in a real terminal, but stealing
+            // the OS focus interrupted whatever the user was doing.
+            await queryStore.openPluginConnection(connection_id);
+          } catch (e) {
+            console.error("[DBX] mcp-open-connection-workbench error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        // Plugins report live transport state through plugin events; when an
+        // SSH session dies, flip the sidebar entry offline so the tree stops
+        // showing a connection that no longer exists.
+        listen<{ method: string; params: { state?: string; connectionId?: string } }>("dbx-plugin-event", async (event) => {
+          try {
+            const payload = event.payload ?? ({} as typeof event.payload);
+            if (payload.method !== "ssh/session/state" || payload.params?.state !== "disconnected") return;
+            const connectionId = payload.params?.connectionId;
+            if (!connectionId) return;
+            if (!connectionStore.connections.length) await connectionStore.initFromDisk();
+            if (!connectionStore.getConfig(connectionId)) return;
+            connectionStore.markConnectionOffline(connectionId);
+          } catch (e) {
+            console.error("[DBX] dbx-plugin-event (ssh/session/state) error:", e);
           }
         }).then((unlisten) => unlistenHandles.push(unlisten));
 
@@ -98,6 +141,32 @@ export function useTauriEvents(deps: { openTableTarget: (target: NavigationTarge
           } catch (e) {
             console.error("[DBX] dbx-open-connection-links error:", e);
           }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen<string[]>("dbx-open-ai-config-links", async (event) => {
+          try {
+            for (const url of event.payload) {
+              await deps.openAiConfigDeepLink(url);
+            }
+            focusCurrentWindow();
+          } catch (e) {
+            console.error("[DBX] dbx-open-ai-config-links error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen<string[]>("dbx-open-plugin-install-links", async (event) => {
+          try {
+            for (const url of event.payload) {
+              await deps.openPluginInstallDeepLink(url);
+            }
+            focusCurrentWindow();
+          } catch (e) {
+            console.error("[DBX] dbx-open-plugin-install-links error:", e);
+          }
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        listen("dbx-close-active-tab", () => {
+          deps.closeActiveSurface();
         }).then((unlisten) => unlistenHandles.push(unlisten));
       })
       .catch(() => {});

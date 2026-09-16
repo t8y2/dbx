@@ -7,7 +7,8 @@
   "platforms": ["linux/amd64", "linux/arm64"],
   "service": "database",
   "defaultPort": 27017,
-  "connection": { "host": "127.0.0.1", "port": 27018, "username": "root", "password": "123456", "database": "dbx", "authSource": "admin" },
+  "connection": { "host": "127.0.0.1", "port": 10400, "username": "root", "password": "123456", "database": "dbx", "authSource": "admin" },
+  "hostPorts": { "DB_PORT": 10400 },
   "shell": ["mongosh", "--quiet", "--host", "127.0.0.1", "--port", "27017", "--username", "root", "--password", "${DB_PASSWORD}", "--authenticationDatabase", "admin", "dbx"],
   "smoke": { "steps": [{ "name": "query initialized document over TCP", "command": ["mongosh", "--quiet", "--host", "127.0.0.1", "--port", "27017", "--username", "root", "--password", "${DB_PASSWORD}", "--authenticationDatabase", "admin", "dbx", "--eval", "db.dbx_smoke.findOne({_id: 1}).note"], "expect": "DBX smoke" }] }
 }

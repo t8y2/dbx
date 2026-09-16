@@ -3,15 +3,34 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
+import { buildSchemaDiffTableMatches, availableSchemaDiffTargetTables, areSchemaDiffTableMappingsEqual, pruneSchemaDiffTableMappings, reconcileSchemaDiffTableMappings, updateSchemaDiffTableMapping, type SchemaDiffTableMatch } from "@/lib/schema/schemaDiffTableMapping";
+import {
+  areSchemaDiffRoutineMappingsEqual,
+  buildSchemaDiffRoutineMatches,
+  identitySchemaDiffRoutineMappings,
+  isSchemaDiffUnrestrictedRoutineLoadTooLarge,
+  pruneSchemaDiffRoutineMappings,
+  reconcileSchemaDiffRoutineMappings,
+  reconcileSchemaDiffSelectedRoutines,
+  schemaDiffRoutineKey,
+  SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT,
+  type SchemaDiffRoutineMatch,
+} from "@/lib/schema/schemaDiffRoutine";
+import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
+import { schemaDiffRoutineObjectTypes, schemaDiffRoutineObjectTypesIntersection, supportsSchemaDiffRoutines } from "@/lib/database/databaseObjectCapabilities";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
-import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
-import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry } from "@/types/schemaDiff";
+import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
+import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, Trash2, X } from "@lucide/vue";
+import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping } from "@/types/schemaDiff";
+import type { DatabaseType } from "@/types/database";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -27,6 +46,9 @@ const props = defineProps<{
   targetSchema: string;
   ignoreComments: boolean;
   options: SchemaDiffCompareOptions;
+  selectedTables?: string[];
+  selectedRoutines?: string[];
+  tableListLoader: SchemaDiffTableListLoader;
   loading: boolean;
   recentConfigs: SchemaDiffConfig[];
 }>();
@@ -40,6 +62,8 @@ const emit = defineEmits<{
   (e: "update:targetSchema", value: string): void;
   (e: "update:ignoreComments", value: boolean): void;
   (e: "update:fieldMappings", value: FieldMappingEntry[]): void;
+  (e: "update:tableMappings", value: SchemaDiffTableMapping[]): void;
+  (e: "update:routineMappings", value: SchemaDiffRoutineMapping[]): void;
   (e: "open-field-mapping"): void;
   (e: "compare"): void;
   (e: "saveConfig"): void;
@@ -48,6 +72,9 @@ const emit = defineEmits<{
   (e: "swap"): void;
   (e: "loadHistoryConfig", config: SchemaDiffConfig): void;
   (e: "deleteHistoryConfig", configId: string): void;
+  (e: "update:selectedTables", value?: string[]): void;
+  (e: "update:selectedRoutines", value?: string[]): void;
+  (e: "update:compareScope", value: { tables?: boolean; views?: boolean; functions?: boolean }): void;
 }>();
 
 const sourceDatabases = ref<string[]>([]);
@@ -57,7 +84,7 @@ const targetSchemas = ref<string[]>([]);
 const sourceDbVersion = ref<string | null>(null);
 const targetDbVersion = ref<string | null>(null);
 
-const sqlConnections = computed(() => store.connections.filter((c: any) => !["mongodb", "redis", "elasticsearch", "easysearch", "etcd", "mq", "nacos"].includes(c.db_type)));
+const sqlConnections = computed(() => store.connections.filter((c: any) => !["mongodb", "redis", "elasticsearch", "easysearch", "meilisearch", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
 
 const sourceConfig = computed(() => store.getConfig(props.sourceConnectionId));
 const targetConfig = computed(() => store.getConfig(props.targetConnectionId));
@@ -67,16 +94,385 @@ const targetDbType = computed(() => targetConfig.value?.db_type || "");
 const showFieldMapping = computed(() => sourceDbType.value && targetDbType.value && sourceDbType.value !== targetDbType.value);
 const activeFieldMappings = computed(() => props.options?.fieldMappings ?? []);
 
+// ---- Visual (explicit) table selection ----
+const sourceTableList = ref<string[]>([]);
+const targetTableList = ref<string[]>([]);
+const targetTableListLoaded = ref(false);
+const restrictTables = ref(false);
+const localSelectedTables = ref<string[]>([]);
+
+const activeTableMappings = computed(() => props.options?.tableMappings ?? []);
+const tableMatches = computed<SchemaDiffTableMatch[]>(() => buildSchemaDiffTableMatches(localSelectedTables.value, targetTableList.value, activeTableMappings.value, props.options.ignoreTableNameCase));
+const matchedTableCount = computed(() => tableMatches.value.filter((match) => match.targetTable).length);
+const missingTargetTables = computed(() => tableMatches.value.filter((match) => !match.targetTable).map((match) => match.sourceTable));
+const tableMappingConflictSource = ref<string | null>(null);
+
+function targetTableOptions(sourceTable: string): string[] {
+  return availableSchemaDiffTargetTables(sourceTable, targetTableList.value, activeTableMappings.value, props.options.ignoreTableNameCase);
+}
+
+function handleTableMappingUpdate(sourceTable: string, targetTable: string) {
+  const update = updateSchemaDiffTableMapping(activeTableMappings.value, sourceTable, targetTable, props.options.ignoreTableNameCase);
+  if (update.accepted) {
+    tableMappingConflictSource.value = null;
+    emitTableMappings(update.mappings);
+  } else {
+    tableMappingConflictSource.value = update.conflictSource ?? sourceTable;
+  }
+}
+
+function emitTableMappings(nextMappings: SchemaDiffTableMapping[]) {
+  if (!areSchemaDiffTableMappingsEqual(nextMappings, activeTableMappings.value)) emit("update:tableMappings", nextMappings);
+}
+
+function reconcileTableMappings(selectedTables: string[], targetTables = targetTableList.value) {
+  const nextMappings = targetTableListLoaded.value ? reconcileSchemaDiffTableMappings(selectedTables, targetTables, activeTableMappings.value, props.options.ignoreTableNameCase) : pruneSchemaDiffTableMappings(selectedTables, activeTableMappings.value);
+  emitTableMappings(nextMappings);
+}
+
+// Keep the visual restriction in sync with the (persisted) config options.
+// `undefined` = not restricted (compare all tables, then regex filter);
+// an array = explicitly restricted to exactly those tables.
+watch(
+  () => props.selectedTables,
+  (value) => {
+    restrictTables.value = Array.isArray(value);
+    localSelectedTables.value = value && Array.isArray(value) ? [...value] : [];
+    if (!restrictTables.value) emitTableMappings([]);
+    else if (targetTableListLoaded.value) reconcileTableMappings(localSelectedTables.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.options?.tableMappings,
+  () => {
+    if (restrictTables.value && targetTableListLoaded.value) reconcileTableMappings(localSelectedTables.value);
+  },
+  { deep: true },
+);
+
+function handleToggleRestrict(enabled: boolean) {
+  restrictTables.value = enabled;
+  emit("update:selectedTables", enabled ? [...localSelectedTables.value] : undefined);
+  if (!enabled) emitTableMappings([]);
+  else reconcileTableMappings(localSelectedTables.value);
+}
+
+function handleUpdateSelectedTables(value: string[]) {
+  localSelectedTables.value = value;
+  if (!restrictTables.value) return;
+  emit("update:selectedTables", [...value]);
+  reconcileTableMappings(value);
+}
+
+function handleRemoveSelectedTable(sourceTable: string) {
+  handleUpdateSelectedTables(localSelectedTables.value.filter((table) => table !== sourceTable));
+}
+
+function matchStatusClass(kind: SchemaDiffTableMatch["kind"]): string {
+  if (kind === "unmatched") return "text-destructive";
+  if (kind === "manual") return "text-amber-600 dark:text-amber-400";
+  return "text-muted-foreground";
+}
+
+function clearUnavailableTableSelection() {
+  sourceTableList.value = [];
+  targetTableList.value = [];
+  targetTableListLoaded.value = false;
+  if (props.selectedTables === undefined && !restrictTables.value && localSelectedTables.value.length === 0) {
+    emitTableMappings([]);
+    return;
+  }
+  restrictTables.value = false;
+  localSelectedTables.value = [];
+  emit("update:selectedTables", undefined);
+  emitTableMappings([]);
+}
+
+function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
+  return side === "source" ? { connectionId: props.sourceConnectionId, database: props.sourceDatabase, schema: props.sourceSchema } : { connectionId: props.targetConnectionId, database: props.targetDatabase, schema: props.targetSchema };
+}
+
+function isTableIdentityReady(side: SchemaDiffTableSide): boolean {
+  const identity = getTableIdentity(side);
+  const config = side === "source" ? sourceConfig.value : targetConfig.value;
+  return !!identity.connectionId && !!identity.database && (!isSchemaAware(config?.db_type) || !!identity.schema);
+}
+
+function setTableList(side: SchemaDiffTableSide, tables: Array<{ name?: string }>) {
+  const names = tables.map((entry) => entry.name ?? "").filter(Boolean);
+  if (side === "source") sourceTableList.value = names;
+  else {
+    targetTableList.value = names;
+    targetTableListLoaded.value = false;
+  }
+}
+
+function reconcileSelectedTablesAfterSuccessfulLoad(tables: Array<{ name?: string }>) {
+  const availableTables = tables.map((entry) => entry.name ?? "").filter(Boolean);
+  let selectedTables = localSelectedTables.value;
+  if (restrictTables.value && Array.isArray(props.selectedTables)) {
+    const nextSelectedTables = reconcileSchemaDiffSelectedTables(props.selectedTables, availableTables);
+    const changed = nextSelectedTables.length !== props.selectedTables.length || nextSelectedTables.some((table, index) => table !== props.selectedTables?.[index]);
+    selectedTables = nextSelectedTables;
+    localSelectedTables.value = nextSelectedTables;
+    if (changed) emit("update:selectedTables", nextSelectedTables);
+  }
+  if (restrictTables.value) reconcileTableMappings(selectedTables);
+}
+
+function reconcileTargetTablesAfterSuccessfulLoad(tables: Array<{ name?: string }>) {
+  targetTableListLoaded.value = true;
+  reconcileTableMappings(localSelectedTables.value, tables.map((entry) => entry.name ?? "").filter(Boolean));
+}
+
+const tableListCoordinator = createSchemaDiffTableListCoordinator({
+  loader: props.tableListLoader,
+  getIdentity: getTableIdentity,
+  setTables: setTableList,
+  onSourceTablesLoaded: reconcileSelectedTablesAfterSuccessfulLoad,
+  onTargetTablesLoaded: reconcileTargetTablesAfterSuccessfulLoad,
+});
+
+const canConfigureTableSelection = computed(() => isTableIdentityReady("source"));
+const tablesCompareEnabled = computed(() => !!props.options.tables);
+const routinesCompareEnabled = computed(() => !!props.options.functions);
+const canEnableRoutinesCompare = computed(() => schemaDiffRoutineObjectTypesIntersection(sourceDbType.value as DatabaseType | undefined, targetDbType.value as DatabaseType | undefined).length > 0);
+/** User preference AND supported pair — drives compare/canCompare/Switch display. */
+const effectiveRoutinesEnabled = computed(() => routinesCompareEnabled.value && canEnableRoutinesCompare.value);
+
+watch(
+  () => [tablesCompareEnabled.value, restrictTables.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value],
+  () => {
+    const shouldLoad = tablesCompareEnabled.value && shouldLoadSchemaDiffTableList("source", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("source"));
+    tableListCoordinator.refresh("source", shouldLoad).catch(() => {});
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [tablesCompareEnabled.value, restrictTables.value, localSelectedTables.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value],
+  () => {
+    const shouldLoad = tablesCompareEnabled.value && shouldLoadSchemaDiffTableList("target", restrictTables.value, localSelectedTables.value.length, isTableIdentityReady("target"));
+    tableListCoordinator.refresh("target", shouldLoad).catch(() => {});
+  },
+  { immediate: true },
+);
+
+// ---- Visual (explicit) routine selection ----
+const sourceRoutineList = ref<string[]>([]);
+const targetRoutineList = ref<string[]>([]);
+const targetRoutineListLoaded = ref(false);
+const restrictRoutines = ref(false);
+const localSelectedRoutines = ref<string[]>([]);
+const loadingRoutines = ref(false);
+
+const canConfigureRoutineSelection = computed(() => isTableIdentityReady("source") && supportsSchemaDiffRoutines(sourceDbType.value as DatabaseType));
+const activeRoutineMappings = computed(() => identitySchemaDiffRoutineMappings(props.options?.routineMappings ?? []));
+const routineMatches = computed<SchemaDiffRoutineMatch[]>(() => buildSchemaDiffRoutineMatches(localSelectedRoutines.value, targetRoutineList.value, activeRoutineMappings.value));
+const matchedRoutineCount = computed(() => routineMatches.value.filter((match) => match.targetRoutine).length);
+const missingTargetRoutines = computed(() => routineMatches.value.filter((match) => !match.targetRoutine).map((match) => match.sourceRoutine));
+
+function emitRoutineMappings(nextMappings: SchemaDiffRoutineMapping[]) {
+  const identityOnly = identitySchemaDiffRoutineMappings(nextMappings);
+  if (!areSchemaDiffRoutineMappingsEqual(identityOnly, activeRoutineMappings.value)) emit("update:routineMappings", identityOnly);
+}
+
+function reconcileRoutineMappings(selectedRoutines: string[], targetRoutines = targetRoutineList.value) {
+  const nextMappings = targetRoutineListLoaded.value ? reconcileSchemaDiffRoutineMappings(selectedRoutines, targetRoutines, activeRoutineMappings.value) : pruneSchemaDiffRoutineMappings(selectedRoutines, activeRoutineMappings.value);
+  emitRoutineMappings(nextMappings);
+}
+
+watch(
+  () => props.selectedRoutines,
+  (value) => {
+    restrictRoutines.value = Array.isArray(value);
+    localSelectedRoutines.value = value && Array.isArray(value) ? [...value] : [];
+    if (!restrictRoutines.value) emitRoutineMappings([]);
+    else if (targetRoutineListLoaded.value) reconcileRoutineMappings(localSelectedRoutines.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => props.options?.routineMappings,
+  () => {
+    if (restrictRoutines.value && targetRoutineListLoaded.value) reconcileRoutineMappings(localSelectedRoutines.value);
+  },
+  { deep: true },
+);
+
+function handleToggleRestrictRoutines(enabled: boolean) {
+  restrictRoutines.value = enabled;
+  emit("update:selectedRoutines", enabled ? [...localSelectedRoutines.value] : undefined);
+  if (!enabled) emitRoutineMappings([]);
+  else reconcileRoutineMappings(localSelectedRoutines.value);
+}
+
+function handleUpdateSelectedRoutines(value: string[]) {
+  localSelectedRoutines.value = value;
+  if (!restrictRoutines.value) return;
+  emit("update:selectedRoutines", [...value]);
+  reconcileRoutineMappings(value);
+}
+
+function handleRemoveSelectedRoutine(sourceRoutine: string) {
+  handleUpdateSelectedRoutines(localSelectedRoutines.value.filter((routine) => routine !== sourceRoutine));
+}
+
+function clearUnavailableRoutineSelection() {
+  sourceRoutineList.value = [];
+  targetRoutineList.value = [];
+  targetRoutineListLoaded.value = false;
+  if (props.selectedRoutines === undefined && !restrictRoutines.value && localSelectedRoutines.value.length === 0) {
+    emitRoutineMappings([]);
+    return;
+  }
+  restrictRoutines.value = false;
+  localSelectedRoutines.value = [];
+  emit("update:selectedRoutines", undefined);
+  emitRoutineMappings([]);
+}
+
+async function loadRoutineList(side: "source" | "target") {
+  const connectionId = side === "source" ? props.sourceConnectionId : props.targetConnectionId;
+  const database = side === "source" ? props.sourceDatabase : props.targetDatabase;
+  const schema = side === "source" ? props.sourceSchema : props.targetSchema;
+  const dbType = side === "source" ? sourceDbType.value : targetDbType.value;
+  if (!connectionId || !database || !supportsSchemaDiffRoutines(dbType as DatabaseType)) {
+    if (side === "source") sourceRoutineList.value = [];
+    else {
+      targetRoutineList.value = [];
+      targetRoutineListLoaded.value = false;
+    }
+    return;
+  }
+  try {
+    loadingRoutines.value = true;
+    await store.ensureConnected(connectionId);
+    // Names/signatures only — avoid listFunctions N+1 source fetch on the config step.
+    const kinds = schemaDiffRoutineObjectTypes(dbType as DatabaseType);
+    const objects = kinds.length === 0 ? [] : await api.listObjects(connectionId, database, schema, kinds);
+    const keys = objects.map((object) => schemaDiffRoutineKey(object.name, object.signature ?? ""));
+    if (side === "source") {
+      sourceRoutineList.value = keys;
+      if (restrictRoutines.value) {
+        const next = reconcileSchemaDiffSelectedRoutines(localSelectedRoutines.value, keys);
+        if (next.length !== localSelectedRoutines.value.length || next.some((key, index) => key !== localSelectedRoutines.value[index])) {
+          localSelectedRoutines.value = next;
+          emit("update:selectedRoutines", [...next]);
+        }
+      }
+    } else {
+      targetRoutineList.value = keys;
+      targetRoutineListLoaded.value = true;
+      if (restrictRoutines.value) reconcileRoutineMappings(localSelectedRoutines.value, keys);
+    }
+  } catch {
+    if (side === "source") sourceRoutineList.value = [];
+    else {
+      targetRoutineList.value = [];
+      targetRoutineListLoaded.value = false;
+    }
+  } finally {
+    loadingRoutines.value = false;
+  }
+}
+
+watch(
+  () => [restrictRoutines.value, effectiveRoutinesEnabled.value, props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, sourceDbType.value] as const,
+  ([restrictEnabled, routinesEnabled]) => {
+    if (!canConfigureRoutineSelection.value) {
+      clearUnavailableRoutineSelection();
+      return;
+    }
+    // Load names whenever routines are effectively on (count guard + restrict picker).
+    if (routinesEnabled || restrictEnabled) void loadRoutineList("source");
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [restrictRoutines.value, localSelectedRoutines.value.length, props.targetConnectionId, props.targetDatabase, props.targetSchema, targetDbType.value] as const,
+  ([enabled, selectedCount]) => {
+    if (!enabled || selectedCount === 0 || !isTableIdentityReady("target") || !supportsSchemaDiffRoutines(targetDbType.value as DatabaseType)) {
+      if (!enabled) {
+        targetRoutineList.value = [];
+        targetRoutineListLoaded.value = false;
+      }
+      return;
+    }
+    void loadRoutineList("target");
+  },
+  { immediate: true },
+);
+
+watch(
+  () => ({
+    source: [props.sourceConnectionId, props.sourceDatabase, props.sourceSchema] as const,
+    selectedRoutines: props.selectedRoutines,
+  }),
+  (current, previous) => {
+    if (!isTableIdentityReady("source") || !supportsSchemaDiffRoutines(sourceDbType.value as DatabaseType)) {
+      clearUnavailableRoutineSelection();
+      return;
+    }
+    if (!previous) return;
+    if (current.source.every((value, index) => value === previous.source[index])) return;
+    if (current.selectedRoutines !== previous.selectedRoutines) return;
+    if (current.selectedRoutines === undefined && !restrictRoutines.value) return;
+    clearUnavailableRoutineSelection();
+  },
+  { immediate: true },
+);
+
+function handleTablesCompareEnabled(enabled: boolean) {
+  if (enabled) emit("update:compareScope", { tables: true });
+  else emit("update:compareScope", { tables: false, views: false });
+}
+
+function handleRoutinesCompareEnabled(enabled: boolean) {
+  if (enabled && !canEnableRoutinesCompare.value) return;
+  emit("update:compareScope", { functions: enabled });
+}
+
+const unrestrictedRoutineLoadTooLarge = computed(() => {
+  if (!effectiveRoutinesEnabled.value || restrictRoutines.value) return false;
+  return isSchemaDiffUnrestrictedRoutineLoadTooLarge(sourceRoutineList.value.length, props.selectedRoutines);
+});
+
 const canCompare = computed(() => {
-  return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
+  const tablesEnabled = tablesCompareEnabled.value;
+  const routinesEnabled = effectiveRoutinesEnabled.value;
+  if (!tablesEnabled && !routinesEnabled) return false;
+  if (unrestrictedRoutineLoadTooLarge.value) return false;
+  const hasSelectedTables = !tablesEnabled || props.selectedTables === undefined || props.selectedTables.length > 0;
+  const hasSelectedRoutines = !routinesEnabled || props.selectedRoutines === undefined || props.selectedRoutines.length > 0;
+  // Unmapped source tables are not a blocker: they flow through the comparison as
+  // source-only tables (CREATE TABLE in the target), matching the pre-mapping behavior.
+  const hasValidTableMappings = !tablesEnabled || !restrictTables.value || localSelectedTables.value.length === 0 || isTableIdentityReady("target");
+  const hasValidRoutineMappings = !routinesEnabled || !restrictRoutines.value || localSelectedRoutines.value.length === 0 || isTableIdentityReady("target");
+  return (
+    props.sourceConnectionId &&
+    props.targetConnectionId &&
+    props.sourceDatabase &&
+    props.targetDatabase &&
+    hasSelectedTables &&
+    hasSelectedRoutines &&
+    hasValidTableMappings &&
+    hasValidRoutineMappings &&
+    (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) &&
+    (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema)
+  );
 });
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   try {
     await store.ensureConnected(connectionId);
-    const dbs = await api.listDatabases(connectionId);
-    const dbNames = Array.isArray(dbs) ? dbs.map((db: any) => (typeof db === "string" ? db : db.name || db.database)) : [];
+    const config = store.getConfig(connectionId);
+    const dbNames = config ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((db) => db.name);
     if (side === "source") {
       sourceDatabases.value = dbNames;
       if (props.sourceDatabase) {
@@ -163,6 +559,29 @@ watch(
     } else {
       targetDatabases.value = [];
     }
+  },
+  { immediate: true },
+);
+
+// A visual selection belongs to the current source connection/database/schema. Clear it
+// when that identity changes so a saved table name cannot silently restrict a different
+// source. If the source and selected tables change together, it is a saved-config load;
+// let the selectedTables watcher restore that config instead of clearing it again.
+watch(
+  () => ({
+    source: [props.sourceConnectionId, props.sourceDatabase, props.sourceSchema] as const,
+    selectedTables: props.selectedTables,
+  }),
+  (current, previous) => {
+    if (!isTableIdentityReady("source")) {
+      clearUnavailableTableSelection();
+      return;
+    }
+    if (!previous) return;
+    if (current.source.every((value, index) => value === previous.source[index])) return;
+    if (current.selectedTables !== previous.selectedTables) return;
+    if (current.selectedTables === undefined && !restrictTables.value) return;
+    clearUnavailableTableSelection();
   },
   { immediate: true },
 );
@@ -262,26 +681,17 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <SearchableSelect
+          <ConnectionTreeSelect
             :model-value="sourceConnectionId"
             @update:model-value="(v: string) => $emit('update:sourceConnectionId', v)"
-            :options="sqlConnections.map((c) => c.id)"
+            :connections="sqlConnections"
+            :layout="store.sidebarLayout"
             :placeholder="t('diff.selectConnection')"
             :search-placeholder="t('diff.searchConnection')"
             :empty-text="t('common.noResults')"
-            :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
-            trigger-variant="outline"
-            trigger-class="h-8 w-full justify-between text-xs"
-            content-class="w-[var(--reka-popover-trigger-width)]"
-          >
-            <template #option-label="{ option, label }">
-              <div class="flex min-w-0 items-center gap-2">
-                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="h-3.5 w-3.5 shrink-0" />
-                <ConnectionGroupBadge :connection-id="option" />
-                <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-              </div>
-            </template>
-          </SearchableSelect>
+            trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+            list-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <div class="space-y-1.5">
@@ -347,26 +757,17 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <SearchableSelect
+          <ConnectionTreeSelect
             :model-value="targetConnectionId"
             @update:model-value="(v: string) => $emit('update:targetConnectionId', v)"
-            :options="sqlConnections.map((c) => c.id)"
+            :connections="sqlConnections"
+            :layout="store.sidebarLayout"
             :placeholder="t('diff.selectConnection')"
             :search-placeholder="t('diff.searchConnection')"
             :empty-text="t('common.noResults')"
-            :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
-            trigger-variant="outline"
-            trigger-class="h-8 w-full justify-between text-xs"
-            content-class="w-[var(--reka-popover-trigger-width)]"
-          >
-            <template #option-label="{ option, label }">
-              <div class="flex min-w-0 items-center gap-2">
-                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="h-3.5 w-3.5 shrink-0" />
-                <ConnectionGroupBadge :connection-id="option" />
-                <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-              </div>
-            </template>
-          </SearchableSelect>
+            trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+            list-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <div class="space-y-1.5">
@@ -416,6 +817,173 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
             <span class="text-muted-foreground">{{ t("diff.serverVersion") }}</span>
             <span>{{ targetDbVersion || "--" }}</span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Comparison Scope -->
+    <div class="space-y-3 rounded-lg border bg-muted/20 p-3">
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex min-w-0 items-center gap-2">
+            <Switch size="sm" :model-value="tablesCompareEnabled" :aria-label="t('diff.compareTablesSwitch')" @update:model-value="handleTablesCompareEnabled(Boolean($event))" />
+            <Label class="text-xs font-medium">{{ t("diff.tableSelection") }}</Label>
+          </div>
+          <Button v-if="tablesCompareEnabled && (restrictTables || canConfigureTableSelection)" variant="ghost" size="sm" class="h-6 px-2 text-xs" @click="handleToggleRestrict(!restrictTables)">
+            {{ restrictTables ? t("diff.compareAllTables") : t("diff.chooseTables") }}
+          </Button>
+        </div>
+        <div v-if="!tablesCompareEnabled" class="text-[11px] text-muted-foreground">
+          {{ t("diff.tableCompareDisabled") }}
+        </div>
+        <template v-else>
+          <div v-if="!restrictTables" class="text-[11px] text-muted-foreground">
+            {{ t("diff.tableSelectionUnrestricted") }}
+          </div>
+          <TableMultiSelect
+            v-if="restrictTables && canConfigureTableSelection"
+            :key="`${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+            :model-value="localSelectedTables"
+            @update:model-value="handleUpdateSelectedTables"
+            :tables="sourceTableList"
+            :title="t('diff.sourceTables')"
+            :empty-text="t('dataCompare.noTables')"
+          />
+        </template>
+      </div>
+
+      <!-- Target Same-Name Match -->
+      <!-- Source → target table mapping -->
+      <div v-if="tablesCompareEnabled && restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-2 rounded-lg border p-3 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-medium">{{ t("diff.targetTableMatching") }}</div>
+          <div class="text-muted-foreground">
+            {{ t("diff.matchedTables", { matched: matchedTableCount, total: localSelectedTables.length }) }}
+          </div>
+        </div>
+        <div class="overflow-x-auto rounded border">
+          <table class="w-full min-w-[520px]">
+            <thead class="border-b bg-muted/30 text-muted-foreground">
+              <tr>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.sourceTables") }}</th>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.targetTable") }}</th>
+                <th class="w-28 px-2 py-1.5 text-left font-medium">{{ t("diff.status") }}</th>
+                <th class="w-16 px-2 py-1.5 text-right font-medium">{{ t("common.actions") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="match in tableMatches" :key="match.sourceTable" class="border-b last:border-b-0">
+                <td class="max-w-[220px] truncate px-2 py-1.5 font-mono" :title="match.sourceTable">{{ match.sourceTable }}</td>
+                <td class="px-2 py-1.5">
+                  <SearchableSelect
+                    :model-value="match.targetTable ?? ''"
+                    @update:model-value="(value: string) => handleTableMappingUpdate(match.sourceTable, value)"
+                    :options="targetTableOptions(match.sourceTable)"
+                    :placeholder="t('diff.selectTargetTable')"
+                    :search-placeholder="t('diff.searchTargetTable')"
+                    :empty-text="t('diff.noTargetTables')"
+                    :disabled="!targetTableListLoaded"
+                    :clearable="true"
+                    :clear-selected-option="true"
+                    trigger-class="h-7 w-full text-xs"
+                    content-class="w-[var(--reka-popover-trigger-width)]"
+                  />
+                </td>
+                <td class="px-2 py-1.5" :class="matchStatusClass(match.kind)">
+                  {{ t(`diff.tableMatchStatus.${match.kind}`) }}
+                </td>
+                <td class="px-2 py-1.5 text-right">
+                  <Button variant="ghost" size="sm" class="h-7 w-7 p-0" :aria-label="t('common.delete')" @click="handleRemoveSelectedTable(match.sourceTable)">
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </Button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="targetTableListLoaded && missingTargetTables.length" class="text-muted-foreground">
+          {{ t("diff.unmatchedTableWarning", { count: missingTargetTables.length }) }}
+        </div>
+        <div v-if="tableMappingConflictSource" class="text-destructive">
+          {{ t("diff.targetTableInUse") }}
+        </div>
+      </div>
+
+      <div class="space-y-1.5 border-t border-border/60 pt-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="flex min-w-0 items-center gap-2">
+            <Switch size="sm" :model-value="effectiveRoutinesEnabled" :disabled="!canEnableRoutinesCompare" :aria-label="t('diff.compareRoutinesSwitch')" @update:model-value="handleRoutinesCompareEnabled(Boolean($event))" />
+            <Label class="text-xs font-medium" :class="!canEnableRoutinesCompare ? 'text-muted-foreground' : ''">{{ t("diff.routineSelection") }}</Label>
+          </div>
+          <Button v-if="effectiveRoutinesEnabled && (restrictRoutines || canConfigureRoutineSelection)" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="loadingRoutines" @click="handleToggleRestrictRoutines(!restrictRoutines)">
+            {{ restrictRoutines ? t("diff.compareAllRoutines") : t("diff.chooseRoutines") }}
+          </Button>
+        </div>
+        <div v-if="!canEnableRoutinesCompare" class="text-[11px] text-muted-foreground">
+          {{ t("diff.routineSelectionUnsupported") }}
+        </div>
+        <div v-else-if="!routinesCompareEnabled" class="text-[11px] text-muted-foreground">
+          {{ t("diff.routineCompareDisabled") }}
+        </div>
+        <template v-else>
+          <div v-if="!restrictRoutines" class="text-[11px] text-muted-foreground">
+            {{ !isTableIdentityReady("source") ? t("diff.routineSelectionNeedSource") : t("diff.routineSelectionUnrestricted") }}
+          </div>
+          <div v-if="unrestrictedRoutineLoadTooLarge" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+            {{ t("diff.routineSelectionTooLarge", { count: sourceRoutineList.length, limit: SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT }) }}
+          </div>
+          <TableMultiSelect
+            v-if="restrictRoutines && canConfigureRoutineSelection"
+            :key="`routines-${sourceConnectionId}.${sourceDatabase}.${sourceSchema}`"
+            :model-value="localSelectedRoutines"
+            @update:model-value="handleUpdateSelectedRoutines"
+            :tables="sourceRoutineList"
+            :title="t('diff.sourceRoutines')"
+            :search-placeholder="t('diff.searchSourceRoutines')"
+            :empty-text="t('diff.noRoutines')"
+          />
+        </template>
+      </div>
+
+      <div v-if="effectiveRoutinesEnabled && restrictRoutines && localSelectedRoutines.length && canConfigureRoutineSelection && isTableIdentityReady('target')" class="space-y-2 rounded-lg border p-3 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-medium">{{ t("diff.targetRoutineMatching") }}</div>
+          <div class="text-muted-foreground">
+            {{ t("diff.matchedRoutines", { matched: matchedRoutineCount, total: localSelectedRoutines.length }) }}
+          </div>
+        </div>
+        <p class="text-[11px] text-muted-foreground">{{ t("diff.routineSameNameMatchingOnly") }}</p>
+        <div class="overflow-x-auto rounded border">
+          <table class="w-full min-w-[520px]">
+            <thead class="border-b bg-muted/30 text-muted-foreground">
+              <tr>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.sourceRoutines") }}</th>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.targetRoutine") }}</th>
+                <th class="w-28 px-2 py-1.5 text-left font-medium">{{ t("diff.status") }}</th>
+                <th class="w-16 px-2 py-1.5 text-right font-medium">{{ t("common.actions") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="match in routineMatches" :key="match.sourceRoutine" class="border-b last:border-b-0">
+                <td class="max-w-[220px] truncate px-2 py-1.5 font-mono" :title="match.sourceRoutine">{{ match.sourceRoutine }}</td>
+                <td class="max-w-[220px] truncate px-2 py-1.5 font-mono" :title="match.targetRoutine || undefined">
+                  <span v-if="match.targetRoutine">{{ match.targetRoutine }}</span>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
+                <td class="px-2 py-1.5" :class="matchStatusClass(match.kind)">
+                  {{ t(`diff.tableMatchStatus.${match.kind}`) }}
+                </td>
+                <td class="px-2 py-1.5 text-right">
+                  <Button variant="ghost" size="sm" class="h-7 w-7 p-0" :aria-label="t('common.delete')" @click="handleRemoveSelectedRoutine(match.sourceRoutine)">
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </Button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="targetRoutineListLoaded && missingTargetRoutines.length" class="text-muted-foreground">
+          {{ t("diff.unmatchedRoutineWarning", { count: missingTargetRoutines.length }) }}
         </div>
       </div>
     </div>

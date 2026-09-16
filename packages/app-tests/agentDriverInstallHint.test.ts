@@ -18,6 +18,13 @@ test("shows the agent driver install hint for Access when missing", () => {
   assert.equal(showAgentDriverInstallHint("access", [{ db_type: "access", installed: false }]), true);
 });
 
+test("installs the MongoDB Legacy agent before testing a legacy MongoDB connection", () => {
+  assert.equal(agentDriverInstallKey("mongodb", "mongodb-legacy"), "mongodb");
+  assert.equal(showAgentDriverInstallHint("mongodb", [{ db_type: "mongodb", installed: false }], "mongodb-legacy"), true);
+  assert.equal(showAgentDriverInstallHint("mongodb", [{ db_type: "mongodb", installed: true }], "mongodb-legacy"), false);
+  assert.equal(showAgentDriverInstallHint("mongodb", [{ db_type: "mongodb", installed: false }], "mongodb"), false);
+});
+
 test("does not show agent driver install hints for built-in database types", () => {
   assert.equal(showAgentDriverInstallHint("mysql", [{ db_type: "informix", installed: false }]), false);
 });
@@ -91,6 +98,13 @@ test("uses unified Oracle and selected profile keys for update hints", () => {
     ),
     true,
   );
+});
+
+test("uses one H2 agent for every H2 profile", () => {
+  for (const profile of ["h2", "h2-v1", "h2-v2", "h2-v3", "h2-custom", "h2-legacy"]) {
+    assert.equal(agentDriverInstallKey("h2", profile), "h2");
+    assert.equal(showAgentDriverInstallHint("h2", [{ db_type: "h2", installed: true }], profile), false);
+  }
 });
 
 test("appends agent driver update hints once", () => {

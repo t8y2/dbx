@@ -4,7 +4,20 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import NacosConfigBatchDialog from "@/components/nacos/NacosConfigBatchDialog.vue";
-import type { NacosBatchReport } from "@/types/nacos";
+import type { NacosBatchPreview, NacosBatchReport, NacosConfigKey } from "@/types/nacos";
+
+vi.mock("@/components/nacos/NacosConfigDiffDialog.vue", () => ({
+  default: defineComponent({
+    props: {
+      open: Boolean,
+      before: String,
+      after: String,
+      format: String,
+      showConfirm: Boolean,
+    },
+    template: '<div v-if="open" data-testid="nacos-preview-diff" :data-before="before" :data-after="after" :data-format="format" :data-show-confirm="showConfirm" />',
+  }),
+}));
 
 const mountedApps: App[] = [];
 
@@ -15,6 +28,8 @@ async function mountDialog(
     { namespace: "remote-only", namespaceShowName: "Remote only" },
   ],
   report: NacosBatchReport | null = null,
+  selectedKeys: NacosConfigKey[] = [{ namespace: "shared", group: "DEFAULT_GROUP", dataId: "app.yaml" }],
+  preview: NacosBatchPreview | null = null,
 ) {
   const onTargetConnectionChange = vi.fn();
   const onPreview = vi.fn();
@@ -27,7 +42,8 @@ async function mountDialog(
           open: true,
           mode: "copy",
           loading: false,
-          selectedCount: 1,
+          selectedCount: selectedKeys.length,
+          selectedKeys,
           filteredCount: 1,
           targetConnections: [
             { id: "source", label: "Source" },
@@ -37,7 +53,7 @@ async function mountDialog(
           sourceConnectionId: "source",
           currentNamespace: "shared",
           namespaces,
-          preview: null,
+          preview,
           report,
           onTargetConnectionChange,
           onPreview,
@@ -73,8 +89,108 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
       scope: "selected",
       targetConnectionId: "remote",
       targetNamespace: "shared",
+      targetGroup: "",
       policy: "ABORT",
     });
+  });
+
+  it("includes a trimmed target group override in the preview payload when provided", async () => {
+    const { onPreview } = await mountDialog("remote");
+    const groupInput = document.body.querySelector("[data-testid=nacos-target-group]") as HTMLInputElement;
+    groupInput.value = "  TARGET_GROUP  ";
+    groupInput.dispatchEvent(new Event("input"));
+    await nextTick();
+
+    Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Preview"))
+      ?.click();
+    await nextTick();
+    expect(onPreview).toHaveBeenCalledWith({
+      scope: "selected",
+      targetConnectionId: "remote",
+      targetNamespace: "shared",
+      targetGroup: "TARGET_GROUP",
+      policy: "ABORT",
+    });
+  });
+
+  it("emits a trimmed target Data ID mapping for one selected config", async () => {
+    const { onPreview } = await mountDialog("remote");
+    const dataIdInput = document.body.querySelector("[data-testid=nacos-target-data-id]") as HTMLInputElement;
+    dataIdInput.value = "  app-prod.yaml  ";
+    dataIdInput.dispatchEvent(new Event("input"));
+    await nextTick();
+
+    Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Preview"))
+      ?.click();
+    await nextTick();
+
+    expect(onPreview).toHaveBeenCalledWith({
+      scope: "selected",
+      targetConnectionId: "remote",
+      targetNamespace: "shared",
+      targetGroup: "",
+      dataIdMappings: [{ sourceGroup: "DEFAULT_GROUP", sourceDataId: "app.yaml", targetDataId: "app-prod.yaml" }],
+      policy: "ABORT",
+    });
+  });
+
+  it("lets multiple selected configs independently retain or edit their target Data IDs", async () => {
+    const selectedKeys = [
+      { namespace: "shared", group: "DEFAULT_GROUP", dataId: "app.yaml" },
+      { namespace: "shared", group: "WORKER_GROUP", dataId: "worker.yaml" },
+    ];
+    const { onPreview } = await mountDialog("remote", undefined, null, selectedKeys);
+    const dataIdInputs = Array.from(document.body.querySelectorAll("[data-testid=nacos-target-data-id]")) as HTMLInputElement[];
+    expect(dataIdInputs).toHaveLength(2);
+    dataIdInputs[1].value = "worker-prod.yaml";
+    dataIdInputs[1].dispatchEvent(new Event("input"));
+    await nextTick();
+
+    Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Preview"))
+      ?.click();
+    await nextTick();
+
+    expect(onPreview).toHaveBeenCalledWith({
+      scope: "selected",
+      targetConnectionId: "remote",
+      targetNamespace: "shared",
+      targetGroup: "",
+      dataIdMappings: [{ sourceGroup: "WORKER_GROUP", sourceDataId: "worker.yaml", targetDataId: "worker-prod.yaml" }],
+      policy: "ABORT",
+    });
+  });
+
+  it("treats blank or unchanged target Data IDs as source-preserving defaults", async () => {
+    const { onPreview } = await mountDialog("remote");
+    const dataIdInput = document.body.querySelector("[data-testid=nacos-target-data-id]") as HTMLInputElement;
+    dataIdInput.value = "  app.yaml  ";
+    dataIdInput.dispatchEvent(new Event("input"));
+    await nextTick();
+
+    Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Preview"))
+      ?.click();
+    await nextTick();
+
+    expect(onPreview.mock.calls[0][0]).not.toHaveProperty("dataIdMappings");
+  });
+
+  it("hides target Data ID editing and omits mappings for non-selected scopes", async () => {
+    const { onPreview } = await mountDialog("remote");
+    const filteredScope = document.body.querySelector("input[value=filtered]") as HTMLInputElement;
+    filteredScope.click();
+    await nextTick();
+
+    expect(document.body.querySelector("[data-testid=nacos-target-data-id]")).toBeNull();
+    Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Preview"))
+      ?.click();
+    await nextTick();
+
+    expect(onPreview.mock.calls[0][0]).not.toHaveProperty("dataIdMappings");
   });
 
   it("excludes the source namespace only for same-connection sync and emits connection changes", async () => {
@@ -100,6 +216,7 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
       scope: "selected",
       targetConnectionId: "remote",
       targetNamespace: "",
+      targetGroup: "",
       policy: "ABORT",
     });
   });
@@ -128,5 +245,33 @@ describe("NacosConfigBatchDialog cross-connection sync", () => {
     expect(document.body.textContent).toContain("Skipped");
     expect(document.body.textContent).toContain("Failed");
     expect(document.body.textContent).toContain("target unavailable");
+  });
+
+  it("opens a read-only diff for a conflicting copy preview", async () => {
+    await mountDialog("remote", undefined, null, undefined, {
+      planHash: "preview-hash",
+      total: 1,
+      created: 0,
+      conflicts: 1,
+      invalid: 0,
+      items: [
+        {
+          namespace: "shared",
+          group: "DEFAULT_GROUP",
+          dataId: "app.yaml",
+          status: "conflict",
+          diff: { beforeContent: "port: 8080", afterContent: "port: 9090", format: "yaml" },
+        },
+      ],
+    });
+
+    (document.body.querySelector('[aria-label="Config Content Compare"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    const diff = document.body.querySelector("[data-testid=nacos-preview-diff]") as HTMLElement;
+    expect(diff.dataset.before).toBe("port: 8080");
+    expect(diff.dataset.after).toBe("port: 9090");
+    expect(diff.dataset.format).toBe("yaml");
+    expect(diff.dataset.showConfirm).toBe("false");
   });
 });

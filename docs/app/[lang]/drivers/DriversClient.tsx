@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { downloadLinksFor, formatSize, type AgentDownloadCatalog, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
 import { Archive, Cpu, Database, Download, Plug, Search, Terminal, X } from "lucide-react";
+import { resolveLang, type DocsLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
@@ -19,7 +20,7 @@ const i18n = {
     drivers: "Database Drivers",
     driversDesc: "Single-driver .tar.zst packages for Java agents. Install the matching JRE separately when it is not already available.",
     nativeAgents: "Native Agents",
-    nativeAgentsDesc: "Platform-specific .tar.zst packages for DuckDB, Oracle, KingBase, and XuguDB. Import the package directly in Driver Manager.",
+    nativeAgentsDesc: "Platform-specific .tar.zst packages for DuckDB, Oracle, KingbaseES, XuguDB, and RabbitMQ. Import the package directly in Driver Manager.",
     jre: "Java Runtime (JRE)",
     jreDesc: "JRE packages used by Java agent-based database drivers such as SQL Server and Dameng.",
     download: "Download",
@@ -55,7 +56,7 @@ const i18n = {
     drivers: "数据库驱动",
     driversDesc: "Java Agent 的单驱动 .tar.zst 包；目标机器尚未安装 JRE 时需要另外安装一次对应 JRE。",
     nativeAgents: "原生 Agent",
-    nativeAgentsDesc: "DuckDB、Oracle、人大金仓和虚谷的按平台 .tar.zst 单驱动包，可直接在驱动管理中导入。",
+    nativeAgentsDesc: "DuckDB、Oracle、金仓KingbaseES、虚谷和 RabbitMQ 的按平台 .tar.zst 单驱动包，可直接在驱动管理中导入。",
     jre: "Java 运行时 (JRE)",
     jreDesc: "Java Agent 驱动所需的 JRE 环境，例如 SQL Server、达梦等连接会使用。",
     download: "下载",
@@ -102,6 +103,11 @@ type NativeAgentGroup = {
   options: NativeAgentDisplayEntry[];
 };
 
+const OFFLINE_HEADING: Record<DocsLang, string> = {
+  en: "Offline Usage",
+  cn: "离线使用说明",
+};
+
 type DriverTranslations = (typeof i18n)["en"];
 
 function DownloadLinks({ url, t }: { url: string; t: DriverTranslations }) {
@@ -131,7 +137,7 @@ function matchesSearch(values: Array<string | number | undefined>, query: string
 export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloadCatalog }) {
   const params = useParams();
   const rawLang = params?.lang as string | undefined;
-  const lang: "en" | "cn" = rawLang === "cn" ? "cn" : "en";
+  const lang = resolveLang(rawLang ?? "en");
   const t = i18n[lang];
 
   const catalog = initialCatalog;
@@ -417,7 +423,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
                                 className="h-8 min-w-[190px] rounded-[6px] border border-landing-line bg-black/10 px-2.5 text-xs text-landing-ink outline-none transition-colors focus:border-landing-blue max-[760px]:w-full"
                               >
                                 {group.options.map((option) => (
-                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#10151d] text-landing-ink">
+                                  <option key={nativeKey(option)} value={option.platformKey} className="bg-[#121317] text-landing-ink">
                                     {option.platformLabel}
                                   </option>
                                 ))}
@@ -480,7 +486,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
             </div>
 
             <div className="landing-glass-card rounded-[10px] p-5 text-sm text-landing-muted leading-[1.65]">
-              <strong className="text-landing-ink">{lang === "cn" ? "离线使用说明" : "Offline Usage"}</strong>
+              <strong className="text-landing-ink">{OFFLINE_HEADING[lang]}</strong>
               <p className="mt-1">{t.downloadHint}</p>
             </div>
           </>

@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
@@ -39,6 +41,8 @@ vi.mock("@/components/ui/button", async () => {
 
 import DataGridColumnLayoutPopover from "../DataGridColumnLayoutPopover.vue";
 
+const contentAreaSource = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/layout/ContentArea.vue"), "utf8");
+
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 function columnLayoutOptions(itemCount: number): DataGridColumnLayoutOption[] {
@@ -66,6 +70,7 @@ function createGrid(itemCount: number) {
       return normalizedSearch ? options.filter((option) => option.column.toLowerCase().includes(normalizedSearch)) : options;
     },
     toggleColumnVisibility,
+    hideColumns: vi.fn(),
     showAllColumns: vi.fn(),
     invertColumnVisibility: vi.fn(),
     hasCustomColumnOrder: false,
@@ -137,6 +142,23 @@ afterEach(() => {
 });
 
 describe("data grid column layout popover", () => {
+  it("is available from the query result toolbar and keeps a labelled compact trigger", async () => {
+    expect(contentAreaSource).toContain('<DataGridColumnLayoutPopover :grid="dataGridRef" :compact="compact" />');
+
+    const gridState = createGrid(4);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(DataGridColumnLayoutPopover, { grid: gridState.grid, compact: true });
+    app.use(i18n);
+    app.mount(host);
+    mountedApps.push({ app, host });
+    await nextTick();
+
+    const trigger = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.getAttribute("aria-label") === i18n.global.t("grid.columnVisibility"));
+    expect(trigger?.className).toContain("w-6");
+    expect(trigger?.textContent?.trim()).toBe("");
+  });
+
   it("renders only the visible field window plus a bounded buffer", () => {
     const window = dataGridColumnLayoutVirtualWindow({
       itemCount: 500,

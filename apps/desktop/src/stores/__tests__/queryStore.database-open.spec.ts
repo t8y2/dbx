@@ -40,19 +40,72 @@ describe("queryStore database open state", () => {
     expect(store.isDatabaseOpen("pg-1", "analytics")).toBe(false);
   }, 10_000);
 
-  it("keeps object browser viewport per tab and clears it on schema change", async () => {
+  it("reuses one database browser tab per connection", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const firstId = store.openDatabaseBrowser("pg-1");
+    const secondId = store.openDatabaseBrowser("pg-1");
+    const otherConnectionId = store.openDatabaseBrowser("pg-2");
+
+    expect(secondId).toBe(firstId);
+    expect(otherConnectionId).not.toBe(firstId);
+    expect(store.tabs.filter((tab) => tab.mode === "databases")).toHaveLength(2);
+    expect(store.tabs.find((tab) => tab.id === firstId)).toMatchObject({ connectionId: "pg-1", database: "", mode: "databases" });
+  });
+
+  it("retargets a connection-scoped driver workspace to a database branch", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const firstId = store.openDriverProfileWorkspace("dolt-1", "inventory", "Version Control", "dolt-version-control", "connection");
+    const branchId = store.openDriverProfileWorkspace("dolt-1", "analytics", "Version Control", "dolt-version-control", "connection", "feature/orders");
+
+    expect(branchId).toBe(firstId);
+    expect(store.tabs.find((tab) => tab.id === firstId)).toMatchObject({
+      database: "analytics",
+      workspaceBranch: "feature/orders",
+      mode: "dolt-version-control",
+    });
+  });
+
+  it("keeps database-scoped driver workspaces isolated", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const inventoryId = store.openDriverProfileWorkspace("profile-1", "inventory", "Workspace", "dolt-version-control", "database");
+    const analyticsId = store.openDriverProfileWorkspace("profile-1", "analytics", "Workspace", "dolt-version-control", "database");
+
+    expect(analyticsId).not.toBe(inventoryId);
+    expect(store.tabs.filter((tab) => tab.mode === "dolt-version-control")).toHaveLength(2);
+  });
+
+  it("keeps object browser filter, search, and viewport per tab", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
 
     const tabId = store.openObjectBrowser("pg-1", "app", "public");
+    store.updateObjectBrowserFilter(tabId, "views");
+    store.updateObjectBrowserSearch(tabId, "orders");
     store.updateObjectBrowserViewport(tabId, { scrollTop: 340, viewMode: "list" });
 
     const tab = store.tabs.find((item) => item.id === tabId);
+    expect(tab?.objectBrowser?.filter).toBe("views");
+    expect(tab?.objectBrowser?.searchQuery).toBe("orders");
     expect(tab?.objectBrowser?.viewport).toEqual({ scrollTop: 340, viewMode: "list" });
+
+    const otherTabId = store.createTab("pg-1", "app", "query");
+    store.switchTab(otherTabId);
+    store.switchTab(tabId);
+    expect(store.tabs.find((item) => item.id === tabId)?.objectBrowser?.filter).toBe("views");
+    expect(store.tabs.find((item) => item.id === tabId)?.objectBrowser?.searchQuery).toBe("orders");
 
     store.updateSchema(tabId, "archive");
 
     expect(tab?.objectBrowser?.schema).toBe("archive");
+    // The keyword intentionally survives a schema switch: the mounted browser keeps its local search too.
+    expect(tab?.objectBrowser?.searchQuery).toBe("orders");
+    expect(tab?.objectBrowser?.filter).toBeUndefined();
     expect(tab?.objectBrowser?.viewport).toBeUndefined();
   });
 
@@ -80,6 +133,54 @@ describe("queryStore database open state", () => {
     expect(store.tabs.find((tab) => tab.id === icebergTabId)?.catalog).toBe("iceberg_catalog");
     expect(store.tabs.find((tab) => tab.id === hiveTabId)?.catalog).toBe("hive_catalog");
     expect(store.openTableStructure("doris-1", "sales", undefined, "orders", undefined, undefined, "iceberg_catalog")).toBe(icebergTabId);
+  });
+
+  it("keeps same-name structure editors in different schemas isolated", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const publicTabId = store.openTableStructure("pg-1", "app", "public", "users");
+    const archiveTabId = store.openTableStructure("pg-1", "app", "archive", "users");
+
+    expect(archiveTabId).not.toBe(publicTabId);
+    expect(store.tabs.filter((tab) => tab.mode === "structure")).toHaveLength(2);
+    expect(store.tabs.find((tab) => tab.id === publicTabId)?.schema).toBe("public");
+    expect(store.tabs.find((tab) => tab.id === archiveTabId)?.schema).toBe("archive");
+    expect(store.openTableStructure("pg-1", "app", "public", "users")).toBe(publicTabId);
+    expect(store.activeTabId).toBe(publicTabId);
+  });
+
+  it("preserves case-sensitive schema and table identities", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const quotedTabId = store.openTableStructure("pg-1", "app", "Sales", "Users");
+    const schemaCaseTabId = store.openTableStructure("pg-1", "app", "sales", "Users");
+    const tableCaseTabId = store.openTableStructure("pg-1", "app", "Sales", "users");
+
+    expect(new Set([quotedTabId, schemaCaseTabId, tableCaseTabId])).toHaveLength(3);
+    expect(store.openTableStructure("pg-1", "app", "Sales", "Users")).toBe(quotedTabId);
+  });
+
+  it("reuses only matching schema-less structure targets", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const schemaLessTabId = store.openTableStructure("mysql-1", "app", undefined, "users");
+    const reusedTabId = store.openTableStructure("mysql-1", "app", undefined, "users", "columns", { kind: "column", name: "id" });
+    const explicitSchemaTabId = store.openTableStructure("mysql-1", "app", "public", "users");
+    const firstCreateTabId = store.openTableStructure("mysql-1", "app", undefined, "");
+    const secondCreateTabId = store.openTableStructure("mysql-1", "app", undefined, "");
+
+    expect(reusedTabId).toBe(schemaLessTabId);
+    expect(store.tabs.find((tab) => tab.id === schemaLessTabId)).toMatchObject({
+      schema: undefined,
+      structureInitialTab: "columns",
+      structureInitialTabRequestId: 1,
+      structureInitialTarget: { kind: "column", name: "id" },
+    });
+    expect(explicitSchemaTabId).not.toBe(schemaLessTabId);
+    expect(secondCreateTabId).not.toBe(firstCreateTabId);
   });
 
   it("clears the catalog when changing a query tab connection", async () => {

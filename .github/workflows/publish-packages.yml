@@ -47,7 +47,7 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
 
           ASSETS=(
-            "${PRODUCT_NAME}_${VERSION}_aarch64.dmg"
+            "${PRODUCT_NAME}_${VERSION}_arm64.dmg"
             "${PRODUCT_NAME}_${VERSION}_x64.dmg"
             "${PRODUCT_NAME}_${VERSION}_x64-setup.exe"
             "${PRODUCT_NAME}_${VERSION}_arm64-setup.exe"
@@ -83,7 +83,7 @@ jobs:
           }
 
           echo "SHA256 hashes:"
-          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_arm64.dmg" "sha_dmg_arm64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64.dmg" "sha_dmg_x64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe_x64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_arm64-setup.exe" "sha_exe_arm64"
@@ -104,14 +104,13 @@ jobs:
 
           cat > Casks/dbx.rb <<'RUBY_EOF'
           cask "dbx" do
-            arch arm: "aarch64", intel: "x64"
+            arch arm: "arm64", intel: "x64"
 
             version "__VERSION__"
             sha256 arm:   "__SHA_ARM64__",
                    intel: "__SHA_X64__"
 
-            url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_#{arch}.dmg",
-                verified: "github.com/__OWNER__/__APP__/"
+            url "https://github.com/__OWNER__/__APP__/releases/download/v#{version}/__PRODUCT___#{version}_#{arch}.dmg"
             name "DBX"
             desc "Database management tool"
             homepage "https://dbxio.com/"
@@ -238,6 +237,26 @@ jobs:
             --dir assets \
             --clobber
           ls -lh assets/
+
+      - name: Validate latest.json completeness
+        run: |
+          LATEST_JSON="assets/latest.json"
+          if [ ! -f "$LATEST_JSON" ]; then
+            echo "::error::latest.json not found in release assets; refusing to sync an incomplete manifest to R2"
+            exit 1
+          fi
+          MISSING=""
+          for p in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64 linux-aarch64; do
+            if ! jq -e --arg p "$p" '.platforms[$p] != null' "$LATEST_JSON" >/dev/null; then
+              MISSING="${MISSING} ${p}"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::latest.json is missing updater platforms:${MISSING}. Release builds may still be uploading assets; dispatch again after all release jobs finish."
+            exit 1
+          fi
+          echo "Platform manifest complete:"
+          jq -r '.platforms | keys[]' "$LATEST_JSON"
 
       - name: Rewrite latest.json download URLs to R2 CDN
         run: |
@@ -452,6 +471,7 @@ jobs:
           PYEOF
 
       - name: Send to QQ group
+        continue-on-error: true
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}

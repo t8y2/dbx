@@ -135,7 +135,7 @@ const SELECT_SNIPPET_LIMIT_STYLE_BY_DATABASE: Partial<Record<DatabaseType, Selec
   oracle: "rownum",
   "oceanbase-oracle": "rownum",
   oscar: "rownum",
-  dameng: "fetch-first",
+  dameng: "rownum",
   db2: "fetch-first",
   sqlserver: "top",
   access: "top",

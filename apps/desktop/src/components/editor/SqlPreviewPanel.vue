@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { ref, computed, watch, onMounted, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlignLeft, Copy, ChevronDown, Undo2, Redo2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,8 @@ import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import type { Highlighter } from "shiki";
+import { createShikiSqlHighlighter, type SqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 const props = defineProps<{
   sql: string;
@@ -27,6 +28,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { isDark } = useTheme();
 const { toast } = useToast();
+const settingsStore = useSettingsStore();
 
 const isFormatted = ref(false);
 const formattedSql = ref("");
@@ -34,7 +36,7 @@ const formatting = ref(false);
 const highlightedHtml = ref("");
 const highlighterReady = ref(false);
 
-let highlighter: Highlighter | null = null;
+let highlighter: SqlHighlighter | null = null;
 
 const displaySql = computed(() => {
   if (isFormatted.value && formattedSql.value) {
@@ -48,10 +50,9 @@ const hasSql = computed(() => props.sql.trim().length > 0);
 async function initHighlighter() {
   if (highlighter) return;
   try {
-    const { createHighlighter } = await import("shiki");
-    highlighter = await createHighlighter({
-      themes: ["dark-plus", "min-light"],
-      langs: ["sql"],
+    highlighter = await createShikiSqlHighlighter({
+      appearance: () => (isDark.value ? "dark" : "light"),
+      themePreset: "preview",
     });
     highlighterReady.value = true;
     await highlightSql();
@@ -63,11 +64,7 @@ async function initHighlighter() {
 async function highlightSql() {
   if (!highlighter || !displaySql.value) return;
   try {
-    const theme = isDark.value ? "dark-plus" : "min-light";
-    highlightedHtml.value = highlighter.codeToHtml(displaySql.value, {
-      lang: "sql",
-      theme,
-    });
+    highlightedHtml.value = highlighter(displaySql.value);
   } catch {
     // fallback to plain text
     highlightedHtml.value = "";
@@ -84,7 +81,7 @@ async function toggleFormat() {
 
   formatting.value = true;
   try {
-    formattedSql.value = await formatSqlText(props.sql, props.sqlFormatDialect ?? "generic");
+    formattedSql.value = await formatSqlText(props.sql, props.sqlFormatDialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
     isFormatted.value = true;
     await highlightSql();
   } catch {
@@ -132,12 +129,6 @@ onMounted(() => {
   nextTick(() => {
     void initHighlighter();
   });
-});
-
-onBeforeUnmount(() => {
-  highlighter?.dispose();
-  highlighter = null;
-  highlighterReady.value = false;
 });
 </script>
 
@@ -202,7 +193,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- Shiki highlighted SQL -->
-      <div v-else-if="highlightedHtml" data-native-clipboard class="p-3 text-xs leading-relaxed [&_pre]:!bg-transparent [&_pre]:!p-0 [&_code]:!font-mono [&_code]:text-xs" v-html="highlightedHtml" />
+      <pre v-else-if="highlightedHtml" data-native-clipboard class="m-0 p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-words select-text" v-html="highlightedHtml"></pre>
 
       <!-- Plain text fallback -->
       <pre v-else data-native-clipboard class="p-3 text-xs font-mono whitespace-pre-wrap select-text">{{ displaySql }}</pre>

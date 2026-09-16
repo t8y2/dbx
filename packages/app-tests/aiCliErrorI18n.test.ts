@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import type { ComposerTranslation } from "vue-i18n";
 import { translateBackendError } from "../../apps/desktop/src/i18n/backend-errors";
+import az from "../../apps/desktop/src/i18n/locales/az";
 import en from "../../apps/desktop/src/i18n/locales/en";
 import es from "../../apps/desktop/src/i18n/locales/es";
 import it from "../../apps/desktop/src/i18n/locales/it";
 import ja from "../../apps/desktop/src/i18n/locales/ja";
+import ko from "../../apps/desktop/src/i18n/locales/ko";
+import tr from "../../apps/desktop/src/i18n/locales/tr";
 import ptBR from "../../apps/desktop/src/i18n/locales/pt-BR";
 import zhCN from "../../apps/desktop/src/i18n/locales/zh-CN";
 import zhTW from "../../apps/desktop/src/i18n/locales/zh-TW";
@@ -31,6 +34,25 @@ const errorCodes = [
   "piAgentProtocolError",
   "piAgentModelInvalid",
   "piAgentRunFailed",
+  "openCodeNotInstalled",
+  "openCodeCliPathInvalid",
+  "openCodeEnvInvalid",
+  "openCodeEnvReserved",
+  "openCodeNotAuthenticated",
+  "openCodeMcpStartupFailed",
+  "openCodeTimeout",
+  "openCodeProtocolError",
+  "openCodeRunFailed",
+  "codeBuddyNotInstalled",
+  "codeBuddyCliPathInvalid",
+  "codeBuddyEnvInvalid",
+  "codeBuddyEnvReserved",
+  "codeBuddyNotAuthenticated",
+  "codeBuddyTimeout",
+  "codeBuddyMcpConfigInvalid",
+  "codeBuddyMcpStartupFailed",
+  "codeBuddyProtocolError",
+  "codeBuddyRunFailed",
 ] as const;
 
 test("Claude Code CLI errors are localized while retaining their stable code and raw diagnostics", () => {
@@ -57,7 +79,7 @@ test("Claude Code CLI errors are localized while retaining their stable code and
 });
 
 test("every current locale defines all AI CLI diagnostic messages", () => {
-  const locales = { en, es, it, ja, ptBR, zhCN, zhTW } as const;
+  const locales = { az, en, es, it, ja, ko, ptBR, tr, zhCN, zhTW } as const;
 
   for (const [localeName, locale] of Object.entries(locales)) {
     assert.equal(typeof locale.ai.requestFailed, "string", `${localeName}.ai.requestFailed`);

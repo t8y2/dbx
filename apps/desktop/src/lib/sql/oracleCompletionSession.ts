@@ -1,5 +1,9 @@
 import type { DatabaseType } from "@/types/database";
 
+export function usesOracleCurrentSchemaCompletion(databaseType?: DatabaseType, schema?: string | null): boolean {
+  return (databaseType === "oracle" || databaseType === "oceanbase-oracle") && !schema;
+}
+
 export function usesOracleSessionCompletionColumns(options: { databaseType?: DatabaseType; selectedSchema?: string; referenceSchema?: string | null; clientSessionId?: string }): boolean {
-  return options.databaseType === "oracle" && !options.selectedSchema && !options.referenceSchema && !!options.clientSessionId;
+  return usesOracleCurrentSchemaCompletion(options.databaseType, options.referenceSchema || options.selectedSchema) && !!options.clientSessionId;
 }

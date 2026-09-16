@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
 import {
   evaluateAgentVersionBump,
   getAgentVersionChanges,
@@ -361,15 +362,19 @@ function validateRollbackRelease(rollbackRelease, latestRelease) {
   }
 
   const version = formatVersion(rollbackVersion);
+  // Rollback targets may predate the aarch64 -> arm64 dmg rename, so either
+  // asset name satisfies the Apple Silicon requirement.
   const requiredAssets = [
-    "latest.json",
-    `DBX_${version}_aarch64.dmg`,
-    `DBX_${version}_x64.dmg`,
-    `DBX_${version}_x64-setup.exe`,
-    `DBX_${version}_arm64-setup.exe`,
+    ["latest.json"],
+    [`DBX_${version}_arm64.dmg`, `DBX_${version}_aarch64.dmg`],
+    [`DBX_${version}_x64.dmg`],
+    [`DBX_${version}_x64-setup.exe`],
+    [`DBX_${version}_arm64-setup.exe`],
   ];
   const assetNames = new Set(rollbackRelease.assets.map((asset) => asset.name));
-  const missingAssets = requiredAssets.filter((asset) => !assetNames.has(asset));
+  const missingAssets = requiredAssets
+    .filter((candidates) => !candidates.some((asset) => assetNames.has(asset)))
+    .map((candidates) => candidates.join(" or "));
   if (missingAssets.length > 0) {
     fail(`Rollback target ${rollbackRelease.tagName} is missing required distribution assets: ${missingAssets.join(", ")}`);
   }
@@ -410,13 +415,28 @@ function getPackageReleaseStatus() {
     };
   }
 
-  const changedFiles = getChangedFilesSince(latest.tag, PACKAGE_RELEASE_PATHS);
+  const changedFiles = getPackageChangedFilesSince(latest.tag);
   return {
     needed: changedFiles.length > 0,
     baseline: latest.tag,
     latestVersion: latest.versionText,
     changedFiles,
   };
+}
+
+function getPackageChangedFilesSince(ref) {
+  const changedFiles = getChangedFilesSince(ref, PACKAGE_RELEASE_PATHS);
+  if (!changedFiles.includes("Cargo.lock") || !isDesktopOnlyCargoLockChangeSince(ref)) {
+    return changedFiles;
+  }
+
+  return changedFiles.filter((file) => file !== "Cargo.lock");
+}
+
+function isDesktopOnlyCargoLockChangeSince(ref) {
+  const beforeLockfile = run("git", ["show", `${ref}:Cargo.lock`]).stdout;
+  const afterLockfile = readFileSync("Cargo.lock", "utf8");
+  return isDesktopVersionOnlyCargoLockChange(beforeLockfile, afterLockfile);
 }
 
 function getLatestAgentTag() {

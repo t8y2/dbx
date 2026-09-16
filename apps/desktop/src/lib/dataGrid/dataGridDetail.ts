@@ -1,6 +1,8 @@
 import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
-import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
+import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { formatJsonText } from "@/lib/dataGrid/cellDetailPresentation";
+import type { DatabaseType } from "@/types/database";
 
 export const CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH = 12_000;
 
@@ -17,8 +19,11 @@ export interface DataGridCellDetail {
   displayValue: string;
   displayValuePreview: string;
   isValuePreviewTruncated: boolean;
+  /** True only while the backend value is incomplete, not when the UI clips its preview. */
+  isSourceTruncated?: boolean;
   imagePreviewUrl: string | null;
   length: number;
+  isNull?: boolean;
   formattedJson: string;
   isEditable: boolean;
 }
@@ -48,7 +53,11 @@ export interface BuildDataGridCellDetailOptions {
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
   isEditable: boolean;
+  rawValue?: (value: CellValue, columnIndex: number) => string;
+  isNullValue?: (value: CellValue) => boolean;
+  databaseType?: DatabaseType;
   includeBinaryImagePreview?: boolean;
+  isValuePreviewTruncated?: boolean;
 }
 
 export interface BuildDataGridRowDetailOptions {
@@ -61,7 +70,10 @@ export interface BuildDataGridRowDetailOptions {
   resultColumnTypes?: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
+  rawValue?: (value: CellValue, columnIndex: number) => string;
+  isNullValue?: (value: CellValue) => boolean;
   isEditableColumn?: (columnIndex: number) => boolean;
+  isValuePreviewTruncated?: (columnIndex: number) => boolean;
 }
 
 export interface BuildDataGridColumnDetailRow {
@@ -69,6 +81,7 @@ export interface BuildDataGridColumnDetailRow {
   rowId: number;
   row: readonly CellValue[];
   isEditable?: boolean;
+  isValuePreviewTruncated?: boolean;
 }
 
 export interface BuildDataGridColumnDetailOptions {
@@ -79,6 +92,8 @@ export interface BuildDataGridColumnDetailOptions {
   resultColumnTypes?: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
   displayValue: (value: CellValue, columnIndex: number) => string;
+  rawValue?: (value: CellValue, columnIndex: number) => string;
+  isNullValue?: (value: CellValue) => boolean;
 }
 
 export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions): DataGridCellDetail | null {
@@ -86,7 +101,8 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
   if (column === undefined) return null;
 
   const value = options.row[options.columnIndex] ?? null;
-  const rawValue = displayCellValue(value);
+  const rawValue = options.rawValue?.(value, options.columnIndex) ?? displayCellValue(value);
+  const isNull = options.isNullValue?.(value) ?? value === null;
   const displayValue = options.displayValue(value, options.columnIndex);
   const formattedJson = typeof value === "string" && looksLikeJsonContainer(value) ? (formatJsonText(value) ?? "") : "";
   const rawValuePreview = previewText(rawValue);
@@ -105,9 +121,14 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     rawValuePreview,
     displayValue,
     displayValuePreview,
-    isValuePreviewTruncated: rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
-    imagePreviewUrl: cellImagePreviewUrl(value, type, { binary: options.includeBinaryImagePreview !== false }),
-    length: value === null ? 0 : String(value).length,
+    isSourceTruncated: options.isValuePreviewTruncated === true,
+    isValuePreviewTruncated: options.isValuePreviewTruncated === true || rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
+    imagePreviewUrl: cellImagePreviewUrl(value, type, {
+      binary: options.includeBinaryImagePreview !== false,
+      databaseType: options.databaseType,
+    }),
+    length: isNull ? 0 : rawValue.length,
+    isNull,
     formattedJson,
     isEditable: options.isEditable,
   };
@@ -129,8 +150,11 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
         resultColumnTypes: options.resultColumnTypes,
         commentByColumn: options.commentByColumn,
         displayValue: options.displayValue,
+        rawValue: options.rawValue,
+        isNullValue: options.isNullValue,
         isEditable: row.isEditable ?? false,
         includeBinaryImagePreview: false,
+        isValuePreviewTruncated: row.isValuePreviewTruncated,
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -157,8 +181,11 @@ export function buildDataGridRowDetail(options: BuildDataGridRowDetailOptions): 
         resultColumnTypes: options.resultColumnTypes,
         commentByColumn: options.commentByColumn,
         displayValue: options.displayValue,
+        rawValue: options.rawValue,
+        isNullValue: options.isNullValue,
         isEditable: options.isEditableColumn?.(columnIndex) ?? false,
         includeBinaryImagePreview: false,
+        isValuePreviewTruncated: options.isValuePreviewTruncated?.(columnIndex),
       }),
     )
     .filter((field): field is DataGridCellDetail => field !== null);
@@ -176,11 +203,20 @@ function detailColumnType(typeByColumn: ReadonlyMap<string, string> | undefined,
   return resultColumnTypes?.[columnIndex]?.trim() ?? "";
 }
 
-export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown): string {
+/** Restores a grid-internal marker value (e.g. the Mongo BSON null sentinel) before it leaves the grid. */
+export type DataGridDetailExternalValue = (value: CellValue) => CellValue;
+
+function externalDetailFieldValue(value: CellValue, externalValue: DataGridDetailExternalValue | undefined): CellValue {
+  const external = externalValue?.(value);
+  return external === undefined ? value : external;
+}
+
+export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown, databaseType?: DatabaseType, externalValue?: DataGridDetailExternalValue): string {
   if (originalDocument !== undefined) return JSON.stringify(jsonDetailDisplayValue(originalDocument), null, 2);
   const row: Record<string, CellValue> = {};
   detail.fields.forEach((field) => {
-    row[field.column] = field.value;
+    const value = externalDetailFieldValue(field.value, externalValue);
+    row[field.column] = binaryCellClipboardText(value, field.type, databaseType) ?? value;
   });
   return JSON.stringify(jsonDetailDisplayValue(row), null, 2);
 }
@@ -204,23 +240,52 @@ export function jsonDetailDisplayValue(value: unknown): unknown {
   return value;
 }
 
-export function dataGridRowDetailTsv(detail: DataGridRowDetail): string {
-  return detail.fields.map((field) => displayCellValue(field.value)).join("\t");
+export function dataGridRowDetailTsv(detail: DataGridRowDetail, databaseType?: DatabaseType, externalValue?: DataGridDetailExternalValue): string {
+  return detail.fields
+    .map((field) => {
+      const value = externalDetailFieldValue(field.value, externalValue);
+      return clipboardCellValue(binaryCellClipboardText(value, field.type, databaseType) ?? value);
+    })
+    .join("\t");
 }
 
-export function dataGridColumnDetailJson(detail: DataGridColumnDetail): string {
+export function dataGridColumnDetailJson(detail: DataGridColumnDetail, databaseType?: DatabaseType, externalValue?: DataGridDetailExternalValue): string {
   return JSON.stringify(
-    detail.fields.map((field) => ({
-      row: field.rowNumber,
-      value: field.value,
-    })),
+    detail.fields.map((field) => {
+      const value = externalDetailFieldValue(field.value, externalValue);
+      return {
+        row: field.rowNumber,
+        value: binaryCellClipboardText(value, field.type, databaseType) ?? value,
+      };
+    }),
     null,
     2,
   );
 }
 
-export function dataGridColumnDetailTsv(detail: DataGridColumnDetail): string {
-  return detail.fields.map((field) => displayCellValue(field.value)).join("\n");
+export function dataGridColumnDetailTsv(detail: DataGridColumnDetail, databaseType?: DatabaseType, externalValue?: DataGridDetailExternalValue): string {
+  return detail.fields
+    .map((field) => {
+      const value = externalDetailFieldValue(field.value, externalValue);
+      return clipboardCellValue(binaryCellClipboardText(value, field.type, databaseType) ?? value);
+    })
+    .join("\n");
+}
+
+export interface BuildDeleteRowConfirmDetailsOptions<TRow> {
+  header: string;
+  rowIds: readonly number[];
+  columns: readonly string[];
+  getRow: (rowId: number) => TRow | undefined;
+  formatCell: (row: TRow, columnIndex: number) => string;
+}
+
+export function buildDeleteRowConfirmDetails<TRow>(options: BuildDeleteRowConfirmDetailsOptions<TRow>): string {
+  const rowLines = options.rowIds
+    .map((rowId) => options.getRow(rowId))
+    .filter((row): row is TRow => row !== undefined)
+    .map((row) => JSON.stringify(Object.fromEntries(options.columns.map((name, columnIndex) => [name, options.formatCell(row, columnIndex)]))));
+  return rowLines.length > 0 ? [options.header, ...rowLines].join("\n") : options.header;
 }
 
 export function filterDataGridDetailFields<T extends DataGridCellDetail>(fields: readonly T[], keyword: string): T[] {

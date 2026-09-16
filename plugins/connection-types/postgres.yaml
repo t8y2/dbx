@@ -1,0 +1,36 @@
+schemaVersion: 1
+order: 20
+dbType: postgres
+rustVariant: Postgres
+label: PostgreSQL
+dialect: PostgreSQL
+runtimeMode: native
+mcpMode: direct
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: false
+defaultPort: 5432
+traits:
+  schemaAware: true
+  treeSchema: true
+  pgVacuum: true
+  pgLikeStructure: true
+  diagramSql: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: true
+  sqlExplain: true
+  userAdmin: true
+  driverManagement: false

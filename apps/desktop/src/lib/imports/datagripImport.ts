@@ -1,6 +1,7 @@
 import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 declare var process: { env: Record<string, string | undefined> } | undefined;
 
@@ -462,7 +463,7 @@ function buildConnection(fragment: DataSourceFragment): ConnectionConfig {
     color: "",
     transport_layers: [],
     connect_timeout_secs: 10,
-    query_timeout_secs: 30,
+    query_timeout_secs: DEFAULT_QUERY_TIMEOUT_SECS,
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsed.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? fragment.jdbcUrl.replace(/^jdbc:/i, "") : undefined,

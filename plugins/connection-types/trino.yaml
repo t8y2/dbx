@@ -1,0 +1,36 @@
+schemaVersion: 1
+order: 490
+dbType: trino
+rustVariant: Trino
+label: Trino
+runtimeMode: agent
+mcpMode: bridge
+agentKey: trino
+driverStoreVisible: true
+driverStoreOrder: 21
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 8080
+traits:
+  schemaAware: true
+  databaseSchemaQualified: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

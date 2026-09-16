@@ -3,22 +3,27 @@ import { describe, expect, it as test } from "vitest";
 import { createI18n } from "vue-i18n";
 import { translateBackendError, type BackendErrorTranslate } from "@/i18n/backend-errors";
 import { BackendErrorException, formatError, normalizeBackendError, sanitizeBackendErrorMessage } from "@/lib/backend/errorUtils";
+import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import it from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
 import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
+import tr from "@/i18n/locales/tr";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
+import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 const LOCALES = {
+  az,
   en,
   es,
   it,
   ja,
   ko,
   "pt-BR": ptBR,
+  tr,
   "zh-CN": zhCN,
   "zh-TW": zhTW,
 } as const;
@@ -36,6 +41,7 @@ const STRUCTURED_BACKEND_ERROR_KEYS = [
   "backendErrors.jdbc.protocolFailed",
   "backendErrors.jdbc.contractInvalid",
   "backendErrors.jdbc.legacyFailure",
+  "backendErrors.transaction.sessionExpired",
   "backendErrors.legacy",
   "backendErrors.unknown",
 ] as const;
@@ -54,6 +60,37 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // Every backend message changed away from hardcoded Chinese, paired with the
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
+  {
+    name: "Nacos ordinary user must configure managed namespaces when namespace discovery is forbidden",
+    message: "Failed to list Nacos namespaces: NACOS_ERROR[v3ManagedNamespacesRequired]: access denied",
+    key: "nacos.nacosManagedNamespacesRequired",
+  },
+  {
+    name: "Nacos ordinary user must configure managed namespaces when authorization management is forbidden",
+    message: "NACOS_ERROR[managedNamespacesRequired]: 403 Forbidden",
+    key: "nacos.nacosManagedNamespacesRequired",
+  },
+  {
+    name: "Nacos 3 managed namespace permission check failed",
+    message: 'NACOS_ERROR[managedNamespaceAccessDenied]: One or more configured namespace IDs are not readable: namespace "team-a" naming: forbidden',
+    key: "nacos.nacosManagedNamespaceAccessDenied",
+    params: { detail: 'namespace "team-a" naming: forbidden' },
+  },
+  {
+    name: "Apache Phoenix JDBC driver missing",
+    message: PHOENIX_DRIVER_NOT_INSTALLED_ERROR,
+    key: "connection.phoenixDriverNotInstalled",
+  },
+  {
+    name: "shared JDBC plugin missing for Apache Phoenix",
+    message: PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR,
+    key: "connection.phoenixDriverNotInstalled",
+  },
+  {
+    name: "SSH TOTP prompt cancelled",
+    message: "SSH layer 1 failed: SSH keyboard-interactive authentication was cancelled",
+    key: "connection.sshTotpCancelled",
+  },
   {
     name: "streaming export unsupported",
     message: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",
@@ -97,6 +134,11 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     message: "Close these database connections before updating drivers: Prod MySQL, Stage PG",
     key: "driverStore.driverUpdateBlocked",
     params: { labels: "Prod MySQL, Stage PG" },
+  },
+  {
+    name: "GBase 8s server name mismatch",
+    message: "Agent RPC error (-1): java.sql.SQLException: GBASEDBTSERVER 与 DBSERVERNAME 或 DBSERVERALIASES 不匹配。",
+    key: "connection.gbaseServerMismatch",
   },
   {
     name: "Kafka topic unload unsupported",
@@ -188,6 +230,20 @@ describe("backend error translation", () => {
     expect(sanitizeBackendErrorMessage(message)).toBe(message);
   });
 
+  test("strips the SQL error-position transport suffix from raw messages", () => {
+    const message = 'ERROR: relation "missing" does not exist\nDBX_SQL_ERROR_POSITION:15';
+    const expected = 'ERROR: relation "missing" does not exist';
+
+    expect(sanitizeBackendErrorMessage(message)).toBe(expected);
+    expect(formatError(new Error(message))).toBe(expected);
+  });
+
+  test("strips the position suffix that precedes appended context text", () => {
+    const message = "ERROR: boom\nDBX_SQL_ERROR_POSITION:7; cleanup failed";
+
+    expect(sanitizeBackendErrorMessage(message)).toBe("ERROR: boom; cleanup failed");
+  });
+
   test("normalizes Error and structural message objects before translation", () => {
     const t = translatorFor("zh-CN");
     const message = "file does not exist: /tmp/missing.sqlite";
@@ -230,6 +286,23 @@ describe("backend error translation", () => {
     expect(translateBackendError(t, error)).toBe(`${t(error.messageKey)}\n\n${error.detail}`);
   });
 
+  test("shows a native adapter code with the DuckDB detail", () => {
+    const t = translatorFor("en");
+    const error = {
+      version: 1,
+      code: "DBX-JDBC-4001",
+      messageKey: "backendErrors.jdbc.sqlFailed",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown",
+      origin: { subsystem: "database", adapter: "native", driver: "duckdb" },
+      diagnostics: { category: "sql", stage: "execute", adapterCode: "duckdb_execute_failed" },
+      detail: "Catalog Error: Table missing_table does not exist",
+    } as const;
+
+    expect(translateBackendError(t, error)).toBe(`${t(error.messageKey, error.messageParams)}\n\n[duckdb_execute_failed] ${error.detail}`);
+  });
+
   test("hides internal Agent error data from structured error details", () => {
     const t = translatorFor("zh-CN");
     const detail = 'driver: bad connection\nDBX_AGENT_ERROR_DATA:{"category":null,"agentSessionId":"session-1"}';
@@ -252,7 +325,7 @@ describe("backend error translation", () => {
     ["non-finite params", { messageParams: { retryAfter: Number.POSITIVE_INFINITY } }],
     ["non-string detail", { detail: 42 }],
     ["object detail", { detail: { message: "database failure" } }],
-    ["unknown source", { source: "http" }],
+    ["non-string source", { source: 42 }],
     ["unknown outcome", { operationOutcome: "completed" }],
   ])("rejects malformed structured envelopes with %s", (_name, override) => {
     expect(
@@ -268,11 +341,182 @@ describe("backend error translation", () => {
     ).toBeNull();
   });
 
+  test("accepts an optional driver-reported error position", () => {
+    const error = normalizeBackendError({
+      version: 1,
+      code: "DBX-JDBC-4001",
+      messageKey: "backendErrors.jdbc.sqlFailed",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown",
+      detail: 'ERROR: relation "missing" does not exist',
+      errorPosition: { line: 2, column: 6, offset: 12 },
+    });
+
+    expect(error?.errorPosition).toEqual({ line: 2, column: 6, offset: 12 });
+
+    const t = translatorFor("zh-CN");
+    expect(translateBackendError(t, error)).toBe(`${t("backendErrors.jdbc.sqlFailed", { stage: "execute" })}\n\nERROR: relation "missing" does not exist`);
+  });
+
+  test.each([
+    ["zero line", { line: 0, column: 1, offset: 0 }],
+    ["negative column", { line: 1, column: -1, offset: 0 }],
+    ["non-integer offset", { line: 1, column: 1, offset: 1.5 }],
+    ["string line", { line: "1", column: 1, offset: 0 }],
+    ["array position", [1, 1, 0]],
+  ])("rejects a malformed error position with %s", (_name, errorPosition) => {
+    expect(
+      normalizeBackendError({
+        version: 1,
+        code: "DBX-JDBC-4001",
+        messageKey: "backendErrors.jdbc.sqlFailed",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+        errorPosition,
+      }),
+    ).toBeNull();
+  });
+
+  test("accepts unknown compatibility sources and extensible origins", () => {
+    const error = normalizeBackendError({
+      version: 1,
+      code: "DBX-DB-4001",
+      messageKey: "backendErrors.jdbc.sqlFailed",
+      messageParams: { stage: "execute" },
+      source: "nativeDatabase",
+      operationOutcome: "unknown",
+      origin: { subsystem: "database", adapter: "native", driver: "postgresql" },
+      detail: "relation missing_table does not exist",
+    });
+    expect(error?.source).toBe("nativeDatabase");
+    expect(error?.origin?.driver).toBe("postgresql");
+  });
+
   test("falls back to legacy text for plain HTTP and Tauri failures", () => {
     const t = translatorFor("zh-CN");
     const error = new BackendErrorException("legacy backend failure");
     expect(error.backendError.code).toBe("DBX-LEGACY-0001");
     expect(translateBackendError(t, error)).toBe(`${t("backendErrors.legacy")}\n\nlegacy backend failure`);
+  });
+
+  test("keeps an explicit original detail when a structured legacy error omits detail", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend",
+      operationOutcome: "unknown" as const,
+    };
+
+    expect(translateBackendError(t, error, "ClickHouse error: table analytics.events does not exist")).toBe(`${t("backendErrors.legacy")}\n\nClickHouse error: table analytics.events does not exist`);
+  });
+
+  test("does not append the generic transport fallback to a structured error", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend",
+      operationOutcome: "unknown" as const,
+    };
+
+    expect(translateBackendError(t, error, "Backend request failed")).toBe(t("backendErrors.legacy"));
+  });
+
+  test("does not duplicate the summary when the fallback already carries it", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend",
+      operationOutcome: "unknown" as const,
+    };
+    const summary = t("backendErrors.legacy");
+
+    expect(translateBackendError(t, error, `${summary}\n\nrelation missing_table does not exist`)).toBe(`${summary}\n\nrelation missing_table does not exist`);
+  });
+
+  test("preserves JSON envelopes carried by strings and Error messages", () => {
+    const envelope = {
+      version: 1,
+      code: "DBX-JDBC-4001",
+      messageKey: "backendErrors.jdbc.sqlFailed",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown",
+      detail: "relation missing_table does not exist",
+    } as const;
+    expect(normalizeBackendError(JSON.stringify(envelope))).toEqual(envelope);
+    expect(normalizeBackendError(new Error(JSON.stringify(envelope)))).toEqual(envelope);
+  });
+
+  test("retains bounded diagnostics from unknown rejection objects", () => {
+    const error = new BackendErrorException({ reason: "database worker returned a vendor diagnostic" });
+    expect(error.backendError.code).toBe("DBX-LEGACY-0001");
+    expect(error.backendError.detail).toBe("database worker returned a vendor diagnostic");
+    expect(new BackendErrorException({ reason: "x".repeat(70_000) }).backendError.detail).toHaveLength(64 * 1024);
+  });
+
+  test("normalizes structured errors across Error realms and module copies", () => {
+    const envelope = {
+      version: 1,
+      code: "DBX-JDBC-5001",
+      messageKey: "backendErrors.jdbc.protocolFailed",
+      messageParams: {},
+      source: "jdbcAgent" as const,
+      operationOutcome: "unknown" as const,
+      detail: "connection reset by peer",
+    };
+    const copiedError = Object.assign(new Error("Backend request failed"), {
+      name: "BackendErrorException",
+      backendError: envelope,
+    });
+    const workerError = { name: "BackendErrorException", message: JSON.stringify(envelope) };
+
+    expect(normalizeBackendError(copiedError)).toEqual(envelope);
+    expect(normalizeBackendError(workerError)).toEqual(envelope);
+  });
+
+  test("does not recurse forever through cyclic error wrappers", () => {
+    const self: Record<string, unknown> = {};
+    self.error = self;
+    expect(normalizeBackendError(self)).toBeNull();
+    expect(() => new BackendErrorException(self)).not.toThrow();
+
+    const first: Record<string, unknown> = {};
+    const second: Record<string, unknown> = {};
+    first.backendError = second;
+    second.error = first;
+    expect(normalizeBackendError(first)).toBeNull();
+    expect(() => new BackendErrorException(first)).not.toThrow();
+  });
+
+  test("stops at a finite wrapper depth", () => {
+    let wrapper: Record<string, unknown> = { error: { message: "deep legacy error" } };
+    for (let index = 0; index < 32; index += 1) wrapper = { backendError: wrapper };
+
+    expect(normalizeBackendError(wrapper)).toBeNull();
+  });
+
+  test("does not stringify a structured envelope as [object Object]", () => {
+    expect(
+      formatError({
+        version: 1,
+        code: "DBX-JDBC-5001",
+        messageKey: "backendErrors.jdbc.protocolFailed",
+        messageParams: {},
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+      }),
+    ).toBe("DBX-JDBC-5001");
   });
 });
 

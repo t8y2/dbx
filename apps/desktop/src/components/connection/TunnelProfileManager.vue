@@ -13,6 +13,8 @@ import { useToast } from "@/composables/useToast";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { createTunnelProfile, createTunnelProfileTestGuard, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
+import { applySshAuthMethod } from "@/lib/connection/sshAuthMethod";
+import { stripInvisibleCharactersFromLayer } from "@/lib/connection/credentialSanitizer";
 import * as api from "@/lib/backend/api";
 import type { SshConfigHostEntry, TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -118,15 +120,12 @@ function removeSelected() {
   selectedId.value = draft.value[0]?.id || null;
 }
 
+// Shared with the connection editor so both SSH entry points keep one single
+// auth-method <-> credential mapping (see sshAuthMethod.ts).
 function updateSshAuthMethod(value: unknown) {
   const profile = selectedSsh.value;
   if (!profile) return;
-  profile.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
-  if (profile.auth_method !== "password" && profile.auth_method !== "key+password") profile.password = "";
-  if (profile.auth_method !== "key" && profile.auth_method !== "key+password") {
-    profile.key_path = "";
-    profile.key_passphrase = "";
-  }
+  applySshAuthMethod(profile, value);
 }
 
 function updateProxyType(value: unknown) {
@@ -153,10 +152,13 @@ async function save() {
   invalidateProfileTest();
   isSaving.value = true;
   try {
-    await store.saveProfiles(cloneProfiles(draft.value));
+    // Pasted credentials may carry invisible characters that trim() keeps (#9043).
+    const sanitized = cloneProfiles(draft.value);
+    sanitized.forEach(stripInvisibleCharactersFromLayer);
+    await store.saveProfiles(sanitized);
     toast(t("settings.tunnelsSaved"));
   } catch (error) {
-    toast(t("settings.tunnelsSaveFailed", { message: translateBackendError(t, String(error)) }), 5000);
+    toast(t("settings.tunnelsSaveFailed", { message: translateBackendError(t, error) }), 5000);
   } finally {
     isSaving.value = false;
   }
@@ -175,7 +177,7 @@ async function testSelected() {
     testResult.value = { ok: true, message: message ? t("settings.tunnelsTestSuccess") + ": " + message : t("settings.tunnelsTestSuccess") };
   } catch (error) {
     if (!testGuard.isCurrent(requestId, profile)) return;
-    testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, String(error)) }) };
+    testResult.value = { ok: false, message: t("settings.tunnelsTestFailed", { message: translateBackendError(t, error) }) };
   } finally {
     if (testGuard.isCurrent(requestId, selectedSsh.value || selectedProxy.value)) isTesting.value = false;
   }
@@ -190,7 +192,14 @@ async function testSelected() {
       <p v-if="!draft.length" class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
         {{ t("settings.tunnelsEmpty") }}
       </p>
-      <button v-for="profile in draft" :key="profile.id" type="button" class="flex min-h-10 items-center gap-2 rounded-md border px-3 text-left text-xs transition-colors" :class="profile.id === selectedId ? 'border-primary bg-primary/5' : 'hover:bg-muted/50'" @click="selectedId = profile.id">
+      <button
+        v-for="profile in draft"
+        :key="profile.id"
+        type="button"
+        class="flex min-h-10 items-center gap-2 rounded-md border px-3 text-left text-xs transition-colors"
+        :class="profile.id === selectedId ? 'tunnel-profile-option--selected border-primary bg-primary/5' : 'hover:bg-muted/50'"
+        @click="selectedId = profile.id"
+      >
         <span class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground">{{ profileTypeLabel(profile) }}</span>
         <span class="min-w-0 flex-1 truncate">{{ profileDisplayName(profile) }}</span>
         <span class="min-w-0 truncate text-muted-foreground">{{ tunnelProfileSummary(profile) }}</span>
@@ -245,6 +254,7 @@ async function testSelected() {
               <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
               <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
               <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
+              <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
               <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
             </SelectContent>
           </Select>
@@ -274,6 +284,10 @@ async function testSelected() {
         <div v-if="selectedSsh.auth_method === 'none'" class="grid grid-cols-4 items-center gap-4">
           <span />
           <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.sshAuthMethodNoneHint") }}</p>
+        </div>
+        <div v-if="selectedSsh.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.sshAgentSockPath") }}</Label>
+          <Input v-model="selectedSsh.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" />
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <span />
@@ -356,3 +370,20 @@ async function testSelected() {
     </p>
   </div>
 </template>
+
+<style>
+html.dbx-legacy-webview .tunnel-profile-option--selected {
+  color: var(--foreground) !important;
+  border-color: var(--ring) !important;
+  background-color: var(--muted) !important;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+html.dbx-legacy-webview .tunnel-profile-option--selected:hover {
+  background-color: var(--accent) !important;
+}
+
+html.dbx-legacy-webview .tunnel-profile-option--selected .text-muted-foreground {
+  color: var(--muted-foreground) !important;
+}
+</style>

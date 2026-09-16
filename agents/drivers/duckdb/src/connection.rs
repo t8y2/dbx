@@ -23,7 +23,6 @@ impl DuckDbConnection {
     }
 
     // Preserve PoisonError ownership so close_connection can still release the contained DuckDB handle.
-    #[cfg(test)]
     #[allow(clippy::result_large_err)]
     fn into_inner(self) -> std::sync::LockResult<duckdb::Connection> {
         self.connection.into_inner()
@@ -116,8 +115,7 @@ pub fn is_memory_database_path(path: &str) -> bool {
 /// Unlike relying on Drop, this calls `duckdb_disconnect` synchronously
 /// so the file handle is released before this function returns.
 /// On Windows this prevents "file already in use" errors when reconnecting.
-#[cfg(test)]
-fn close_connection(con: Arc<DuckDbConnection>) {
+pub(crate) fn close_connection(con: Arc<DuckDbConnection>) {
     match Arc::try_unwrap(con) {
         Ok(handle) => match handle.into_inner() {
             Ok(conn) => {

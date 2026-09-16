@@ -66,6 +66,7 @@ describe("connectionDatabaseInfo", () => {
     expect(connectionConfigFingerprint(original, "")).not.toBe(connectionConfigFingerprint(original, original.name));
     expect(connectionConfigFingerprint({ ...original, database_info: { productName: "MySQL", productVersion: "8.4.0" } })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, note: "Production reporting" })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, default_schema: "archive" })).toBe(connectionConfigFingerprint(original));
   });
 
   it("formats only database metadata for rows and copied text", () => {

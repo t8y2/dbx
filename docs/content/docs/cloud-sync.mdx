@@ -4,7 +4,7 @@ description: Sync DBX connections, settings, and saved SQL with WebDAV, GitHub G
 ---
 
 <Callout type="info">
-DBX can package connections, application settings, and saved SQL into a snapshot, upload it to WebDAV or a private code snippet, and restore it on another device.
+DBX can package connections, application settings, and saved SQL into a snapshot. Desktop can sync through WebDAV or private snippets, while Web/Docker can sync through WebDAV and restore the snapshot in another DBX instance.
 </Callout>
 
 <Callout type="warn">Cloud Sync backs up DBX configuration. It does not read or back up the business databases behind your connections. Use [Database Export](/en/docs/database-export) for schema and data, or [Database Backup](/en/docs/database-backup) for scheduled Desktop MySQL/PostgreSQL backups.</Callout>
@@ -12,7 +12,7 @@ DBX can package connections, application settings, and saved SQL into a snapshot
 Choose a provider under **Settings → Sync**:
 
 - **WebDAV**: Best when you already use a NAS, Nextcloud, or another WebDAV service. Supports scheduled uploads.
-- **GitHub / Gitee snippets**: Stores the snapshot in a private Gist or code snippet without requiring your own server. Uploads and downloads are currently manual.
+- **GitHub / Gitee snippets**: Stores the snapshot in a private Gist or code snippet without requiring your own server. It is currently exposed in Desktop only, and uploads and downloads are manual.
 
 ## What Is Synchronized
 
@@ -38,10 +38,26 @@ A GitHub **fine-grained personal access token** is recommended:
 [Open the GitHub fine-grained token creation page](https://github.com/settings/personal-access-tokens/new)
 
 <Steps>
-  <Step>### Open token settings Sign in to GitHub and open **Settings → Developer settings → Personal access tokens → Fine-grained tokens**.</Step>
-  <Step>### Create a token Select **Generate new token**, then set a name and expiration.</Step>
-  <Step>### Grant permission Under **Account permissions**, set **Gists** to **Read and write**. Repository permissions are not required.</Step>
-  <Step>### Save the token Copy the token immediately. GitHub only displays the complete token once.</Step>
+<Step>
+    ### Open token settings
+
+    Sign in to GitHub and open **Settings → Developer settings → Personal access tokens → Fine-grained tokens**.
+  </Step>
+<Step>
+    ### Create a token
+
+    Select **Generate new token**, then set a name and expiration.
+  </Step>
+<Step>
+    ### Grant permission
+
+    Under **Account permissions**, set **Gists** to **Read and write**. Repository permissions are not required.
+  </Step>
+<Step>
+    ### Save the token
+
+    Copy the token immediately. GitHub only displays the complete token once.
+  </Step>
 </Steps>
 
 A classic token also works, but grant only the `gist` scope.
@@ -49,9 +65,21 @@ A classic token also works, but grant only the `gist` scope.
 ### First Upload
 
 <Steps>
-  <Step>### Select GitHub Open **Settings → Sync → GitHub / Gitee** and select **GitHub Gist**.</Step>
-  <Step>### Enter the token Paste the access token. Enabling **Store encrypted on this device** is recommended.</Step>
-  <Step>### Create the Gist Leave **Snippet ID** empty and select **Upload**. DBX creates a private Gist and stores the returned ID.</Step>
+<Step>
+    ### Select GitHub
+
+    Open **Settings → Sync → GitHub / Gitee** and select **GitHub Gist**.
+  </Step>
+<Step>
+    ### Enter the token
+
+    Paste the access token. Enabling **Store encrypted on this device** is recommended.
+  </Step>
+<Step>
+    ### Create the Gist
+
+    Leave **Snippet ID** empty and select **Upload**. DBX creates a private Gist and stores the returned ID.
+  </Step>
 </Steps>
 
 DBX stores an encrypted `dbx-sync.json` file in the Gist. The snippet encryption password protects the complete snapshot, so the URL does not expose connection details, SQL, or settings. Existing plain-text snippets can still be downloaded once for migration.
@@ -74,10 +102,26 @@ Plain-text snippets created by older versions cannot be safely migrated in place
 [Open the Gitee personal access token page](https://gitee.com/profile/personal_access_tokens)
 
 <Steps>
-  <Step>### Open token settings Sign in to Gitee and open **Settings → Personal Access Tokens**.</Step>
-  <Step>### Create a token Select **Generate new token** and enter a description.</Step>
-  <Step>### Grant permission Select only the code snippet (`gists`) permission. If permissions are grouped, choose the smallest permission that allows reading and writing snippets.</Step>
-  <Step>### Save the token Copy the generated token immediately and store it in a password manager.</Step>
+<Step>
+    ### Open token settings
+
+    Sign in to Gitee and open **Settings → Personal Access Tokens**.
+  </Step>
+<Step>
+    ### Create a token
+
+    Select **Generate new token** and enter a description.
+  </Step>
+<Step>
+    ### Grant permission
+
+    Select only the code snippet (`gists`) permission. If permissions are grouped, choose the smallest permission that allows reading and writing snippets.
+  </Step>
+<Step>
+    ### Save the token
+
+    Copy the generated token immediately and store it in a password manager.
+  </Step>
 </Steps>
 
 ### Upload and Restore
@@ -109,7 +153,9 @@ Neither password can be recovered. An encrypted GitHub/Gitee snippet cannot be r
 
 Enter the WebDAV endpoint, username, application password, and remote snapshot path. The default path is `DBX/sync/snapshot.json`.
 
-WebDAV supports scheduled uploads while DBX is running. Downloads always require confirmation to prevent accidental replacement of local data.
+In Web/Docker mode, the DBX server sends WebDAV requests, so browser CORS restrictions do not apply. WebDAV application passwords are encrypted in the current DBX instance and are never included in sync snapshots.
+
+WebDAV supports scheduled uploads while the corresponding DBX client remains open. Keep at least one DBX page open when using Web/Docker. Downloads always require confirmation to prevent accidental replacement of data in the current instance.
 
 ## Troubleshooting
 

@@ -1,0 +1,31 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '9.0.0-beta12'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.apache.iotdb:iotdb-jdbc:2.0.8'
+    implementation 'org.slf4j:slf4j-nop:2.0.16'
+}
+
+sourceSets {
+    main {
+        java.srcDir 'java'
+    }
+}
+
+tasks.named('shadowJar') {
+    archiveBaseName = 'dbx-iotdb-jdbc-benchmark'
+    archiveClassifier = ''
+    manifest {
+        attributes('Main-Class': 'com.dbx.agent.iotdb.bench.JdbcDriverBenchmark')
+    }
+}
+
+tasks.register('benchmarkJar') {
+    dependsOn tasks.named('shadowJar')
+}

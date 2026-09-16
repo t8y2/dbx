@@ -1,0 +1,34 @@
+schemaVersion: 1
+order: 780
+dbType: spark
+rustVariant: Spark
+label: Apache Spark
+runtimeMode: agent
+mcpMode: bridge
+agentKey: spark
+driverStoreVisible: true
+driverStoreOrder: 23
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 10015
+traits:
+  schemaAware: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

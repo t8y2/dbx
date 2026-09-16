@@ -2,6 +2,7 @@ import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/data
 import { uuid } from "@/lib/common/utils";
 import { JDBCX_JDBC_DRIVER_CLASS } from "@/lib/database/jdbcxBuiltinDriver";
 import { buildSidebarLayoutFromFolderPaths } from "@/lib/sidebar/sidebarLayout";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -42,10 +43,12 @@ const profileMap: Record<string, ConnectionProfile> = {
   postgresql: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
   postgres: { dbType: "postgres", profile: "postgres", label: "PostgreSQL", port: 5432, user: "postgres" },
   cloudberry: { dbType: "postgres", profile: "cloudberry", label: "Apache Cloudberry", port: 5432, user: "postgres" },
+  opentenbase: { dbType: "postgres", profile: "opentenbase", label: "OpenTenBase", port: 11000, user: "opentenbase" },
   sqlite: { dbType: "sqlite", profile: "sqlite", label: "SQLite", port: 0, user: "" },
   sqlserver: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
   mssql: { dbType: "sqlserver", profile: "sqlserver", label: "SQL Server", port: 1433, user: "sa" },
   oracle: { dbType: "oracle", profile: "oracle", label: "Oracle", port: 1521, user: "system" },
+  db2: { dbType: "db2", profile: "db2", label: "IBM DB2", port: 50000, user: "db2inst1" },
   clickhouse: { dbType: "clickhouse", profile: "clickhouse", label: "ClickHouse", port: 8123, user: "default" },
   duckdb: { dbType: "duckdb", profile: "duckdb", label: "DuckDB", port: 0, user: "" },
   mongodb: { dbType: "mongodb", profile: "mongodb", label: "MongoDB", port: 27017, user: "" },
@@ -80,8 +83,27 @@ function getNumber(value: unknown) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+// DBeaver's own driver id (e.g. "db2", "mysql8") is a short internal registry
+// key, not a Java class name; passing it straight to the JDBC agent as
+// `jdbc_driver_class` makes it try `Class.forName("db2")` and fail with
+// ClassNotFoundException. Only fall back to it when it is actually
+// package-qualified, which is how DBeaver identifies genuinely custom drivers.
+function looksLikeJdbcDriverClassName(value: string) {
+  return /^[a-zA-Z_$][\w$]*(\.[a-zA-Z_$][\w$]*)+$/.test(value);
+}
+
+function firstNonEmptyString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
 function inferProfile(entry: DbeaverConnectionEntry): ConnectionProfile {
   if (/^jdbcx:/i.test(getString(entry.configuration?.url))) return profileMap.jdbcx;
+  if (normalizeKey(entry.provider) === "opentenbase") return profileMap.opentenbase;
   const driverProfile = profileMap[normalizeKey(entry.driver)];
   if (driverProfile) return driverProfile;
   const candidates = [entry.provider, entry.driver, entry.configuration?.url, entry.name].map(normalizeKey).join(" ");
@@ -177,6 +199,7 @@ function parseJdbcUrl(url: string, profile: ConnectionProfile) {
 
   try {
     const parsed = new URL(withoutJdbc);
+    if (!parsed.hostname) return result;
     result.host = parsed.hostname;
     result.port = parsed.port ? Number(parsed.port) : profile.port;
     result.database = parsed.pathname.replace(/^\/+/, "").split("/")[0] || undefined;
@@ -221,7 +244,8 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
   const config = entry.configuration || {};
   const url = getString(config.url);
   const parsedUrl = parseJdbcUrl(url, profile);
-  const configuredDatabase = getString(config.database || config["database-name"] || config.schema || parsedUrl.database);
+  const configuredPort = getNumber(config.port || config["host-port"] || parsedUrl.port) || profile.port;
+  const configuredDatabase = firstNonEmptyString(config.database, config["database-name"], config.schema, parsedUrl.database);
   const host = getString(config.host || config["host-name"] || parsedUrl.host || (profile.dbType === "sqlite" ? configuredDatabase : "127.0.0.1"));
   const database = profile.dbType === "sqlite" ? "" : configuredDatabase;
   const name = getString(entry.name || database || host || profile.label);
@@ -234,18 +258,18 @@ function buildConnection(entry: DbeaverConnectionEntry, credentials: ReturnType<
     driver_label: profile.label,
     url_params: getString(parsedUrl.params),
     host,
-    port: getNumber(config.port || config["host-port"] || parsedUrl.port) || profile.port,
+    port: configuredPort,
     username: credentials.username || getString(parsedUrl.username) || profile.user,
     password: credentials.password || getString(parsedUrl.password),
     database: database || undefined,
     color: getString(config.color || config["connection-color"]),
     transport_layers: [],
     connect_timeout_secs: 10,
-    query_timeout_secs: 30,
+    query_timeout_secs: DEFAULT_QUERY_TIMEOUT_SECS,
     ssl: false,
     oracle_connection_type: profile.dbType === "oracle" ? parsedUrl.oracleConnectionType || "service_name" : undefined,
     connection_string: profile.dbType === "jdbc" || profile.dbType === "mongodb" ? url || undefined : undefined,
-    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || (profile.profile === "jdbcx" ? JDBCX_JDBC_DRIVER_CLASS : entry.driver)) || undefined : undefined,
+    jdbc_driver_class: profile.dbType === "jdbc" ? getString(config["driver-class"] || (profile.profile === "jdbcx" ? JDBCX_JDBC_DRIVER_CLASS : looksLikeJdbcDriverClassName(getString(entry.driver)) ? entry.driver : undefined)) || undefined : undefined,
     jdbc_driver_paths: [],
   };
 

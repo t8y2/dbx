@@ -5,6 +5,8 @@ const RECENCY_WINDOW_MS = 30 * DAY_MS;
 
 export interface SavedSqlHistoryScope {
   connectionId?: string;
+  /** Null explicitly selects the built-in/default catalog; undefined does not filter catalogs. */
+  catalog?: string | null;
   database?: string;
   schema?: string;
   tableName?: string;
@@ -51,6 +53,7 @@ export function savedSqlHistoryScore(file: SavedSqlFile, now = Date.now()) {
 
 export function savedSqlMatchesHistoryScope(file: SavedSqlFile, scope: SavedSqlHistoryScope) {
   if (scope.connectionId && file.connectionId !== scope.connectionId) return false;
+  if (scope.catalog !== undefined && (file.catalog || null) !== scope.catalog) return false;
   if (scope.database != null && file.database !== scope.database) return false;
   if (scope.schema && file.schema && file.schema !== scope.schema) return false;
   return true;

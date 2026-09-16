@@ -20,8 +20,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import javax.sql.rowset.serial.SerialBlob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcExecutorTest {
     @Test
@@ -146,6 +148,87 @@ class JdbcExecutorTest {
     }
 
     @Test
+    void executeReturnsDriverMessagesForNoResultStatementsAndHonorsMaxRows() {
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, null, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            () -> "",
+            2,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("first", "second", "third")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first"), Arrays.asList("second")), result.getRows());
+        assertTrue(result.getTruncated());
+    }
+
+    @Test
+    void executeLimitsCombinedWarningsAndDriverMessages() {
+        SQLWarning first = new SQLWarning("first warning");
+        first.setNextWarning(new SQLWarning("second warning"));
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            executionConnection(false, -1, first, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            () -> "",
+            1,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("driver message")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first warning")), result.getRows());
+        assertTrue(result.getTruncated());
+    }
+
+    @Test
+    void executePageReturnsDriverMessagesForNoResultStatements() {
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            executionConnection(false, -1, null, new AtomicInteger(), null, null),
+            "CALL LOG_ONLY_PROCEDURE()",
+            "",
+            schema -> "",
+            new QueryPageOptions(100, null, 100),
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            statement -> Arrays.asList("first", "second")
+        );
+
+        assertEquals(Arrays.asList("Message"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList("first"), Arrays.asList("second")), result.getRows());
+        assertFalse(result.getHas_more());
+    }
+
+    @Test
+    void executePageKeepsWarningsHiddenWithoutADriverMessageReader() {
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            executionConnection(
+                false,
+                -1,
+                new SQLWarning("existing paged warning"),
+                new AtomicInteger(),
+                null,
+                null
+            ),
+            "CALL EXISTING_PROCEDURE()",
+            "",
+            schema -> "",
+            new QueryPageOptions()
+        );
+
+        assertEquals(Collections.emptyList(), result.getColumns());
+        assertEquals(Collections.emptyList(), result.getRows());
+    }
+
+    @Test
     void executeDoesNotReplaceOrdinaryResultSetsWithWarnings() {
         CountingResultSetFixture fixture = countingResultSet(new Object[][]{{1, "Ada"}});
         QueryResult result = JdbcExecutor.INSTANCE.execute(
@@ -157,6 +240,47 @@ class JdbcExecutorTest {
 
         assertEquals(Arrays.asList("id", "name"), result.getColumns());
         assertEquals(Arrays.asList(Arrays.asList(1, "Ada")), result.getRows());
+    }
+
+    @Test
+    void executeAdvancesPastUpdateCountsToTheFollowingResultSet() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{42, "Bill_Record"}});
+
+        QueryResult result = JdbcExecutor.INSTANCE.execute(
+            updateThenResultSetConnection(1, fixture.resultSet()),
+            "DECLARE @tables TABLE (id INT, name NVARCHAR(128)); INSERT INTO @tables VALUES (42, 'Bill_Record'); SELECT * FROM @tables;",
+            "",
+            schema -> "",
+            () -> "",
+            100,
+            null,
+            0,
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            JdbcExecutor.StatementMessageReader.NONE,
+            true
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(42, "Bill_Record")), result.getRows());
+    }
+
+    @Test
+    void executePageAdvancesPastUpdateCountsToTheFollowingResultSet() {
+        CountingResultSetFixture fixture = countingResultSet(new Object[][]{{42, "Bill_Record"}});
+
+        QueryPageResult result = JdbcExecutor.INSTANCE.executePage(
+            updateThenResultSetConnection(1, fixture.resultSet()),
+            "DECLARE @tables TABLE (id INT, name NVARCHAR(128)); INSERT INTO @tables VALUES (42, 'Bill_Record'); SELECT * FROM @tables;",
+            "",
+            schema -> "",
+            () -> "",
+            new QueryPageOptions(100, null, 100),
+            JdbcExecutor.INSTANCE::defaultResultValue,
+            true
+        );
+
+        assertEquals(Arrays.asList("id", "name"), result.getColumns());
+        assertEquals(Arrays.asList(Arrays.asList(42, "Bill_Record")), result.getRows());
     }
 
     @Test
@@ -360,6 +484,42 @@ class JdbcExecutorTest {
                 case "clearWarnings":
                     clearWarningsCalls.incrementAndGet();
                     return null;
+                case "close":
+                    return null;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        };
+        Statement statement = (Statement) Proxy.newProxyInstance(
+            Statement.class.getClassLoader(),
+            new Class<?>[]{Statement.class},
+            statementHandler
+        );
+        InvocationHandler connectionHandler = (Object unused, Method method, Object[] args) -> {
+            if (method.getName().equals("createStatement")) {
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        };
+        return (Connection) Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[]{Connection.class},
+            connectionHandler
+        );
+    }
+
+    private static Connection updateThenResultSetConnection(int updateCount, ResultSet resultSet) {
+        AtomicInteger resultIndex = new AtomicInteger();
+        InvocationHandler statementHandler = (Object unused, Method method, Object[] args) -> {
+            switch (method.getName()) {
+                case "execute":
+                    return false;
+                case "getUpdateCount":
+                    return resultIndex.get() == 0 ? updateCount : -1;
+                case "getMoreResults":
+                    return resultIndex.incrementAndGet() == 1;
+                case "getResultSet":
+                    return resultSet;
                 case "close":
                     return null;
                 default:

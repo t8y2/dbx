@@ -1,5 +1,6 @@
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import type { ConnectionConfig } from "@/types/database";
 
 export interface ProductionSqlExecutionGuardOptions<T> {
@@ -11,6 +12,9 @@ export interface ProductionSqlExecutionGuardOptions<T> {
 }
 
 export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExecutionGuardOptions<T>): Promise<T | undefined> {
+  if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql: options.sql, source: options.source }))) {
+    return undefined;
+  }
   const assessment = assessProductionSql(options.sql, options.connection, options.database);
   if (assessment.active && assessment.isMutation) {
     // Centralize production write confirmation so secondary tool surfaces cannot
@@ -41,6 +45,9 @@ export interface ProductionContextExecutionGuardOptions<T> {
  * connection/database production scope rather than SQL risk classification.
  */
 export async function executeWithProductionContextGuard<T>(options: ProductionContextExecutionGuardOptions<T>): Promise<T | undefined> {
+  if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql: options.reviewText, source: options.source, treatAsMutation: true }))) {
+    return undefined;
+  }
   const productionContext = productionContextForDatabase(options.connection, options.database);
   if (productionContext.active) {
     const confirmed = await useProductionSafetyStore().requestConfirmation({

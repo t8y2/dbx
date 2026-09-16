@@ -4,14 +4,23 @@ export type SqlHighlighter = (content: string, appearance?: AppThemeAppearance) 
 
 interface ShikiSqlHighlighterOptions {
   appearance: () => AppThemeAppearance;
+  themePreset?: ShikiSqlThemePreset;
 }
 
+type ShikiSqlThemePreset = "default" | "preview";
+
 const SHIKI_THEMES = {
-  dark: "github-dark",
-  light: "github-light",
+  default: {
+    dark: "github-dark",
+    light: "github-light",
+  },
+  preview: {
+    dark: "dark-plus",
+    light: "min-light",
+  },
 } as const;
 
-type ShikiHighlighter = Awaited<ReturnType<typeof import("shiki/core").createHighlighterCore>>;
+export type ShikiHighlighter = Awaited<ReturnType<typeof import("shiki/core").createHighlighterCore>>;
 type ShikiCodeHighlighter = Pick<ShikiHighlighter, "codeToHtml">;
 
 let highlighterPromise: Promise<ShikiHighlighter> | undefined;
@@ -29,10 +38,11 @@ export async function createShikiSqlHighlighter(options: ShikiSqlHighlighterOpti
 export function createSafeSqlHighlighter(highlighter: ShikiCodeHighlighter, options: ShikiSqlHighlighterOptions): SqlHighlighter {
   return (content, appearance = options.appearance()) => {
     try {
+      const themes = SHIKI_THEMES[options.themePreset ?? "default"];
       return highlighter.codeToHtml(content, {
         lang: "sql",
         structure: "inline",
-        theme: SHIKI_THEMES[appearance],
+        theme: themes[appearance],
       });
     } catch (error) {
       console.warn("[DBX][sqlHighlighter] Failed to highlight SQL:", error);
@@ -58,17 +68,30 @@ export function escapeHtml(content: string): string {
   });
 }
 
-function getShikiSqlHighlighter(): Promise<ShikiHighlighter> {
+/**
+ * Lazily-initialized shared highlighter. Exported so other SQL renderers
+ * (e.g. rich-text copy) reuse one Shiki instance instead of loading the SQL
+ * grammar and themes a second time.
+ */
+export function getShikiSqlHighlighter(): Promise<ShikiHighlighter> {
   highlighterPromise ??= loadShikiSqlHighlighter();
   return highlighterPromise;
 }
 
 async function loadShikiSqlHighlighter(): Promise<ShikiHighlighter> {
-  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, sql] = await Promise.all([import("shiki/core"), import("shiki/engine/javascript"), import("shiki/themes/github-dark.mjs"), import("shiki/themes/github-light.mjs"), import("shiki/langs/sql.mjs")]);
+  const [{ createHighlighterCore }, { createJavaScriptRegexEngine }, githubDark, githubLight, darkPlus, minLight, sql] = await Promise.all([
+    import("shiki/core"),
+    import("shiki/engine/javascript"),
+    import("shiki/themes/github-dark.mjs"),
+    import("shiki/themes/github-light.mjs"),
+    import("shiki/themes/dark-plus.mjs"),
+    import("shiki/themes/min-light.mjs"),
+    import("shiki/langs/sql.mjs"),
+  ]);
 
   return createHighlighterCore({
     engine: createJavaScriptRegexEngine(),
     langs: [sql.default],
-    themes: [githubDark.default, githubLight.default],
+    themes: [githubDark.default, githubLight.default, darkPlus.default, minLight.default],
   });
 }

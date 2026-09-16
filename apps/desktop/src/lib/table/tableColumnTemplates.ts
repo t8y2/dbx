@@ -17,6 +17,14 @@ export interface TableColumnTemplateField {
   comment?: string;
 }
 
+export interface TableColumnTemplateGridRowInput {
+  name: string;
+  required: boolean;
+  defaultValue: string;
+  comment: string;
+  overrides: readonly { databaseType: DatabaseType; dataType: string }[];
+}
+
 export const PRESET_FIELDS_TEMPLATE_ID = "preset-fields";
 export const EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE = "<empty>";
 export const TABLE_COLUMN_TEMPLATE_DATABASE_TYPES: DatabaseType[] = manifestDatabaseTypes().filter(isTableColumnTemplateDatabaseType);
@@ -24,21 +32,27 @@ export const DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS: string[] = [];
 
 export function normalizeTableColumnTemplateFields(value: unknown): string[] {
   if (!Array.isArray(value)) return [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS];
-  const fields: string[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    if (typeof item !== "string") continue;
-    const field = item.trim();
-    const name = field.split("|")[0]?.trim();
-    if (!field || !name || seen.has(name.toLowerCase())) continue;
-    seen.add(name.toLowerCase());
-    fields.push(field);
-  }
-  return fields;
+  return parseTableColumnTemplateFieldLines(value).map(serializeTableColumnTemplateField);
 }
 
 export function parseTableColumnTemplateFields(value: unknown): TableColumnTemplateField[] {
-  return normalizeTableColumnTemplateFields(value).map(parseTableColumnTemplateField);
+  if (!Array.isArray(value)) return parseTableColumnTemplateFieldLines(DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS);
+  return parseTableColumnTemplateFieldLines(value);
+}
+
+/**
+ * Serialize settings-grid rows.
+ * UI is filtered per database, so the same field name can appear as separate rows (one per
+ * engine). Merge those into one stored field with per-DB types — dropping later names made
+ * Apply look unchanged (#5579).
+ */
+export function tableColumnTemplateRowsToSettings(rows: readonly TableColumnTemplateGridRowInput[]): string[] {
+  const fields: TableColumnTemplateField[] = [];
+  for (const row of rows) {
+    const field = fieldFromGridRow(row);
+    if (field) fields.push(field);
+  }
+  return mergeTableColumnTemplateFields(fields).map(serializeTableColumnTemplateField);
 }
 
 export function tableColumnTemplates(columnNames: readonly string[] = DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS): TableColumnTemplate[] {
@@ -56,6 +70,80 @@ export function createTableColumnTemplateDrafts(options: { templateId: string; d
   if (options.templateId !== PRESET_FIELDS_TEMPLATE_ID) return [];
   const existingNames = new Set([...(options.existingColumnNames ?? [])].map((name) => name.toLowerCase()));
   return presetFieldColumns(options.databaseType, parseTableColumnTemplateFields([...(options.columnNames ?? DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS)]), options.createId).filter((column) => !existingNames.has(column.name.toLowerCase()));
+}
+
+/** Case-insensitive name merge: first wins for field props; per-DB types are unioned. */
+function mergeTableColumnTemplateFields(fields: readonly TableColumnTemplateField[]): TableColumnTemplateField[] {
+  const order: string[] = [];
+  const byName = new Map<string, TableColumnTemplateField>();
+
+  for (const field of fields) {
+    const name = field.name.trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    const existing = byName.get(key);
+    if (!existing) {
+      byName.set(key, {
+        name,
+        dataTypesByDatabase: { ...field.dataTypesByDatabase },
+        isNullable: field.isNullable,
+        defaultValue: field.defaultValue,
+        comment: field.comment,
+      });
+      order.push(key);
+      continue;
+    }
+    if (!existing.defaultValue && field.defaultValue) existing.defaultValue = field.defaultValue;
+    if (!existing.comment && field.comment) existing.comment = field.comment;
+    for (const [databaseType, dataType] of Object.entries(field.dataTypesByDatabase) as [DatabaseType, string][]) {
+      if (existing.dataTypesByDatabase[databaseType] !== undefined) continue;
+      existing.dataTypesByDatabase[databaseType] = dataType;
+    }
+  }
+
+  return order.map((key) => byName.get(key)!);
+}
+
+function serializeTableColumnTemplateField(field: TableColumnTemplateField): string {
+  const parts = [field.name];
+  for (const [databaseType, dataType] of Object.entries(field.dataTypesByDatabase)) {
+    if (!dataType) continue;
+    parts.push(`${databaseType}:${dataType}`);
+  }
+  if (field.isNullable === true) parts.push("required:false");
+  if (field.defaultValue) parts.push(`default:${field.defaultValue}`);
+  if (field.comment) parts.push(`comment:${field.comment}`);
+  return parts.join(" | ");
+}
+
+function fieldFromGridRow(row: TableColumnTemplateGridRowInput): TableColumnTemplateField | null {
+  const name = row.name.trim();
+  if (!name) return null;
+
+  const dataTypesByDatabase: Partial<Record<DatabaseType, string>> = {};
+  for (const override of row.overrides) {
+    if (dataTypesByDatabase[override.databaseType] !== undefined) continue;
+    dataTypesByDatabase[override.databaseType] = override.dataType.trim() || EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE;
+  }
+
+  return {
+    name,
+    dataTypesByDatabase,
+    isNullable: row.required ? undefined : true,
+    defaultValue: row.defaultValue.trim() || undefined,
+    comment: row.comment.trim() || undefined,
+  };
+}
+
+function parseTableColumnTemplateFieldLines(value: readonly unknown[]): TableColumnTemplateField[] {
+  const parsed: TableColumnTemplateField[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || !trimmed.split("|")[0]?.trim()) continue;
+    parsed.push(parseTableColumnTemplateField(trimmed));
+  }
+  return mergeTableColumnTemplateFields(parsed);
 }
 
 function presetFieldColumns(databaseType: DatabaseType | undefined, fields: readonly TableColumnTemplateField[], createId: () => string): EditableStructureColumn[] {

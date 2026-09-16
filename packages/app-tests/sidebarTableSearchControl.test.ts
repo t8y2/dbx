@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { insertSidebarTableSearchControls } from "../../apps/desktop/src/lib/sidebar/sidebarTableSearchControl.ts";
-import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
+import { appendFlatTreeRenderKey, type FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function flat(node: TreeNode, depth = 0): FlatTreeNode {
@@ -9,6 +9,7 @@ function flat(node: TreeNode, depth = 0): FlatTreeNode {
     node,
     depth,
     id: node.id,
+    renderKey: appendFlatTreeRenderKey("", node),
     type: node.type,
     poolType: node.type,
   };
@@ -38,6 +39,7 @@ test("inserts a local table search control above simple table children", () => {
   );
   assert.equal(nodes[1].node.tableSearchParentId, "conn:app");
   assert.equal(nodes[1].depth, 1);
+  assert.equal(nodes[1].renderKey, appendFlatTreeRenderKey(nodes[0].renderKey, nodes[1].node));
 });
 
 test("keeps a simple local table search control visible when the current search has no results", () => {
@@ -128,8 +130,14 @@ test("does not insert a local table search control for empty table scopes", () =
     activeQueries: {},
   });
 
-  assert.deepEqual(groupedNodes.map((item) => item.node.type), ["group-tables"]);
-  assert.deepEqual(simpleNodes.map((item) => item.node.type), ["schema"]);
+  assert.deepEqual(
+    groupedNodes.map((item) => item.node.type),
+    ["group-tables"],
+  );
+  assert.deepEqual(
+    simpleNodes.map((item) => item.node.type),
+    ["schema"],
+  );
 });
 
 test("keeps a grouped local table search control visible when the current search has no results", () => {
@@ -203,7 +211,10 @@ test("hides local table search controls while global sidebar filtering is active
     activeQueries: { "conn:app": "orders" },
   });
 
-  assert.deepEqual(nodes.map((item) => item.node.type), ["database"]);
+  assert.deepEqual(
+    nodes.map((item) => item.node.type),
+    ["database"],
+  );
 });
 
 test("does not insert local table search controls when the user setting is disabled", () => {
@@ -223,5 +234,8 @@ test("does not insert local table search controls when the user setting is disab
     activeQueries: { "conn:app:__tables": "orders" },
   });
 
-  assert.deepEqual(nodes.map((item) => item.node.type), ["group-tables"]);
+  assert.deepEqual(
+    nodes.map((item) => item.node.type),
+    ["group-tables"],
+  );
 });

@@ -18,6 +18,12 @@ describe("ObjectBrowser context watcher", () => {
     expect(watcher).toContain("reload({ allowCachedObjects: true, contextEpoch })");
   });
 
+  it("loads MongoDB collections through the existing objects view", () => {
+    expect(objectBrowserSource).toContain("api.mongoListCollections");
+    expect(objectBrowserSource).toContain("buildMongoObjectBrowserRows");
+    expect(objectBrowserSource).toContain("objects.searchCollections");
+  });
+
   it("ignores connection object replacement when the context values stay unchanged", async () => {
     const connection = ref({ id: "connection-1" });
     const database = ref("database-1");

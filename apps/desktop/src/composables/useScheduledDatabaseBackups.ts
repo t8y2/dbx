@@ -11,6 +11,7 @@ import {
   DatabaseBackupConnectionQueue,
   databaseBackupAggregateExportStatus,
   databaseBackupFilePath,
+  databaseBackupRunDirectory,
   databaseBackupProgressPercent,
   databaseBackupRunsToPrune,
   databaseBackupScheduleIsDue,
@@ -22,10 +23,13 @@ import {
   resolveScheduledDatabaseBackupTableScope,
   resolveScheduledDatabaseBackupTargets,
   supportsScheduledDatabaseBackup,
+  toDatabaseBackupExecutionConfig,
   writeDatabaseBackupRuns,
   writeDatabaseBackupSchedules,
+  type DatabaseBackupExecutionConfig,
   type DatabaseBackupFile,
   type DatabaseBackupRun,
+  type DatabaseBackupRunSource,
   type DatabaseBackupRunStatus,
   type DatabaseBackupRunTrigger,
   type DatabaseBackupSchedule,
@@ -39,7 +43,9 @@ const schedules = ref<DatabaseBackupSchedule[]>(readDatabaseBackupSchedules());
 const runs = ref<DatabaseBackupRun[]>(readDatabaseBackupRuns());
 const activeScheduleIds = reactive(new Set<string>());
 const activeRunIds = reactive(new Set<string>());
+const cancellingRunIds = reactive(new Set<string>());
 const activeExportIds = new Map<string, string>();
+const activeBackupPaths = new Set<string>();
 const cancellationRequested = new Set<string>();
 
 let schedulerTimer: ReturnType<typeof window.setInterval> | undefined;
@@ -72,6 +78,20 @@ function updateRun(runId: string, patch: Partial<DatabaseBackupRun>, persist = t
   return updated;
 }
 
+function backupPathIsReferencedByAnotherRun(filePath: string, excludedRunIds: ReadonlySet<string>): boolean {
+  return runs.value.some((run) => !excludedRunIds.has(run.id) && run.files.some((file) => file.filePath === filePath));
+}
+
+function uniqueUnreferencedBackupPaths(paths: readonly string[], excludedRunIds: ReadonlySet<string>): string[] {
+  return [...new Set(paths)].filter((filePath) => !backupPathIsReferencedByAnotherRun(filePath, excludedRunIds));
+}
+
+function backupRootsForRuns(selectedRuns: readonly DatabaseBackupRun[], fallback?: string): string[] {
+  return [...new Set([...selectedRuns.map((run) => run.destinationDirectory), fallback].filter((root): root is string => Boolean(root)))];
+}
+
+type FinishedDatabaseBackupRun = Omit<DatabaseBackupRun, "status"> & { status: Exclude<DatabaseBackupRunStatus, "running"> };
+
 function refreshFromStorage() {
   schedules.value = readDatabaseBackupSchedules();
   runs.value = readDatabaseBackupRuns();
@@ -79,7 +99,7 @@ function refreshFromStorage() {
 
 export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {}) {
   const connectionStore = useConnectionStore();
-  const { addDatabaseExportTask, registerTaskCancelHandler, unregisterTaskCancelHandler, updateDatabaseExportTask } = useExportTracker();
+  const { addDatabaseExportTask, markDatabaseExportTaskCancelling, registerTaskCancelHandler, restoreDatabaseExportTaskRunning, unregisterTaskCancelHandler, updateDatabaseExportTask } = useExportTracker();
 
   const activeRuns = computed(() => runs.value.filter((run) => activeRunIds.has(run.id)));
 
@@ -121,12 +141,23 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     return true;
   }
 
-  async function deleteRun(runId: string): Promise<void> {
-    const run = runs.value.find((item) => item.id === runId);
-    if (!run || activeRunIds.has(runId)) return;
-    if (run.files.length > 0) await api.deleteDatabaseBackupFiles(run.files.map((file) => file.filePath));
-    runs.value = runs.value.filter((item) => item.id !== runId);
+  async function deleteRuns(runIds: readonly string[]): Promise<void> {
+    const ids = new Set(runIds);
+    const selectedRuns = runs.value.filter((run) => ids.has(run.id) && !activeRunIds.has(run.id));
+    if (selectedRuns.length === 0) return;
+
+    const deletedIds = new Set(selectedRuns.map((run) => run.id));
+    const paths = uniqueUnreferencedBackupPaths(
+      selectedRuns.flatMap((run) => run.files.map((file) => file.filePath)),
+      deletedIds,
+    );
+    if (paths.length > 0) await api.deleteDatabaseBackupFiles(paths, backupRootsForRuns(selectedRuns));
+    runs.value = runs.value.filter((run) => !deletedIds.has(run.id));
     persistRuns();
+  }
+
+  async function deleteRun(runId: string): Promise<void> {
+    await deleteRuns([runId]);
   }
 
   function renameRun(runId: string, displayName: string): boolean {
@@ -140,10 +171,13 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
   async function pruneScheduleRuns(schedule: DatabaseBackupSchedule) {
     const staleRuns = databaseBackupRunsToPrune(runs.value, schedule.id, schedule.retentionCount);
     if (staleRuns.length === 0) return;
-    const stalePaths = staleRuns.flatMap((run) => run.files.map((file) => file.filePath));
+    const staleIds = new Set(staleRuns.map((run) => run.id));
+    const stalePaths = uniqueUnreferencedBackupPaths(
+      staleRuns.flatMap((run) => run.files.map((file) => file.filePath)),
+      staleIds,
+    );
     try {
-      if (stalePaths.length > 0) await api.deleteDatabaseBackupFiles(stalePaths);
-      const staleIds = new Set(staleRuns.map((run) => run.id));
+      if (stalePaths.length > 0) await api.deleteDatabaseBackupFiles(stalePaths, backupRootsForRuns(staleRuns, schedule.destinationDirectory));
       runs.value = runs.value.filter((run) => !staleIds.has(run.id));
       persistRuns();
     } catch (error) {
@@ -151,64 +185,91 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     }
   }
 
-  async function cancelRun(runId: string) {
-    if (!activeRunIds.has(runId)) return;
+  async function cancelRun(runId: string): Promise<boolean> {
+    if (!activeRunIds.has(runId)) return false;
+    if (cancellationRequested.has(runId)) return true;
     cancellationRequested.add(runId);
-    const exportId = activeExportIds.get(runId);
-    if (exportId) await api.cancelDatabaseExport(exportId).catch(() => {});
+    cancellingRunIds.add(runId);
+    markDatabaseExportTaskCancelling(runId);
+    const exportIds = new Set([runId, activeExportIds.get(runId)].filter((id): id is string => Boolean(id)));
+    try {
+      await Promise.all([...exportIds].map((exportId) => api.cancelDatabaseExport(exportId)));
+    } catch (error) {
+      appendDebugLog("warn", "[DBX][database-backup:cancel-request-error]", error);
+      cancellationRequested.delete(runId);
+      cancellingRunIds.delete(runId);
+      restoreDatabaseExportTaskRunning(runId);
+      return false;
+    }
+    return true;
   }
 
-  async function runSchedule(scheduleId: string, trigger: DatabaseBackupRunTrigger = "manual"): Promise<DatabaseBackupRun | null> {
-    if (!isTauriRuntime()) throw new Error("Scheduled database backups are only available in the desktop app.");
-    const schedule = schedules.value.find((item) => item.id === scheduleId);
-    if (!schedule || activeScheduleIds.has(scheduleId)) return null;
-    const connection = connectionStore.getConfig(schedule.connectionId);
+  async function runBackup(config: DatabaseBackupExecutionConfig, request: { source: DatabaseBackupRunSource; trigger: DatabaseBackupRunTrigger; scheduleId?: string; displayName: string; runDirectoryPattern?: string }): Promise<FinishedDatabaseBackupRun | null> {
+    const backupName = request.displayName;
+    const connection = connectionStore.getConfig(config.connectionId);
 
     const startedAt = new Date();
     const runId = generateDatabaseExportId();
+    const outputDirectory = request.runDirectoryPattern ? databaseBackupRunDirectory(config.destinationDirectory, request.runDirectoryPattern, backupName, startedAt, runId) : config.destinationDirectory;
     const run: DatabaseBackupRun = {
       id: runId,
-      scheduleId: schedule.id,
-      scheduleName: schedule.name,
-      connectionId: schedule.connectionId,
+      scheduleId: request.scheduleId,
+      scheduleName: backupName,
+      connectionId: config.connectionId,
       connectionName: connection?.name ?? "",
-      trigger,
+      destinationDirectory: config.destinationDirectory,
+      trigger: request.trigger,
+      source: request.source,
       status: "running",
       startedAt: startedAt.toISOString(),
       files: [],
       progressPercent: 0,
     };
     replaceRun(run);
-    activeScheduleIds.add(schedule.id);
     activeRunIds.add(runId);
     cancellationRequested.delete(runId);
-    addDatabaseExportTask(runId, schedule.name, schedule.destinationDirectory);
-    registerTaskCancelHandler(runId, () => cancelRun(runId));
+    addDatabaseExportTask(runId, backupName, outputDirectory, request.source === "scheduled" ? "scheduled" : "manual");
+    registerTaskCancelHandler(runId, async () => {
+      await cancelRun(runId);
+    });
 
     let finalStatus: Exclude<DatabaseBackupRunStatus, "running"> = "success";
     let finalError = "";
-    let finishedRun: DatabaseBackupRun | null = null;
+    let finishedRun: FinishedDatabaseBackupRun | null = null;
     let lastProgressPercent = 0;
     const generatedPaths: string[] = [];
-    await databaseBackupConnectionQueue.run(schedule.connectionId, async () => {
+    const reservedPaths: string[] = [];
+    await databaseBackupConnectionQueue.run(config.connectionId, async () => {
       try {
         if (cancellationRequested.has(runId)) {
           finalStatus = "cancelled";
           return;
         }
         if (!connection || !supportsScheduledDatabaseBackup(connection.db_type)) throw new Error("The backup connection is unavailable or unsupported.");
-        await connectionStore.ensureConnected(schedule.connectionId);
-        const availableDatabases = (await api.listDatabases(schedule.connectionId)).map((database) => database.name);
-        const selectedDatabases = resolveScheduledDatabaseBackupTargets(schedule.databases, availableDatabases, connection.db_type);
+        await connectionStore.ensureConnected(config.connectionId);
+        if (cancellationRequested.has(runId)) {
+          finalStatus = "cancelled";
+          return;
+        }
+        const availableDatabases = (await api.listDatabases(config.connectionId)).map((database) => database.name);
+        if (cancellationRequested.has(runId)) {
+          finalStatus = "cancelled";
+          return;
+        }
+        const selectedDatabases = resolveScheduledDatabaseBackupTargets(config.databases, availableDatabases, connection.db_type);
         if (selectedDatabases.length === 0) throw new Error("No databases are available for this backup schedule.");
 
         let tableNamesCaseSensitive = true;
-        if (connection.db_type === "mysql" && schedule.tableFilterMode !== "all") {
+        if (connection.db_type === "mysql" && config.tableFilterMode !== "all") {
           try {
-            const result = await api.executeQuery(schedule.connectionId, "", "SHOW VARIABLES LIKE 'lower_case_table_names'", undefined, undefined, { maxRows: 1 });
+            const result = await api.executeQuery(config.connectionId, "", "SHOW VARIABLES LIKE 'lower_case_table_names'", undefined, undefined, { maxRows: 1 });
             tableNamesCaseSensitive = databaseBackupTableNamesAreCaseSensitive(connection.db_type, result.rows[0]?.[1] ?? result.rows[0]?.[0]);
           } catch (error) {
             appendDebugLog("warn", "[DBX][database-backup:table-name-case-detection-error]", error);
+          }
+          if (cancellationRequested.has(runId)) {
+            finalStatus = "cancelled";
+            return;
           }
         }
 
@@ -219,27 +280,38 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
             finalStatus = "cancelled";
             break;
           }
-          const snapshot = await api.beginDatabaseBackupSnapshot(schedule.connectionId, database);
+          const schemasByDatabase = connection.db_type === "postgres" ? { [database]: await api.listSchemas(config.connectionId, database) } : undefined;
+          if (cancellationRequested.has(runId)) {
+            finalStatus = "cancelled";
+            break;
+          }
+          const databasePlan = buildAllDatabaseExportPlan({
+            databases: [database],
+            schemaAware: connection.db_type === "postgres",
+            schemasByDatabase,
+          });
+          if (databasePlan.length === 0) throw new Error(`Database ${database} did not resolve to any schemas.`);
+          const scopedDatabasePlan: Array<(typeof databasePlan)[number] & { selectedTables?: string[]; excludedTables?: string[] }> = [];
+          for (const item of databasePlan) {
+            if (config.tableFilterMode === "all") {
+              scopedDatabasePlan.push(item);
+              continue;
+            }
+            const availableTables = (await api.listTables(config.connectionId, item.database, item.schema)).map((table) => table.name);
+            if (cancellationRequested.has(runId)) {
+              finalStatus = "cancelled";
+              break;
+            }
+            const scope = resolveScheduledDatabaseBackupTableScope(config.tableFilterMode, config.tablePatterns, availableTables, item.database, item.schema, tableNamesCaseSensitive);
+            includedTableCount += scope.includedTables.length;
+            if (scope.includedTables.length === 0) continue;
+            scopedDatabasePlan.push({ ...item, selectedTables: scope.selectedTables, excludedTables: scope.excludedTables });
+          }
+          if (finalStatus === "cancelled") break;
+
+          const snapshot = await api.beginDatabaseBackupSnapshot(config.connectionId, database, runId);
           let snapshotCompleted = false;
           try {
-            const databasePlan = buildAllDatabaseExportPlan({
-              databases: [database],
-              schemaAware: connection.db_type === "postgres",
-              schemasByDatabase: { [database]: snapshot.schemas },
-            });
-            if (databasePlan.length === 0) throw new Error(`Database ${database} did not resolve to any schemas.`);
-            const scopedDatabasePlan: Array<(typeof databasePlan)[number] & { selectedTables?: string[]; excludedTables?: string[] }> = [];
-            for (const item of databasePlan) {
-              if (schedule.tableFilterMode === "all") {
-                scopedDatabasePlan.push(item);
-                continue;
-              }
-              const availableTables = (await api.listTables(schedule.connectionId, item.database, item.schema)).map((table) => table.name);
-              const scope = resolveScheduledDatabaseBackupTableScope(schedule.tableFilterMode, schedule.tablePatterns, availableTables, item.database, item.schema, tableNamesCaseSensitive);
-              includedTableCount += scope.includedTables.length;
-              if (scope.includedTables.length === 0) continue;
-              scopedDatabasePlan.push({ ...item, selectedTables: scope.selectedTables, excludedTables: scope.excludedTables });
-            }
             for (const [planIndex, item] of scopedDatabasePlan.entries()) {
               if (cancellationRequested.has(runId)) {
                 finalStatus = "cancelled";
@@ -248,48 +320,64 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
               exportIndex += 1;
               const childExportId = `${runId}-${exportIndex}`;
               activeExportIds.set(runId, childExportId);
-              const filePath = databaseBackupFilePath(schedule.destinationDirectory, schedule.name, item.fileStem, startedAt, runId);
+              const filePath = databaseBackupFilePath(outputDirectory, backupName, item.fileStem, startedAt, runId, config.outputCompression, config.fileNamePattern);
+              if (generatedPaths.includes(filePath) || activeBackupPaths.has(filePath) || backupPathIsReferencedByAnotherRun(filePath, new Set([runId]))) {
+                throw new Error("Backup file path is already used by another run. Include {runId} or another unique value in the file-name template.");
+              }
               generatedPaths.push(filePath);
-              const terminal = await runDatabaseExportUntilTerminal(
-                {
-                  exportId: childExportId,
-                  connectionId: schedule.connectionId,
-                  database: item.database,
-                  schema: item.schema,
-                  filePath,
-                  selectedTables: item.selectedTables,
-                  excludedTables: item.excludedTables,
-                  includeStructure: schedule.includeStructure,
-                  includeData: schedule.includeData,
-                  includeObjects: schedule.includeObjects,
-                  dropTableIfExists: schedule.dropTableIfExists,
-                  failOnError: true,
-                  snapshotSessionId: snapshot.sessionId,
-                  batchSize: 1000,
-                },
-                (progress) => {
-                  const progressPercent = databaseBackupProgressPercent({
-                    completedDatabases: databaseIndex,
-                    totalDatabases: selectedDatabases.length,
-                    completedExports: planIndex,
-                    totalExports: scopedDatabasePlan.length,
-                    currentObjectIndex: progress.objectIndex,
-                    currentTotalObjects: progress.totalObjects,
-                    currentExportComplete: progress.status === "Done",
-                  });
-                  if (progressPercent !== lastProgressPercent) {
-                    lastProgressPercent = progressPercent;
-                    updateRun(runId, { progressPercent }, false);
-                  }
-                  updateDatabaseExportTask(runId, {
-                    ...progress,
-                    exportId: runId,
-                    currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
-                    status: databaseBackupAggregateExportStatus(progress.status, false),
-                    overallPercent: progressPercent,
-                  });
-                },
-              );
+              reservedPaths.push(filePath);
+              activeBackupPaths.add(filePath);
+              let terminal: Awaited<ReturnType<typeof runDatabaseExportUntilTerminal>>;
+              try {
+                terminal = await runDatabaseExportUntilTerminal(
+                  {
+                    exportId: childExportId,
+                    connectionId: config.connectionId,
+                    database: item.database,
+                    schema: item.schema,
+                    filePath,
+                    selectedTables: item.selectedTables,
+                    excludedTables: item.excludedTables,
+                    includeStructure: config.includeStructure,
+                    includeData: config.includeData,
+                    includeObjects: config.includeObjects,
+                    dropTableIfExists: config.dropTableIfExists,
+                    outputCompression: config.outputCompression,
+                    failOnError: true,
+                    preventOverwrite: true,
+                    snapshotSessionId: snapshot.sessionId,
+                    batchSize: 1000,
+                  },
+                  (progress) => {
+                    const progressPercent = databaseBackupProgressPercent({
+                      completedDatabases: databaseIndex,
+                      totalDatabases: selectedDatabases.length,
+                      completedExports: planIndex,
+                      totalExports: scopedDatabasePlan.length,
+                      currentObjectIndex: progress.objectIndex,
+                      currentTotalObjects: progress.totalObjects,
+                      currentExportComplete: progress.status === "Done",
+                    });
+                    if (progressPercent !== lastProgressPercent) {
+                      lastProgressPercent = progressPercent;
+                      updateRun(runId, { progressPercent }, false);
+                    }
+                    updateDatabaseExportTask(runId, {
+                      ...progress,
+                      exportId: runId,
+                      currentObject: `${item.displayName}: ${progress.currentObject || item.displayName}`,
+                      status: databaseBackupAggregateExportStatus(progress.status, false),
+                      overallPercent: progressPercent,
+                    });
+                  },
+                );
+              } catch (error: any) {
+                if (String(error?.message || error).startsWith("Backup file already exists:")) {
+                  const index = generatedPaths.lastIndexOf(filePath);
+                  if (index >= 0) generatedPaths.splice(index, 1);
+                }
+                throw error;
+              }
               activeExportIds.delete(runId);
               if (terminal.status === "Cancelled" || cancellationRequested.has(runId)) {
                 finalStatus = "cancelled";
@@ -320,16 +408,24 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
           });
           updateRun(runId, { progressPercent: lastProgressPercent }, false);
         }
-        if (schedule.tableFilterMode !== "all" && includedTableCount === 0) {
-          throw new Error(`No tables matched the configured ${schedule.tableFilterMode} backup rules.`);
+        if (config.tableFilterMode !== "all" && includedTableCount === 0) {
+          throw new Error(`No tables matched the configured ${config.tableFilterMode} backup rules.`);
         }
       } catch (error: any) {
         finalStatus = cancellationRequested.has(runId) ? "cancelled" : "failed";
         finalError = error?.message || String(error);
       } finally {
+        for (const filePath of reservedPaths) activeBackupPaths.delete(filePath);
+        // `runId` is also the cancellation key while a snapshot is waiting
+        // for a pool connection. Unlike child exports, it has no exporter
+        // task that can clear that key after completion.
+        await api.clearDatabaseExportCancellation(runId).catch((error) => {
+          appendDebugLog("warn", "[DBX][database-backup:cancel-clear-error]", error);
+        });
         if (finalStatus !== "success" && generatedPaths.length > 0) {
           try {
-            await api.deleteDatabaseBackupFiles(generatedPaths);
+            const cleanupPaths = uniqueUnreferencedBackupPaths(generatedPaths, new Set([runId]));
+            if (cleanupPaths.length > 0) await api.deleteDatabaseBackupFiles(cleanupPaths, [config.destinationDirectory]);
             run.files = [];
           } catch (error: any) {
             appendDebugLog("error", "[DBX][database-backup:partial-cleanup-error]", error);
@@ -340,20 +436,21 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
         const completedAt = new Date();
         activeExportIds.delete(runId);
         cancellationRequested.delete(runId);
-        activeScheduleIds.delete(schedule.id);
+        cancellingRunIds.delete(runId);
         activeRunIds.delete(runId);
         unregisterTaskCancelHandler(runId);
 
-        finishedRun = updateRun(runId, {
+        const updatedRun = updateRun(runId, {
           status: finalStatus,
           completedAt: completedAt.toISOString(),
           files: [...run.files],
           progressPercent: finalStatus === "success" ? 100 : lastProgressPercent,
           error: finalError || undefined,
         });
+        finishedRun = updatedRun && updatedRun.status !== "running" ? (updatedRun as FinishedDatabaseBackupRun) : null;
         updateDatabaseExportTask(runId, {
           exportId: runId,
-          currentObject: schedule.name,
+          currentObject: backupName,
           objectIndex: finalStatus === "success" ? run.files.length : 0,
           totalObjects: run.files.length,
           rowsExported: 0,
@@ -363,24 +460,8 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
           overallPercent: finalStatus === "success" ? 100 : lastProgressPercent,
         });
 
-        const latestSchedule = schedules.value.find((item) => item.id === schedule.id);
-        if (latestSchedule) {
-          schedules.value = schedules.value.map((item) =>
-            item.id === schedule.id
-              ? {
-                  ...item,
-                  lastRunAt: completedAt.toISOString(),
-                  lastRunStatus: finalStatus,
-                  nextRunAt: trigger === "scheduled" || Date.parse(item.nextRunAt) <= completedAt.getTime() ? nextDatabaseBackupRunAt(item, completedAt).toISOString() : item.nextRunAt,
-                }
-              : item,
-          );
-          persistSchedules();
-          if (finalStatus === "success") await pruneScheduleRuns(latestSchedule);
-        }
-
         appendDebugLog(finalStatus === "success" ? "info" : "error", `[DBX][database-backup:${finalStatus}]`, {
-          scheduleId: schedule.id,
+          scheduleId: request.scheduleId,
           runId,
           files: run.files.length,
           error: finalError || undefined,
@@ -388,6 +469,50 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
       }
     });
     return finishedRun;
+  }
+
+  async function finalizeScheduledRun(scheduleId: string, trigger: DatabaseBackupRunTrigger, run: FinishedDatabaseBackupRun) {
+    const schedule = schedules.value.find((item) => item.id === scheduleId);
+    if (!schedule) return;
+    const completedAt = run.completedAt ? new Date(run.completedAt) : new Date();
+    schedules.value = schedules.value.map((item) =>
+      item.id === scheduleId
+        ? {
+            ...item,
+            lastRunAt: completedAt.toISOString(),
+            lastRunStatus: run.status,
+            nextRunAt: trigger === "scheduled" || Date.parse(item.nextRunAt) <= completedAt.getTime() ? nextDatabaseBackupRunAt(item, completedAt).toISOString() : item.nextRunAt,
+          }
+        : item,
+    );
+    persistSchedules();
+    if (run.status === "success") await pruneScheduleRuns(schedule);
+  }
+
+  async function runSchedule(scheduleId: string, trigger: DatabaseBackupRunTrigger = "manual"): Promise<DatabaseBackupRun | null> {
+    if (!isTauriRuntime()) throw new Error("Scheduled database backups are only available in the desktop app.");
+    const schedule = schedules.value.find((item) => item.id === scheduleId);
+    if (!schedule || activeScheduleIds.has(scheduleId)) return null;
+    activeScheduleIds.add(scheduleId);
+    try {
+      const run = await runBackup(toDatabaseBackupExecutionConfig(schedule), {
+        source: "scheduled",
+        trigger,
+        scheduleId,
+        displayName: schedule.name,
+        runDirectoryPattern: schedule.runDirectoryPattern,
+      });
+      if (run) await finalizeScheduledRun(scheduleId, trigger, run);
+      return run;
+    } finally {
+      activeScheduleIds.delete(scheduleId);
+    }
+  }
+
+  async function runOneShot(config: DatabaseBackupExecutionConfig, displayName = "Database backup"): Promise<FinishedDatabaseBackupRun | null> {
+    if (!isTauriRuntime()) throw new Error("One-shot database backups are only available in the desktop app.");
+    if (activeRuns.value.some((run) => run.source === "one-shot")) return null;
+    return runBackup(config, { source: "one-shot", trigger: "manual", displayName });
   }
 
   async function processDueSchedules() {
@@ -444,13 +569,16 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     runs,
     activeScheduleIds,
     activeRunIds,
+    cancellingRunIds,
     activeRuns,
     saveSchedule,
     setScheduleEnabled,
     deleteSchedule,
     deleteRun,
+    deleteRuns,
     renameRun,
     runSchedule,
+    runOneShot,
     cancelRun,
     processDueSchedules,
   };

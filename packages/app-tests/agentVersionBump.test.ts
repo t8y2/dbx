@@ -150,6 +150,23 @@ test("Kingbase native Go source changes bump the Kingbase module version", () =>
   ]);
 });
 
+test("Vastbase native Go source changes bump the Vastbase module version", () => {
+  const fixture = moduleFixture(["agents/drivers/vastbase-go"]);
+
+  const result = evaluateAgentVersionBump({
+    versions: {
+      vastbase: "0.1.37",
+    },
+    changedFiles: ["agents/drivers/vastbase-go/main.go"],
+    ...fixture,
+  });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.versions, {
+    vastbase: "0.1.38",
+  });
+});
+
 test("manual agent versions are preserved while other changed modules auto bump", () => {
   const fixture = moduleFixture([
     "agents/drivers/access",

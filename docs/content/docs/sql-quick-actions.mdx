@@ -1,0 +1,72 @@
+---
+title: SQL Quick Actions
+description: Run custom SQL templates from the editor after selecting a table name and pressing a shortcut.
+---
+
+SQL Quick Actions let you run reusable SQL templates against the text you have selected in the query editor. Select a table identifier first, then press the shortcut you configured in **Settings → Shortcuts**.
+
+This is different from [SQL Snippets](/en/docs/sql-snippets), which insert templates at the cursor through completion. Quick Actions generate SQL from the current selection and send it through the normal execution path.
+
+## Manage Quick Actions
+
+Open **Settings → Shortcuts** and scroll to **SQL Quick Actions**. Each action contains:
+
+| Field | Purpose |
+| --- | --- |
+| Label | Name shown in the settings list. |
+| Shortcut | Key combination that runs the action. |
+| Status | Enables or disables the action without deleting it. |
+| SQL Template | SQL executed after `${table}` is replaced with the selected text. |
+
+You can add, edit, enable, disable, or delete actions. Changes are saved immediately from the action dialog, or when you click **Apply** in the settings window.
+
+<Callout type="info">
+  Shortcuts that include `Mod` (`Cmd` on macOS, `Ctrl` on Windows/Linux) are recommended. They are less likely to interfere with normal typing than bare letter keys such as `Shift+U`.
+</Callout>
+
+## Run a Quick Action
+
+1. Select a table name or qualified identifier in the SQL editor, for example `orders` or `public.users`.
+2. Press the configured shortcut.
+3. DBX replaces every `${table}` token with the trimmed selection and executes the expanded SQL.
+
+Example template:
+
+```sql
+SELECT COUNT(*) FROM ${table}
+```
+
+With `orders` selected, DBX runs:
+
+```sql
+SELECT COUNT(*) FROM orders
+```
+
+If nothing is selected, the shortcut does not run and normal editor input continues.
+
+## Shortcut Conflicts
+
+DBX checks Quick Action shortcuts against:
+
+- Other Quick Actions in your list
+- Built-in editor and global shortcuts shown in **Settings → Shortcuts**
+
+Conflicting bindings are highlighted and block **Apply** until you resolve them.
+
+## Storage, Sync, and Safety
+
+Quick Actions are editor settings stored in the current DBX runtime. On Desktop, [Configuration Cloud Sync](/en/docs/cloud-sync) can synchronize them with your other editor settings. [Connection Config Migration](/en/docs/config-export) only moves database connections and does not include Quick Actions.
+
+A Quick Action only generates SQL; it does not bypass database permissions or DBX production protection. Review the fully expanded statement before running templates that contain writes or DDL, and follow the [Production Safety](/en/docs/production-safety) guidance.
+
+<Cards>
+  <Card title="SQL Snippets" href="/en/docs/sql-snippets">
+    Insert reusable templates at the cursor through editor completion.
+  </Card>
+  <Card title="Keyboard Shortcuts" href="/en/docs/keyboard-shortcuts">
+    Review built-in editor shortcuts and conflict rules.
+  </Card>
+  <Card title="Query Editor" href="/en/docs/query-editor">
+    Learn how execution scope, result tabs, and selection work together.
+  </Card>
+</Cards>

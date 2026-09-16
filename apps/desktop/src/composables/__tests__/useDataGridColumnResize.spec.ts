@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
 import { clearDataGridColumnWidthStates, createDataGridColumnMeasurementSignature, createDataGridColumnStructureSignature, DATA_GRID_COLUMN_WIDTH_STATE_LIMIT, dataGridColumnWidthStateCount, loadDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resizeDataGridColumnWidth, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
+import { resultGridColumnWidthCacheKey } from "@/lib/tabs/tabPresentation";
 
 function createResizeState(options: {
   columns: string[];
@@ -14,23 +15,28 @@ function createResizeState(options: {
   cacheKey?: string;
   density?: "compact" | "standard" | "comfortable";
   compactColumnHeaderActions?: boolean;
+  indexIndicatorColumnIndexes?: number[] | ReturnType<typeof ref<number[]>>;
   headerTextWidth?: number;
+  displayValue?: (value: string | number | boolean | null, columnIndex: number) => string | number | boolean | null;
 }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
   const headerTextWidth = ref(options.headerTextWidth);
   const headerMeasurementKey = ref(0);
   const density = ref(options.density ?? "standard");
   const rows = isRef(options.rows) ? options.rows : ref(options.rows);
+  const indexIndicatorColumnIndexes = isRef(options.indexIndicatorColumnIndexes) ? options.indexIndicatorColumnIndexes : ref(options.indexIndicatorColumnIndexes ?? []);
   const state = useDataGridColumnResize({
     columns: computed(() => options.columns),
     sourceRows: computed(() => rows.value),
     columnIndexes: computed(() => options.columnIndexes ?? options.columns.map((_, index) => index)),
     density,
     compactColumnHeaderActions: computed(() => compact.value),
+    columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
     cacheKey: computed(() => options.cacheKey),
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
     headerMeasurementKey,
+    displayValue: options.displayValue,
   });
   return {
     ...state,
@@ -44,6 +50,9 @@ function createResizeState(options: {
     setHeaderTextWidth(width: number) {
       headerTextWidth.value = width;
       headerMeasurementKey.value += 1;
+    },
+    setIndexIndicatorColumnIndexes(indexes: number[]) {
+      indexIndicatorColumnIndexes.value = indexes;
     },
   };
 }
@@ -101,6 +110,23 @@ describe("useDataGridColumnResize", () => {
     expect(state.columnWidths.value[0]).toBeGreaterThan(60);
   });
 
+  it("measures formatted display values instead of raw source values", () => {
+    const raw = createResizeState({
+      columns: ["event_time"],
+      rows: [[1786958306456]],
+    });
+    const formatted = createResizeState({
+      columns: ["event_time"],
+      rows: [[1786958306456]],
+      displayValue: () => "2026-08-17T17:18:26.456+08:00",
+    });
+
+    raw.initColumnWidths();
+    formatted.initColumnWidths();
+
+    expect(formatted.columnWidths.value[0]).toBeGreaterThan(raw.columnWidths.value[0]);
+  });
+
   it("clamps manual column resizing to the minimum width", () => {
     expect(resizeDataGridColumnWidth(120, -200)).toBe(DATA_GRID_COL_MIN_WIDTH);
     expect(resizeDataGridColumnWidth(120, 30)).toBe(150);
@@ -147,6 +173,32 @@ describe("useDataGridColumnResize", () => {
       columns: ["id", "name"],
       rows: [[1, "Alice"]],
       cacheKey: "result-a",
+    });
+    remounted.initColumnWidths();
+
+    expect(remounted.columnWidths.value).toEqual(first.columnWidths.value);
+  });
+
+  it("restores manually resized widths when the active result run changes", () => {
+    const firstResult = { id: "tab-1", activeResultRunId: "run-1", activeResultIndex: 2 };
+    const rerunResult = { ...firstResult, activeResultRunId: "run-2" };
+    const firstCacheKey = resultGridColumnWidthCacheKey(firstResult);
+
+    expect(resultGridColumnWidthCacheKey(rerunResult)).toBe(firstCacheKey);
+
+    const first = createResizeState({
+      columns: ["id", "resource"],
+      rows: [[1, "lock"]],
+      cacheKey: firstCacheKey,
+    });
+    first.initColumnWidths();
+    first.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 260 }));
+
+    const remounted = createResizeState({
+      columns: ["id", "resource"],
+      rows: [[1, "lock"]],
+      cacheKey: resultGridColumnWidthCacheKey(rerunResult),
     });
     remounted.initColumnWidths();
 
@@ -279,6 +331,22 @@ describe("useDataGridColumnResize", () => {
     longName.initColumnWidths();
     // 100×7+45=745，表头自动宽度限制为 500
     expect(longName.columnWidths.value[0]).toBe(500);
+  });
+
+  it("grows a short column when its index indicator metadata arrives", async () => {
+    const state = createResizeState({
+      columns: ["id"],
+      rows: [[1]],
+      density: "compact",
+      compactColumnHeaderActions: true,
+    });
+    state.initColumnWidths();
+    expect(state.columnWidths.value[0]).toBe(60);
+
+    state.setIndexIndicatorColumnIndexes([0]);
+    await nextTick();
+
+    expect(state.columnWidths.value[0]).toBe(75);
   });
 
   it("comfortable mode uses percentile to ignore outlier values", () => {

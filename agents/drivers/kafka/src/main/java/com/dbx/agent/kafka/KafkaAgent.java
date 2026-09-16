@@ -41,6 +41,8 @@ public final class KafkaAgent {
     private static final PrintStream JSON_RPC_OUT = System.out;
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+    private static final int MAX_PEEK_MESSAGE_COUNT = 100;
+    private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
@@ -144,6 +146,7 @@ public final class KafkaAgent {
             case "mq_alter_topic_config" -> alterTopicConfig(params);
             // Consumer groups
             case "mq_list_consumer_groups" -> listConsumerGroups(params);
+            case "mq_get_consumer_group_snapshot" -> getConsumerGroupSnapshot(params);
             case "mq_describe_consumer_group" -> describeConsumerGroup(params);
             case "mq_delete_consumer_group" -> deleteConsumerGroup(params);
             case "mq_reset_consumer_group_offsets" -> resetConsumerGroupOffsets(params);
@@ -285,6 +288,10 @@ public final class KafkaAgent {
     }
 
     private static KafkaProducer<String, byte[]> buildProducer(JsonObject conn) {
+        return new KafkaProducer<>(producerProperties(conn));
+    }
+
+    static Properties producerProperties(JsonObject conn) {
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers(conn));
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
@@ -292,8 +299,10 @@ public final class KafkaAgent {
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG,
             "org.apache.kafka.common.serialization.ByteArraySerializer");
         props.put(ProducerConfig.ACKS_CONFIG, "all");
+        // Kafka 3.x enables idempotence by default, which rejects pre-0.11 brokers.
+        props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "false");
         applyConnectionProperties(conn, props);
-        return new KafkaProducer<>(props);
+        return props;
     }
 
     private static String bootstrapServers(JsonObject conn) {
@@ -498,16 +507,9 @@ public final class KafkaAgent {
             }
         }
 
+        // TLS properties
         JsonObject tls = conn.has("tls") && conn.get("tls").isJsonObject()
             ? conn.getAsJsonObject("tls") : null;
-        boolean skipVerify = boolOrDefault(conn, "tls_skip_verify", false)
-            || boolOrDefault(conn, "tlsSkipVerify", false)
-            || (tls != null && boolOrDefault(tls, "skip_verify", false));
-        if (skipVerify) {
-            props.put("ssl.endpoint.identification.algorithm", "");
-        }
-
-        // TLS properties
         if (tls != null) {
             String truststorePath = stringOrEmpty(tls, "truststore_path");
             if (!truststorePath.isBlank()) {
@@ -531,6 +533,20 @@ public final class KafkaAgent {
     static void applyConnectionProperties(JsonObject conn, Properties props) {
         applySecurityProperties(conn, props);
         applyExtraProperties(conn, props);
+        applyTlsSkipVerification(conn, props);
+    }
+
+    private static void applyTlsSkipVerification(JsonObject conn, Properties props) {
+        JsonObject tls = conn.has("tls") && conn.get("tls").isJsonObject()
+            ? conn.getAsJsonObject("tls") : null;
+        boolean skipVerify = boolOrDefault(conn, "tls_skip_verify", false)
+            || boolOrDefault(conn, "tlsSkipVerify", false)
+            || (tls != null && boolOrDefault(tls, "skip_verify", false));
+        if (!skipVerify) return;
+
+        DbxInsecureTrustManagerFactory.ensureRegistered();
+        props.put("ssl.endpoint.identification.algorithm", "");
+        props.put("ssl.trustmanager.algorithm", DbxInsecureTrustManagerFactory.ALGORITHM);
     }
 
     static String jaasValue(String value) {
@@ -607,28 +623,56 @@ public final class KafkaAgent {
     private static Object listTopics(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
-        Set<String> names = admin.listTopics(new ListTopicsOptions().timeoutMs(timeout))
-            .names().get(timeout, TimeUnit.MILLISECONDS);
-        if (names.isEmpty()) {
+        Collection<TopicListing> listings = admin.listTopics(new ListTopicsOptions().timeoutMs(timeout))
+            .listings().get(timeout, TimeUnit.MILLISECONDS);
+        return topicListResult(
+            listings,
+            names -> admin.describeTopics(names).allTopicNames().get(timeout, TimeUnit.MILLISECONDS)
+        );
+    }
+
+    static Object topicListResult(Collection<TopicListing> listings, TopicDescriptionLoader descriptionLoader) throws Exception {
+        if (listings.isEmpty()) {
             return Collections.singletonMap("topics", Collections.emptyList());
         }
 
-        Map<String, TopicDescription> descriptions = admin.describeTopics(names)
-            .allTopicNames().get(timeout, TimeUnit.MILLISECONDS);
-
         List<Map<String, Object>> topics = new ArrayList<>();
-        for (Map.Entry<String, TopicDescription> entry : descriptions.entrySet()) {
-            TopicDescription desc = entry.getValue();
-            Map<String, Object> topic = new LinkedHashMap<>();
-            topic.put("name", desc.name());
-            topic.put("partitions", desc.partitions().size());
-            topic.put("replicationFactor", desc.partitions().isEmpty() ? 0
-                : desc.partitions().get(0).replicas().size());
-            topic.put("internal", desc.isInternal());
-            topics.add(topic);
+        try {
+            Set<String> names = listings.stream().map(TopicListing::name).collect(Collectors.toCollection(LinkedHashSet::new));
+            Map<String, TopicDescription> descriptions = descriptionLoader.load(names);
+            for (TopicDescription desc : descriptions.values()) {
+                Map<String, Object> topic = new LinkedHashMap<>();
+                topic.put("name", desc.name());
+                topic.put("partitions", desc.partitions().size());
+                topic.put("replicationFactor", desc.partitions().isEmpty() ? 0
+                    : desc.partitions().get(0).replicas().size());
+                topic.put("internal", desc.isInternal());
+                topics.add(topic);
+            }
+        } catch (Exception error) {
+            if (!isUnsupportedVersionError(error) && !isTimeoutError(error)) {
+                throw error;
+            }
+            if (isTimeoutError(error)) {
+                logger().warn(
+                    "Kafka topic descriptions timed out; returning topic names without partition metadata",
+                    error
+                );
+            }
+            for (TopicListing listing : listings) {
+                Map<String, Object> topic = new LinkedHashMap<>();
+                topic.put("name", listing.name());
+                topic.put("internal", listing.isInternal());
+                topics.add(topic);
+            }
         }
         topics.sort(Comparator.comparing(m -> (String) m.get("name")));
         return Collections.singletonMap("topics", topics);
+    }
+
+    @FunctionalInterface
+    interface TopicDescriptionLoader {
+        Map<String, TopicDescription> load(Set<String> names) throws Exception;
     }
 
     private static Object createTopic(JsonObject params) throws Exception {
@@ -680,8 +724,22 @@ public final class KafkaAgent {
         int timeout = requestTimeout(params);
         String name = stringOrEmpty(params, "name");
 
+        try {
+            return modernTopicStats(admin, name, timeout);
+        } catch (Exception error) {
+            if (!hasUnsupportedVersionException(error)) {
+                throw error;
+            }
+            return legacyTopicStats(name, timeout);
+        }
+    }
+
+    private static Object modernTopicStats(AdminClient admin, String name, int timeout) throws Exception {
         TopicDescription desc = admin.describeTopics(Collections.singletonList(name))
             .allTopicNames().get(timeout, TimeUnit.MILLISECONDS).get(name);
+        if (desc == null) {
+            throw new UnknownTopicOrPartitionException("Kafka topic does not exist: " + name);
+        }
 
         // Collect offsets for size estimation
         Map<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> endOffsets = new LinkedHashMap<>();
@@ -724,14 +782,101 @@ public final class KafkaAgent {
         return result;
     }
 
+    private static Object legacyTopicStats(String name, int timeout) {
+        Properties props = topicStatsConsumerProperties(activeConnection);
+        Duration requestTimeout = Duration.ofMillis(timeout);
+        try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
+            Map<String, List<PartitionInfo>> topics = consumer.listTopics(requestTimeout);
+            requireExistingTopic(topics.keySet(), name);
+            List<PartitionInfo> partitions = topics.get(name);
+            List<TopicPartition> topicPartitions = partitions.stream()
+                .map(partition -> new TopicPartition(name, partition.partition()))
+                .collect(Collectors.toList());
+            Map<TopicPartition, Long> beginningOffsets = consumer.beginningOffsets(topicPartitions, requestTimeout);
+            Map<TopicPartition, Long> endOffsets = consumer.endOffsets(topicPartitions, requestTimeout);
+            return legacyTopicStatsResult(name, partitions, beginningOffsets, endOffsets);
+        }
+    }
+
+    static void requireExistingTopic(Collection<String> topicNames, String name) {
+        if (!topicNames.contains(name)) {
+            throw new UnknownTopicOrPartitionException("Kafka topic does not exist: " + name);
+        }
+    }
+
+    static Properties topicStatsConsumerProperties(JsonObject conn) {
+        if (conn == null) {
+            throw new IllegalStateException("Kafka Agent is not connected");
+        }
+        Properties props = peekConsumerProperties(conn, 1);
+        // The fallback discovers the topic through all-topics metadata, which cannot create
+        // a topic, before issuing requests for its concrete partitions.
+        props.put(ConsumerConfig.ALLOW_AUTO_CREATE_TOPICS_CONFIG, "true");
+        return props;
+    }
+
+    static Object legacyTopicStatsResult(
+        String name,
+        List<PartitionInfo> partitions,
+        Map<TopicPartition, Long> beginningOffsets,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        long totalMessages = 0;
+        List<Map<String, Object>> partitionStats = new ArrayList<>();
+        for (PartitionInfo partition : partitions) {
+            TopicPartition topicPartition = new TopicPartition(name, partition.partition());
+            long begin = beginningOffsets.get(topicPartition);
+            long end = endOffsets.get(topicPartition);
+            long count = end - begin;
+            totalMessages += count;
+
+            Map<String, Object> stats = new LinkedHashMap<>();
+            stats.put("partition", partition.partition());
+            stats.put("leader", partition.leader() != null ? partition.leader().id() : -1);
+            stats.put("replicas", Arrays.stream(partition.replicas()).map(Node::id).collect(Collectors.toList()));
+            stats.put("isr", Arrays.stream(partition.inSyncReplicas()).map(Node::id).collect(Collectors.toList()));
+            stats.put("beginOffset", begin);
+            stats.put("endOffset", end);
+            stats.put("messageCount", count);
+            partitionStats.add(stats);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("name", name);
+        result.put("partitions", partitions.size());
+        result.put("replicationFactor", partitions.isEmpty() ? 0 : partitions.get(0).replicas().length);
+        result.put("totalMessages", totalMessages);
+        result.put("partitionStats", partitionStats);
+        return result;
+    }
+
     private static Object getTopicConfig(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
         String name = stringOrEmpty(params, "name");
 
         ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, name);
-        Config config = admin.describeConfigs(Collections.singletonList(resource))
-            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource);
+        return topicConfigResult(() -> admin.describeConfigs(Collections.singletonList(resource))
+            .all().get(timeout, TimeUnit.MILLISECONDS).get(resource));
+    }
+
+    static Object topicConfigResult(TopicConfigLoader configLoader) throws Exception {
+        Config config;
+        try {
+            config = configLoader.load();
+        } catch (Exception error) {
+            if (!hasUnsupportedVersionException(error)) {
+                throw error;
+            }
+            Map<String, Object> unsupported = new LinkedHashMap<>();
+            unsupported.put("configs", Collections.emptyMap());
+            unsupported.put("configSupported", false);
+            unsupported.put(
+                "unsupportedReason",
+                "Topic configuration is unavailable because this Kafka broker does not support DescribeConfigs."
+            );
+            return unsupported;
+        }
 
         Map<String, Object> configs = new LinkedHashMap<>();
         for (ConfigEntry entry : config.entries()) {
@@ -744,6 +889,11 @@ public final class KafkaAgent {
             configs.put(entry.name(), entryMap);
         }
         return Collections.singletonMap("configs", configs);
+    }
+
+    @FunctionalInterface
+    interface TopicConfigLoader {
+        Config load() throws Exception;
     }
 
     private static Object alterTopicConfig(JsonObject params) throws Exception {
@@ -819,20 +969,384 @@ public final class KafkaAgent {
     private static Object listConsumerGroups(JsonObject params) throws Exception {
         AdminClient admin = requireAdmin();
         int timeout = requestTimeout(params);
+        String filterTopic = stringOrEmpty(params, "topic");
+
         Collection<ConsumerGroupListing> groups = admin.listConsumerGroups(
                 new ListConsumerGroupsOptions().timeoutMs(timeout))
             .all().get(timeout, TimeUnit.MILLISECONDS);
 
+        List<String> groupIds = groups.stream()
+            .map(ConsumerGroupListing::groupId)
+            .sorted()
+            .toList();
+        if (groupIds.isEmpty()) {
+            return Collections.singletonMap("groups", Collections.emptyList());
+        }
+
+        // Batch-describe every group in one Kafka Admin request. Per-group
+        // failures degrade to an empty member list instead of failing the batch.
+        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
+        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
+            groupIds,
+            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                descriptions.put(
+                    groupId,
+                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
+                );
+            } catch (Exception error) {
+                logger().debug("Consumer group details unavailable for {}: {}", groupId, normalizeErrorMessage(error));
+            }
+        }
+
+        // Batch-resolve committed offsets for every group in one Admin request.
+        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
+        for (String groupId : groupIds) {
+            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
+        }
+        Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
+        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
+            offsetSpecs,
+            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                Map<TopicPartition, OffsetAndMetadata> rows = offsetsResult
+                    .partitionsToOffsetAndMetadata(groupId)
+                    .get(timeout, TimeUnit.MILLISECONDS);
+                committedOffsets.put(groupId, rows == null ? Collections.emptyMap() : rows);
+            } catch (Exception error) {
+                committedOffsets.put(groupId, Collections.emptyMap());
+                logger().debug("Committed offsets unavailable for {}: {}", groupId, normalizeErrorMessage(error));
+            }
+        }
+
+        // End offsets: one batched Admin request limited to the requested
+        // topic's partitions (deduplicated across groups). Without a topic
+        // filter no end offsets are resolved, keeping the listing cheap.
+        Map<TopicPartition, Long> endOffsets = new HashMap<>();
+        if (!filterTopic.isEmpty()) {
+            LinkedHashSet<TopicPartition> topicPartitions = new LinkedHashSet<>();
+            for (Map<TopicPartition, OffsetAndMetadata> rows : committedOffsets.values()) {
+                for (TopicPartition topicPartition : rows.keySet()) {
+                    if (topicPartition.topic().equals(filterTopic)) {
+                        topicPartitions.add(topicPartition);
+                    }
+                }
+            }
+            if (!topicPartitions.isEmpty()) {
+                Map<TopicPartition, OffsetSpec> endOffsetSpecs = new LinkedHashMap<>();
+                for (TopicPartition topicPartition : topicPartitions) {
+                    endOffsetSpecs.put(topicPartition, OffsetSpec.latest());
+                }
+                try {
+                    ListOffsetsResult latestOffsets = admin.listOffsets(
+                        endOffsetSpecs,
+                        new ListOffsetsOptions().timeoutMs(timeout)
+                    );
+                    for (TopicPartition topicPartition : topicPartitions) {
+                        try {
+                            ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
+                                .partitionResult(topicPartition)
+                                .get(timeout, TimeUnit.MILLISECONDS);
+                            endOffsets.put(topicPartition, info.offset());
+                        } catch (Exception error) {
+                            // Leave the partition absent so callers can tell an
+                            // unknown end offset (no lag contribution) apart from zero lag.
+                            logger().debug("End offset unavailable for {}: {}", topicPartition, normalizeErrorMessage(error));
+                        }
+                    }
+                } catch (Exception error) {
+                    logger().debug("End offset batch unavailable: {}", normalizeErrorMessage(error));
+                }
+            }
+        }
+
+        Map<String, ConsumerGroupListing> listingByGroup = groups.stream()
+            .collect(Collectors.toMap(ConsumerGroupListing::groupId, listing -> listing));
+
         List<Map<String, Object>> result = new ArrayList<>();
-        for (ConsumerGroupListing group : groups) {
+        for (String groupId : groupIds) {
+            ConsumerGroupListing listing = listingByGroup.get(groupId);
+            ConsumerGroupDescription description = descriptions.get(groupId);
+            Map<TopicPartition, OffsetAndMetadata> committed = committedOffsets.getOrDefault(groupId, Collections.emptyMap());
+
             Map<String, Object> g = new LinkedHashMap<>();
-            g.put("groupId", group.groupId());
-            g.put("state", group.state().map(Enum::name).orElse("UNKNOWN"));
-            g.put("simpleGroup", group.isSimpleConsumerGroup());
+            g.put("groupId", groupId);
+            g.put("state", listing == null ? "UNKNOWN" : listing.state().map(Enum::name).orElse("UNKNOWN"));
+            g.put("simpleGroup", listing != null && listing.isSimpleConsumerGroup());
+            g.put("members", memberMaps(description == null ? Collections.emptyList() : description.members()));
+            g.put("committedOffsets", offsetRows(committed, filterTopic));
+            g.put("endOffsets", endOffsetRows(committed, endOffsets, filterTopic));
             result.add(g);
         }
-        result.sort(Comparator.comparing(m -> (String) m.get("groupId")));
         return Collections.singletonMap("groups", result);
+    }
+
+    static List<Map<String, Object>> memberMaps(Collection<MemberDescription> members) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (MemberDescription member : members) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("memberId", member.consumerId());
+            m.put("clientId", member.clientId());
+            m.put("host", member.host());
+            List<Map<String, Object>> assignments = new ArrayList<>();
+            for (TopicPartition topicPartition : member.assignment().topicPartitions()) {
+                Map<String, Object> a = new LinkedHashMap<>();
+                a.put("topic", topicPartition.topic());
+                a.put("partition", topicPartition.partition());
+                assignments.add(a);
+            }
+            m.put("assignments", assignments);
+            result.add(m);
+        }
+        return result;
+    }
+
+    /** Committed offsets as rows, optionally restricted to one topic. */
+    static List<Map<String, Object>> offsetRows(Map<TopicPartition, OffsetAndMetadata> offsets, String topic) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map.Entry<TopicPartition, OffsetAndMetadata> entry : offsets.entrySet()) {
+            if (!topic.isEmpty() && !entry.getKey().topic().equals(topic)) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("topic", entry.getKey().topic());
+            row.put("partition", entry.getKey().partition());
+            row.put("offset", entry.getValue().offset());
+            rows.add(row);
+        }
+        rows.sort(Comparator.comparingInt(row -> (int) row.get("partition")));
+        return rows;
+    }
+
+    /** End offsets for a group's committed partitions, restricted to one topic. */
+    static List<Map<String, Object>> endOffsetRows(
+        Map<TopicPartition, OffsetAndMetadata> committed,
+        Map<TopicPartition, Long> endOffsets,
+        String topic
+    ) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (TopicPartition topicPartition : committed.keySet()) {
+            if (!topic.isEmpty() && !topicPartition.topic().equals(topic)) {
+                continue;
+            }
+            Long endOffset = endOffsets.get(topicPartition);
+            if (endOffset == null) {
+                continue;
+            }
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("topic", topicPartition.topic());
+            row.put("partition", topicPartition.partition());
+            row.put("offset", endOffset);
+            rows.add(row);
+        }
+        rows.sort(Comparator.comparingInt(row -> (int) row.get("partition")));
+        return rows;
+    }
+
+    private static Object getConsumerGroupSnapshot(JsonObject params) throws Exception {
+        AdminClient admin = requireAdmin();
+        int timeout = requestTimeout(params);
+        Collection<ConsumerGroupListing> listings = admin.listConsumerGroups(
+                new ListConsumerGroupsOptions().timeoutMs(timeout))
+            .all().get(timeout, TimeUnit.MILLISECONDS);
+
+        List<ConsumerGroupListing> sortedListings = new ArrayList<>(listings);
+        sortedListings.sort(Comparator.comparing(ConsumerGroupListing::groupId));
+        if (sortedListings.isEmpty()) {
+            return Collections.singletonMap("groups", Collections.emptyList());
+        }
+
+        List<String> groupIds = sortedListings.stream()
+            .map(ConsumerGroupListing::groupId)
+            .toList();
+        Map<String, ConsumerGroupDescription> descriptions = new HashMap<>();
+        Map<String, Map<TopicPartition, OffsetAndMetadata>> committedOffsets = new HashMap<>();
+        Map<String, Boolean> committedOffsetsAvailable = new HashMap<>();
+        Map<String, LinkedHashSet<String>> errors = new HashMap<>();
+
+        DescribeConsumerGroupsResult described = admin.describeConsumerGroups(
+            groupIds,
+            new DescribeConsumerGroupsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                descriptions.put(
+                    groupId,
+                    described.describedGroups().get(groupId).get(timeout, TimeUnit.MILLISECONDS)
+                );
+            } catch (Exception error) {
+                snapshotErrors(errors, groupId).add("Consumer group details unavailable: " + normalizeErrorMessage(error));
+            }
+        }
+
+        Map<String, ListConsumerGroupOffsetsSpec> offsetSpecs = new LinkedHashMap<>();
+        for (String groupId : groupIds) {
+            offsetSpecs.put(groupId, new ListConsumerGroupOffsetsSpec());
+        }
+        ListConsumerGroupOffsetsResult offsetsResult = admin.listConsumerGroupOffsets(
+            offsetSpecs,
+            new ListConsumerGroupOffsetsOptions().timeoutMs(timeout)
+        );
+        for (String groupId : groupIds) {
+            try {
+                Map<TopicPartition, OffsetAndMetadata> groupOffsets = offsetsResult
+                    .partitionsToOffsetAndMetadata(groupId)
+                    .get(timeout, TimeUnit.MILLISECONDS);
+                committedOffsets.put(groupId, groupOffsets == null ? Collections.emptyMap() : groupOffsets);
+                committedOffsetsAvailable.put(groupId, true);
+            } catch (Exception error) {
+                committedOffsets.put(groupId, Collections.emptyMap());
+                committedOffsetsAvailable.put(groupId, false);
+                snapshotErrors(errors, groupId).add("Committed offsets unavailable: " + normalizeErrorMessage(error));
+            }
+        }
+
+        Map<String, Set<TopicPartition>> assignedPartitions = new HashMap<>();
+        Set<TopicPartition> allPartitions = new LinkedHashSet<>();
+        for (String groupId : groupIds) {
+            Set<TopicPartition> assigned = new LinkedHashSet<>();
+            ConsumerGroupDescription description = descriptions.get(groupId);
+            if (description != null) {
+                for (MemberDescription member : description.members()) {
+                    assigned.addAll(member.assignment().topicPartitions());
+                }
+            }
+            assignedPartitions.put(groupId, assigned);
+            allPartitions.addAll(assigned);
+            allPartitions.addAll(committedOffsets.getOrDefault(groupId, Collections.emptyMap()).keySet());
+        }
+
+        Map<TopicPartition, Long> endOffsets = new HashMap<>();
+        Map<TopicPartition, String> endOffsetErrors = new HashMap<>();
+        if (!allPartitions.isEmpty()) {
+            Map<TopicPartition, OffsetSpec> endOffsetSpecs = new LinkedHashMap<>();
+            for (TopicPartition topicPartition : allPartitions) {
+                endOffsetSpecs.put(topicPartition, OffsetSpec.latest());
+            }
+            try {
+                ListOffsetsResult latestOffsets = admin.listOffsets(
+                    endOffsetSpecs,
+                    new ListOffsetsOptions().timeoutMs(timeout)
+                );
+                for (TopicPartition topicPartition : allPartitions) {
+                    try {
+                        ListOffsetsResult.ListOffsetsResultInfo info = latestOffsets
+                            .partitionResult(topicPartition)
+                            .get(timeout, TimeUnit.MILLISECONDS);
+                        endOffsets.put(topicPartition, info.offset());
+                    } catch (Exception error) {
+                        endOffsetErrors.put(topicPartition, normalizeErrorMessage(error));
+                    }
+                }
+            } catch (Exception error) {
+                String message = normalizeErrorMessage(error);
+                for (TopicPartition topicPartition : allPartitions) {
+                    endOffsetErrors.put(topicPartition, message);
+                }
+            }
+        }
+
+        List<Map<String, Object>> groups = new ArrayList<>();
+        for (ConsumerGroupListing listing : sortedListings) {
+            String groupId = listing.groupId();
+            ConsumerGroupDescription description = descriptions.get(groupId);
+            Set<TopicPartition> groupPartitions = new LinkedHashSet<>(
+                assignedPartitions.getOrDefault(groupId, Collections.emptySet())
+            );
+            groupPartitions.addAll(committedOffsets.getOrDefault(groupId, Collections.emptyMap()).keySet());
+            long unavailableEndOffsetCount = groupPartitions.stream()
+                .filter(endOffsetErrors::containsKey)
+                .count();
+            if (unavailableEndOffsetCount > 0) {
+                snapshotErrors(errors, groupId).add(
+                    "End offsets unavailable for " + unavailableEndOffsetCount + " partition(s)"
+                );
+            }
+            groups.add(consumerGroupSnapshotRow(
+                groupId,
+                description != null
+                    ? description.state().name()
+                    : listing.state().map(Enum::name).orElse("UNKNOWN"),
+                listing.isSimpleConsumerGroup(),
+                description == null ? null : description.members().size(),
+                assignedPartitions.getOrDefault(groupId, Collections.emptySet()),
+                committedOffsets.getOrDefault(groupId, Collections.emptyMap()),
+                committedOffsetsAvailable.getOrDefault(groupId, false),
+                endOffsets,
+                errors.getOrDefault(groupId, new LinkedHashSet<>())
+            ));
+        }
+
+        return Collections.singletonMap("groups", groups);
+    }
+
+    private static LinkedHashSet<String> snapshotErrors(
+        Map<String, LinkedHashSet<String>> errors,
+        String groupId
+    ) {
+        return errors.computeIfAbsent(groupId, ignored -> new LinkedHashSet<>());
+    }
+
+    static Map<String, Object> consumerGroupSnapshotRow(
+        String groupId,
+        String state,
+        boolean simpleGroup,
+        Integer memberCount,
+        Collection<TopicPartition> assignedPartitions,
+        Map<TopicPartition, OffsetAndMetadata> committedOffsets,
+        boolean committedOffsetsAvailable,
+        Map<TopicPartition, Long> endOffsets,
+        Collection<String> errors
+    ) {
+        Set<TopicPartition> topicPartitions = new LinkedHashSet<>(assignedPartitions);
+        topicPartitions.addAll(committedOffsets.keySet());
+        List<TopicPartition> sortedPartitions = new ArrayList<>(topicPartitions);
+        sortedPartitions.sort(Comparator
+            .comparing(TopicPartition::topic)
+            .thenComparingInt(TopicPartition::partition));
+
+        Set<String> topics = new TreeSet<>();
+        List<Map<String, Object>> partitions = new ArrayList<>();
+        long totalLag = 0;
+        boolean lagAvailable = committedOffsetsAvailable && !sortedPartitions.isEmpty();
+        for (TopicPartition topicPartition : sortedPartitions) {
+            topics.add(topicPartition.topic());
+            OffsetAndMetadata committed = committedOffsets.get(topicPartition);
+            Long currentOffset = committed == null ? null : committed.offset();
+            Long endOffset = endOffsets.get(topicPartition);
+            Long lag = currentOffset == null || endOffset == null
+                ? null
+                : Math.max(0, endOffset - currentOffset);
+            if (lag == null) {
+                lagAvailable = false;
+            } else {
+                totalLag += lag;
+            }
+
+            Map<String, Object> partition = new LinkedHashMap<>();
+            partition.put("topic", topicPartition.topic());
+            partition.put("partition", topicPartition.partition());
+            partition.put("currentOffset", currentOffset);
+            partition.put("endOffset", endOffset);
+            partition.put("lag", lag);
+            partitions.add(partition);
+        }
+
+        Map<String, Object> group = new LinkedHashMap<>();
+        group.put("groupId", groupId);
+        group.put("state", state);
+        group.put("simpleGroup", simpleGroup);
+        group.put("memberCount", memberCount);
+        group.put("topics", new ArrayList<>(topics));
+        group.put("totalLag", lagAvailable ? totalLag : null);
+        group.put("lagAvailable", lagAvailable);
+        group.put("partitions", partitions);
+        group.put("error", errors.isEmpty() ? null : String.join("; ", errors));
+        return group;
     }
 
     private static Object describeConsumerGroup(JsonObject params) throws Exception {
@@ -949,16 +1463,7 @@ public final class KafkaAgent {
         String groupId = stringOrEmpty(params, "groupId");
         String topic = stringOrEmpty(params, "topic");
 
-        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
-        JsonArray offsetArray = params.has("offsets") && params.get("offsets").isJsonArray()
-            ? params.getAsJsonArray("offsets") : new JsonArray();
-
-        for (JsonElement el : offsetArray) {
-            JsonObject offsetObj = el.getAsJsonObject();
-            int partition = offsetObj.get("partition").getAsInt();
-            long offset = offsetObj.get("offset").getAsLong();
-            offsets.put(new TopicPartition(topic, partition), new OffsetAndMetadata(offset));
-        }
+        Map<TopicPartition, OffsetAndMetadata> offsets = explicitConsumerGroupOffsets(params, topic);
 
         // If no explicit offsets, check for a "position" parameter.
         if (offsets.isEmpty()) {
@@ -1002,6 +1507,58 @@ public final class KafkaAgent {
         return Collections.singletonMap("ok", true);
     }
 
+    static Map<TopicPartition, OffsetAndMetadata> explicitConsumerGroupOffsets(JsonObject params, String topic) {
+        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+        if (!params.has("offsets")) {
+            return offsets;
+        }
+        JsonElement offsetsElement = params.get("offsets");
+        if (!offsetsElement.isJsonArray()) {
+            throw new IllegalArgumentException("offsets must be an array");
+        }
+        JsonArray offsetArray = offsetsElement.getAsJsonArray();
+        if (offsetArray.isEmpty()) {
+            throw new IllegalArgumentException("offsets must contain at least one partition offset");
+        }
+        for (JsonElement element : offsetArray) {
+            if (!element.isJsonObject()) {
+                throw new IllegalArgumentException("each offset must be an object");
+            }
+            JsonObject value = element.getAsJsonObject();
+            int partition = nonNegativeExactInt(value, "partition");
+            long offset = nonNegativeExactLong(value, "offset");
+            TopicPartition topicPartition = new TopicPartition(topic, partition);
+            if (offsets.put(topicPartition, new OffsetAndMetadata(offset)) != null) {
+                throw new IllegalArgumentException("duplicate partition in offsets: " + partition);
+            }
+        }
+        return offsets;
+    }
+
+    private static int nonNegativeExactInt(JsonObject object, String name) {
+        long value = nonNegativeExactLong(object, name);
+        if (value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(name + " is outside the supported integer range");
+        }
+        return (int) value;
+    }
+
+    private static long nonNegativeExactLong(JsonObject object, String name) {
+        JsonElement element = object.get(name);
+        if (element == null || !element.isJsonPrimitive() || !element.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(name + " must be a non-negative integer");
+        }
+        try {
+            java.math.BigDecimal decimal = element.getAsBigDecimal();
+            if (decimal.signum() < 0 || decimal.stripTrailingZeros().scale() > 0) {
+                throw new IllegalArgumentException(name + " must be a non-negative integer");
+            }
+            return decimal.longValueExact();
+        } catch (ArithmeticException error) {
+            throw new IllegalArgumentException(name + " is outside the supported integer range", error);
+        }
+    }
+
     static OffsetSpec offsetSpecForPosition(String position, Long timestampMs) {
         String normalized = position == null ? "latest" : position.trim().toLowerCase(Locale.ROOT);
         return switch (normalized) {
@@ -1025,31 +1582,43 @@ public final class KafkaAgent {
         String topic = stringOrEmpty(params, "topic");
         Integer partition = integerOrNull(params, "partition");
         Long offset = longOrNull(params, "offset");
-        int count = Math.max(1, intOrDefault(params, "count", 10));
+        int count = validatedPeekCount(intOrDefault(params, "count", 10));
+        PeekStartPosition startPosition = peekStartPosition(params);
+        boolean explicitStartPosition = stringOrNull(params, "startPosition") != null;
+        validatePeekRequest(startPosition, explicitStartPosition, partition, offset);
+        boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
         if (conn == null) {
             throw new IllegalStateException("Kafka Agent is not connected");
         }
         Properties props = peekConsumerProperties(conn, count);
+        Duration requestTimeout = Duration.ofMillis(peekRequestTimeoutMs(conn, props));
 
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
-            List<TopicPartition> candidatePartitions = resolvePeekPartitions(consumer, topic, partition);
+            List<TopicPartition> candidatePartitions = resolvePeekPartitions(
+                consumer, topic, partition, requestTimeout
+            );
             if (candidatePartitions.isEmpty()) {
-                return Collections.singletonMap("messages", Collections.emptyList());
+                return peekMessagesResult(Collections.emptyList(), false);
             }
 
             Map<TopicPartition, Long> beginningOffsets =
-                consumer.beginningOffsets(candidatePartitions, Duration.ofSeconds(5));
+                consumer.beginningOffsets(candidatePartitions, requestTimeout);
             Map<TopicPartition, Long> endOffsets =
-                consumer.endOffsets(candidatePartitions, Duration.ofSeconds(5));
+                consumer.endOffsets(candidatePartitions, requestTimeout);
 
             List<TopicPartition> readablePartitions = new ArrayList<>();
             Map<TopicPartition, Long> seekOffsets = new LinkedHashMap<>();
             for (TopicPartition tp : candidatePartitions) {
                 long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
                 long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
-                long requestedOffset = offset != null ? offset : beginningOffset;
+                Long requestedOffset = requestedPeekOffset(
+                    startPosition, offset, legacyOffsetRequest, beginningOffset, endOffset
+                );
+                if (requestedOffset == null) {
+                    continue;
+                }
                 Long seekOffset = normalizePeekOffset(requestedOffset, beginningOffset, endOffset);
                 if (seekOffset == null) {
                     continue;
@@ -1058,7 +1627,27 @@ public final class KafkaAgent {
                 seekOffsets.put(tp, seekOffset);
             }
             if (readablePartitions.isEmpty()) {
-                return Collections.singletonMap("messages", Collections.emptyList());
+                return peekMessagesResult(Collections.emptyList(), false);
+            }
+
+            int messagesPerPartition = startPosition == PeekStartPosition.LATEST
+                ? latestPeekMessagesPerPartition(count, readablePartitions.size())
+                : peekMessagesPerPartition(count, readablePartitions.size());
+            int scanLimit = peekScanLimit(count, readablePartitions.size(), startPosition);
+            boolean latestBudgetLimited = startPosition == PeekStartPosition.LATEST
+                && latestPeekBudgetLimited(count, readablePartitions.size());
+            Map<TopicPartition, Long> snapshotEndOffsets = new LinkedHashMap<>();
+            if (startPosition == PeekStartPosition.LATEST) {
+                for (TopicPartition tp : readablePartitions) {
+                    long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
+                    long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                    seekOffsets.put(tp, recentPeekStartOffset(
+                        beginningOffset, endOffset, messagesPerPartition
+                    ));
+                }
+            }
+            for (TopicPartition tp : readablePartitions) {
+                snapshotEndOffsets.put(tp, endOffsets.getOrDefault(tp, 0L));
             }
 
             consumer.assign(readablePartitions);
@@ -1066,25 +1655,86 @@ public final class KafkaAgent {
                 consumer.seek(entry.getKey(), entry.getValue());
             }
 
-            List<Map<String, Object>> messages = collectPeekedMessages(
-                timeout -> consumer.poll(timeout),
-                () -> {
-                    Map<TopicPartition, Long> positions = new LinkedHashMap<>();
-                    for (TopicPartition tp : readablePartitions) {
-                        positions.put(tp, consumer.position(tp));
-                    }
-                    return allPeekPartitionsCaughtUp(readablePartitions, positions, endOffsets);
-                },
-                count,
-                System.nanoTime() + Duration.ofSeconds(5).toNanos(),
-                Duration.ofMillis(500)
-            );
-            sortPeekedMessages(messages);
-            if (messages.size() > count) {
-                messages = new ArrayList<>(messages.subList(0, count));
+            long deadlineNs = System.nanoTime() + requestTimeout.toNanos();
+            Duration pollTimeout = Duration.ofMillis(Math.min(500L, requestTimeout.toMillis()));
+            PeekCollectionState collection;
+            if (startPosition == PeekStartPosition.LATEST) {
+                collection = collectLatestPeekedMessages(
+                    consumer,
+                    readablePartitions,
+                    beginningOffsets,
+                    seekOffsets,
+                    snapshotEndOffsets,
+                    messagesPerPartition,
+                    scanLimit,
+                    deadlineNs,
+                    pollTimeout
+                );
+                collection.incomplete = collection.incomplete || latestBudgetLimited;
+            } else {
+                PeekCollectionCompletionChecker snapshotComplete = state -> allPeekPartitionsComplete(
+                    readablePartitions,
+                    state.remainingByPartition,
+                    currentPeekPositions(consumer, readablePartitions),
+                    snapshotEndOffsets
+                );
+                collection = new PeekCollectionState(readablePartitions, messagesPerPartition);
+                collection.incomplete = !collectPeekedMessages(
+                    timeout -> consumer.poll(timeout),
+                    snapshotComplete,
+                    record -> recordIsBeforeEndOffset(record, snapshotEndOffsets),
+                    collection,
+                    scanLimit,
+                    deadlineNs,
+                    pollTimeout
+                );
             }
-            return Collections.singletonMap("messages", messages);
+            List<Map<String, Object>> messages = sortAndLimitPeekedMessages(
+                collection.messages, count, startPosition
+            );
+            return peekMessagesResult(messages, collection.incomplete);
         }
+    }
+
+    static Map<String, Object> peekMessagesResult(List<Map<String, Object>> messages, boolean incomplete) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("messages", messages);
+        result.put("incomplete", incomplete);
+        return result;
+    }
+
+    static int validatedPeekCount(int count) {
+        if (count < 1 || count > MAX_PEEK_MESSAGE_COUNT) {
+            throw new IllegalArgumentException(
+                "Peek message count must be between 1 and " + MAX_PEEK_MESSAGE_COUNT
+            );
+        }
+        return count;
+    }
+
+    static int peekRequestTimeoutMs(JsonObject conn, Properties props) {
+        Integer connectionTimeout = integerOrNull(conn, "request_timeout_ms");
+        if (connectionTimeout != null) {
+            return positiveTimeoutMs("request_timeout_ms", connectionTimeout);
+        }
+        String configuredTimeout = props.getProperty(
+            ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG,
+            String.valueOf(DEFAULT_REQUEST_TIMEOUT_MS)
+        );
+        try {
+            return positiveTimeoutMs(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, Integer.parseInt(configuredTimeout));
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException(
+                ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG + " must be a positive integer", error
+            );
+        }
+    }
+
+    private static int positiveTimeoutMs(String name, int timeoutMs) {
+        if (timeoutMs <= 0) {
+            throw new IllegalArgumentException(name + " must be a positive integer");
+        }
+        return timeoutMs;
     }
 
     static Properties peekConsumerProperties(JsonObject conn, int count) {
@@ -1103,19 +1753,45 @@ public final class KafkaAgent {
     }
 
     /**
-     * Poll until {@code count} messages are collected, every assigned partition has reached its
-     * end offset, or {@code deadlineNs} expires. Empty polls retry until caught-up or deadline —
-     * they must not abort early (broker / network / first-fetch latency can exceed one poll).
+     * Reads until each partition supplies its share of the page or reaches the snapshot boundary.
+     * This counts retained records, rather than treating an offset range as a record count.
      */
     static List<Map<String, Object>> collectPeekedMessages(
         PeekRecordPoller poller,
         PeekCaughtUpChecker caughtUpChecker,
-        int count,
+        PeekRecordFilter recordFilter,
+        List<TopicPartition> partitions,
+        int messagesPerPartition,
+        int maxScanRecords,
         long deadlineNs,
         Duration pollTimeout
     ) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        while (messages.size() < count && System.nanoTime() < deadlineNs) {
+        PeekCollectionState collection = new PeekCollectionState(partitions, messagesPerPartition);
+        collectPeekedMessages(
+            poller,
+            state -> state.allPartitionQuotasSatisfied() || caughtUpChecker.allPartitionsCaughtUp(),
+            recordFilter,
+            collection,
+            maxScanRecords,
+            deadlineNs,
+            pollTimeout
+        );
+        return collection.messages;
+    }
+
+    private static boolean collectPeekedMessages(
+        PeekRecordPoller poller,
+        PeekCollectionCompletionChecker completionChecker,
+        PeekRecordFilter recordFilter,
+        PeekCollectionState collection,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        while (System.nanoTime() < deadlineNs) {
+            if (completionChecker.isComplete(collection)) {
+                return true;
+            }
             long remainingNs = deadlineNs - System.nanoTime();
             if (remainingNs <= 0) {
                 break;
@@ -1125,19 +1801,207 @@ public final class KafkaAgent {
                 : pollTimeout;
             ConsumerRecords<String, byte[]> records = poller.poll(timeout);
             if (records.isEmpty()) {
-                if (caughtUpChecker.allPartitionsCaughtUp()) {
-                    break;
-                }
                 continue;
             }
             for (ConsumerRecord<String, byte[]> record : records) {
-                messages.add(peekedMessageFromRecord(record));
-                if (messages.size() >= count) {
-                    break;
+                if (collection.scannedRecords >= maxScanRecords) {
+                    return false;
                 }
+                collection.scannedRecords++;
+                TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
+                if (remaining <= 0 || !recordFilter.include(record)) {
+                    continue;
+                }
+                collection.messages.add(peekedMessageFromRecord(record));
+                collection.remainingByPartition.put(partition, remaining - 1);
             }
         }
-        return messages;
+        return completionChecker.isComplete(collection);
+    }
+
+    /**
+     * Starts at the snapshot tail and widens backward when compacted or retained-offset gaps
+     * leave a partition short of its record quota.
+     */
+    private static PeekCollectionState collectLatestPeekedMessages(
+        KafkaConsumer<String, byte[]> consumer,
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Long> beginningOffsets,
+        Map<TopicPartition, Long> initialSeekOffsets,
+        Map<TopicPartition, Long> snapshotEndOffsets,
+        int messagesPerPartition,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        Map<TopicPartition, Long> rangeStartOffsets = new LinkedHashMap<>(initialSeekOffsets);
+        Map<TopicPartition, Long> rangeEndOffsets = new LinkedHashMap<>(snapshotEndOffsets);
+        Map<TopicPartition, Long> rangeWidths = new LinkedHashMap<>();
+        for (TopicPartition partition : partitions) {
+            long rangeStart = rangeStartOffsets.getOrDefault(partition, 0L);
+            long rangeEnd = rangeEndOffsets.getOrDefault(partition, rangeStart);
+            rangeWidths.put(partition, Math.max(1L, rangeEnd - rangeStart));
+        }
+
+        PeekCollectionState collection = new PeekCollectionState(partitions, messagesPerPartition);
+        while (!collection.allPartitionQuotasSatisfied()) {
+            PeekCollectionCompletionChecker rangeComplete = state -> allPeekPartitionsComplete(
+                partitions,
+                state.remainingByPartition,
+                currentPeekPositions(consumer, partitions),
+                rangeEndOffsets
+            );
+            if (!collectLatestPeekRange(
+                timeout -> consumer.poll(timeout),
+                rangeComplete,
+                record -> recordIsBeforeEndOffset(record, rangeEndOffsets),
+                collection,
+                maxScanRecords,
+                deadlineNs,
+                pollTimeout
+            )) {
+                collection.incomplete = true;
+                break;
+            }
+            if (collection.allPartitionQuotasSatisfied()) {
+                break;
+            }
+
+            boolean expanded = false;
+            for (TopicPartition partition : partitions) {
+                if (collection.remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                    continue;
+                }
+                long beginningOffset = beginningOffsets.getOrDefault(partition, 0L);
+                long currentStart = rangeStartOffsets.getOrDefault(partition, beginningOffset);
+                if (currentStart <= beginningOffset) {
+                    continue;
+                }
+                long nextStart = previousLatestPeekStartOffset(
+                    beginningOffset,
+                    currentStart,
+                    rangeWidths.getOrDefault(partition, 1L)
+                );
+                rangeEndOffsets.put(partition, currentStart);
+                rangeStartOffsets.put(partition, nextStart);
+                rangeWidths.put(partition, Math.max(1L, currentStart - nextStart));
+                consumer.seek(partition, nextStart);
+                expanded = true;
+            }
+            if (!expanded) {
+                break;
+            }
+        }
+        return collection;
+    }
+
+    /**
+     * Scans one backward-expanded range to its end, retaining only each partition's newest
+     * remaining records. Stopping early would select older records from a widened range.
+     */
+    private static boolean collectLatestPeekRange(
+        PeekRecordPoller poller,
+        PeekCollectionCompletionChecker rangeComplete,
+        PeekRecordFilter recordFilter,
+        PeekCollectionState collection,
+        int maxScanRecords,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
+        Map<TopicPartition, Deque<Map<String, Object>>> rangeMessages = new HashMap<>();
+        while (System.nanoTime() < deadlineNs) {
+            if (rangeComplete.isComplete(collection)) {
+                break;
+            }
+            long remainingNs = deadlineNs - System.nanoTime();
+            if (remainingNs <= 0) {
+                break;
+            }
+            Duration timeout = pollTimeout.toNanos() > remainingNs
+                ? Duration.ofNanos(remainingNs)
+                : pollTimeout;
+            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            for (ConsumerRecord<String, byte[]> record : records) {
+                if (collection.scannedRecords >= maxScanRecords) {
+                    commitLatestPeekRange(rangeMessages, collection);
+                    return false;
+                }
+                collection.scannedRecords++;
+                TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+                int remaining = collection.remainingByPartition.getOrDefault(partition, 0);
+                if (remaining <= 0 || !recordFilter.include(record)) {
+                    continue;
+                }
+                Deque<Map<String, Object>> latestRecords = rangeMessages.computeIfAbsent(
+                    partition,
+                    ignored -> new ArrayDeque<>()
+                );
+                retainLatestPeekRecord(latestRecords, peekedMessageFromRecord(record), remaining);
+            }
+        }
+        boolean complete = rangeComplete.isComplete(collection);
+        commitLatestPeekRange(rangeMessages, collection);
+        return complete;
+    }
+
+    private static void commitLatestPeekRange(
+        Map<TopicPartition, Deque<Map<String, Object>>> rangeMessages,
+        PeekCollectionState collection
+    ) {
+        for (Map.Entry<TopicPartition, Deque<Map<String, Object>>> entry : rangeMessages.entrySet()) {
+            int retainedCount = entry.getValue().size();
+            collection.messages.addAll(entry.getValue());
+            collection.remainingByPartition.computeIfPresent(
+                entry.getKey(),
+                (ignored, remaining) -> remaining - retainedCount
+            );
+        }
+    }
+
+    static <T> void retainLatestPeekRecord(Deque<T> records, T record, int maxRecords) {
+        records.addLast(record);
+        if (records.size() > maxRecords) {
+            records.removeFirst();
+        }
+    }
+
+    private static boolean recordIsBeforeEndOffset(
+        ConsumerRecord<String, byte[]> record,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        Long endOffset = endOffsets.get(new TopicPartition(record.topic(), record.partition()));
+        return endOffset != null && record.offset() < endOffset;
+    }
+
+    private static Map<TopicPartition, Long> currentPeekPositions(
+        KafkaConsumer<String, byte[]> consumer,
+        List<TopicPartition> partitions
+    ) {
+        Map<TopicPartition, Long> positions = new LinkedHashMap<>();
+        for (TopicPartition partition : partitions) {
+            positions.put(partition, consumer.position(partition));
+        }
+        return positions;
+    }
+
+    static boolean allPeekPartitionsComplete(
+        List<TopicPartition> partitions,
+        Map<TopicPartition, Integer> remainingByPartition,
+        Map<TopicPartition, Long> positions,
+        Map<TopicPartition, Long> endOffsets
+    ) {
+        for (TopicPartition partition : partitions) {
+            if (remainingByPartition.getOrDefault(partition, 0) <= 0) {
+                continue;
+            }
+            long endOffset = endOffsets.getOrDefault(partition, 0L);
+            long position = positions.getOrDefault(partition, 0L);
+            if (position < endOffset) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static boolean allPeekPartitionsCaughtUp(
@@ -1165,25 +2029,59 @@ public final class KafkaAgent {
         boolean allPartitionsCaughtUp();
     }
 
+    @FunctionalInterface
+    private interface PeekCollectionCompletionChecker {
+        boolean isComplete(PeekCollectionState collection);
+    }
+
+    @FunctionalInterface
+    interface PeekRecordFilter {
+        boolean include(ConsumerRecord<String, byte[]> record);
+    }
+
+    private static final class PeekCollectionState {
+        private final List<Map<String, Object>> messages = new ArrayList<>();
+        private final Map<TopicPartition, Integer> remainingByPartition = new HashMap<>();
+        private int scannedRecords;
+        private boolean incomplete;
+
+        private PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition) {
+            for (TopicPartition partition : partitions) {
+                remainingByPartition.put(partition, messagesPerPartition);
+            }
+        }
+
+        private boolean allPartitionQuotasSatisfied() {
+            return remainingByPartition.values().stream().allMatch(remaining -> remaining <= 0);
+        }
+    }
+
     /** When partition is null, peek across every partition of the topic. */
     static List<TopicPartition> resolvePeekPartitions(
         KafkaConsumer<String, byte[]> consumer,
         String topic,
-        Integer partition
+        Integer partition,
+        Duration timeout
     ) {
-        if (partition != null) {
-            return resolvePeekPartitions(topic, partition, Collections.emptyList());
-        }
-        List<PartitionInfo> infos = consumer.partitionsFor(topic, Duration.ofSeconds(5));
+        List<PartitionInfo> infos = consumer.partitionsFor(topic, timeout);
         if (infos == null || infos.isEmpty()) {
             return Collections.emptyList();
         }
         List<Integer> available = infos.stream().map(PartitionInfo::partition).collect(Collectors.toList());
-        return resolvePeekPartitions(topic, null, available);
+        return resolvePeekPartitions(topic, partition, available);
     }
 
     static List<TopicPartition> resolvePeekPartitions(String topic, Integer partition, List<Integer> availablePartitions) {
         if (partition != null) {
+            if (availablePartitions == null || !availablePartitions.contains(partition)) {
+                String available = availablePartitions == null || availablePartitions.isEmpty()
+                    ? "none"
+                    : availablePartitions.stream().sorted().map(String::valueOf).collect(Collectors.joining(", "));
+                throw new IllegalArgumentException(
+                    "Kafka partition " + partition + " does not exist for topic '" + topic
+                        + "'. Available partitions: " + available
+                );
+            }
             return Collections.singletonList(new TopicPartition(topic, partition));
         }
         if (availablePartitions == null || availablePartitions.isEmpty()) {
@@ -1195,13 +2093,138 @@ public final class KafkaAgent {
             .collect(Collectors.toList());
     }
 
+    enum PeekStartPosition {
+        EARLIEST,
+        LATEST,
+        OFFSET,
+    }
+
+    /** Omitting startPosition preserves the old earliest default (or explicit legacy offset) behavior. */
+    static PeekStartPosition peekStartPosition(JsonObject params) {
+        String value = stringOrNull(params, "startPosition");
+        if (value == null) {
+            return PeekStartPosition.EARLIEST;
+        }
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "earliest" -> PeekStartPosition.EARLIEST;
+            case "latest" -> PeekStartPosition.LATEST;
+            case "offset" -> PeekStartPosition.OFFSET;
+            default -> throw new IllegalArgumentException("Unsupported peek startPosition: " + value);
+        };
+    }
+
+    static void validatePeekRequest(
+        PeekStartPosition startPosition,
+        boolean explicitStartPosition,
+        Integer partition,
+        Long offset
+    ) {
+        if (partition != null && partition < 0) {
+            throw new IllegalArgumentException("partition must be non-negative");
+        }
+        if (!explicitStartPosition) {
+            // Older clients used offset directly without a startPosition field.
+            if (offset != null && offset < 0) {
+                throw new IllegalArgumentException("offset must be non-negative");
+            }
+            return;
+        }
+        if (startPosition != PeekStartPosition.OFFSET) {
+            if (offset != null) {
+                throw new IllegalArgumentException("offset is only supported when startPosition is offset");
+            }
+            return;
+        }
+        if (offset == null) {
+            throw new IllegalArgumentException("offset is required when startPosition is offset");
+        }
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must be non-negative when startPosition is offset");
+        }
+    }
+
+    static Long requestedPeekOffset(
+        PeekStartPosition startPosition,
+        Long offset,
+        boolean legacyOffsetRequest,
+        long beginningOffset,
+        long endOffset
+    ) {
+        return switch (startPosition) {
+            case LATEST -> endOffset > beginningOffset ? beginningOffset : null;
+            case OFFSET -> offset;
+            case EARLIEST -> legacyOffsetRequest ? offset : beginningOffset;
+        };
+    }
+
+    static int peekScanLimit(int count, int readablePartitionCount) {
+        return peekScanLimit(count, readablePartitionCount, PeekStartPosition.EARLIEST);
+    }
+
+    static int peekScanLimit(int count, int readablePartitionCount, PeekStartPosition startPosition) {
+        if (startPosition == PeekStartPosition.LATEST
+            && readablePartitionCount > MAX_PEEK_SCAN_RECORDS) {
+            throw new IllegalArgumentException(
+                "Kafka topic has more than " + MAX_PEEK_SCAN_RECORDS
+                    + " readable partitions; select a partition to browse latest messages"
+            );
+        }
+        return MAX_PEEK_SCAN_RECORDS;
+    }
+
+    /**
+     * Latest is a topic-level query. Below the scan budget, every partition contributes the
+     * requested count so the global merge is exact. Above it, the fixed budget is shared across
+     * partitions and the response is marked incomplete.
+     */
+    static int latestPeekMessagesPerPartition(int count, int readablePartitionCount) {
+        int safePartitionCount = Math.max(1, readablePartitionCount);
+        if (safePartitionCount > MAX_PEEK_SCAN_RECORDS) {
+            throw new IllegalArgumentException(
+                "Kafka topic has more than " + MAX_PEEK_SCAN_RECORDS
+                    + " readable partitions; select a partition to browse latest messages"
+            );
+        }
+        return Math.min(count, MAX_PEEK_SCAN_RECORDS / safePartitionCount);
+    }
+
+    static boolean latestPeekBudgetLimited(int count, int readablePartitionCount) {
+        return latestPeekMessagesPerPartition(count, readablePartitionCount) < count;
+    }
+
+    static List<Map<String, Object>> sortAndLimitPeekedMessages(
+        List<Map<String, Object>> messages,
+        int count,
+        PeekStartPosition startPosition
+    ) {
+        sortPeekedMessages(messages, startPosition);
+        if (messages.size() <= count) {
+            return messages;
+        }
+        return new ArrayList<>(messages.subList(0, count));
+    }
+
     static void sortPeekedMessages(List<Map<String, Object>> messages) {
-        messages.sort((left, right) -> {
+        sortPeekedMessages(messages, PeekStartPosition.EARLIEST);
+    }
+
+    static void sortPeekedMessages(List<Map<String, Object>> messages, PeekStartPosition startPosition) {
+        if (startPosition == PeekStartPosition.OFFSET) {
+            messages.sort(Comparator
+                .comparingLong((Map<String, Object> message) ->
+                    ((Number) message.getOrDefault("offset", 0L)).longValue()
+                )
+                .thenComparingInt(message -> ((Number) message.getOrDefault("partition", 0)).intValue())
+            );
+            return;
+        }
+
+        Comparator<Map<String, Object>> comparator = (left, right) -> {
             long leftTs = ((Number) left.getOrDefault("timestamp", 0L)).longValue();
             long rightTs = ((Number) right.getOrDefault("timestamp", 0L)).longValue();
             int byTs = Long.compare(leftTs, rightTs);
             if (byTs != 0) {
-                return byTs;
+                return startPosition == PeekStartPosition.LATEST ? -byTs : byTs;
             }
             int leftPartition = ((Number) left.getOrDefault("partition", 0)).intValue();
             int rightPartition = ((Number) right.getOrDefault("partition", 0)).intValue();
@@ -1211,8 +2234,11 @@ public final class KafkaAgent {
             }
             long leftOffset = ((Number) left.getOrDefault("offset", 0L)).longValue();
             long rightOffset = ((Number) right.getOrDefault("offset", 0L)).longValue();
-            return Long.compare(leftOffset, rightOffset);
-        });
+            return startPosition == PeekStartPosition.LATEST
+                ? Long.compare(rightOffset, leftOffset)
+                : Long.compare(leftOffset, rightOffset);
+        };
+        messages.sort(comparator);
     }
 
     private static Map<String, Object> peekedMessageFromRecord(ConsumerRecord<String, byte[]> record) {
@@ -1224,7 +2250,7 @@ public final class KafkaAgent {
         msg.put("key", record.key());
         Map<String, String> headers = new LinkedHashMap<>();
         record.headers().forEach(h ->
-            headers.put(h.key(), new String(h.value(), StandardCharsets.UTF_8)));
+            headers.put(h.key(), h.value() == null ? "" : new String(h.value(), StandardCharsets.UTF_8)));
         msg.put("headers", headers);
         if (record.value() != null) {
             msg.put("payloadBase64", Base64.getEncoder().encodeToString(record.value()));
@@ -1398,13 +2424,14 @@ public final class KafkaAgent {
         int timeout = requestTimeout(params);
 
         DescribeClusterResult cluster = admin.describeCluster();
+        DescribeMetadataQuorumResult metadataQuorum = admin.describeMetadataQuorum();
         String clusterId = cluster.clusterId().get(timeout, TimeUnit.MILLISECONDS);
-        Node controller = cluster.controller().get(timeout, TimeUnit.MILLISECONDS);
         Collection<Node> nodes = cluster.nodes().get(timeout, TimeUnit.MILLISECONDS);
+        Map<String, Object> controller = resolveClusterController(metadataQuorum, cluster, nodes, timeout);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("clusterId", clusterId);
-        result.put("controller", controller != null ? nodeToMap(controller) : null);
+        result.put("controller", controller);
         List<Map<String, Object>> brokerList = new ArrayList<>();
         for (Node node : nodes) {
             brokerList.add(nodeToMap(node));
@@ -1412,6 +2439,52 @@ public final class KafkaAgent {
         result.put("brokers", brokerList);
         result.put("nodeCount", nodes.size());
         return result;
+    }
+
+    private static Map<String, Object> resolveClusterController(
+        DescribeMetadataQuorumResult metadataQuorum,
+        DescribeClusterResult cluster,
+        Collection<Node> brokers,
+        int timeout
+    ) throws Exception {
+        try {
+            QuorumInfo quorum = metadataQuorum.quorumInfo().get(timeout, TimeUnit.MILLISECONDS);
+            Map<Integer, List<RaftVoterEndpoint>> endpointsByNode = new HashMap<>();
+            for (Map.Entry<Integer, QuorumInfo.Node> entry : quorum.nodes().entrySet()) {
+                endpointsByNode.put(entry.getKey(), entry.getValue().endpoints());
+            }
+            return metadataQuorumControllerToMap(quorum.leaderId(), brokers, endpointsByNode);
+        } catch (Exception e) {
+            if (isUnsupportedVersionError(e)) {
+                Node controller = cluster.controller().get(timeout, TimeUnit.MILLISECONDS);
+                return controller != null ? nodeToMap(controller) : null;
+            }
+            logger().warn("Unable to resolve Kafka metadata quorum leader; omitting the controller", e);
+            return null;
+        }
+    }
+
+    static Map<String, Object> metadataQuorumControllerToMap(
+        int leaderId,
+        Collection<Node> brokers,
+        Map<Integer, List<RaftVoterEndpoint>> endpointsByNode
+    ) {
+        if (leaderId < 0) {
+            return null;
+        }
+        for (Node broker : brokers) {
+            if (broker.id() == leaderId) {
+                return nodeToMap(broker);
+            }
+        }
+        List<RaftVoterEndpoint> endpoints = endpointsByNode.getOrDefault(leaderId, Collections.emptyList());
+        if (!endpoints.isEmpty()) {
+            RaftVoterEndpoint endpoint = endpoints.get(0);
+            return nodeToMap(new Node(leaderId, endpoint.host(), endpoint.port()));
+        }
+        Map<String, Object> controller = new LinkedHashMap<>();
+        controller.put("id", leaderId);
+        return controller;
     }
 
     private static Object getConsumerLag(JsonObject params) throws Exception {
@@ -1515,6 +2588,25 @@ public final class KafkaAgent {
         return false;
     }
 
+    /**
+     * A topic listing is still useful when the broker cannot describe every topic before the
+     * request deadline. Keep timeout detection narrow so authorization, transport, and unknown
+     * topic failures remain visible to the caller instead of being mistaken for a partial result.
+     */
+    private static boolean isTimeoutError(Throwable error) {
+        for (Throwable current : causeChain(error)) {
+            if (current instanceof java.util.concurrent.TimeoutException
+                || current instanceof org.apache.kafka.common.errors.TimeoutException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean hasUnsupportedVersionException(Throwable error) {
+        return causeChain(error).stream().anyMatch(UnsupportedVersionException.class::isInstance);
+    }
+
     private static Throwable rootCause(Throwable error) {
         Throwable current = null;
         for (Throwable cause : causeChain(error)) {
@@ -1582,6 +2674,29 @@ public final class KafkaAgent {
             return null;
         }
         return requestedOffset;
+    }
+
+    /** Splits the requested page quota across partitions. */
+    static int peekMessagesPerPartition(int count, int partitionCount) {
+        int safePartitionCount = Math.max(1, partitionCount);
+        return (int) (((long) count + safePartitionCount - 1) / safePartitionCount);
+    }
+
+    static long recentPeekStartOffset(long beginningOffset, long endOffset, int messagesPerPartition) {
+        return Math.max(beginningOffset, endOffset - messagesPerPartition);
+    }
+
+    static long previousLatestPeekStartOffset(
+        long beginningOffset,
+        long currentStartOffset,
+        long currentWindowWidth
+    ) {
+        long safeWindowWidth = Math.max(1L, currentWindowWidth);
+        long expandedWindowWidth = safeWindowWidth > Long.MAX_VALUE / 2
+            ? Long.MAX_VALUE
+            : safeWindowWidth * 2;
+        long distanceToBeginning = currentStartOffset - beginningOffset;
+        return currentStartOffset - Math.min(distanceToBeginning, expandedWindowWidth);
     }
 
     private static String stringOrNull(JsonObject object, String key) {

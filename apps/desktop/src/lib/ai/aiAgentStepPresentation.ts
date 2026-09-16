@@ -18,6 +18,12 @@ export interface AiAgentStepItem {
   isError?: boolean;
   /** Structured explain plan data (for explain_query tool results) */
   explainData?: unknown;
+  /** Wall-clock timestamp when the tool call started (stamped by tool_call_start) */
+  startedAtMs?: number;
+  /** Wall-clock timestamp when the tool call finished (stamped by tool_call_end) */
+  endedAtMs?: number;
+  /** Computed tool duration (endedAtMs - startedAtMs), present only when both stamps exist */
+  durationMs?: number;
 }
 
 /** Backend fallback tool_call_id values that repeat across calls and must not be used as stable merge keys. */
@@ -46,7 +52,23 @@ export function upsertAgentStep(steps: AiAgentStepItem[], step: AiAgentStepItem)
   if (!merged.explainData && existing.explainData) merged.explainData = existing.explainData;
   if (!merged.titleKey && existing.titleKey) merged.titleKey = existing.titleKey;
   if (!merged.titleParams && existing.titleParams) merged.titleParams = existing.titleParams;
+  if (merged.startedAtMs === undefined && existing.startedAtMs !== undefined) merged.startedAtMs = existing.startedAtMs;
+  if (merged.endedAtMs !== undefined && merged.startedAtMs !== undefined) {
+    merged.durationMs = Math.max(0, merged.endedAtMs - merged.startedAtMs);
+  }
   steps.splice(idx, 1, merged);
+}
+
+/**
+ * Format a tool duration for the step-card tail: sub-second → one decimal
+ * ("0.8s"); 1s–10s → one decimal ("1.2s"); ≥10s → integer ("12s").
+ * Negative durations clamp to 0; callers hide the tail entirely when
+ * `durationMs` is absent.
+ */
+export function formatToolDurationMs(ms: number): string {
+  const safe = Math.max(0, ms);
+  if (safe >= 10_000) return `${Math.round(safe / 1000)}s`;
+  return `${(safe / 1000).toFixed(1)}s`;
 }
 
 export function buildAiAgentStepItems(plan: AiAgentPlan): AiAgentStepItem[] {

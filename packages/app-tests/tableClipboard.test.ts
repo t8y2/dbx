@@ -72,8 +72,36 @@ test("table data copy uses only writable columns for first-class databases", () 
     postgresOverridingSystemValue: true,
     sqlserverIdentityInsert: false,
   });
-  assert.deepEqual(tableDataCopyColumnOptions("mysql", [{ ...columns[0], extra: "auto_increment" }, { ...columns[1] }, { ...columns[2], extra: "STORED GENERATED" }]), {
-    columns: ["id", "name"],
+  assert.deepEqual(tableDataCopyColumnOptions("mysql", [{ ...columns[0], extra: "auto_increment" }, { ...columns[1] }, { ...columns[2], extra: "STORED GENERATED" }, column("expr_default", "DEFAULT_GENERATED"), column("expr_default_on_update", "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"), column("virtual_full_name", "VIRTUAL GENERATED"), column("stored_full_name", "GENERATED ALWAYS AS (concat(first_name, ' ', last_name)) STORED")]), {
+    columns: ["id", "name", "expr_default", "expr_default_on_update"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: false,
+  });
+});
+
+test("table data copy skips only SQL Server rowversion types", () => {
+  const column = (name: string, dataType: string): ColumnInfo => ({
+    name,
+    data_type: dataType,
+    is_nullable: true,
+    column_default: null,
+    is_primary_key: false,
+    extra: null,
+  });
+  const sqlServerColumns = [{ ...column("id", "int"), extra: "identity(1,1)" }, column("name", "nvarchar(64)"), column("legacy_version", "timestamp"), column("row_version", "  ROWVERSION  "), column("fixed_binary", "binary(8)"), column("variable_binary", "varbinary(8)")];
+
+  assert.deepEqual(tableDataCopyColumnOptions("sqlserver", sqlServerColumns), {
+    columns: ["id", "name", "fixed_binary", "variable_binary"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: true,
+  });
+  assert.deepEqual(tableDataCopyColumnOptions("postgres", [column("updated_at", "timestamp")]), {
+    columns: ["updated_at"],
+    postgresOverridingSystemValue: false,
+    sqlserverIdentityInsert: false,
+  });
+  assert.deepEqual(tableDataCopyColumnOptions("mysql", [column("updated_at", "timestamp")]), {
+    columns: ["updated_at"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: false,
   });

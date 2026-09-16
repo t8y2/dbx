@@ -94,7 +94,7 @@ test("object browser rows normalize space separated materialized views", () => {
   );
 });
 
-test("object browser search matches names, types, and comments but not schema names", () => {
+test("object browser search matches names and comments but not schema names", () => {
   const rows = buildObjectBrowserRows({
     objects: [
       { name: "users", object_type: "TABLE", schema: "exam_hub", comment: "account records" },
@@ -110,6 +110,37 @@ test("object browser search matches names, types, and comments but not schema na
     filterObjectBrowserRows(rows, "exam").map((row) => row.name),
     ["orders", "refresh_exam_stats"],
   );
+});
+
+test("object browser search matches names, never object type labels", () => {
+  const rows = buildObjectBrowserRows({
+    objects: [
+      { name: "tab_history", object_type: "TABLE", schema: "public" },
+      { name: "user_accounts", object_type: "TABLE", schema: "public", comment: "user account records" },
+      { name: "v_sales_summary", object_type: "VIEW", schema: "public" },
+      { name: "refresh_sales", object_type: "PROCEDURE", schema: "public" },
+    ],
+    database: "app",
+    fallbackSchema: "public",
+    needsSchema: true,
+  });
+
+  const names = (query: string) => filterObjectBrowserRows(rows, query).map((row) => row.name);
+
+  // "TAB" must not surface every TABLE row through its type label (issue #6488).
+  assert.deepEqual(names("TAB"), ["tab_history"]);
+  assert.deepEqual(names("tab"), ["tab_history"]);
+  assert.deepEqual(names("Tab"), ["tab_history"]);
+  assert.deepEqual(names("TABLE"), []);
+  assert.deepEqual(names("VIEW"), []);
+  // Name prefix and middle-substring matching keep working.
+  assert.deepEqual(names("sales"), ["v_sales_summary", "refresh_sales"]);
+  assert.deepEqual(names("history"), ["tab_history"]);
+  // Comment matching keeps working.
+  assert.deepEqual(names("accounts"), ["user_accounts"]);
+  // Non-existent keywords return nothing; empty queries keep everything.
+  assert.deepEqual(names("TAB1"), []);
+  assert.equal(names("   ").length, rows.length);
 });
 
 test("object browser search supports slash-delimited regular expression queries", () => {

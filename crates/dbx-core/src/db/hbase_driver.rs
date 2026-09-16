@@ -226,7 +226,7 @@ pub async fn list_namespaces(client: &HBaseClient) -> Result<Vec<DatabaseInfo>, 
     let body: RestNamespaces = parse_success_json(response, "list namespaces").await?;
     let mut namespaces = body.namespaces;
     namespaces.sort_by_key(|name| name.to_ascii_lowercase());
-    Ok(namespaces.into_iter().map(|name| DatabaseInfo { name }).collect())
+    Ok(namespaces.into_iter().map(|name| DatabaseInfo { name, ..Default::default() }).collect())
 }
 
 pub async fn list_tables(client: &HBaseClient, namespace: &str) -> Result<Vec<TableInfo>, String> {

@@ -4,9 +4,11 @@ import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 
 const MIN_SELECTION_MATCH_LENGTH = 2;
 const MAX_SELECTION_MATCH_LENGTH = 200;
-const MAX_SCROLLBAR_MARKS = 1200;
+const MAX_SCROLLBAR_MATCHES = 1200;
+export const SELECTION_MATCH_SCAN_CHUNK_LENGTH = 64 * 1024;
+export const SELECTION_MATCH_UPDATE_DELAY_MS = 120;
 
-interface SelectionMatchMarker {
+export interface SelectionMatchMarker {
   from: number;
   to: number;
   lineNumber: number;
@@ -23,57 +25,130 @@ function selectedMatchQuery(state: EditorState): string | null {
   return text;
 }
 
-function buildSelectionMatchMarkers(state: EditorState): SelectionMatchMarker[] {
-  const query = selectedMatchQuery(state);
-  if (!query) return [];
+export class SelectionMatchMarkerScan {
+  readonly markers: SelectionMatchMarker[] = [];
+  private readonly seenLines = new Set<number>();
+  private from = 0;
+  private matchesScanned = 0;
+  private readonly lookaheadLength: number;
 
-  const selection = state.selection.main;
-  const markers: SelectionMatchMarker[] = [];
-  const seenLines = new Set<number>();
-  const cursor = new SearchCursor(state.doc, query);
+  constructor(
+    private readonly state: EditorState,
+    private readonly query: string,
+  ) {
+    const selection = state.selection.main;
+    const selectedLine = state.doc.lineAt(selection.from);
+    this.seenLines.add(selectedLine.number);
+    this.seenLines.add(-selectedLine.number);
+    this.markers.push({ from: selection.from, to: selection.to, lineNumber: selectedLine.number, selected: true });
 
-  for (let match = cursor.next(); !match.done; match = cursor.next()) {
-    const { from, to } = match.value;
-    if (from === to) continue;
-
-    const line = state.doc.lineAt(from);
-    const selected = from === selection.from && to === selection.to;
-    const lineKey = selected ? -line.number : line.number;
-    if (seenLines.has(lineKey)) continue;
-    seenLines.add(lineKey);
-
-    markers.push({ from, to, lineNumber: line.number, selected });
-    if (markers.length >= MAX_SCROLLBAR_MARKS) break;
+    // SearchCursor compares NFKD text, whose source can use two UTF-16 units per normalized code point.
+    const normalizedQuery = typeof query.normalize === "function" ? query.normalize("NFKD") : query;
+    this.lookaheadLength = Math.max(query.length, normalizedQuery.length * 2) - 1;
   }
 
-  return markers;
+  scanNextChunk(): boolean {
+    const doc = this.state.doc;
+    if (this.from >= doc.length || this.matchesScanned >= MAX_SCROLLBAR_MATCHES) return true;
+
+    const chunkFrom = this.from;
+    const chunkTo = Math.min(doc.length, chunkFrom + SELECTION_MATCH_SCAN_CHUNK_LENGTH);
+    // Include enough lookahead to catch normalized matches that start in this chunk and cross its boundary.
+    const searchTo = Math.min(doc.length, chunkTo + this.lookaheadLength);
+    const selection = this.state.selection.main;
+    const cursor = new SearchCursor(doc, this.query, chunkFrom, searchTo);
+
+    for (let match = cursor.next(); !match.done; match = cursor.next()) {
+      const { from, to } = match.value;
+      if (from >= chunkTo) break;
+      if (from === to) continue;
+
+      this.matchesScanned += 1;
+      const line = doc.lineAt(from);
+      const selected = from === selection.from && to === selection.to;
+      const lineKey = selected ? -line.number : line.number;
+      if (!this.seenLines.has(lineKey)) {
+        this.seenLines.add(lineKey);
+        this.markers.push({ from, to, lineNumber: line.number, selected });
+      }
+      if (this.matchesScanned >= MAX_SCROLLBAR_MATCHES) return true;
+    }
+
+    this.from = chunkTo;
+    return this.from >= doc.length;
+  }
+}
+
+export function createSelectionMatchMarkerScan(state: EditorState): SelectionMatchMarkerScan | null {
+  const query = selectedMatchQuery(state);
+  return query ? new SelectionMatchMarkerScan(state, query) : null;
 }
 
 class SelectionMatchScrollbar {
   private readonly layer: HTMLElement;
+  private readonly win: Window;
   private signature = "";
+  private updateTimer: number | null = null;
+  private scanFrame: number | null = null;
+  private revision = 0;
 
   constructor(view: EditorView) {
     this.layer = document.createElement("div");
     this.layer.className = "cm-selectionMatchScrollbarLayer";
+    this.win = view.dom.ownerDocument.defaultView ?? window;
     view.dom.appendChild(this.layer);
-    this.render(view);
+    this.scheduleRender(view, 0);
   }
 
   update(update: ViewUpdate) {
-    if (update.docChanged || update.selectionSet || update.geometryChanged) {
-      this.render(update.view);
-    }
+    if (update.docChanged || update.selectionSet) this.scheduleRender(update.view);
   }
 
   destroy() {
+    this.cancelScheduledRender();
     this.layer.remove();
   }
 
-  private render(view: EditorView) {
-    const markers = buildSelectionMatchMarkers(view.state);
-    const lineCount = view.state.doc.lines;
-    const signature = markers.map((marker) => `${marker.lineNumber}:${marker.from}:${marker.to}:${marker.selected}`).join("|");
+  private cancelScheduledRender() {
+    this.revision += 1;
+    if (this.updateTimer !== null) {
+      this.win.clearTimeout(this.updateTimer);
+      this.updateTimer = null;
+    }
+    if (this.scanFrame !== null) {
+      this.win.cancelAnimationFrame(this.scanFrame);
+      this.scanFrame = null;
+    }
+  }
+
+  private scheduleRender(view: EditorView, delay = SELECTION_MATCH_UPDATE_DELAY_MS) {
+    this.cancelScheduledRender();
+    const scan = createSelectionMatchMarkerScan(view.state);
+    this.renderMarkers([], view.state.doc.lines);
+    if (!scan) return;
+
+    const revision = this.revision;
+    this.updateTimer = this.win.setTimeout(() => {
+      this.updateTimer = null;
+      this.scanNextFrame(view, scan, revision);
+    }, delay);
+  }
+
+  private scanNextFrame(view: EditorView, scan: SelectionMatchMarkerScan, revision: number) {
+    if (revision !== this.revision) return;
+    if (scan.scanNextChunk()) {
+      this.renderMarkers(scan.markers, view.state.doc.lines);
+      return;
+    }
+    // Yield between chunks so a large document never monopolizes pointer and paint work.
+    this.scanFrame = this.win.requestAnimationFrame(() => {
+      this.scanFrame = null;
+      this.scanNextFrame(view, scan, revision);
+    });
+  }
+
+  private renderMarkers(markers: SelectionMatchMarker[], lineCount: number) {
+    const signature = `${lineCount}|${markers.map((marker) => `${marker.lineNumber}:${marker.from}:${marker.to}:${marker.selected}`).join("|")}`;
     if (signature === this.signature) return;
     this.signature = signature;
     this.layer.replaceChildren(

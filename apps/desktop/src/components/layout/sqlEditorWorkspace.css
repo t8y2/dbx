@@ -1,0 +1,51 @@
+/*
+ * New editor groups animate when split. Query results and their pane sizes
+ * update immediately, including when restoring a collapsed result pane.
+ */
+
+.sql-editor-workspace {
+  --sql-workspace-ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* Override splitpanes' stock transition so ready results are not clipped
+   while the result pane expands. */
+.sql-editor-workspace .sql-editor-workspace-split.splitpanes--ready > .splitpanes__pane {
+  transition: none !important;
+}
+
+/* A group pane created after the workspace is interactive emerges from its
+   owner's side (the divider). No fill mode: the transform is released once
+   the animation ends so the pane never becomes a containing block. */
+.sql-editor-workspace .workspace-pane-enter {
+  animation: dbx-workspace-pane-in 220ms var(--sql-workspace-ease-out);
+}
+.sql-editor-workspace .workspace-pane-enter--from-left {
+  --dbx-pane-enter-x: -12px;
+}
+.sql-editor-workspace .workspace-pane-enter--from-top {
+  --dbx-pane-enter-y: -12px;
+}
+@keyframes dbx-workspace-pane-in {
+  from {
+    opacity: 0;
+    transform: translate(var(--dbx-pane-enter-x, 0), var(--dbx-pane-enter-y, 0));
+  }
+}
+
+/* The splitter between the editor and result panes stays in the splitpanes
+   flow even when the result pane is collapsed; hide it and disable it so
+   the closed state is visually clean and cannot be dragged open into an
+   empty pane. */
+.sql-editor-workspace-split > .splitpanes__splitter {
+  transition: none;
+}
+.sql-editor-workspace-split.result-pane-collapsed > .splitpanes__splitter {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sql-editor-workspace .workspace-pane-enter {
+    animation: none;
+  }
+}

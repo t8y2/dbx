@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
 import {
-  buildKingbaseKillSql,
-  buildKingbasePgKillSql,
-  buildPgKillSql,
+  buildKingbaseCancelQuerySql,
+  buildKingbasePgCancelQuerySql,
+  buildPgCancelQuerySql,
   isKingbaseOwnSessionCatalogCompatibilityError,
   isKingbaseProcessListCatalogCompatibilityError,
-  isKingbaseTerminateCatalogCompatibilityError,
+  isKingbaseCancelCatalogCompatibilityError,
   isPgProcessListCompatibilityError,
   KINGBASE_OWN_SESSION_SQL,
   KINGBASE_PG_OWN_SESSION_SQL,
@@ -15,7 +15,9 @@ import {
   mapPgProcessRows,
   OPENGAUSS_OWN_SESSION_SQL,
   OPENGAUSS_PROCESS_LIST_SQL,
-  pgKillResultError,
+  kingbaseCancelQueryResultError,
+  kingbasePgCancelQueryResultError,
+  pgCancelQueryResultError,
   PG_PROCESS_LIST_LEGACY_SQL,
   PG_PROCESS_LIST_SQL,
 } from "@/lib/database/postgresProcessList";
@@ -56,22 +58,22 @@ describe("mapPgProcessRows", () => {
   });
 });
 
-describe("buildPgKillSql", () => {
-  it("builds pg_terminate_backend for a valid pid", () => {
-    expect(buildPgKillSql(4211)).toBe("SELECT pg_terminate_backend(4211)");
+describe("buildPgCancelQuerySql", () => {
+  it("builds pg_cancel_backend for a valid pid without disconnecting the session", () => {
+    expect(buildPgCancelQuerySql(4211)).toBe("SELECT pg_cancel_backend(4211)");
   });
 
   it("rejects non-integer, zero, or negative pids", () => {
-    expect(() => buildPgKillSql(1.5)).toThrow();
-    expect(() => buildPgKillSql(0)).toThrow();
-    expect(() => buildPgKillSql(-1)).toThrow();
-    expect(() => buildPgKillSql(Number.NaN)).toThrow();
+    expect(() => buildPgCancelQuerySql(1.5)).toThrow();
+    expect(() => buildPgCancelQuerySql(0)).toThrow();
+    expect(() => buildPgCancelQuerySql(-1)).toThrow();
+    expect(() => buildPgCancelQuerySql(Number.NaN)).toThrow();
   });
 
-  it("builds the KingbaseES sys_terminate_backend call with the same PID validation", () => {
-    expect(buildKingbaseKillSql(4211)).toBe("SELECT sys_terminate_backend(4211)");
-    expect(() => buildKingbaseKillSql(0)).toThrow();
-    expect(() => buildKingbaseKillSql(1.5)).toThrow();
+  it("builds the KingbaseES sys_cancel_backend call with the same PID validation", () => {
+    expect(buildKingbaseCancelQuerySql(4211)).toBe("SELECT sys_cancel_backend(4211)");
+    expect(() => buildKingbaseCancelQuerySql(0)).toThrow();
+    expect(() => buildKingbaseCancelQuerySql(1.5)).toThrow();
   });
 });
 
@@ -83,7 +85,7 @@ describe("PostgreSQL-family process SQL", () => {
     expect(OPENGAUSS_PROCESS_LIST_SQL).toContain("FROM pg_catalog.pg_stat_activity");
     expect(OPENGAUSS_PROCESS_LIST_SQL).toContain("CASE WHEN waiting");
     expect(OPENGAUSS_PROCESS_LIST_SQL).not.toContain("wait_event_type");
-    expect(driver?.buildKillSql(7)).toBe("SELECT pg_terminate_backend(7)");
+    expect(driver?.buildCancelQuerySql(7)).toBe("SELECT pg_cancel_backend(7)");
   });
 
   it("uses KingbaseES's sys catalog and session functions", () => {
@@ -95,26 +97,26 @@ describe("PostgreSQL-family process SQL", () => {
     expect(KINGBASE_PROCESS_LIST_SQL).toContain("extract(epoch FROM CAST(CURRENT_TIMESTAMP AS TIMESTAMP))");
     expect(KINGBASE_PROCESS_LIST_SQL).toContain("extract(epoch FROM CAST(coalesce(query_start, xact_start, backend_start) AS TIMESTAMP))");
     expect(KINGBASE_PROCESS_LIST_SQL).not.toContain("CURRENT_TIMESTAMP - coalesce(query_start");
-    expect(driver?.buildKillSql(7)).toBe("SELECT sys_terminate_backend(7)");
+    expect(driver?.buildCancelQuerySql(7)).toBe("SELECT sys_cancel_backend(7)");
   });
 
   it("provides pg_catalog fallbacks for pg-compatible KingbaseES servers", () => {
     const driver = resolveProcessListDriver("kingbase");
     expect(driver?.fallbackListSql).toBe(KINGBASE_PG_PROCESS_LIST_SQL);
     expect(driver?.fallbackOwnSessionSql).toBe(KINGBASE_PG_OWN_SESSION_SQL);
-    expect(driver?.buildFallbackKillSql?.(7)).toBe("SELECT pg_terminate_backend(7)");
+    expect(driver?.buildFallbackCancelQuerySql?.(7)).toBe("SELECT pg_cancel_backend(7)");
     expect(KINGBASE_PG_PROCESS_LIST_SQL).toContain("FROM pg_catalog.pg_stat_activity");
     expect(KINGBASE_PG_PROCESS_LIST_SQL).not.toContain("sys_catalog");
-    expect(buildKingbasePgKillSql(4211)).toBe("SELECT pg_terminate_backend(4211)");
+    expect(buildKingbasePgCancelQuerySql(4211)).toBe("SELECT pg_cancel_backend(4211)");
   });
 
   it("retries only missing sys relation/function errors", () => {
     expect(isKingbaseProcessListCatalogCompatibilityError(new Error('relation "sys_catalog.sys_stat_activity" does not exist (SQLSTATE 42P01)'))).toBe(true);
     expect(isKingbaseOwnSessionCatalogCompatibilityError(Object.assign(new Error("function sys_backend_pid() does not exist"), { code: "42883" }))).toBe(true);
-    expect(isKingbaseTerminateCatalogCompatibilityError(new Error("function sys_terminate_backend(integer) does not exist (SQLSTATE 42883)"))).toBe(true);
+    expect(isKingbaseCancelCatalogCompatibilityError(new Error("function sys_cancel_backend(integer) does not exist (SQLSTATE 42883)"))).toBe(true);
     expect(isKingbaseProcessListCatalogCompatibilityError(Object.assign(new Error("permission denied for relation sys_catalog.sys_stat_activity"), { code: "42501" }))).toBe(false);
     expect(isKingbaseOwnSessionCatalogCompatibilityError(new Error("authentication failed for sys_backend_pid"))).toBe(false);
-    expect(isKingbaseTerminateCatalogCompatibilityError(new Error("connection refused"))).toBe(false);
+    expect(isKingbaseCancelCatalogCompatibilityError(new Error("connection refused"))).toBe(false);
   });
 });
 
@@ -128,11 +130,13 @@ describe("Postgres compatibility", () => {
     expect(isPgProcessListCompatibilityError(new Error("permission denied for view pg_stat_activity"))).toBe(false);
   });
 
-  it("requires pg_terminate_backend to confirm termination", () => {
-    expect(pgKillResultError([result(["pg_terminate_backend"], [[true]])])).toBeNull();
-    expect(pgKillResultError([result(["pg_terminate_backend"], [["t"]])])).toBeNull();
-    expect(pgKillResultError([result(["pg_terminate_backend"], [[false]])])).toContain("did not terminate");
-    expect(pgKillResultError([result(["pg_terminate_backend"], [])])).toContain("did not terminate");
+  it("requires cancellation functions to confirm that a running query was canceled", () => {
+    expect(pgCancelQueryResultError([result(["pg_cancel_backend"], [[true]])])).toBeNull();
+    expect(pgCancelQueryResultError([result(["pg_cancel_backend"], [["t"]])])).toBeNull();
+    expect(pgCancelQueryResultError([result(["pg_cancel_backend"], [[false]])])).toContain("did not cancel");
+    expect(pgCancelQueryResultError([result(["pg_cancel_backend"], [])])).toContain("did not cancel");
+    expect(kingbaseCancelQueryResultError([result(["sys_cancel_backend"], [[false]])])).toContain("did not cancel");
+    expect(kingbasePgCancelQueryResultError([result(["pg_cancel_backend"], [[true]])])).toBeNull();
   });
 });
 
@@ -140,11 +144,11 @@ describe("resolveProcessListDriver", () => {
   it("routes MySQL and Postgres engines to distinct drivers", () => {
     const mysql = resolveProcessListDriver("mysql");
     const postgres = resolveProcessListDriver("postgres");
-    expect(mysql?.buildKillSql(7)).toBe("KILL CONNECTION 7");
-    expect(postgres?.buildKillSql(7)).toBe("SELECT pg_terminate_backend(7)");
+    expect(mysql?.buildCancelQuerySql(7)).toBe("KILL QUERY 7");
+    expect(postgres?.buildCancelQuerySql(7)).toBe("SELECT pg_cancel_backend(7)");
     expect(postgres?.fallbackListSql).toBe(PG_PROCESS_LIST_LEGACY_SQL);
     expect(postgres?.shouldUseFallbackListSql?.(new Error('column "wait_event" does not exist'))).toBe(true);
-    expect(postgres?.killResultError?.([result(["pg_terminate_backend"], [[false]])])).toContain("did not terminate");
+    expect(postgres?.cancelQueryResultError?.([result(["pg_cancel_backend"], [[false]])])).toContain("did not cancel");
     expect(resolveProcessListDriver("sqlite")).toBeNull();
   });
 
@@ -190,7 +194,7 @@ describe("connectionSupportsProcessList", () => {
 
 describe("resolveProcessListDriverForConnection", () => {
   it("returns the engine driver for a JDBC MySQL connection and null for lookalikes", () => {
-    expect(resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "jdbc:mysql://db/app" }))?.buildKillSql(9)).toBe("KILL CONNECTION 9");
+    expect(resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "jdbc:mysql://db/app" }))?.buildCancelQuerySql(9)).toBe("KILL QUERY 9");
     expect(resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "jdbc:hive2://hs2/default" }))).toBeNull();
   });
 });

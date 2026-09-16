@@ -21,6 +21,8 @@ pub struct DatabaseSearchSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
     #[serde(default)]
@@ -92,7 +94,7 @@ pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<Da
         let identifier = quote_table_identifier(options.database_type, &column.name);
         conditions.push(format!(
             "{} LIKE {} ESCAPE '~'",
-            text_cast_expression(options.database_type, &identifier),
+            text_cast_expression(options.database_type, options.driver_profile.as_deref(), &identifier),
             sql_string_literal(&like_pattern(&term))
         ));
     }
@@ -229,9 +231,14 @@ fn like_pattern(term: &str) -> String {
     pattern
 }
 
-fn text_cast_expression(database_type: Option<DatabaseType>, identifier: &str) -> String {
+fn text_cast_expression(database_type: Option<DatabaseType>, driver_profile: Option<&str>, identifier: &str) -> String {
     match database_type {
         Some(DatabaseType::Mysql) => format!("LOWER(CAST({identifier} AS CHAR))"),
+        Some(DatabaseType::SqlServer)
+            if driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case("sqlserver-legacy")) =>
+        {
+            format!("LOWER(CAST({identifier} AS NVARCHAR(4000)))")
+        }
         Some(DatabaseType::SqlServer) => format!("LOWER(CAST({identifier} AS NVARCHAR(MAX)))"),
         Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle) => {
             format!("LOWER(CAST({identifier} AS VARCHAR2(4000)))")
@@ -278,6 +285,7 @@ mod tests {
     fn builds_table_search_query_over_text_columns() {
         let query = build_database_search_sql(DatabaseSearchSqlOptions {
             database_type: Some(DatabaseType::Mysql),
+            driver_profile: None,
             schema: None,
             table_name: "users".to_string(),
             columns: vec![col("id", "bigint", true), col("email", "varchar", false), col("avatar", "blob", false)],
@@ -294,9 +302,29 @@ mod tests {
     }
 
     #[test]
+    fn uses_legacy_sqlserver_cast_without_max_type() {
+        let query = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            driver_profile: Some(" SQLSERVER-LEGACY ".to_string()),
+            schema: Some("dbo".to_string()),
+            table_name: "users".to_string(),
+            columns: vec![col("name", "nvarchar", false)],
+            term: "alice".to_string(),
+            limit: Some(20),
+        })
+        .unwrap();
+
+        assert_eq!(
+            query.sql,
+            "SELECT TOP 20 * FROM [dbo].[users] WHERE (LOWER(CAST([name] AS NVARCHAR(4000))) LIKE '%alice%' ESCAPE '~')"
+        );
+    }
+
+    #[test]
     fn adds_numeric_predicates_only_for_numeric_terms() {
         let query = build_database_search_sql(DatabaseSearchSqlOptions {
             database_type: Some(DatabaseType::Postgres),
+            driver_profile: None,
             schema: Some("public".to_string()),
             table_name: "orders".to_string(),
             columns: vec![col("id", "integer", true), col("note", "text", false)],
@@ -314,6 +342,7 @@ mod tests {
     fn builds_oceanbase_oracle_search_query_with_rownum_limit() {
         let query = build_database_search_sql(DatabaseSearchSqlOptions {
             database_type: Some(DatabaseType::OceanbaseOracle),
+            driver_profile: None,
             schema: Some("APP".to_string()),
             table_name: "USERS".to_string(),
             columns: vec![col("NAME", "varchar2", false)],
@@ -334,6 +363,7 @@ mod tests {
         assert_eq!(
             build_database_search_sql(DatabaseSearchSqlOptions {
                 database_type: Some(DatabaseType::Sqlite),
+                driver_profile: None,
                 schema: None,
                 table_name: "files".to_string(),
                 columns: vec![col("payload", "blob", false)],

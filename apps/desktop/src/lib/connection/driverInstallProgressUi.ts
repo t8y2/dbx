@@ -16,14 +16,72 @@ export interface DriverInstallProgressTargetState {
   progressMap: Record<string, DriverInstallProgress | null | undefined>;
 }
 
+export interface DriverInstallCancellationTargetState {
+  activeOperationId: string | null;
+  cancellableDbType: string | null;
+  upgradingAll: boolean;
+  progressMap: Record<string, DriverInstallProgress | null | undefined>;
+}
+
 export type DriverInstallProgressChannel = "agent" | "jdbc-plugin";
 
 const AGENT_PROGRESS_STEPS = new Set(["driver", "jre", "jre-extract", "all-done"]);
+
+/** Substring the backend uses for a user-cancelled driver install/upgrade. */
+const AGENT_DOWNLOAD_CANCELED_ERROR = "Agent download canceled by user.";
+
+/**
+ * True when a driver-install error is a user cancel rather than a genuine
+ * failure. Callers use this to close install modals silently and to avoid
+ * reporting a cancelled driver/upgrade as failed.
+ */
+export function isDriverInstallCanceledError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String((error as { message?: string } | null)?.message ?? error ?? "");
+  return message.includes(AGENT_DOWNLOAD_CANCELED_ERROR);
+}
 
 export function isDriverInstallProgressForOperation(progress: DriverInstallProgress, operationId: string | null): boolean {
   // Keep accepting legacy unscoped events, while preventing another active
   // install's terminal/progress event from mutating this dialog.
   return !progress.operation_id || progress.operation_id === operationId;
+}
+
+/** How an agent install promise settled relative to the dialog's state. */
+export interface AgentInstallOperationContext {
+  /** Operation id captured when the install promise was created. */
+  operationId: string;
+  /** Operation id the dialog is currently tracking (null once finished). */
+  currentOperationId: string | null;
+  /** Whether the user pressed Cancel on the dialog's tracked operation. */
+  cancelRequested: boolean;
+}
+
+export type AgentInstallOutcome = { kind: "succeeded"; ownsState: boolean } | { kind: "cancelled"; ownsState: boolean } | { kind: "failed"; ownsState: boolean };
+
+export type AgentInstallCancelRequestResult = { ok: true } | { ok: false; error: unknown };
+
+/**
+ * Classify the settlement of an agent install operation promise. When the
+ * dialog no longer tracks the promise's operation id (the user cancelled and
+ * immediately retried, so a newer operation owns the state), `ownsState` is
+ * false and the stale promise must not finish/fail the new operation's UI.
+ */
+export function resolveAgentInstallOutcome(result: { ok: true } | { ok: false; error: unknown }, context: AgentInstallOperationContext): AgentInstallOutcome {
+  const ownsState = context.currentOperationId === context.operationId;
+  if (result.ok) return { kind: "succeeded", ownsState };
+  if (isDriverInstallCanceledError(result.error) || context.cancelRequested) {
+    return { kind: "cancelled", ownsState };
+  }
+  return { kind: "failed", ownsState };
+}
+
+export async function requestAgentInstallCancellation(request: () => Promise<void>): Promise<AgentInstallCancelRequestResult> {
+  try {
+    await request();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 export function driverInstallProgressChannel(progress: DriverInstallProgress): DriverInstallProgressChannel | null {
@@ -69,6 +127,13 @@ export function isDriverInstallProgressTarget(dbType: string, state: DriverInsta
   if (!state.upgradingAll) return false;
   // During batch upgrade, check the per-driver map — the driver is "active"
   // if it has a (non-null, non-"done") progress entry.
+  const progress = state.progressMap[dbType];
+  return progress !== null && progress !== undefined;
+}
+
+export function isDriverInstallCancellationTarget(dbType: string, state: DriverInstallCancellationTargetState): boolean {
+  if (!state.activeOperationId) return false;
+  if (!state.upgradingAll) return state.cancellableDbType === dbType;
   const progress = state.progressMap[dbType];
   return progress !== null && progress !== undefined;
 }

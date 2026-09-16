@@ -1,4 +1,4 @@
-import type { NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
+import type { NacosAdminConfig, NacosApiPlane, NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosPermissionInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
 import { diffArrays, diffChars } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
@@ -12,26 +12,26 @@ export interface NacosRawTemplate {
 }
 
 export const NACOS_RAW_TEMPLATES: NacosRawTemplate[] = [
-  { key: "serverState", method: "GET", path: "/v3/console/server/state", query: "", body: "" },
-  { key: "namespaceList", method: "GET", path: "/v3/console/core/namespace/list", query: "", body: "" },
+  { key: "serverState", method: "GET", path: "/v3/admin/core/state", query: "", body: "" },
+  { key: "namespaceList", method: "GET", path: "/v3/admin/core/namespace/list", query: "", body: "" },
   {
     key: "configDetail",
     method: "GET",
-    path: "/v3/console/cs/config",
+    path: "/v3/admin/cs/config",
     query: "dataId=application.yaml&groupName=DEFAULT_GROUP&namespaceId=",
     body: "",
   },
   {
     key: "serviceList",
     method: "GET",
-    path: "/v3/console/ns/service/list",
+    path: "/v3/admin/ns/service/list",
     query: "pageNo=1&pageSize=20&namespaceId=",
     body: "",
   },
   {
     key: "instanceList",
     method: "GET",
-    path: "/v3/console/ns/instance/list",
+    path: "/v3/admin/ns/instance/list",
     query: "serviceName=DEFAULT_GROUP@@example&namespaceId=",
     body: "",
   },
@@ -58,7 +58,67 @@ export interface NacosEndpointNormalization {
 export interface NacosEndpointNormalizationOptions {
   implementation?: NacosImplementation;
   versionMode?: NacosVersionMode;
+  apiPlane?: NacosApiPlane;
   contextPath?: string;
+}
+
+export interface NacosMetadataTableRow {
+  key: string;
+  value: string;
+}
+
+/** Makes a metadata object readable in a two-column view without losing nested values. */
+export function nacosMetadataTableRows(metadata: unknown): NacosMetadataTableRow[] {
+  if (!metadata || typeof metadata !== "object") return [];
+  return Object.entries(metadata as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value: typeof value === "string" ? value : (JSON.stringify(value) ?? String(value)),
+  }));
+}
+
+/** Validates a browser-only Nacos console URL without mixing credentials into a saved connection profile. */
+export function normalizeNacosConsoleUrl(input: string): string {
+  let url: URL;
+  try {
+    url = new URL(input.trim());
+  } catch {
+    throw new Error("Nacos console URL must be a valid absolute URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Nacos console URL must use HTTP or HTTPS");
+  if (url.username || url.password) throw new Error("Nacos console URL must not contain embedded credentials");
+  return url.toString().replace(/\/$/, "");
+}
+
+/**
+ * Resolves the web-console address independently from DBX's API connection.
+ * Nacos 3 must be configured explicitly because its Console port can differ
+ * from its Admin API port. Nacos 2 keeps the historical same-endpoint fallback.
+ */
+function resolveNacosConsoleUrlFromServer(serverAddr: string, contextPath: string | undefined, fallbackPath: string): string {
+  const endpoint = new URL(normalizeNacosConsoleUrl(serverAddr));
+  const normalizedContextPath = contextPath?.trim().replace(/^\/+|\/+$/g, "");
+  endpoint.pathname = normalizedContextPath ? `/${normalizedContextPath}` : fallbackPath || "/";
+  endpoint.search = "";
+  endpoint.hash = "";
+  return endpoint.toString().replace(/\/$/, "");
+}
+
+export function resolveNacosConsoleUrl(config: Pick<NacosAdminConfig, "implementation" | "versionMode" | "apiPlane" | "serverAddr" | "contextPath" | "consoleUrl" | "rnacosConsoleAddr">): string | undefined {
+  // A Nacos 3 Console API connection already targets the browser console.
+  // Prefer its primary endpoint even for legacy profiles that kept a stale
+  // standalone console URL.
+  if (config.versionMode === "v3" && config.apiPlane === "console") {
+    const serverAddr = config.serverAddr?.trim();
+    return serverAddr ? resolveNacosConsoleUrlFromServer(serverAddr, config.contextPath, "") : undefined;
+  }
+  if (config.implementation === "rnacos" || (!config.implementation && config.rnacosConsoleAddr?.trim())) {
+    return config.rnacosConsoleAddr?.trim() ? normalizeNacosConsoleUrl(config.rnacosConsoleAddr) : undefined;
+  }
+  if (config.versionMode === "v3") return config.consoleUrl?.trim() ? normalizeNacosConsoleUrl(config.consoleUrl) : undefined;
+
+  const serverAddr = config.serverAddr?.trim();
+  if (!serverAddr) return undefined;
+  return resolveNacosConsoleUrlFromServer(serverAddr, config.contextPath, "/nacos");
 }
 
 /**
@@ -78,6 +138,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
   const rawPath = url.pathname.replace(/\/+$/, "");
   const implementation = options.implementation;
   const versionMode = options.versionMode || "auto";
+  const apiPlane = options.apiPlane || "admin";
   const warnings: string[] = [];
   const hasRNacosSuffix = /\/rnacos$/i.test(rawPath);
   const hasNacosSuffix = /\/nacos$/i.test(rawPath);
@@ -91,7 +152,7 @@ export function normalizeNacosEndpoint(input: string, options: NacosEndpointNorm
     contextPath = hasNacosSuffix ? rawPath : options.contextPath?.trim() || "/nacos";
   } else if (detectedVersion === "v3" || hasNacos3UiSuffix) {
     contextPath = rawPath.replace(/\/(?:next(?:\/index\.html)?|index\.html)$/i, "");
-    if (!contextPath) contextPath = options.contextPath?.trim() || "/nacos";
+    if (!contextPath) contextPath = options.contextPath?.trim() || (apiPlane === "console" ? "" : "/nacos");
     if (hasNacos3UiSuffix) warnings.push("The Nacos 3 console route was removed from the API context.");
   } else if (!contextPath) {
     contextPath = options.contextPath?.trim() || (versionMode === "v2" ? "/nacos" : "");
@@ -160,6 +221,43 @@ export function parseNacosRawQuery(text: string): Record<string, string> | undef
   const trimmed = text.trim().replace(/^\?/, "");
   if (!trimmed) return undefined;
   return Object.fromEntries(new URLSearchParams(trimmed).entries());
+}
+
+export function parseNacosManagedNamespaces(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .split(/[\n,，]+/)
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+export type NacosNamespacePermissionAction = "r" | "w" | "rw";
+
+export interface NacosNamespacePermissionAssignment {
+  namespaceId: string;
+  action: NacosNamespacePermissionAction;
+}
+
+/**
+ * The Nacos permission table may store read and write as separate rows for the
+ * same role and namespace. The editor exposes one assignment per namespace, so
+ * combine those rows before populating the form to avoid dropping either half
+ * when an unchanged role is saved.
+ */
+export function mergeNacosNamespacePermissionAssignments(permissions: Pick<NacosPermissionInfo, "actionRaw" | "parsedScope">[]): NacosNamespacePermissionAssignment[] {
+  const assignments = new Map<string, NacosNamespacePermissionAction>();
+  for (const permission of permissions) {
+    const namespaceId = permission.parsedScope?.namespaceId;
+    if (!namespaceId || !["r", "w", "rw"].includes(permission.actionRaw)) continue;
+    const current = assignments.get(namespaceId);
+    const readable = current?.includes("r") || permission.actionRaw.includes("r");
+    const writable = current?.includes("w") || permission.actionRaw.includes("w");
+    assignments.set(namespaceId, readable && writable ? "rw" : readable ? "r" : "w");
+  }
+  return [...assignments].map(([namespaceId, action]) => ({ namespaceId, action }));
 }
 
 export function parseNacosRawBody(text: string): unknown {
@@ -467,13 +565,6 @@ export function createNacosSaveAsCopy(item: NacosConfigItem): NacosConfigItem {
   };
 }
 
-export interface NacosDiffSummary {
-  changed: boolean;
-  addedLines: number;
-  removedLines: number;
-  preview: string;
-}
-
 export type NacosDiffLineType = "equal" | "delete" | "insert" | "modify" | "padding";
 
 export interface NacosInlineSegment {
@@ -499,28 +590,6 @@ export interface NacosInlineDiffRow {
   content: string;
   type: Exclude<NacosDiffLineType, "modify" | "padding">;
   segments: NacosInlineSegment[];
-}
-
-export function summarizeNacosConfigDiff(before: string, after: string, maxPreviewLines = 40): NacosDiffSummary {
-  const changes = diffArrays(splitDiffLines(before), splitDiffLines(after));
-  const lines: string[] = [];
-  let addedLines = 0;
-  let removedLines = 0;
-
-  for (const change of changes) {
-    if (!change.added && !change.removed) continue;
-    const prefix = change.added ? "+" : "-";
-    for (const line of change.value) {
-      if (change.added) addedLines += 1;
-      else removedLines += 1;
-      if (lines.length < maxPreviewLines) lines.push(`${prefix} ${line}`);
-    }
-  }
-
-  const changed = addedLines > 0 || removedLines > 0;
-  if (!changed) return { changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." };
-  if (lines.length < addedLines + removedLines) lines.push("...");
-  return { changed: true, addedLines, removedLines, preview: lines.join("\n") };
 }
 
 function normalizeNacosDiffText(value: string): string {
@@ -702,8 +771,12 @@ export function buildNacosInstanceConfirm(service: NacosServiceInfo, instance: N
     `serviceName=${service.serviceName}`,
     `group=${instance.groupName || service.groupName || fallbackGroup || "DEFAULT_GROUP"}`,
     `instance=${instance.ip}:${instance.port}`,
+    `cluster=${instance.clusterName || "DEFAULT"}`,
+    `ephemeral=${instance.ephemeral === true ? "true" : instance.ephemeral === false ? "false" : "unknown"}`,
     patch.enabled == null ? "" : `targetEnabled=${targetEnabled === false ? "false" : "true"}`,
     patch.healthy == null ? "" : `targetHealthy=${targetHealthy === false ? "false" : "true"}`,
+    patch.weight == null ? "" : `targetWeight=${patch.weight}`,
+    patch.metadata == null ? "" : `targetMetadata=${JSON.stringify(patch.metadata)}`,
   ]
     .filter(Boolean)
     .join("\n");

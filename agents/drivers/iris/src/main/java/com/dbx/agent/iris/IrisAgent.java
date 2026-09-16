@@ -2,14 +2,19 @@ package com.dbx.agent.iris;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
+import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.StandardJdbcMetadata;
+
+import com.intersystems.jdbc.IRISConnection;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -28,6 +33,56 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
 
     public IrisAgent() {
         super(IRIS_PROFILE);
+    }
+
+    // The InterSystems driver's default query prefetch block (32768 bytes) means
+    // one server round trip per ~32KB of result data. Large result sets over
+    // high-latency links then spend most of their wall time waiting on the
+    // network instead of transferring rows, while other clients that negotiate
+    // larger fetch blocks finish several times faster. Statement.setFetchSize
+    // does not help here: intersystems-jdbc stores that value but never sends
+    // it to the server. The connection-level query prefetch size is the only
+    // effective knob, so raise it for every DBX IRIS connection. This is
+    // advisory: servers that reject the value keep the driver default, and the
+    // driver only round-trips when the value actually changes.
+    static final int IRIS_QUERY_PREFETCH_SIZE = 262144;
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        super.afterConnect(params, connection);
+        applyQueryPrefetchSize(connection);
+    }
+
+    static void applyQueryPrefetchSize(Connection connection) {
+        if (!(connection instanceof IRISConnection)) {
+            return;
+        }
+        try {
+            ((IRISConnection) connection).setQueryPrefetchSize(IRIS_QUERY_PREFETCH_SIZE);
+        } catch (Exception ignored) {
+            // Performance tuning only; keep the connection usable with the
+            // driver default when a server refuses the larger prefetch.
+        }
+    }
+
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
+        switch (sqlType) {
+            case Types.BIGINT:
+            case Types.INTEGER:
+            case Types.SMALLINT:
+            case Types.TINYINT:
+                // InterSystems can expose values outside the Java primitive range
+                // implied by its JDBC metadata. Preserve them without narrowing.
+                return unchecked(() -> {
+                    Object value = rs.getBigDecimal(index);
+                    return rs.wasNull() ? null : value;
+                });
+            case Types.OTHER:
+                return unchecked(() -> JdbcExecutor.normalizeResultValue(rs.getObject(index)));
+            default:
+                return super.resultValue(rs, index, sqlType);
+        }
     }
 
     @Override
@@ -62,7 +117,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
                             stringOrNull(rs, "COLUMN_DEFAULT"),
                             "YES".equalsIgnoreCase(stringOrNull(rs, "PRIMARY_KEY")),
                             null,
-                            null,
+                            stringOrNull(rs, "DESCRIPTION"),
                             intOrNull(rs, "NUMERIC_PRECISION"),
                             intOrNull(rs, "NUMERIC_SCALE"),
                             intOrNull(rs, "CHARACTER_MAXIMUM_LENGTH")
@@ -126,7 +181,7 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
     private static String columnSql(String schema) {
         StringBuilder sql = new StringBuilder(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
-                + "PRIMARY_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH "
+                + "PRIMARY_KEY, DESCRIPTION, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH "
                 + "FROM INFORMATION_SCHEMA.COLUMNS WHERE "
         );
         if (!isBlank(schema)) {

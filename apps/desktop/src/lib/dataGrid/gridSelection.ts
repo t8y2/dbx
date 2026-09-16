@@ -27,6 +27,7 @@ export interface SelectionSummary {
   rowCount: number;
   numericCount: number;
   sum: number;
+  average: number | null;
 }
 
 export function parseClipboardTable(text: string): string[][] {
@@ -123,5 +124,25 @@ export function summarizeSelection(selection: SelectionData): SelectionSummary {
     rowCount: selection.rows.length,
     numericCount,
     sum,
+    average: numericCount > 0 && Number.isFinite(sum) ? sum / numericCount : null,
   };
+}
+
+export function createPendingSelectionSummary(cellCount: number, rowCount: number): SelectionSummary {
+  return {
+    cellCount,
+    rowCount,
+    numericCount: 0,
+    sum: 0,
+    average: null,
+  };
+}
+
+export function formatSelectionAggregate(value: number, locales?: Intl.LocalesArgument): string {
+  const normalized = Object.is(value, -0) ? 0 : value;
+  return Number.isInteger(normalized) ? String(normalized) : normalized.toLocaleString(locales, { maximumFractionDigits: 12 });
+}
+
+export function formatSelectionAverage(value: number | null | undefined, locales?: Intl.LocalesArgument): string {
+  return typeof value === "number" && Number.isFinite(value) ? formatSelectionAggregate(value, locales) : "—";
 }

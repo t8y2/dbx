@@ -1,7 +1,18 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildDataGridColumnLookupItems, filterDataGridColumnLookupItems } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnLookup.ts";
-import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesForKeys, hiddenColumnIndexesWithAllNullColumns, hiddenColumnKeysForIndexes, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnVisibility.ts";
+import {
+  allNullColumnIndexes,
+  filterColumnVisibilityOptions,
+  hiddenColumnIndexesAfterHiding,
+  hiddenColumnIndexesForKeys,
+  hiddenColumnIndexesWithAllNullColumns,
+  hiddenColumnKeysForIndexes,
+  invertedHiddenColumnIndexes,
+  nextHiddenColumnIndexes,
+  removeAutoHiddenColumnIndexes,
+  visibleColumnIndexesForFilter,
+} from "../../apps/desktop/src/lib/dataGrid/dataGridColumnVisibility.ts";
 
 test("filters column visibility options by trimmed case-insensitive text", () => {
   const options = filterColumnVisibilityOptions(["id", "created_at", "CustomerName"], "  NAME ");
@@ -91,6 +102,54 @@ test("inverts hidden column indexes", () => {
   const hidden = invertedHiddenColumnIndexes([0, 1, 2, 3], new Set([1, 3]));
 
   assert.deepEqual([...hidden].sort(), [0, 2]);
+});
+
+test("hides a batch of columns in one step", () => {
+  const hidden = hiddenColumnIndexesAfterHiding({
+    columnIndexes: [1, 2],
+    hiddenIndexes: new Set(),
+    availableIndexes: [0, 1, 2, 3],
+  });
+
+  assert.deepEqual([...hidden].sort(), [1, 2]);
+});
+
+test("batch hiding is idempotent for duplicates and already hidden columns", () => {
+  const hidden = hiddenColumnIndexesAfterHiding({
+    columnIndexes: [1, 1, 2, 2],
+    hiddenIndexes: new Set([2]),
+    availableIndexes: [0, 1, 2, 3],
+  });
+
+  assert.deepEqual([...hidden].sort(), [1, 2]);
+});
+
+test("batch hiding ignores empty input and unavailable indexes", () => {
+  const empty = hiddenColumnIndexesAfterHiding({ columnIndexes: [], hiddenIndexes: new Set([1]), availableIndexes: [0, 1, 2] });
+  assert.deepEqual([...empty], [1]);
+
+  const unavailable = hiddenColumnIndexesAfterHiding({ columnIndexes: [9], hiddenIndexes: new Set(), availableIndexes: [0, 1, 2] });
+  assert.deepEqual([...unavailable], []);
+});
+
+test("batch hiding keeps the last visible column", () => {
+  const noneLeft = hiddenColumnIndexesAfterHiding({
+    columnIndexes: [2],
+    hiddenIndexes: new Set([0, 1]),
+    availableIndexes: [0, 1, 2],
+  });
+
+  assert.deepEqual([...noneLeft].sort(), [0, 1]);
+});
+
+test("batch hiding every visible column keeps the first one visible", () => {
+  const hidden = hiddenColumnIndexesAfterHiding({
+    columnIndexes: [0, 1, 2],
+    hiddenIndexes: new Set(),
+    availableIndexes: [0, 1, 2],
+  });
+
+  assert.deepEqual([...hidden].sort(), [1, 2]);
 });
 
 test("keeps one column visible when inverting all visible columns", () => {

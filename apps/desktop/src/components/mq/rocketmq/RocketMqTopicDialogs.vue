@@ -2,8 +2,9 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { BrokerNode, ResetPosition, SubscriptionInfo, TopicInfo, TopicRef } from "@/types/mq";
-import { mqAlterTopicConfig, mqGetTopicInternalStats, mqGetTopicRoute, mqGetTopicStats, mqListSubscriptions, mqResetCursor, mqSkipTopicAccumulation } from "@/lib/backend/api";
+import { mqAlterTopicConfig, mqEnrichSubscriptions, mqGetTopicInternalStats, mqGetTopicRoute, mqGetTopicStats, mqListSubscriptions, mqResetCursor, mqSkipTopicAccumulation } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 export type RocketMqTopicDialogKind = "status" | "route" | "consumers" | "config" | "reset" | "skip";
 
@@ -46,6 +47,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const loading = ref(false);
 const dialogError = ref<string>();
@@ -194,8 +196,13 @@ async function loadResetSubscriptions(topic: TopicRef): Promise<SubscriptionInfo
     return sortResetSubscriptions(topicSpecific, topic.topic);
   }
   // Reset offset uses force=true; fall back to all cluster groups when the topic has no committed offsets yet.
+  // Prefer enrich so subscribed-topic sorting still works after the fast-list path dropped enrich.
   const clusterWide: TopicRef = { ...topic, topic: "" };
-  return sortResetSubscriptions(await mqListSubscriptions(props.connectionId, clusterWide), topic.topic);
+  try {
+    return sortResetSubscriptions(await mqEnrichSubscriptions(props.connectionId, clusterWide), topic.topic);
+  } catch {
+    return sortResetSubscriptions(await mqListSubscriptions(props.connectionId, clusterWide), topic.topic);
+  }
 }
 
 function formatDateTimeLocal(date: Date): string {
@@ -215,7 +222,12 @@ async function loadDialogData() {
     } else if (props.dialog === "route") {
       routeRaw.value = await mqGetTopicRoute(props.connectionId, topic);
     } else if (props.dialog === "consumers") {
-      subscriptions.value = await mqListSubscriptions(props.connectionId, topic);
+      // Topic consumer dialog shows lag; includeLag is on the list path. Enrich fills members when cheap.
+      try {
+        subscriptions.value = await mqEnrichSubscriptions(props.connectionId, topic);
+      } catch {
+        subscriptions.value = await mqListSubscriptions(props.connectionId, topic);
+      }
       selectedSubscription.value = subscriptions.value[0]?.name ?? "";
     } else if (props.dialog === "reset") {
       subscriptions.value = await loadResetSubscriptions(topic);
@@ -237,6 +249,7 @@ async function loadDialogData() {
 async function saveConfig() {
   const topic = topicRef.value;
   if (!topic || props.readOnly) return;
+  if (!(await confirmMqWrite(t("mqTopics.actionConfig")))) return;
   loading.value = true;
   dialogError.value = undefined;
   try {
@@ -258,6 +271,7 @@ async function saveConfig() {
 async function confirmSkip() {
   const topic = topicRef.value;
   if (!topic || props.readOnly) return;
+  if (!(await confirmMqWrite(t("mqTopics.actionSkip")))) return;
   if (!confirm(t("mqTopics.confirmSkip", { name: topic.topic }))) return;
   loading.value = true;
   dialogError.value = undefined;
@@ -275,6 +289,7 @@ async function confirmSkip() {
 async function confirmReset() {
   const topic = topicRef.value;
   if (!topic || props.readOnly || !selectedSubscription.value) return;
+  if (!(await confirmMqWrite(t("mqTopics.actionReset")))) return;
   loading.value = true;
   dialogError.value = undefined;
   try {
@@ -496,6 +511,8 @@ watch(
 </template>
 
 <style scoped>
+@import "../shared/mqPanel.css";
+
 .dialog-overlay {
   position: fixed;
   inset: 0;
@@ -532,14 +549,6 @@ watch(
 .dialog-header h3 {
   margin: 0;
   font-size: 18px;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 24px;
-  cursor: pointer;
-  color: var(--color-text-secondary);
 }
 
 .dialog-body {
@@ -672,28 +681,6 @@ watch(
   gap: 8px;
   padding: 16px 20px;
   border-top: 1px solid var(--color-border);
-}
-
-.btn-primary,
-.btn-secondary,
-.btn-sm {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: #fff;
-}
-
-.btn-sm {
-  padding: 4px 8px;
-  font-size: 12px;
 }
 
 button:disabled,

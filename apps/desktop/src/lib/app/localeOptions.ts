@@ -2,11 +2,13 @@ import type { Locale } from "@/i18n";
 
 export const LOCALE_OPTIONS: { value: Locale; flag: string; label: string }[] = [
   { value: "en", flag: "🇺🇸", label: "English" },
+  { value: "az", flag: "🇦🇿", label: "Azərbaycan" },
   { value: "es", flag: "🇪🇸", label: "Español" },
   { value: "it", flag: "🇮🇹", label: "Italiano" },
   { value: "ja", flag: "🇯🇵", label: "日本語" },
   { value: "ko", flag: "🇰🇷", label: "한국어" },
   { value: "pt-BR", flag: "🇧🇷", label: "Português" },
+  { value: "tr", flag: "🇹🇷", label: "Türkçe" },
   { value: "zh-CN", flag: "🇨🇳", label: "简体中文" },
   { value: "zh-TW", flag: "繁", label: "繁體中文" },
 ];

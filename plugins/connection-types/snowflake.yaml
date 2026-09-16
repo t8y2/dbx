@@ -1,0 +1,34 @@
+schemaVersion: 1
+order: 480
+dbType: snowflake
+rustVariant: Snowflake
+label: Snowflake
+runtimeMode: agent
+mcpMode: bridge
+agentKey: snowflake
+driverStoreVisible: true
+driverStoreOrder: 20
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 443
+traits:
+  schemaAware: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: true
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

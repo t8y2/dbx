@@ -7,7 +7,8 @@ existing newline-delimited JSON worker runtime, while keeping DuckDB and
 ## Build
 
 ```bash
-cargo build --manifest-path agents/drivers/duckdb/Cargo.toml --release --bin dbx-duckdb-driver
+cd agents/drivers/duckdb
+cargo build --release --bin dbx-duckdb-driver
 ```
 
 Point DBX at the resulting executable with:
@@ -34,6 +35,9 @@ drivers/dbx-agent-duckdb-<version>-<platform>[.exe]
 DBX decompresses the package itself, so users do not need to install `zstd`,
 DuckDB, or a separate database driver. The existing aggregate offline `.zip`
 packages remain supported for backward compatibility.
+
+Windows MSVC artifacts statically link the Visual C++ runtime so they also run
+on fresh Windows installations without a separate redistributable package.
 
 ## Current scope
 

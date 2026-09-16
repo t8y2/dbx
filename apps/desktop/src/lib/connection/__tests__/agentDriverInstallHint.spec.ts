@@ -9,11 +9,30 @@ describe("DuckDB driver installation", () => {
   });
 });
 
+describe("SQLite SSH worker installation", () => {
+  it("requires the downloadable worker only for SQLite over SSH", () => {
+    expect(agentDriverInstallKey("sqlite")).toBeUndefined();
+    expect(showAgentDriverInstallHint("sqlite", [])).toBe(false);
+    expect(agentDriverInstallKey("sqlite", undefined, { ssh: true })).toBe("sqlite-worker");
+    expect(showAgentDriverInstallHint("sqlite", [], undefined, { ssh: true })).toBe(true);
+    expect(showAgentDriverInstallHint("sqlite", [{ db_type: "sqlite-worker", installed: true }], undefined, { ssh: true })).toBe(false);
+  });
+});
+
+describe("HiveServer2-compatible driver installation", () => {
+  it("reuses the downloadable Hive driver", () => {
+    expect(agentDriverInstallKey("impala")).toBe("hive");
+    expect(showAgentDriverInstallHint("impala", [{ db_type: "hive", installed: true }])).toBe(false);
+    expect(agentDriverInstallKey("kyuubi")).toBe("hive");
+    expect(showAgentDriverInstallHint("kyuubi", [{ db_type: "hive", installed: true }])).toBe(false);
+  });
+});
+
 describe("driverStoreFocusForInstallError", () => {
-  it("focuses the missing agent driver for driver-not-installed errors", () => {
-    expect(driverStoreFocusForInstallError("zookeeper driver is not installed. Please install it from the Driver Manager.", "zookeeper", undefined)).toEqual({
+  it("focuses the SQLite SSH worker for remote SQLite driver errors", () => {
+    expect(driverStoreFocusForInstallError("sqlite-worker driver is not installed. Please install it from the Driver Manager.", "sqlite", undefined)).toEqual({
       target: "driver",
-      driver: "zookeeper",
+      driver: "sqlite-worker",
     });
   });
 

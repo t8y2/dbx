@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
@@ -10,8 +11,8 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::nacos::config::{NacosAdminConfig, NacosAuthConfig, NacosImplementation, NacosVersionMode};
-use crate::nacos::port::NacosAdmin;
+use crate::nacos::config::{NacosAdminConfig, NacosApiPlane, NacosAuthConfig, NacosImplementation, NacosVersionMode};
+use crate::nacos::port::{NacosAdmin, NacosNamespaceAuthorizationSnapshot};
 use crate::nacos::types::*;
 
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -21,6 +22,108 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 pub(crate) const RNACOS_CONSOLE_SESSION_CACHE_SECS: u64 = 86_400;
 const MAX_RAW_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const NACOS_ERROR_PREFIX: &str = "NACOS_ERROR";
+const ACCESS_CONTROL_CAPABILITY_CACHE_TTL: Duration = Duration::from_secs(60);
+const ACCESS_CONTROL_PROBE_PAGE_SIZE: u32 = 500;
+const ADMIN_ROLE: &str = "ROLE_ADMIN";
+const CONSOLE_USERS_RESOURCE: &str = "console/users";
+const CONSOLE_ROLES_RESOURCE: &str = "console/roles";
+const CONSOLE_PERMISSIONS_RESOURCE: &str = "console/permissions";
+
+#[derive(Clone)]
+struct CachedAccessControlCapabilities {
+    capabilities: NacosAccessControlCapabilities,
+    authorization: Option<CachedOfficialAuthorization>,
+    expires_at: Instant,
+}
+
+#[derive(Clone)]
+struct CachedOfficialAuthorization {
+    username: String,
+    role_bindings: Result<NacosRoleList, String>,
+    permissions: Result<NacosPermissionList, String>,
+}
+
+fn access_control_probe_reason(error: &str) -> NacosCapabilityReason {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("403")
+        || lower.contains("401")
+        || lower.contains("forbidden")
+        || lower.contains("unauthorized")
+        || lower.contains("access denied")
+    {
+        NacosCapabilityReason::PermissionDenied
+    } else if lower.contains("404")
+        || lower.contains("405")
+        || lower.contains("not found")
+        || lower.contains("no static resource")
+    {
+        NacosCapabilityReason::EndpointUnavailable
+    } else {
+        NacosCapabilityReason::NotVerified
+    }
+}
+
+fn read_capability<T>(result: &Result<T, String>) -> NacosOperationCapability {
+    match result {
+        Ok(_) => NacosOperationCapability::supported(),
+        Err(error) => NacosOperationCapability::unsupported(access_control_probe_reason(error)),
+    }
+}
+
+fn write_capability(
+    read: &NacosOperationCapability,
+    authorization_complete: bool,
+    granted: bool,
+) -> NacosOperationCapability {
+    if !read.supported {
+        return read.clone();
+    }
+    if !authorization_complete {
+        return NacosOperationCapability::unsupported(NacosCapabilityReason::NotVerified);
+    }
+    if granted {
+        NacosOperationCapability::supported()
+    } else {
+        NacosOperationCapability::unsupported(NacosCapabilityReason::PermissionDenied)
+    }
+}
+
+fn official_unverified_access_control() -> NacosAccessControlCapabilities {
+    let unavailable = NacosOperationCapability::unsupported(NacosCapabilityReason::NotVerified);
+    NacosAccessControlCapabilities {
+        mode: NacosAccessControlMode::RoleBindings,
+        list_users: unavailable.clone(),
+        create_user: unavailable.clone(),
+        update_user: unavailable.clone(),
+        delete_user: unavailable.clone(),
+        list_role_bindings: unavailable.clone(),
+        assign_role: unavailable.clone(),
+        remove_role: unavailable.clone(),
+        list_permissions: unavailable.clone(),
+        grant_permission: unavailable.clone(),
+        revoke_permission: unavailable,
+        enhanced_workspace: false,
+        supports_namespace_privileges: false,
+    }
+}
+
+fn official_full_access_control() -> NacosAccessControlCapabilities {
+    NacosAccessControlCapabilities {
+        mode: NacosAccessControlMode::RoleBindings,
+        list_users: NacosOperationCapability::supported(),
+        create_user: NacosOperationCapability::supported(),
+        update_user: NacosOperationCapability::supported(),
+        delete_user: NacosOperationCapability::supported(),
+        list_role_bindings: NacosOperationCapability::supported(),
+        assign_role: NacosOperationCapability::supported(),
+        remove_role: NacosOperationCapability::supported(),
+        list_permissions: NacosOperationCapability::supported(),
+        grant_permission: NacosOperationCapability::supported(),
+        revoke_permission: NacosOperationCapability::supported(),
+        enhanced_workspace: true,
+        supports_namespace_privileges: false,
+    }
+}
 
 #[derive(Debug, Clone)]
 struct AccessToken {
@@ -66,6 +169,11 @@ pub struct NacosOpenApiAdmin {
     http: reqwest::Client,
     token: Mutex<Option<AccessToken>>,
     rnacos_console_session: RNacosConsoleSessionHandle,
+    detected_rnacos: AtomicBool,
+    detected_major_version: AtomicU8,
+    managed_namespace_fallback_used: AtomicBool,
+    global_admin: AtomicU8,
+    access_control_capabilities: StdRwLock<Option<CachedAccessControlCapabilities>>,
 }
 
 impl NacosOpenApiAdmin {
@@ -77,27 +185,50 @@ impl NacosOpenApiAdmin {
         cfg: NacosAdminConfig,
         rnacos_console_session: RNacosConsoleSessionHandle,
     ) -> Result<Self, String> {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS));
+        let mut builder =
+            reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS)).cookie_store(true);
         if cfg.tls_skip_verify {
             builder = builder.danger_accept_invalid_certs(true);
         }
         let http = builder.build().map_err(|e| format!("Failed to build Nacos HTTP client: {e}"))?;
-        Ok(Self { cfg, http, token: Mutex::new(None), rnacos_console_session })
+        let detected_rnacos = AtomicBool::new(matches!(cfg.implementation, Some(NacosImplementation::RNacos)));
+        let detected_major_version = AtomicU8::new(match cfg.version_mode {
+            Some(NacosVersionMode::V3) => 3,
+            // New connections must choose a version in the UI. Keep legacy
+            // omitted/`auto` values deterministic rather than probing across
+            // API generations: they follow the established v2 Naming API.
+            Some(NacosVersionMode::V2) | Some(NacosVersionMode::Auto) | None => 2,
+        });
+        Ok(Self {
+            cfg,
+            http,
+            token: Mutex::new(None),
+            rnacos_console_session,
+            detected_rnacos,
+            detected_major_version,
+            managed_namespace_fallback_used: AtomicBool::new(false),
+            global_admin: AtomicU8::new(0),
+            access_control_capabilities: StdRwLock::new(None),
+        })
     }
 
     fn endpoint_with_context(&self, path: &str, context_path: &str) -> Result<String, String> {
+        self.endpoint_with_base(&self.cfg.server_addr, path, context_path)
+    }
+
+    fn endpoint_with_base(&self, server_addr: &str, path: &str, context_path: &str) -> Result<String, String> {
         let path = normalize_api_path(path);
         let context_path = normalize_api_path(context_path).trim_end_matches('/').to_string();
-        let base = format!("{}{}", self.cfg.server_addr, context_path);
+        let base = format!("{server_addr}{context_path}");
         let base = base.trim_end_matches('/');
         let full = if path.starts_with("/nacos/") && context_path == "/nacos" {
-            format!("{}{}", self.cfg.server_addr, path)
+            format!("{server_addr}{path}")
         } else if path.starts_with("/rnacos/") && context_path.ends_with("/nacos") {
             // r-nacos documents this auth endpoint outside the Nacos-compatible
             // `/nacos` context. Preserve an optional proxy prefix such as
             // `/gateway/nacos` while replacing that final segment.
             let proxy_prefix = context_path.strip_suffix("/nacos").unwrap_or(&context_path);
-            format!("{}{}{}", self.cfg.server_addr, proxy_prefix, path)
+            format!("{server_addr}{proxy_prefix}{path}")
         } else {
             format!("{base}{path}")
         };
@@ -111,8 +242,12 @@ impl NacosOpenApiAdmin {
         query: &[(String, String)],
         form: Option<&[(String, String)]>,
         body: Option<&Value>,
+        auth_token: Option<&str>,
     ) -> Result<reqwest::Response, String> {
-        let resp = self.send_once(method.clone(), path, &self.cfg.context_path, query, form, body).await?;
+        let resp = self.send_once(method.clone(), path, &self.cfg.context_path, query, form, body, auth_token).await?;
+        if method != reqwest::Method::GET && method != reqwest::Method::HEAD {
+            return Ok(resp);
+        }
         if !self.should_retry_without_context(resp.status()) {
             return Ok(resp);
         }
@@ -122,7 +257,7 @@ impl NacosOpenApiAdmin {
         if self.cfg.context_path.trim().is_empty() || !looks_like_wrong_context_path(&detail, &self.cfg.context_path) {
             return Err(format!("Nacos admin {path} returned {status}: {}", detail.trim()));
         }
-        self.send_once(method, path, "", query, form, body).await
+        self.send_once(method, path, "", query, form, body, auth_token).await
     }
 
     async fn send_once(
@@ -133,8 +268,13 @@ impl NacosOpenApiAdmin {
         query: &[(String, String)],
         form: Option<&[(String, String)]>,
         body: Option<&Value>,
+        auth_token: Option<&str>,
     ) -> Result<reqwest::Response, String> {
-        let mut req = self.http.request(method, self.endpoint_with_context(path, context_path)?).query(query);
+        let endpoint = self.endpoint_with_context(path, context_path)?;
+        let mut req = self.http.request(method, endpoint).query(query);
+        if let Some(token) = auth_token {
+            req = req.header("accessToken", token);
+        }
         if let Some(form) = form {
             req = req.form(form);
         }
@@ -186,7 +326,7 @@ impl NacosOpenApiAdmin {
             if !self.api_path_allowed(path) {
                 continue;
             }
-            match self.send_with_context_fallback(reqwest::Method::POST, path, &[], Some(&form), None).await {
+            match self.send_with_context_fallback(reqwest::Method::POST, path, &[], Some(&form), None, None).await {
                 Ok(value) if value.status().is_success() => {
                     resp = Some(value);
                     break;
@@ -224,6 +364,11 @@ impl NacosOpenApiAdmin {
             .or_else(|| token_source.get("expireSeconds"))
             .and_then(Value::as_u64)
             .unwrap_or(18_000);
+        if let Some(global_admin) =
+            token_source.get("globalAdmin").or_else(|| token_source.get("global_admin")).and_then(Value::as_bool)
+        {
+            self.global_admin.store(if global_admin { 2 } else { 1 }, Ordering::Relaxed);
+        }
         *self.token.lock().await = Some(AccessToken {
             token: token.clone(),
             expires_at: Instant::now() + Duration::from_secs(ttl.saturating_sub(30).max(60)),
@@ -239,20 +384,32 @@ impl NacosOpenApiAdmin {
         form: Option<Vec<(String, String)>>,
         body: Option<Value>,
     ) -> Result<reqwest::Response, String> {
-        if let Some(token) = self.access_token().await? {
-            query.push(("accessToken".to_string(), token));
-        }
-        self.send_with_context_fallback(method, path, &query, form.as_deref(), body.as_ref()).await
+        let token = self.access_token().await?;
+        // Token transport follows the endpoint generation, not only the
+        // detected server version: Nacos 3 can deliberately fall back to a
+        // legacy V1 namespace directory, whose auth contract uses a query
+        // parameter rather than the V3 accessToken header.
+        let header_token = if path.starts_with("/v3/") {
+            token.as_deref()
+        } else {
+            if let Some(token) = token {
+                query.push(("accessToken".to_string(), token));
+            }
+            None
+        };
+        self.send_with_context_fallback(method, path, &query, form.as_deref(), body.as_ref(), header_token).await
     }
 
     async fn get_json(&self, path: &str, query: Vec<(String, String)>) -> Result<Value, String> {
         let resp = self.request(reqwest::Method::GET, path, query, None, None).await?;
         let resp = error_for_status(resp, path).await?;
-        response_json_or_text(resp).await
+        let value = response_json_or_text(resp).await?;
+        validate_nacos_json_authorization(&value, path)?;
+        Ok(value)
     }
 
     async fn get_json_without_auth(&self, path: &str, query: Vec<(String, String)>) -> Result<Value, String> {
-        let resp = self.send_with_context_fallback(reqwest::Method::GET, path, &query, None, None).await?;
+        let resp = self.send_with_context_fallback(reqwest::Method::GET, path, &query, None, None, None).await?;
         let resp = error_for_status(resp, path).await?;
         response_json_or_text(resp).await
     }
@@ -407,6 +564,32 @@ impl NacosOpenApiAdmin {
         }
     }
 
+    async fn post_rnacos_console_json(&self, path: &str, body: Value) -> Result<Value, String> {
+        let mut retried_after_expired_session = false;
+        loop {
+            let token = self.rnacos_console_token().await?;
+            let response = self
+                .http
+                .post(self.rnacos_console_endpoint(path)?)
+                .header("Token", token.clone())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("r-nacos console request to {path} failed: {e}"))?;
+            let response = error_for_status(response, path).await?;
+            let value = response_json_or_text(response).await?;
+            if value.get("success").and_then(Value::as_bool) == Some(true) {
+                return Ok(value);
+            }
+            if !retried_after_expired_session && rnacos_console_session_expired(&value) {
+                self.clear_rnacos_console_token_if_matches(&token).await;
+                retried_after_expired_session = true;
+                continue;
+            }
+            return Err(format!("r-nacos console {path} failed: {}", rnacos_console_error_detail(&value)));
+        }
+    }
+
     async fn get_rnacos_console_json_without_login(
         &self,
         path: &str,
@@ -464,9 +647,27 @@ impl NacosOpenApiAdmin {
         }
     }
 
-    async fn list_rnacos_console_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
-        let value = self.get_rnacos_console_json("/rnacos/api/console/v2/namespaces/list", Vec::new()).await?;
-        Ok(parse_namespaces(value))
+    /// The Nacos-compatible discovery endpoint intentionally hides disabled
+    /// instances. r-nacos's own management console exposes the complete
+    /// administrative view instead, including `enabled = false` instances.
+    ///
+    /// This requires the separately configured console endpoint and its
+    /// session token, so callers retain the compatible OpenAPI fallback when
+    /// a console is unavailable. A CAPTCHA requirement is deliberately
+    /// propagated for the UI to complete the existing interactive login flow.
+    async fn list_rnacos_console_instances(
+        &self,
+        query: &NacosInstanceQuery,
+        namespace: &str,
+        requested_clusters: &[String],
+    ) -> Result<Vec<NacosInstanceInfo>, String> {
+        let mut params = vec![
+            ("namespaceId".to_string(), namespace.to_string()),
+            ("serviceName".to_string(), query.service_name.clone()),
+        ];
+        push_optional(&mut params, "groupName", query.group_name.clone());
+        let value = self.get_rnacos_console_json("/rnacos/api/console/v2/instance/list", params).await?;
+        Ok(filter_instances_by_clusters(parse_instances(value), requested_clusters))
     }
 
     /// Do not let an older in-flight request invalidate a newer session that
@@ -534,55 +735,54 @@ impl NacosOpenApiAdmin {
         .await
     }
 
-    /// r-nacos's Nacos-compatible configuration API returns the raw content
-    /// only. The independent console keeps the user-facing metadata such as
-    /// `configType` and `desc`, so enrich that compatibility response when a
-    /// console has been configured. Metadata is deliberately best-effort for
-    /// network/version failures. A CAPTCHA requirement is propagated so the UI
-    /// can authenticate once and retry the interrupted list/detail request.
-    async fn enrich_rnacos_config_metadata(&self, mut config: NacosConfigItem) -> Result<NacosConfigItem, String> {
-        if !self.is_explicit_rnacos()
-            || (config.config_type.is_some() && config.desc.is_some())
-            || self.cfg.rnacos_console_addr.is_empty()
-        {
-            return Ok(config);
-        }
-
-        let metadata = self
+    /// r-nacos stores detail (`value`, `configType`, `desc`, `md5`) on the console.
+    async fn get_rnacos_console_config(
+        &self,
+        data_id: &str,
+        group: &str,
+        namespace: &str,
+    ) -> Result<NacosConfigItem, String> {
+        let value = self
             .get_rnacos_console_metadata_json(
                 "/rnacos/api/console/v2/config/info",
                 vec![
-                    ("tenant".to_string(), config.namespace.clone()),
-                    ("dataId".to_string(), config.data_id.clone()),
-                    ("group".to_string(), config.group.clone()),
+                    ("tenant".to_string(), namespace.to_string()),
+                    ("dataId".to_string(), data_id.to_string()),
+                    ("group".to_string(), group.to_string()),
                 ],
             )
-            .await
-            .map(|value| {
-                parse_config_detail(value, config.data_id.clone(), config.group.clone(), config.namespace.clone())
-            });
+            .await?;
+        Ok(parse_config_detail(value, data_id.to_string(), group.to_string(), namespace.to_string()))
+    }
 
-        let metadata = match metadata {
-            Ok(metadata) => metadata,
-            Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
-            // Metadata remains optional. Network, permission, or version
-            // mismatches must not hide configuration content obtained from
-            // the compatible OpenAPI.
-            Err(_) => return Ok(config),
-        };
-        if config.desc.is_none() {
-            config.desc = metadata.desc;
-        }
-        if config.config_type.is_none() {
-            config.config_type = metadata.config_type;
-        }
-        if config.md5.is_none() {
-            config.md5 = metadata.md5;
-        }
-        if config.content.is_none() {
-            config.content = metadata.content;
-        }
-        Ok(config)
+    /// OpenAPI default GET: response body is the configuration text only.
+    async fn get_openapi_raw_config(
+        &self,
+        data_id: &str,
+        group: &str,
+        namespace: &str,
+    ) -> Result<NacosConfigItem, String> {
+        let query = vec![
+            ("dataId".to_string(), data_id.to_string()),
+            ("group".to_string(), group.to_string()),
+            ("tenant".to_string(), namespace.to_string()),
+        ];
+        let resp = self.request(reqwest::Method::GET, "/v1/cs/configs", query, None, None).await?;
+        let resp = error_for_status(resp, "/v1/cs/configs").await?;
+        let text = resp.text().await.map_err(|e| format!("Failed to read Nacos config response: {e}"))?;
+        // Never JSON-parse this body as a detail document: valid JSON configs are content (#6131).
+        Ok(NacosConfigItem {
+            data_id: data_id.to_string(),
+            group: group.to_string(),
+            namespace: namespace.to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: None,
+            md5: None,
+            encrypted_data_key: None,
+            content: Some(text),
+        })
     }
 
     async fn get_server_state(&self) -> Result<NacosServerStateProbe, String> {
@@ -590,12 +790,14 @@ impl NacosOpenApiAdmin {
         // r-nacos implements the Nacos client OpenAPI but not the console state endpoints.
         // Its documented health endpoint is mounted below the same `/nacos` context path,
         // so keep it last to preserve the richer official-Nacos state response when available.
-        let paths = if matches!(self.cfg.implementation, Some(NacosImplementation::RNacos)) {
-            ["/health", "/v3/console/server/state", "/v1/ns/operator/servers", "/v1/console/server/state"]
+        let paths: &[&str] = if matches!(self.cfg.implementation, Some(NacosImplementation::RNacos)) {
+            &["/health", "/v3/admin/core/state", "/v1/ns/operator/servers", "/v1/console/server/state"]
+        } else if self.is_v3_console() {
+            &["/v3/console/server/state", "/v3/console/health/readiness", "/health"]
         } else {
-            ["/v3/console/server/state", "/v1/ns/operator/servers", "/v1/console/server/state", "/health"]
+            &["/v3/admin/core/state", "/v1/ns/operator/servers", "/v1/console/server/state", "/health"]
         };
-        for path in paths {
+        for &path in paths {
             if !self.api_path_allowed(path) {
                 continue;
             }
@@ -615,12 +817,57 @@ impl NacosOpenApiAdmin {
         matches!(self.cfg.implementation, Some(NacosImplementation::RNacos))
     }
 
-    fn api_path_allowed(&self, path: &str) -> bool {
-        match self.cfg.version_mode.as_ref() {
-            Some(NacosVersionMode::V2) => !path.starts_with("/v3/"),
-            Some(NacosVersionMode::V3) => !path.starts_with("/v1/") && !path.starts_with("/v2/"),
-            Some(NacosVersionMode::Auto) | None => true,
+    fn is_rnacos_compatible(&self) -> bool {
+        self.is_explicit_rnacos() || self.detected_rnacos.load(Ordering::Relaxed)
+    }
+
+    fn is_official_v3(&self) -> bool {
+        !self.is_rnacos_compatible()
+            && (matches!(self.cfg.version_mode, Some(NacosVersionMode::V3))
+                || self.detected_major_version.load(Ordering::Relaxed) == 3)
+    }
+
+    fn is_v3_console(&self) -> bool {
+        self.is_official_v3() && self.cfg.api_plane() == NacosApiPlane::Console
+    }
+
+    fn v3_path(&self, admin: &'static str, console: &'static str) -> &'static str {
+        if self.is_v3_console() {
+            console
+        } else {
+            admin
         }
+    }
+
+    fn api_path_allowed(&self, path: &str) -> bool {
+        // r-nacos implements the Nacos-compatible v1 client OpenAPI, but it
+        // does not expose official Nacos v2/v3 console or admin endpoints.
+        // Treating its version as auto must not make a v3 probe the first
+        // service-management request, because a normal 404 is intentionally
+        // not retried across API generations.
+        if self.is_rnacos_compatible() {
+            return !path.starts_with("/v2/") && !path.starts_with("/v3/");
+        }
+        match self.detected_major_version.load(Ordering::Relaxed) {
+            2 => !path.starts_with("/v3/"),
+            3 => {
+                let correct_plane = if self.cfg.api_plane() == NacosApiPlane::Console {
+                    !path.starts_with("/v3/admin/")
+                } else {
+                    !path.starts_with("/v3/console/")
+                };
+                !path.starts_with("/v1/") && !path.starts_with("/v2/") && correct_plane
+            }
+            _ => true,
+        }
+    }
+
+    fn should_try_next_candidate(&self, _error: &str) -> bool {
+        // Nacos 2, Nacos 3 and r-nacos are explicitly selected connection
+        // profiles. A failed request must remain a failure for that profile;
+        // retrying it on a different API generation can mutate the wrong
+        // endpoint or hide the real configuration error.
+        false
     }
 
     fn namespace(&self, override_ns: Option<&str>) -> String {
@@ -641,11 +888,12 @@ impl NacosOpenApiAdmin {
             ("dataId".to_string(), search.to_string()),
             ("groupName".to_string(), group.to_string()),
             ("namespaceId".to_string(), namespace.to_string()),
+            ("configDetail".to_string(), String::new()),
             ("pageNo".to_string(), page_no.to_string()),
             ("pageSize".to_string(), page_size.to_string()),
         ];
         push_optional(&mut v3_params, "appName", Some(app_name.to_string()));
-        let mut attempts = vec![("/v3/console/cs/config/list", v3_params)];
+        let mut attempts = vec![(self.v3_path("/v3/admin/cs/config/list", "/v3/console/cs/config/list"), v3_params)];
         let mut v1_params = vec![
             ("search".to_string(), "blur".to_string()),
             ("dataId".to_string(), search.to_string()),
@@ -721,19 +969,164 @@ impl NacosOpenApiAdmin {
         Err(format!("Failed to {operation}: {}", errors.join("; ")))
     }
 
-    async fn list_configs_by_client_filter(
+    async fn get_service_json_from_candidates(
+        &self,
+        operation: &str,
+        attempts: Vec<(&str, Vec<(String, String)>)>,
+    ) -> Result<Value, String> {
+        let mut errors = Vec::new();
+        for (path, query) in attempts {
+            if !self.api_path_allowed(path) {
+                continue;
+            }
+            match self.get_json(path, query).await {
+                Ok(value) => return Ok(value),
+                Err(err) => {
+                    let try_next = self.should_try_next_candidate(&err);
+                    errors.push(err);
+                    if !try_next {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(format!("Failed to {operation}: {}", errors.join("; ")))
+    }
+
+    async fn submit_service_form_candidates(
+        &self,
+        operation: &str,
+        method: reqwest::Method,
+        attempts: Vec<(&str, Vec<(String, String)>)>,
+    ) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (path, form) in attempts {
+            if !self.api_path_allowed(path) {
+                continue;
+            }
+            let result = match self.request(method.clone(), path, Vec::new(), Some(form), None).await {
+                Ok(resp) => error_for_status(resp, path).await.map(|_| ()),
+                Err(err) => Err(err),
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let try_next = self.should_try_next_candidate(&err);
+                    errors.push(err);
+                    if !try_next {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(format!("Failed to {operation}: {}", errors.join("; ")))
+    }
+
+    async fn submit_service_query_candidates(
+        &self,
+        operation: &str,
+        method: reqwest::Method,
+        attempts: Vec<(&str, Vec<(String, String)>)>,
+    ) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for (path, query) in attempts {
+            if !self.api_path_allowed(path) {
+                continue;
+            }
+            let result = match self.request(method.clone(), path, query, None, None).await {
+                Ok(resp) => error_for_status(resp, path).await.map(|_| ()),
+                Err(err) => Err(err),
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    let try_next = self.should_try_next_candidate(&err);
+                    errors.push(err);
+                    if !try_next {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(format!("Failed to {operation}: {}", errors.join("; ")))
+    }
+
+    async fn submit_service_upsert(
+        &self,
+        operation: &str,
+        req: NacosServiceUpsert,
+        method: reqwest::Method,
+    ) -> Result<(), String> {
+        if req.service_name.trim().is_empty() {
+            return Err("Nacos service name is required".to_string());
+        }
+        let group_name = req
+            .group_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|group| !group.is_empty())
+            .ok_or_else(|| "Nacos service group name is required".to_string())?
+            .to_string();
+        let namespace = self.namespace(req.namespace.as_deref());
+        let mut form = vec![("namespaceId".to_string(), namespace), ("serviceName".to_string(), req.service_name)];
+        form.push(("groupName".to_string(), group_name));
+        if let Some(metadata) = req.metadata {
+            if !metadata.is_object() {
+                return Err("Nacos service metadata must be a JSON object".to_string());
+            }
+            form.push(("metadata".to_string(), metadata.to_string()));
+        }
+        if let Some(threshold) = req.protect_threshold {
+            if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+                return Err("Nacos service protection threshold must be between 0 and 1".to_string());
+            }
+            form.push(("protectThreshold".to_string(), threshold.to_string()));
+        }
+        let selector = req.selector.unwrap_or_else(|| serde_json::json!({ "type": "none", "contextType": "NONE" }));
+        if !selector.is_object() {
+            return Err("Nacos service selector must be a JSON object".to_string());
+        }
+        // Both supported Nacos generations reject `{}`. DBX owns the
+        // version-neutral "no selector" semantic and sends the canonical
+        // none selector instead, which also allows an existing selector to be
+        // cleared during an update.
+        let selector = if selector.as_object().is_some_and(|object| object.is_empty()) {
+            serde_json::json!({ "type": "none", "contextType": "NONE" })
+        } else {
+            selector
+        };
+        form.push(("selector".to_string(), selector.to_string()));
+        if let Some(ephemeral) = req.ephemeral {
+            form.push(("ephemeral".to_string(), ephemeral.to_string()));
+        }
+        self.submit_service_form_candidates(
+            operation,
+            method,
+            vec![
+                (self.v3_path("/v3/admin/ns/service", "/v3/console/ns/service"), form.clone()),
+                // Nacos 2.x keeps the verified Naming management contract on
+                // the v1 endpoint. The v2 compatibility endpoint can accept a
+                // request while silently applying defaults to some fields.
+                ("/v1/ns/service", form),
+            ],
+        )
+        .await
+    }
+
+    async fn list_configs_by_client_filters(
         &self,
         namespace: String,
-        group: Option<String>,
         data_id_filter: Option<String>,
+        group_filter: Option<String>,
         app_name_filter: Option<String>,
         page_no: u32,
         page_size: u32,
     ) -> Result<NacosConfigList, String> {
-        let Some(filter) = data_id_filter.map(|value| value.to_lowercase()).filter(|value| !value.is_empty()) else {
+        let data_id_filter = data_id_filter.map(|value| value.to_lowercase()).filter(|value| !value.is_empty());
+        let group_filter = group_filter.map(|value| value.to_lowercase()).filter(|value| !value.is_empty());
+        if data_id_filter.is_none() && group_filter.is_none() {
             return Ok(NacosConfigList { page_no, page_size, total_count: 0, items: Vec::new() });
-        };
-        let group = group.unwrap_or_default();
+        }
         let app_name = app_name_filter.unwrap_or_default();
         let scan_page_size = page_size.max(self.cfg.page_size).clamp(100, 500);
         let mut matched = Vec::new();
@@ -741,15 +1134,18 @@ impl NacosOpenApiAdmin {
         let mut current_page = 1;
 
         loop {
-            let value =
-                self.get_config_list_value(&namespace, "", &group, &app_name, current_page, scan_page_size).await?;
+            let value = self.get_config_list_value(&namespace, "", "", &app_name, current_page, scan_page_size).await?;
             let list = parse_config_list(value, namespace.clone(), current_page, scan_page_size);
             let total_count = list.total_count;
             let empty = list.items.is_empty();
             let before = seen.len();
             for item in list.items {
                 let identity = (item.namespace.clone(), item.group.clone(), item.data_id.clone());
-                if seen.insert(identity) && item.data_id.to_lowercase().contains(&filter) {
+                let data_id_matches =
+                    data_id_filter.as_ref().is_none_or(|filter| item.data_id.to_lowercase().contains(filter));
+                let group_matches =
+                    group_filter.as_ref().is_none_or(|filter| item.group.to_lowercase().contains(filter));
+                if seen.insert(identity) && data_id_matches && group_matches {
                     matched.push(item);
                 }
             }
@@ -777,9 +1173,11 @@ impl NacosOpenApiAdmin {
             // Normal Nacos lists already carry descriptions when available.
             // r-nacos's compatibility list does not carry either the type or
             // description, and its configured console can supply both.
-            let needs_rnacos_description =
-                self.is_explicit_rnacos() && item.desc.is_none() && !self.cfg.rnacos_console_addr.is_empty();
-            if item.config_type.is_some() && !needs_rnacos_description {
+            // r-nacos list rows lack type/desc; load detail when a console is configured.
+            let needs_rnacos_metadata = self.is_rnacos_compatible()
+                && !self.cfg.rnacos_console_addr.is_empty()
+                && (item.config_type.is_none() || item.desc.is_none());
+            if item.config_type.is_some() && !needs_rnacos_metadata {
                 continue;
             }
             let detail = self
@@ -851,23 +1249,428 @@ impl NacosOpenApiAdmin {
             }
         }
 
-        let mut seen = HashSet::new();
-        instances.retain(|instance| seen.insert((instance.ip.clone(), instance.port, instance.cluster_name.clone())));
-        Ok(instances)
+        Ok(deduplicate_management_instances(instances, namespace, query.group_name.as_deref(), &query.service_name))
+    }
+
+    async fn list_v3_admin_instances(
+        &self,
+        query: &NacosInstanceQuery,
+        namespace: &str,
+    ) -> Result<Vec<NacosInstanceInfo>, String> {
+        // Nacos 3's documentation says omitting `clusterName` lists every
+        // cluster. Nacos 3.1.0 can instead resolve that omission to `DEFAULT`,
+        // returning an error for services whose only cluster is, for example,
+        // `blue` or lowercase `default`. Read the service's cluster map and
+        // query every declared cluster explicitly. The same route also keeps
+        // disabled instances visible for the management page.
+        let requested_clusters = split_nacos_cluster_names(query.clusters.as_deref());
+        let cluster_names = if requested_clusters.is_empty() {
+            let mut detail_params = vec![
+                ("namespaceId".to_string(), namespace.to_string()),
+                ("serviceName".to_string(), query.service_name.clone()),
+            ];
+            push_optional(&mut detail_params, "groupName", query.group_name.clone());
+            parse_catalog_cluster_names(
+                &self.get_json(self.v3_path("/v3/admin/ns/service", "/v3/console/ns/service"), detail_params).await?,
+            )
+        } else {
+            requested_clusters.clone()
+        };
+
+        // An empty cluster map is the normal state for an empty service. Do
+        // not invent `DEFAULT` (which produces a misleading 404 on Nacos
+        // 3.1), but also do not turn a valid zero-instance service into an
+        // error: callers must still be able to inspect and delete it.
+        if cluster_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut instances = Vec::new();
+        for cluster_name in cluster_names {
+            let page_size = self.cfg.page_size.max(100).clamp(1, 500);
+            let mut page_no = 1u32;
+            let mut loaded = 0u64;
+            loop {
+                let mut params = vec![
+                    ("namespaceId".to_string(), namespace.to_string()),
+                    ("serviceName".to_string(), query.service_name.clone()),
+                    ("clusterName".to_string(), cluster_name.clone()),
+                ];
+                push_optional(&mut params, "groupName", query.group_name.clone());
+                if self.is_v3_console() {
+                    params.push(("pageNo".to_string(), page_no.to_string()));
+                    params.push(("pageSize".to_string(), page_size.to_string()));
+                    params.push(("enabledOnly".to_string(), "false".to_string()));
+                }
+                let value = self
+                    .get_json(self.v3_path("/v3/admin/ns/instance/list", "/v3/console/ns/instance/list"), params)
+                    .await?;
+                let total_count = catalog_instance_count(&value);
+                let page = parse_instances(value);
+                let page_len = page.len();
+                loaded = loaded.saturating_add(page_len as u64);
+                instances.extend(page);
+                if !self.is_v3_console()
+                    || page_len == 0
+                    || total_count.map(|total| loaded >= total).unwrap_or(page_len < page_size as usize)
+                {
+                    break;
+                }
+                page_no = page_no
+                    .checked_add(1)
+                    .ok_or_else(|| "Nacos instance pagination exceeded the supported page range".to_string())?;
+            }
+        }
+        Ok(filter_instances_by_clusters(
+            deduplicate_management_instances(instances, namespace, query.group_name.as_deref(), &query.service_name),
+            &requested_clusters,
+        ))
+    }
+
+    async fn verify_v3_naming_admin_api(&self, namespace: &str) -> Result<(), String> {
+        self.get_json(
+            self.v3_path("/v3/admin/ns/service/list", "/v3/console/ns/service/list"),
+            vec![
+                ("namespaceId".to_string(), namespace.to_string()),
+                ("pageNo".to_string(), "1".to_string()),
+                ("pageSize".to_string(), "1".to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn verify_v3_admin_config_api(&self, namespace: &str) -> Result<(), String> {
+        self.get_json(
+            self.v3_path("/v3/admin/cs/config/list", "/v3/console/cs/config/list"),
+            vec![
+                ("namespaceId".to_string(), namespace.to_string()),
+                ("dataId".to_string(), String::new()),
+                ("groupName".to_string(), String::new()),
+                ("configDetail".to_string(), String::new()),
+                ("search".to_string(), "blur".to_string()),
+                ("pageNo".to_string(), "1".to_string()),
+                ("pageSize".to_string(), "1".to_string()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn verify_v3_managed_namespaces(&self, namespaces: &[NacosNamespaceInfo]) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for namespace in namespaces {
+            let namespace_id = &namespace.namespace;
+            let naming_result = self.verify_v3_naming_admin_api(namespace_id).await;
+            let config_result = self.verify_v3_admin_config_api(namespace_id).await;
+            if let Err(error) = naming_result {
+                errors.push(format!("namespace {namespace_id:?} naming: {error}"));
+            }
+            if let Err(error) = config_result {
+                errors.push(format!("namespace {namespace_id:?} config: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(classified_error(
+                "managedNamespaceAccessDenied",
+                &format!("One or more configured namespace IDs are not readable: {}", errors.join("; ")),
+            ))
+        }
+    }
+
+    async fn verify_v2_managed_namespaces(&self, namespaces: &[NacosNamespaceInfo]) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for namespace in namespaces {
+            let namespace_id = &namespace.namespace;
+            if let Err(error) = self.get_config_list_value(namespace_id, "", "", "", 1, 1).await {
+                errors.push(format!("namespace {namespace_id:?} config: {error}"));
+            }
+            let params = vec![
+                ("namespaceId".to_string(), namespace_id.clone()),
+                ("pageNo".to_string(), "1".to_string()),
+                ("pageSize".to_string(), "1".to_string()),
+            ];
+            if let Err(error) = self
+                .get_service_json_from_candidates(
+                    "validate Nacos v2 namespace service access",
+                    vec![("/v1/ns/catalog/services", params.clone()), ("/v2/ns/service/list", params)],
+                )
+                .await
+            {
+                errors.push(format!("namespace {namespace_id:?} naming: {error}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(classified_error(
+                "managedNamespaceAccessDenied",
+                &format!("One or more configured namespace IDs are not readable: {}", errors.join("; ")),
+            ))
+        }
+    }
+
+    fn map_v3_verification_error(error: String) -> String {
+        if error.contains("[contextPathMismatch]") || error.contains("[apiVersionMismatch]") {
+            format!(
+                "NACOS_ERROR[v3EndpointMismatch]: {error}. 请检查所选 Nacos 3 API 模式、服务地址和上下文路径是否匹配。"
+            )
+        } else {
+            error
+        }
+    }
+
+    fn baseline_access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+        if self.is_rnacos_compatible() {
+            if self.cfg.rnacos_console_addr.trim().is_empty() || !self.cfg.has_effective_rnacos_console_credentials() {
+                return NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::EndpointUnavailable);
+            }
+            return NacosAccessControlCapabilities {
+                mode: NacosAccessControlMode::EmbeddedRoles,
+                list_users: NacosOperationCapability::supported(),
+                create_user: NacosOperationCapability::supported(),
+                update_user: NacosOperationCapability::supported(),
+                delete_user: NacosOperationCapability::supported(),
+                list_role_bindings: NacosOperationCapability::unsupported(NacosCapabilityReason::VersionUnsupported),
+                assign_role: NacosOperationCapability::unsupported(NacosCapabilityReason::VersionUnsupported),
+                remove_role: NacosOperationCapability::unsupported(NacosCapabilityReason::VersionUnsupported),
+                list_permissions: NacosOperationCapability::unsupported(NacosCapabilityReason::VersionUnsupported),
+                grant_permission: NacosOperationCapability::unsupported(NacosCapabilityReason::VersionUnsupported),
+                revoke_permission: NacosOperationCapability::unsupported(NacosCapabilityReason::VersionUnsupported),
+                enhanced_workspace: false,
+                supports_namespace_privileges: true,
+            };
+        }
+        if matches!(self.cfg.auth, NacosAuthConfig::None) {
+            official_full_access_control()
+        } else {
+            official_unverified_access_control()
+        }
+    }
+
+    fn cached_access_control_capabilities(&self) -> Option<NacosAccessControlCapabilities> {
+        self.access_control_capabilities
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|cached| cached.expires_at > Instant::now())
+            .map(|cached| cached.capabilities.clone())
+    }
+
+    fn store_access_control_capabilities(
+        &self,
+        capabilities: NacosAccessControlCapabilities,
+        authorization: Option<CachedOfficialAuthorization>,
+    ) {
+        *self.access_control_capabilities.write().unwrap_or_else(|error| error.into_inner()) =
+            Some(CachedAccessControlCapabilities {
+                capabilities,
+                authorization,
+                expires_at: Instant::now() + ACCESS_CONTROL_CAPABILITY_CACHE_TTL,
+            });
+    }
+
+    fn cached_official_authorization(&self, username: &str) -> Option<CachedOfficialAuthorization> {
+        self.access_control_capabilities
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .filter(|cached| cached.expires_at > Instant::now())
+            .and_then(|cached| cached.authorization.as_ref())
+            .filter(|authorization| authorization.username == username)
+            .cloned()
+    }
+
+    fn console_write_granted(permissions: &[NacosPermissionInfo], roles: &HashSet<String>, resource: &str) -> bool {
+        permissions.iter().any(|permission| {
+            roles.contains(&permission.role)
+                && permission.resource_raw.trim().eq_ignore_ascii_case(resource)
+                && matches!(permission.action_raw.trim().to_ascii_lowercase().as_str(), "w" | "rw" | "wr" | "*")
+        })
+    }
+
+    async fn probe_access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+        if let Some(capabilities) = self.cached_access_control_capabilities() {
+            return capabilities;
+        }
+        if self.explicitly_scoped_namespace_ids().is_some() {
+            let capabilities = NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied);
+            self.store_access_control_capabilities(capabilities.clone(), None);
+            return capabilities;
+        }
+        let baseline = self.baseline_access_control_capabilities();
+        if self.is_rnacos_compatible() || matches!(self.cfg.auth, NacosAuthConfig::None) {
+            self.store_access_control_capabilities(baseline.clone(), None);
+            return baseline;
+        }
+        let Some(username) = self.current_username() else {
+            self.store_access_control_capabilities(baseline.clone(), None);
+            return baseline;
+        };
+
+        let users = self
+            .list_users(NacosUserQuery { username: Some(username.clone()), page_no: Some(1), page_size: Some(1) })
+            .await;
+        let role_bindings = self
+            .list_role_bindings(NacosRoleQuery {
+                username: Some(username.clone()),
+                role: None,
+                page_no: Some(1),
+                page_size: Some(ACCESS_CONTROL_PROBE_PAGE_SIZE),
+            })
+            .await;
+        let permissions = self
+            .list_permissions(NacosPermissionQuery {
+                role: None,
+                resource: None,
+                page_no: Some(1),
+                page_size: Some(ACCESS_CONTROL_PROBE_PAGE_SIZE),
+            })
+            .await;
+
+        let list_users = read_capability(&users);
+        let list_role_bindings = read_capability(&role_bindings);
+        let list_permissions = read_capability(&permissions);
+        let roles = role_bindings
+            .as_ref()
+            .map(|page| {
+                page.items
+                    .iter()
+                    .filter(|binding| binding.username == username)
+                    .map(|binding| binding.role.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let global_admin = self.global_admin.load(Ordering::Relaxed) == 2 || roles.contains(ADMIN_ROLE);
+        let authorization_complete = global_admin
+            || role_bindings.as_ref().is_ok_and(|page| page.total_count <= page.items.len() as u64)
+                && permissions.as_ref().is_ok_and(|page| page.total_count <= page.items.len() as u64);
+        let permission_items = permissions.as_ref().map(|page| page.items.as_slice()).unwrap_or_default();
+        let users_write = global_admin || Self::console_write_granted(permission_items, &roles, CONSOLE_USERS_RESOURCE);
+        let roles_write = global_admin || Self::console_write_granted(permission_items, &roles, CONSOLE_ROLES_RESOURCE);
+        let permissions_write =
+            global_admin || Self::console_write_granted(permission_items, &roles, CONSOLE_PERMISSIONS_RESOURCE);
+        let create_user = write_capability(&list_users, authorization_complete, users_write);
+        let update_user = create_user.clone();
+        let delete_user = create_user.clone();
+        let assign_role = write_capability(&list_role_bindings, authorization_complete, roles_write);
+        let remove_role = assign_role.clone();
+        let grant_permission = write_capability(&list_permissions, authorization_complete, permissions_write);
+        let revoke_permission = grant_permission.clone();
+        // The directory-detail workspace is a read surface. Individual
+        // mutations are guarded separately so a read-only or partially
+        // privileged administrator can still inspect the data it may read.
+        let enhanced_workspace =
+            [&list_users, &list_role_bindings, &list_permissions].into_iter().all(|capability| capability.supported);
+        let capabilities = NacosAccessControlCapabilities {
+            mode: NacosAccessControlMode::RoleBindings,
+            list_users,
+            create_user,
+            update_user,
+            delete_user,
+            list_role_bindings,
+            assign_role,
+            remove_role,
+            list_permissions,
+            grant_permission,
+            revoke_permission,
+            enhanced_workspace,
+            supports_namespace_privileges: false,
+        };
+        self.store_access_control_capabilities(
+            capabilities.clone(),
+            Some(CachedOfficialAuthorization { username, role_bindings, permissions }),
+        );
+        capabilities
+    }
+
+    async fn complete_role_bindings_page(
+        &self,
+        username: &str,
+        first_page: NacosRoleList,
+    ) -> Result<Vec<NacosRoleBinding>, String> {
+        let mut items = first_page.items;
+        let total_count = first_page.total_count;
+        let page_size = first_page.page_size.max(1);
+        let mut page_no = first_page.page_no.max(1);
+        while (items.len() as u64) < total_count {
+            page_no += 1;
+            let page = self
+                .list_role_bindings(NacosRoleQuery {
+                    username: Some(username.to_string()),
+                    role: None,
+                    page_no: Some(page_no),
+                    page_size: Some(page_size),
+                })
+                .await?;
+            let count = page.items.len();
+            items.extend(page.items);
+            if count < page_size as usize {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    async fn complete_permissions_page(
+        &self,
+        first_page: NacosPermissionList,
+    ) -> Result<Vec<NacosPermissionInfo>, String> {
+        let mut items = first_page.items;
+        let total_count = first_page.total_count;
+        let page_size = first_page.page_size.max(1);
+        let mut page_no = first_page.page_no.max(1);
+        while (items.len() as u64) < total_count {
+            page_no += 1;
+            let page = self
+                .list_permissions(NacosPermissionQuery {
+                    role: None,
+                    resource: None,
+                    page_no: Some(page_no),
+                    page_size: Some(page_size),
+                })
+                .await?;
+            let count = page.items.len();
+            items.extend(page.items);
+            if count < page_size as usize {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    async fn update_v3_admin_instance(&self, req: NacosInstanceUpdateRequest) -> Result<(), String> {
+        let namespace = self.namespace(req.target.namespace.as_deref());
+        // Nacos v3 exposes a dedicated partial-update endpoint. Send only the
+        // target identity and fields present in the patch so an external
+        // console update cannot be overwritten by a stale read-modify-write.
+        let form = instance_update_form(namespace, req);
+        let response = self
+            .request(
+                reqwest::Method::PUT,
+                self.v3_path("/v3/admin/ns/instance/partial", "/v3/console/ns/instance"),
+                Vec::new(),
+                Some(form),
+                None,
+            )
+            .await?;
+        error_for_status(response, self.v3_path("/v3/admin/ns/instance/partial", "/v3/console/ns/instance")).await?;
+        Ok(())
     }
 
     async fn get_dashboard_nodes(&self) -> Result<Vec<NacosClusterNode>, String> {
         // r-nacos does not implement the official Nacos cluster-node Admin
         // APIs. An empty list represents this unsupported optional capability
         // without turning every dashboard refresh into a false warning.
-        if self.is_explicit_rnacos() {
+        if self.is_rnacos_compatible() {
             return Ok(Vec::new());
         }
 
         self.get_json_from_candidates(
             "load Nacos cluster nodes",
             vec![
-                ("/v3/admin/core/cluster/node/list", Vec::new()),
+                (self.v3_path("/v3/admin/core/cluster/node/list", "/v3/console/core/cluster/nodes"), Vec::new()),
                 ("/v2/core/cluster/node/list", Vec::new()),
                 ("/v1/core/cluster/nodes", Vec::new()),
                 ("/v1/ns/operator/servers", Vec::new()),
@@ -881,10 +1684,12 @@ impl NacosOpenApiAdmin {
         if matches!(self.cfg.version_mode, Some(NacosVersionMode::V3))
             && (error.contains("[contextPathMismatch]") || error.contains("[apiVersionMismatch]"))
         {
-            return format!(
-                "{error} Check the connection address: Nacos 3 dashboard APIs use the Server / Admin API endpoint \
-                 (normally http://host:8848/nacos), not the port 8080 Console."
-            );
+            let endpoint = if self.is_v3_console() {
+                "the Console API endpoint (normally http://host:8080)"
+            } else {
+                "the Server / Admin API endpoint (normally http://host:8848/nacos)"
+            };
+            return format!("{error} Check that the connection address and context path match {endpoint}.");
         }
         error
     }
@@ -911,16 +1716,82 @@ fn content_search_endpoint_is_unsupported(error: &str) -> bool {
 
 #[async_trait]
 impl NacosAdmin for NacosOpenApiAdmin {
+    fn service_capabilities(&self) -> NacosServiceCapabilities {
+        // r-nacos 0.8.x documents the full compatible v1 Naming management
+        // surface: service POST/PUT/DELETE and instance POST/PUT/PATCH/DELETE.
+        // Its own console exercises the same operations. `api_path_allowed`
+        // keeps these calls strictly on `/v1/ns/...`, never on Nacos v3 admin
+        // routes, so the shared UI can expose the verified CRUD workflow.
+        let mut capabilities = NacosServiceCapabilities::default();
+        if self.is_official_v3() {
+            capabilities.update_instance_health =
+                NacosOperationCapability::unsupported(NacosCapabilityReason::EndpointUnavailable);
+        }
+        if self.is_v3_console() {
+            capabilities.register_instance =
+                NacosOperationCapability::unsupported(NacosCapabilityReason::EndpointUnavailable);
+            capabilities.deregister_instance =
+                NacosOperationCapability::unsupported(NacosCapabilityReason::EndpointUnavailable);
+        }
+        if self.is_rnacos_compatible() && self.cfg.rnacos_console_addr.trim().is_empty() {
+            // r-nacos's compatible discovery API hides disabled instances.
+            // Without its console API, DBX cannot safely prove a service is
+            // empty before deletion, so keep this destructive action closed.
+            capabilities.delete_service =
+                NacosOperationCapability::unsupported(NacosCapabilityReason::EndpointUnavailable);
+        }
+        capabilities
+    }
+
+    fn access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+        self.cached_access_control_capabilities().unwrap_or_else(|| self.baseline_access_control_capabilities())
+    }
+
+    fn invalidate_access_control_capabilities(&self) {
+        *self.access_control_capabilities.write().unwrap_or_else(|error| error.into_inner()) = None;
+    }
+
+    fn current_username(&self) -> Option<String> {
+        match &self.cfg.auth {
+            crate::nacos::config::NacosAuthConfig::UsernamePassword { username, .. } => {
+                let username = username.trim();
+                (!username.is_empty()).then(|| username.to_string())
+            }
+            crate::nacos::config::NacosAuthConfig::None => None,
+        }
+    }
+
+    fn explicitly_scoped_namespace_ids(&self) -> Option<Vec<String>> {
+        (!self.is_explicit_rnacos()
+            && matches!(self.cfg.auth, NacosAuthConfig::UsernamePassword { .. })
+            && !self.cfg.managed_namespaces.is_empty())
+        .then(|| self.cfg.managed_namespaces.clone())
+    }
+
     async fn test_connection(&self) -> Result<NacosConnectionInfo, String> {
         // Server-state endpoints are console APIs and r-nacos deliberately only
         // guarantees the client OpenAPI. Treat state/health as best-effort;
         // successful authentication and namespace access below prove that this
         // connection can perform the DBX operations it exposes.
         let state = self.get_server_state().await.ok();
-        let _ = self.access_token().await?;
-        let _ = self.list_namespaces().await?;
-        let mut capabilities = NacosCapabilities::default();
+        // Namespace discovery must use r-nacos' compatible v1 API as soon as
+        // its health response identifies the implementation. Delaying this
+        // assignment until after `list_namespaces` made a fresh r-nacos
+        // connection first probe official Nacos v3 routes.
         let is_rnacos = self.is_explicit_rnacos() || state.as_ref().is_some_and(|state| state.is_rnacos_compatible);
+        self.detected_rnacos.store(is_rnacos, Ordering::Relaxed);
+        let _ = self.access_token().await?;
+        if let Err(error) = self.list_namespaces().await {
+            // r-nacos can authenticate and serve configuration reads without
+            // exposing a namespace directory. The connection dialog will
+            // collect an explicit display scope instead of rejecting this
+            // otherwise valid OpenAPI connection.
+            if !(is_rnacos && error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]")) {
+                return Err(error);
+            }
+        }
+        let mut capabilities =
+            NacosCapabilities { service_management: self.service_capabilities(), ..Default::default() };
         if is_rnacos {
             if !self.cfg.rnacos_history_enabled() {
                 capabilities.supports_config_history = false;
@@ -933,11 +1804,40 @@ impl NacosAdmin for NacosOpenApiAdmin {
                 capabilities.history_unavailable_reason = Some("consoleCredentialsMissing".to_string());
             }
         }
+        let access_control = if self.explicitly_scoped_namespace_ids().is_some() {
+            NacosAccessControlCapabilities::unavailable(NacosCapabilityReason::PermissionDenied)
+        } else {
+            self.access_control_capabilities()
+        };
+        capabilities.access_control = access_control;
+        capabilities.supports_service_management = capabilities.service_management.list_services.supported;
+        capabilities.supports_instance_update = capabilities.service_management.update_instance.supported;
         let server_version = if is_rnacos {
             self.rnacos_console_version_if_authenticated().await
         } else {
             state.as_ref().and_then(|state| extract_server_version(&state.raw))
         };
+        let is_v3 = matches!(self.cfg.version_mode, Some(NacosVersionMode::V3));
+        if !is_rnacos && is_v3 && self.is_v3_console() {
+            capabilities.supports_raw_api = false;
+        }
+        if !is_rnacos && is_v3 && !self.cfg.managed_namespaces.is_empty() {
+            // A namespace directory can include entries that an ordinary user
+            // is not allowed to open. With no user-selected scope, validating
+            // the first entry (commonly `public`) rejects the connection before
+            // the explicit access picker can probe every namespace. Explicit
+            // scopes remain strictly validated below.
+            let representative = NacosNamespaceInfo {
+                namespace: self.cfg.managed_namespaces[0].clone(),
+                namespace_show_name: self.cfg.managed_namespaces[0].clone(),
+                namespace_desc: None,
+                config_count: None,
+                quota: None,
+                namespace_type: None,
+            };
+            let verification = self.verify_v3_managed_namespaces(std::slice::from_ref(&representative)).await;
+            verification.map_err(Self::map_v3_verification_error)?;
+        }
         Ok(NacosConnectionInfo {
             server_addr: self.cfg.server_addr.clone(),
             display_server_addr: self.cfg.display_server_addr.clone(),
@@ -952,6 +1852,95 @@ impl NacosAdmin for NacosOpenApiAdmin {
         })
     }
 
+    async fn test_connection_with_scope_validation(&self) -> Result<NacosConnectionInfo, String> {
+        let info = self.test_connection().await?;
+        if self.is_rnacos_compatible() || self.cfg.managed_namespaces.is_empty() {
+            return Ok(info);
+        }
+        if matches!(self.cfg.version_mode, Some(NacosVersionMode::V3)) {
+            // The bounded regular check already validated the first configured
+            // namespace. The explicit check completes the remainder without
+            // repeating that pair of requests.
+            let managed_namespaces = self
+                .cfg
+                .managed_namespaces
+                .iter()
+                .skip(1)
+                .map(|namespace| NacosNamespaceInfo {
+                    namespace: namespace.clone(),
+                    namespace_show_name: namespace.clone(),
+                    namespace_desc: None,
+                    config_count: None,
+                    quota: None,
+                    namespace_type: None,
+                })
+                .collect::<Vec<_>>();
+            if !managed_namespaces.is_empty() {
+                self.verify_v3_managed_namespaces(&managed_namespaces)
+                    .await
+                    .map_err(Self::map_v3_verification_error)?;
+            }
+        } else if matches!(self.cfg.version_mode, Some(NacosVersionMode::V2)) {
+            let managed_namespaces = self
+                .cfg
+                .managed_namespaces
+                .iter()
+                .map(|namespace| NacosNamespaceInfo {
+                    namespace: namespace.clone(),
+                    namespace_show_name: namespace.clone(),
+                    namespace_desc: None,
+                    config_count: None,
+                    quota: None,
+                    namespace_type: None,
+                })
+                .collect::<Vec<_>>();
+            self.verify_v2_managed_namespaces(&managed_namespaces).await?;
+        }
+        Ok(info)
+    }
+
+    async fn refresh_access_control_capabilities(&self) -> NacosAccessControlCapabilities {
+        self.probe_access_control_capabilities().await
+    }
+
+    async fn refresh_namespace_authorization(
+        &self,
+        username: &str,
+    ) -> Result<Option<NacosNamespaceAuthorizationSnapshot>, String> {
+        let access_control = self.probe_access_control_capabilities().await;
+        let Some(authorization) = self.cached_official_authorization(username) else {
+            return Ok(None);
+        };
+        let login_global_admin = self.global_admin.load(Ordering::Relaxed) == 2;
+        if login_global_admin {
+            return Ok(Some(NacosNamespaceAuthorizationSnapshot {
+                access_control,
+                roles: vec![ADMIN_ROLE.to_string()],
+                permissions: Vec::new(),
+                global_admin: true,
+            }));
+        }
+
+        let role_bindings = self.complete_role_bindings_page(username, authorization.role_bindings?).await?;
+        let mut roles = role_bindings
+            .into_iter()
+            .filter(|binding| binding.username == username)
+            .map(|binding| binding.role)
+            .collect::<Vec<_>>();
+        roles.sort();
+        roles.dedup();
+        let global_admin = roles.iter().any(|role| role == ADMIN_ROLE);
+        let permissions =
+            if global_admin { Vec::new() } else { self.complete_permissions_page(authorization.permissions?).await? };
+        Ok(Some(NacosNamespaceAuthorizationSnapshot { access_control, roles, permissions, global_admin }))
+    }
+
+    async fn inspect_connection(&self) -> Result<NacosConnectionInfo, String> {
+        let mut info = self.test_connection().await?;
+        info.capabilities.access_control = self.probe_access_control_capabilities().await;
+        Ok(info)
+    }
+
     async fn get_rnacos_console_captcha(&self) -> Result<NacosRNacosConsoleCaptcha, String> {
         self.fetch_rnacos_console_captcha().await
     }
@@ -960,35 +1949,414 @@ impl NacosAdmin for NacosOpenApiAdmin {
         self.login_rnacos_console_with_captcha(captcha).await.map(|_| ())
     }
 
-    async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
-        if self.is_explicit_rnacos() {
-            // r-nacos v0.6.12 exposes the Nacos-compatible namespace API on
-            // the main OpenAPI service. This keeps the connection tree usable
-            // without a separately configured console, including consoles
-            // that require an interactive CAPTCHA.
-            match self.get_json("/v1/console/namespaces", Vec::new()).await {
-                Ok(value) => return Ok(parse_namespaces(value)),
-                Err(openapi_error) if self.cfg.rnacos_console_addr.is_empty() => return Err(openapi_error),
-                Err(openapi_error) => {
-                    return self.list_rnacos_console_namespaces().await.map_err(|console_error| {
-                        format!(
-                            "Failed to list r-nacos namespaces through the OpenAPI endpoint ({openapi_error}) or console fallback ({console_error})"
-                        )
-                    });
-                }
-            }
+    async fn list_users(&self, query: NacosUserQuery) -> Result<NacosUserList, String> {
+        let page_no = query.page_no.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(self.cfg.page_size).clamp(1, 500);
+        let username = query.username.unwrap_or_default().trim().to_string();
+        if self.is_rnacos_compatible() {
+            let value = self
+                .get_rnacos_console_json(
+                    "/rnacos/api/console/v2/user/list",
+                    vec![
+                        ("likeUsername".to_string(), username),
+                        ("pageNo".to_string(), page_no.to_string()),
+                        ("pageSize".to_string(), page_size.to_string()),
+                        ("isRev".to_string(), "false".to_string()),
+                    ],
+                )
+                .await?;
+            return Ok(parse_user_list(value, page_no, page_size));
         }
         let value = self
             .get_json_from_candidates(
-                "list Nacos namespaces",
-                vec![("/v3/console/core/namespace/list", Vec::new()), ("/v1/console/namespaces", Vec::new())],
+                "list Nacos users",
+                vec![
+                    (
+                        "/v3/auth/user/list",
+                        vec![
+                            ("pageNo".to_string(), page_no.to_string()),
+                            ("pageSize".to_string(), page_size.to_string()),
+                            ("username".to_string(), username.clone()),
+                            ("search".to_string(), "blur".to_string()),
+                        ],
+                    ),
+                    (
+                        "/v1/auth/users",
+                        vec![
+                            ("pageNo".to_string(), page_no.to_string()),
+                            ("pageSize".to_string(), page_size.to_string()),
+                            ("username".to_string(), username),
+                            ("search".to_string(), "blur".to_string()),
+                        ],
+                    ),
+                ],
             )
             .await?;
-        Ok(parse_namespaces(value))
+        Ok(parse_user_list(value, page_no, page_size))
+    }
+
+    async fn create_user(&self, req: NacosUserCreate) -> Result<(), String> {
+        let username = validated_nacos_username(&req.username)?;
+        if req.password.is_empty() {
+            return Err(classified_error("invalidUser", "Nacos user password is required"));
+        }
+        if self.is_rnacos_compatible() {
+            self.post_rnacos_console_json(
+                "/rnacos/api/console/v2/user/add",
+                rnacos_user_payload(
+                    &username,
+                    Some(&req.password),
+                    req.nickname.as_deref(),
+                    req.enabled,
+                    Some(&req.roles),
+                    req.namespace_privilege.as_ref(),
+                    true,
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+        self.submit_form_candidates(
+            "create Nacos user",
+            reqwest::Method::POST,
+            vec![
+                (
+                    "/v3/auth/user",
+                    vec![("username".to_string(), username.clone()), ("password".to_string(), req.password.clone())],
+                ),
+                ("/v1/auth/users", vec![("username".to_string(), username), ("password".to_string(), req.password)]),
+            ],
+        )
+        .await
+    }
+
+    async fn update_user(&self, req: NacosUserUpdate) -> Result<(), String> {
+        let username = validated_nacos_username(&req.username)?;
+        if self.is_rnacos_compatible() {
+            self.post_rnacos_console_json(
+                "/rnacos/api/console/v2/user/update",
+                rnacos_user_payload(
+                    &username,
+                    req.password.as_deref(),
+                    req.nickname.as_deref(),
+                    req.enabled,
+                    req.roles.as_deref(),
+                    req.namespace_privilege.as_ref(),
+                    false,
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+        let password = req
+            .password
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| classified_error("invalidUser", "A new password is required when updating a Nacos user"))?;
+        let attempts = vec![
+            (
+                "/v3/auth/user",
+                vec![("username".to_string(), username.clone()), ("newPassword".to_string(), password.clone())],
+            ),
+            ("/v1/auth/users", vec![("username".to_string(), username), ("newPassword".to_string(), password)]),
+        ];
+        let result =
+            self.submit_form_candidates("update Nacos user password", reqwest::Method::PUT, attempts.clone()).await;
+        if !matches!(&result, Err(error) if is_official_session_expired(error)) {
+            return result;
+        }
+
+        *self.token.lock().await = None;
+        self.global_admin.store(0, Ordering::Relaxed);
+        self.invalidate_access_control_capabilities();
+        self.submit_form_candidates("update Nacos user password", reqwest::Method::PUT, attempts).await
+    }
+
+    async fn delete_user(&self, username: String) -> Result<(), String> {
+        let username = validated_nacos_username(&username)?;
+        if self.is_rnacos_compatible() {
+            self.post_rnacos_console_json(
+                "/rnacos/api/console/v2/user/remove",
+                serde_json::json!({ "username": username }),
+            )
+            .await?;
+            return Ok(());
+        }
+        self.submit_query_candidates(
+            "delete Nacos user",
+            reqwest::Method::DELETE,
+            vec![
+                ("/v3/auth/user", vec![("username".to_string(), username.clone())]),
+                ("/v1/auth/users", vec![("username".to_string(), username)]),
+            ],
+        )
+        .await
+    }
+
+    async fn list_role_bindings(&self, query: NacosRoleQuery) -> Result<NacosRoleList, String> {
+        if self.is_rnacos_compatible() {
+            return Err(classified_error(
+                "unsupportedOperation",
+                "r-nacos stores fixed roles on each user instead of exposing role bindings",
+            ));
+        }
+        let page_no = query.page_no.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(self.cfg.page_size).clamp(1, 500);
+        let username = query.username.unwrap_or_default().trim().to_string();
+        let role = query.role.unwrap_or_default().trim().to_string();
+        let value = self
+            .get_json_from_candidates(
+                "list Nacos role bindings",
+                vec![
+                    (
+                        "/v3/auth/role/list",
+                        vec![
+                            ("pageNo".to_string(), page_no.to_string()),
+                            ("pageSize".to_string(), page_size.to_string()),
+                            ("username".to_string(), username.clone()),
+                            ("role".to_string(), role.clone()),
+                            ("search".to_string(), "blur".to_string()),
+                        ],
+                    ),
+                    (
+                        "/v1/auth/roles",
+                        vec![
+                            ("pageNo".to_string(), page_no.to_string()),
+                            ("pageSize".to_string(), page_size.to_string()),
+                            ("username".to_string(), username),
+                            ("role".to_string(), role),
+                            ("search".to_string(), "blur".to_string()),
+                        ],
+                    ),
+                ],
+            )
+            .await?;
+        Ok(parse_role_list(value, page_no, page_size))
+    }
+
+    async fn assign_role(&self, binding: NacosRoleBinding) -> Result<(), String> {
+        let username = validated_nacos_username(&binding.username)?;
+        let role = validated_nacos_role(&binding.role)?;
+        if self.is_rnacos_compatible() {
+            return Err(classified_error("unsupportedOperation", "r-nacos roles are updated with the user record"));
+        }
+        self.submit_form_candidates(
+            "assign Nacos role",
+            reqwest::Method::POST,
+            vec![
+                ("/v3/auth/role", vec![("username".to_string(), username.clone()), ("role".to_string(), role.clone())]),
+                ("/v1/auth/roles", vec![("username".to_string(), username), ("role".to_string(), role)]),
+            ],
+        )
+        .await
+    }
+
+    async fn remove_role(&self, binding: NacosRoleBinding) -> Result<(), String> {
+        let username = validated_nacos_username(&binding.username)?;
+        let role = validated_nacos_role(&binding.role)?;
+        if self.is_rnacos_compatible() {
+            return Err(classified_error("unsupportedOperation", "r-nacos roles are updated with the user record"));
+        }
+        // Both Nacos generations interpret an omitted username as "remove every
+        // binding for this role". Always send the pair represented by the UI row.
+        self.submit_query_candidates(
+            "remove Nacos role binding",
+            reqwest::Method::DELETE,
+            vec![
+                ("/v3/auth/role", vec![("username".to_string(), username.clone()), ("role".to_string(), role.clone())]),
+                ("/v1/auth/roles", vec![("username".to_string(), username), ("role".to_string(), role)]),
+            ],
+        )
+        .await
+    }
+
+    async fn list_permissions(&self, query: NacosPermissionQuery) -> Result<NacosPermissionList, String> {
+        if self.is_rnacos_compatible() {
+            return Err(classified_error("unsupportedOperation", "r-nacos does not expose Nacos role permissions"));
+        }
+        let page_no = query.page_no.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(self.cfg.page_size).clamp(1, 500);
+        let role = query.role.unwrap_or_default().trim().to_string();
+        let resource = query.resource.unwrap_or_default().trim().to_string();
+        let value = self
+            .get_json_from_candidates(
+                "list Nacos permissions",
+                vec![
+                    (
+                        "/v3/auth/permission/list",
+                        vec![
+                            ("pageNo".to_string(), page_no.to_string()),
+                            ("pageSize".to_string(), page_size.to_string()),
+                            ("role".to_string(), role.clone()),
+                            ("resource".to_string(), resource.clone()),
+                            ("search".to_string(), "blur".to_string()),
+                        ],
+                    ),
+                    (
+                        "/v1/auth/permissions",
+                        vec![
+                            ("pageNo".to_string(), page_no.to_string()),
+                            ("pageSize".to_string(), page_size.to_string()),
+                            ("role".to_string(), role),
+                            ("resource".to_string(), resource),
+                            ("search".to_string(), "blur".to_string()),
+                        ],
+                    ),
+                ],
+            )
+            .await?;
+        Ok(parse_permission_list(value, page_no, page_size))
+    }
+
+    async fn grant_permission(&self, permission: NacosPermissionInfo) -> Result<(), String> {
+        let role = validated_nacos_role(&permission.role)?;
+        let resource = permission.resource_raw.trim().to_string();
+        let action = validated_nacos_permission_action(&permission.action_raw)?;
+        if resource.is_empty() {
+            return Err(classified_error("invalidPermission", "Nacos permission resource is required"));
+        }
+        self.submit_form_candidates(
+            "grant Nacos permission",
+            reqwest::Method::POST,
+            vec![
+                (
+                    "/v3/auth/permission",
+                    vec![
+                        ("role".to_string(), role.clone()),
+                        ("resource".to_string(), resource.clone()),
+                        ("action".to_string(), action.clone()),
+                    ],
+                ),
+                (
+                    "/v1/auth/permissions",
+                    vec![
+                        ("role".to_string(), role),
+                        ("resource".to_string(), resource),
+                        ("action".to_string(), action),
+                    ],
+                ),
+            ],
+        )
+        .await
+    }
+
+    async fn revoke_permission(&self, permission: NacosPermissionInfo) -> Result<(), String> {
+        let role = validated_nacos_role(&permission.role)?;
+        let resource = permission.resource_raw.trim().to_string();
+        let action = permission.action_raw.trim().to_string();
+        if resource.is_empty() || action.is_empty() {
+            return Err(classified_error("invalidPermission", "Nacos permission resource and action are required"));
+        }
+        self.submit_query_candidates(
+            "revoke Nacos permission",
+            reqwest::Method::DELETE,
+            vec![
+                (
+                    "/v3/auth/permission",
+                    vec![
+                        ("role".to_string(), role.clone()),
+                        ("resource".to_string(), resource.clone()),
+                        ("action".to_string(), action.clone()),
+                    ],
+                ),
+                (
+                    "/v1/auth/permissions",
+                    vec![
+                        ("role".to_string(), role),
+                        ("resource".to_string(), resource),
+                        ("action".to_string(), action),
+                    ],
+                ),
+            ],
+        )
+        .await
+    }
+
+    async fn list_namespaces(&self) -> Result<Vec<NacosNamespaceInfo>, String> {
+        if self.is_rnacos_compatible() {
+            // Namespace discovery is not part of r-nacos' client OpenAPI
+            // contract. Do not turn a failed optional console login into a
+            // prerequisite for normal OpenAPI configuration access: console
+            // deployments can require CAPTCHA, OAuth, or different credentials.
+            // The caller can still use an explicitly configured namespace
+            // scope, whose individual config requests remain server-authorized.
+            match self.get_json("/v1/console/namespaces", Vec::new()).await {
+                Ok(value) => return Ok(parse_namespaces(value)),
+                Err(openapi_error) if rnacos_namespace_directory_endpoint_unavailable(&openapi_error) => {
+                    return Err(classified_error(
+                        "rnacosNamespaceDirectoryUnavailable",
+                        &format!(
+                            "r-nacos could not list namespaces through its OpenAPI endpoint: {openapi_error}. Configure the namespace IDs to display instead of relying on console authentication"
+                        ),
+                    ));
+                }
+                // A reachable endpoint that rejects the current API token, or
+                // a transport/server failure, is not evidence that the
+                // directory is optional. Propagate it so connection testing
+                // cannot report success for an unusable OpenAPI session.
+                Err(openapi_error) => return Err(openapi_error),
+            }
+        }
+        match self
+            .get_json_from_candidates(
+                "list Nacos namespaces",
+                vec![
+                    (self.v3_path("/v3/admin/core/namespace/list", "/v3/console/core/namespace/list"), Vec::new()),
+                    ("/v1/console/namespaces", Vec::new()),
+                ],
+            )
+            .await
+        {
+            Ok(value) => {
+                self.managed_namespace_fallback_used.store(false, Ordering::Relaxed);
+                Ok(parse_namespaces(value))
+            }
+            Err(error) if classify_nacos_error(&error) == "authFailed" => {
+                // Nacos 3's Admin namespace directory requires elevated
+                // access. The Console directory is read-only and, on servers
+                // that expose it through the same endpoint, returns the
+                // namespace ID behind the name shown to an ordinary user.
+                // Keep this as a narrowly scoped compatibility fallback: the
+                // selected Admin or Console API plane still governs all
+                // regular data operations.
+                if matches!(self.cfg.version_mode, Some(NacosVersionMode::V3))
+                    && self.explicitly_scoped_namespace_ids().is_none()
+                {
+                    if let Ok(value) = self.get_json("/v1/console/namespaces", Vec::new()).await {
+                        self.managed_namespace_fallback_used.store(false, Ordering::Relaxed);
+                        return Ok(parse_namespaces(value));
+                    }
+                }
+                if let Some(managed_namespaces) = self.explicitly_scoped_namespace_ids() {
+                    self.managed_namespace_fallback_used.store(true, Ordering::Relaxed);
+                    return Ok(managed_namespaces
+                        .into_iter()
+                        .map(|namespace| NacosNamespaceInfo {
+                            namespace: namespace.clone(),
+                            namespace_show_name: namespace,
+                            namespace_desc: None,
+                            config_count: None,
+                            quota: None,
+                            namespace_type: None,
+                        })
+                        .collect());
+                }
+                Err(classified_error(
+                    "managedNamespacesRequired",
+                    &format!(
+                        "{error}. This Nacos account cannot list namespaces. Enable the ordinary-user option and enter at least one namespace ID that the account is allowed to manage"
+                    ),
+                ))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn create_namespace(&self, req: NacosNamespaceCreate) -> Result<(), String> {
-        let namespace_id = req.namespace_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        let namespace_id = req
+            .namespace_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let namespace_name = req.namespace_name.trim().to_string();
         if namespace_name.is_empty() {
             return Err(classified_error("invalidNamespace", "Nacos namespace name is required"));
@@ -1005,21 +2373,18 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         let mut v1_form =
             vec![("namespaceName".to_string(), namespace_name), ("namespaceDesc".to_string(), namespace_desc)];
-        if let Some(namespace_id) = namespace_id {
-            // Nacos 3.x Console API uses `customNamespaceId`; passing only
-            // `namespaceId` is accepted but ignored and causes a generated UUID.
-            v3_form.push(("customNamespaceId".to_string(), namespace_id.clone()));
-            v3_form.push(("namespaceId".to_string(), namespace_id.clone()));
-            v1_form.push(("customNamespaceId".to_string(), namespace_id.clone()));
-            v1_form.push(("namespaceId".to_string(), namespace_id));
-        }
+        // Nacos consoles generate an ID client-side when the field is empty,
+        // but the V3 Admin and Console forms expose different parameter names.
+        let v3_namespace_id_key = if self.is_v3_console() { "customNamespaceId" } else { "namespaceId" };
+        v3_form.push((v3_namespace_id_key.to_string(), namespace_id.clone()));
+        v1_form.push(("customNamespaceId".to_string(), namespace_id.clone()));
+        v1_form.push(("namespaceId".to_string(), namespace_id));
 
         self.submit_form_candidates(
             "create Nacos namespace",
             reqwest::Method::POST,
             vec![
-                ("/v3/console/core/namespace", v3_form.clone()),
-                ("/v3/console/core/namespace/create", v3_form),
+                (self.v3_path("/v3/admin/core/namespace", "/v3/console/core/namespace"), v3_form),
                 ("/v1/console/namespaces", v1_form.clone()),
                 ("/v1/console/namespaces/create", v1_form),
             ],
@@ -1060,10 +2425,27 @@ impl NacosAdmin for NacosOpenApiAdmin {
             "update Nacos namespace",
             reqwest::Method::PUT,
             vec![
-                ("/v3/console/core/namespace", v3_form.clone()),
-                ("/v3/console/core/namespace/update", v3_form),
+                (self.v3_path("/v3/admin/core/namespace", "/v3/console/core/namespace"), v3_form),
                 ("/v1/console/namespaces", v1_form.clone()),
                 ("/v1/console/namespaces/update", v1_form),
+            ],
+        )
+        .await
+    }
+
+    async fn delete_namespace(&self, namespace_id: String) -> Result<(), String> {
+        let namespace_id = namespace_id.trim().to_string();
+        if namespace_id.is_empty() {
+            return Err(classified_error("invalidNamespace", "Nacos namespace ID is required"));
+        }
+        let query = vec![("namespaceId".to_string(), namespace_id)];
+        self.submit_query_candidates(
+            "delete Nacos namespace",
+            reqwest::Method::DELETE,
+            vec![
+                (self.v3_path("/v3/admin/core/namespace", "/v3/console/core/namespace"), query.clone()),
+                ("/v1/console/namespaces", query.clone()),
+                ("/v1/console/namespaces/delete", query),
             ],
         )
         .await
@@ -1080,19 +2462,37 @@ impl NacosAdmin for NacosOpenApiAdmin {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let search = data_id_filter.clone().unwrap_or_default();
-        let group_filter = query.group.clone();
+        let group_filter = query.group.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        let group_contains = query.group_contains;
         let group = group_filter.clone().unwrap_or_default();
         let app_name_filter = query.app_name.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
         let app_name = app_name_filter.clone().unwrap_or_default();
+
+        // Nacos v2, v3, and r-nacos do not agree on whether a group filter is
+        // exact or fuzzy. Scan without that server-side constraint so the UI
+        // always provides the same case-insensitive contains semantics.
+        if group_contains && group_filter.is_some() {
+            return self
+                .list_configs_by_client_filters(
+                    namespace,
+                    data_id_filter,
+                    group_filter,
+                    app_name_filter,
+                    page_no,
+                    page_size,
+                )
+                .await;
+        }
+
         let value = self.get_config_list_value(&namespace, &search, &group, &app_name, page_no, page_size).await?;
         let parsed =
             self.enrich_missing_config_formats(parse_config_list(value, namespace.clone(), page_no, page_size)).await;
         if data_id_filter.is_some() && parsed.items.is_empty() {
             let fallback = self
-                .list_configs_by_client_filter(
+                .list_configs_by_client_filters(
                     namespace,
-                    group_filter,
                     data_id_filter,
+                    group_filter,
                     app_name_filter,
                     page_no,
                     page_size,
@@ -1122,28 +2522,16 @@ impl NacosAdmin for NacosOpenApiAdmin {
         // queries, so wrapping the term gives us contains semantics; every
         // candidate is still fetched and verified with Rust `str::contains`.
         let config_detail = format!("*{query}*");
-        let attempts = [
-            (
-                "/v3/admin/cs/config/list",
-                vec![
-                    ("configDetail".to_string(), config_detail.clone()),
-                    ("search".to_string(), "blur".to_string()),
-                    ("namespaceId".to_string(), namespace.to_string()),
-                    ("pageNo".to_string(), page_no.to_string()),
-                    ("pageSize".to_string(), page_size.to_string()),
-                ],
-            ),
-            (
-                "/v3/console/cs/config/searchDetail",
-                vec![
-                    ("configDetail".to_string(), config_detail),
-                    ("search".to_string(), "blur".to_string()),
-                    ("namespaceId".to_string(), namespace.to_string()),
-                    ("pageNo".to_string(), page_no.to_string()),
-                    ("pageSize".to_string(), page_size.to_string()),
-                ],
-            ),
-        ];
+        let attempts = [(
+            self.v3_path("/v3/admin/cs/config/list", "/v3/console/cs/config/searchDetail"),
+            vec![
+                ("configDetail".to_string(), config_detail),
+                ("search".to_string(), "blur".to_string()),
+                ("namespaceId".to_string(), namespace.to_string()),
+                ("pageNo".to_string(), page_no.to_string()),
+                ("pageSize".to_string(), page_size.to_string()),
+            ],
+        )];
         let mut unsupported = false;
         for (path, params) in attempts {
             if !self.api_path_allowed(path) {
@@ -1189,6 +2577,20 @@ impl NacosAdmin for NacosOpenApiAdmin {
 
     async fn get_config(&self, key: NacosConfigKey) -> Result<NacosConfigItem, String> {
         let namespace = self.namespace(key.namespace.as_deref());
+
+        // r-nacos: console owns detail (content + type). OpenAPI is body-only fallback.
+        if self.is_rnacos_compatible() {
+            if !self.cfg.rnacos_console_addr.is_empty() {
+                match self.get_rnacos_console_config(&key.data_id, &key.group, &namespace).await {
+                    Ok(config) => return Ok(config),
+                    Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
+                    Err(_) => {}
+                }
+            }
+            return self.get_openapi_raw_config(&key.data_id, &key.group, &namespace).await;
+        }
+
+        // Official Nacos Open API.
         let v3_params = vec![
             ("dataId".to_string(), key.data_id.clone()),
             ("groupName".to_string(), key.group.clone()),
@@ -1201,26 +2603,30 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         let mut v1_detail_params = v1_params.clone();
         v1_detail_params.push(("show".to_string(), "all".to_string()));
+
         let mut errors = Vec::new();
         for (path, query) in [
-            ("/v3/console/cs/config", v3_params.clone()),
-            ("/v3/console/cs/config/detail", v3_params),
+            (self.v3_path("/v3/admin/cs/config", "/v3/console/cs/config"), v3_params),
             ("/v1/cs/configs", v1_detail_params),
             ("/v1/cs/configs", v1_params),
         ] {
             if !self.api_path_allowed(path) {
                 continue;
             }
+            let show_all =
+                path == "/v1/cs/configs" && query.iter().any(|(name, value)| name == "show" && value == "all");
             match self.request(reqwest::Method::GET, path, query, None, None).await {
                 Ok(resp) => match error_for_status(resp, path).await {
                     Ok(resp) if path == "/v1/cs/configs" => {
                         let text =
                             resp.text().await.map_err(|e| format!("Failed to read Nacos config response: {e}"))?;
-                        if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            let detail = parse_config_detail(value, key.data_id, key.group, namespace);
-                            return self.enrich_rnacos_config_metadata(detail).await;
+                        // show=all → detail JSON; default GET → opaque content text.
+                        if show_all {
+                            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                                return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
+                            }
                         }
-                        let detail = NacosConfigItem {
+                        return Ok(NacosConfigItem {
                             data_id: key.data_id,
                             group: key.group,
                             namespace,
@@ -1231,13 +2637,11 @@ impl NacosAdmin for NacosOpenApiAdmin {
                             md5: None,
                             encrypted_data_key: None,
                             content: Some(text),
-                        };
-                        return self.enrich_rnacos_config_metadata(detail).await;
+                        });
                     }
                     Ok(resp) => {
                         let value = response_json_or_text(resp).await?;
-                        let detail = parse_config_detail(value, key.data_id, key.group, namespace);
-                        return self.enrich_rnacos_config_metadata(detail).await;
+                        return Ok(parse_config_detail(value, key.data_id, key.group, namespace));
                     }
                     Err(err) => errors.push(err),
                 },
@@ -1252,11 +2656,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let (v3_form, v1_form) = build_publish_forms(req, namespace);
 
         let mut errors = Vec::new();
-        for (path, form) in [
-            ("/v3/console/cs/config", v3_form.clone()),
-            ("/v3/console/cs/config/publish", v3_form.clone()),
-            ("/v3/console/cs/config/update", v3_form),
-        ] {
+        for (path, form) in [(self.v3_path("/v3/admin/cs/config", "/v3/console/cs/config"), v3_form)] {
             if !self.api_path_allowed(path) {
                 continue;
             }
@@ -1302,9 +2702,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
             "delete Nacos config",
             reqwest::Method::DELETE,
             vec![
-                ("/v3/console/cs/config", v3_query.clone()),
-                ("/v3/console/cs/config/delete", v3_query.clone()),
-                ("/v3/console/cs/config/remove", v3_query),
+                (self.v3_path("/v3/admin/cs/config", "/v3/console/cs/config"), v3_query),
                 ("/v1/cs/configs", v1_query),
             ],
         )
@@ -1335,8 +2733,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
             .get_json_from_candidates(
                 "list Nacos config history",
                 vec![
-                    ("/v3/console/cs/history/list", v3_params.clone()),
-                    ("/v3/console/cs/history", v3_params.clone()),
+                    (self.v3_path("/v3/admin/cs/history/list", "/v3/console/cs/history/list"), v3_params),
                     ("/v1/cs/history/list", v1_params.clone()),
                     ("/v1/cs/history", v1_params.clone()),
                     ("/v1/cs/history/configs", v1_params),
@@ -1390,8 +2787,7 @@ impl NacosAdmin for NacosOpenApiAdmin {
             .get_json_from_candidates(
                 "get Nacos config history",
                 vec![
-                    ("/v3/console/cs/history/detail", v3_params.clone()),
-                    ("/v3/console/cs/history", v3_params.clone()),
+                    (self.v3_path("/v3/admin/cs/history", "/v3/console/cs/history"), v3_params),
                     ("/v1/cs/history", v1_params.clone()),
                     ("/v1/cs/history/config", v1_params),
                 ],
@@ -1434,15 +2830,6 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let data_id = req.data_id.clone();
         let group = req.group.clone();
         let history_id = req.history_id.clone();
-        let mut v3_query = vec![
-            ("dataId".to_string(), req.data_id.clone()),
-            ("groupName".to_string(), req.group.clone()),
-            ("namespaceId".to_string(), namespace.clone()),
-            ("id".to_string(), req.history_id.clone()),
-        ];
-        if let Some(nid) = nid {
-            v3_query.push(("nid".to_string(), nid.to_string()));
-        }
         let mut v1_query = vec![
             ("dataId".to_string(), req.data_id),
             ("group".to_string(), req.group),
@@ -1453,18 +2840,20 @@ impl NacosAdmin for NacosOpenApiAdmin {
         } else {
             v1_query.push(("id".to_string(), req.history_id));
         }
-        let endpoint_result = self
-            .submit_query_candidates(
+        // The Nacos 3 Admin API exposes history reads but no rollback route.
+        // Re-publishing the selected revision is the documented, deterministic
+        // rollback implementation. Older compatible APIs keep their direct
+        // endpoint probes below.
+        let endpoint_result = if matches!(self.cfg.version_mode, Some(NacosVersionMode::V3)) {
+            Err("Nacos v3 Admin API uses history read and publish for rollback".to_string())
+        } else {
+            self.submit_query_candidates(
                 "rollback Nacos config",
                 reqwest::Method::POST,
-                vec![
-                    ("/v3/console/cs/history/rollback", v3_query.clone()),
-                    ("/v3/console/cs/config/history/rollback", v3_query),
-                    ("/v1/cs/history/rollback", v1_query.clone()),
-                    ("/v1/cs/history/config/rollback", v1_query),
-                ],
+                vec![("/v1/cs/history/rollback", v1_query.clone()), ("/v1/cs/history/config/rollback", v1_query)],
             )
-            .await;
+            .await
+        };
         if endpoint_result.is_ok() {
             return Ok(());
         }
@@ -1520,6 +2909,16 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         push_optional(&mut v3_params, "groupNameParam", query.group_name.clone());
         push_optional(&mut v3_params, "serviceNameParam", query.service_name.clone());
+        let requested_group = query.group_name.clone();
+        let mut v2_params = vec![
+            ("namespaceId".to_string(), namespace.clone()),
+            ("pageNo".to_string(), page_no.to_string()),
+            ("pageSize".to_string(), page_size.to_string()),
+        ];
+        // Nacos v2 uses the service API's field names rather than the v3
+        // console list aliases (`groupNameParam` and `serviceNameParam`).
+        push_optional(&mut v2_params, "groupName", query.group_name.clone());
+        push_optional(&mut v2_params, "serviceName", query.service_name.clone());
         let mut v1_catalog_params = vec![
             ("namespaceId".to_string(), namespace.clone()),
             ("pageNo".to_string(), page_no.to_string()),
@@ -1534,22 +2933,116 @@ impl NacosAdmin for NacosOpenApiAdmin {
         ];
         push_optional(&mut v1_legacy_params, "groupName", query.group_name);
         push_optional(&mut v1_legacy_params, "serviceName", query.service_name);
+        if self.is_rnacos_compatible() {
+            // r-nacos returns only the default group from the ordinary Naming
+            // list endpoint when no group is supplied. Its compatible Catalog
+            // service endpoint is the management view that can enumerate
+            // services across groups, just as it is for Nacos v2.
+            let value = self.get_json("/v1/ns/catalog/services", v1_catalog_params).await?;
+            let mut result = parse_service_list(value, page_no, page_size);
+            if let Some(group_name) = requested_group.filter(|group| !group.trim().is_empty()) {
+                for service in &mut result.items {
+                    if service.group_name.is_none() {
+                        service.group_name = Some(group_name.clone());
+                    }
+                }
+            }
+            return Ok(result);
+        }
         let value = self
-            .get_json_from_candidates(
+            .get_service_json_from_candidates(
                 "list Nacos services",
                 vec![
-                    ("/v3/console/ns/service/list", v3_params.clone()),
+                    (self.v3_path("/v3/admin/ns/service/list", "/v3/console/ns/service/list"), v3_params.clone()),
+                    // The catalog endpoint is what the Nacos v2 console uses
+                    // to enumerate services across every group. `/v2/ns/service/list`
+                    // returns a valid-but-empty response without `groupName`, which
+                    // must not prevent this cross-group query from being attempted.
                     ("/v1/ns/catalog/services", v1_catalog_params.clone()),
-                    ("/v3/console/ns/service", v3_params),
+                    ("/v2/ns/service/list", v2_params.clone()),
                     ("/v1/ns/service/list", v1_legacy_params),
                 ],
             )
             .await?;
-        Ok(parse_service_list(value, page_no, page_size))
+        let mut result = parse_service_list(value, page_no, page_size);
+        // Nacos does not include empty services in the v2 catalog response.
+        // When a group is explicitly selected, query the direct v2 API as a
+        // supplement so manually-created empty services remain manageable.
+        if result.items.is_empty()
+            && requested_group.as_deref().is_some_and(|group| !group.trim().is_empty())
+            && self.api_path_allowed("/v2/ns/service/list")
+        {
+            if let Ok(value) = self.get_json("/v2/ns/service/list", v2_params).await {
+                result = parse_service_list(value, page_no, page_size);
+            }
+        }
+        // The v2 list API returns plain service names and omits the matched
+        // group. Preserve the requested group so subsequent detail, update,
+        // and instance calls address the same service identity.
+        if let Some(group_name) = requested_group.filter(|group| !group.trim().is_empty()) {
+            for service in &mut result.items {
+                if service.group_name.is_none() {
+                    service.group_name = Some(group_name.clone());
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn get_service(&self, query: NacosServiceQuery) -> Result<NacosServiceDetail, String> {
+        let namespace = self.namespace(query.namespace.as_deref());
+        let service_name = query.service_name.ok_or_else(|| "Nacos service name is required".to_string())?;
+        if self.is_rnacos_compatible() {
+            // r-nacos reads a grouped service detail through the compatible
+            // v1 endpoint, but derives the group from `serviceName` rather
+            // than honoring a separate `groupName` parameter.
+            let params = vec![
+                ("namespaceId".to_string(), namespace),
+                ("serviceName".to_string(), qualified_nacos_service_name(&service_name, query.group_name.as_deref())),
+            ];
+            return self.get_json("/v1/ns/service", params).await.map(parse_service_detail);
+        }
+        let mut params = vec![("namespaceId".to_string(), namespace), ("serviceName".to_string(), service_name)];
+        push_optional(&mut params, "groupName", query.group_name);
+        let value = self
+            .get_service_json_from_candidates(
+                "get Nacos service",
+                vec![
+                    (self.v3_path("/v3/admin/ns/service", "/v3/console/ns/service"), params.clone()),
+                    ("/v1/ns/service", params),
+                ],
+            )
+            .await?;
+        Ok(parse_service_detail(value))
+    }
+
+    async fn create_service(&self, req: NacosServiceUpsert) -> Result<(), String> {
+        self.submit_service_upsert("create Nacos service", req, reqwest::Method::POST).await
+    }
+
+    async fn update_service(&self, req: NacosServiceUpsert) -> Result<(), String> {
+        self.submit_service_upsert("update Nacos service", req, reqwest::Method::PUT).await
+    }
+
+    async fn delete_service(&self, query: NacosServiceQuery) -> Result<(), String> {
+        let namespace = self.namespace(query.namespace.as_deref());
+        let service_name = query.service_name.ok_or_else(|| "Nacos service name is required".to_string())?;
+        let mut params = vec![("namespaceId".to_string(), namespace), ("serviceName".to_string(), service_name)];
+        push_optional(&mut params, "groupName", query.group_name);
+        self.submit_service_query_candidates(
+            "delete Nacos service",
+            reqwest::Method::DELETE,
+            vec![
+                (self.v3_path("/v3/admin/ns/service", "/v3/console/ns/service"), params.clone()),
+                ("/v1/ns/service", params),
+            ],
+        )
+        .await
     }
 
     async fn list_instances(&self, query: NacosInstanceQuery) -> Result<Vec<NacosInstanceInfo>, String> {
         let namespace = self.namespace(query.namespace.as_deref());
+        let requested_clusters = split_nacos_cluster_names(query.clusters.as_deref());
         let mut params = vec![
             ("serviceName".to_string(), query.service_name.clone()),
             ("namespaceId".to_string(), namespace.clone()),
@@ -1557,88 +3050,204 @@ impl NacosAdmin for NacosOpenApiAdmin {
         push_optional(&mut params, "groupName", query.group_name.clone());
         push_optional(&mut params, "clusters", query.clusters.clone());
 
+        if self.is_rnacos_compatible() {
+            // The compatible discovery API only lists enabled instances. When
+            // the optional r-nacos console has been configured, prefer its
+            // authenticated management endpoint so disabled persistent
+            // instances remain operable in DBX as well.
+            if !self.cfg.rnacos_console_addr.is_empty() {
+                match self.list_rnacos_console_instances(&query, &namespace, &requested_clusters).await {
+                    Ok(instances) => return Ok(instances),
+                    Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
+                    // The console is optional for r-nacos. A connection,
+                    // permission, or version failure must not hide the
+                    // regular compatible discovery result.
+                    Err(_) => {}
+                }
+            }
+            let value = self.get_json("/v1/ns/instance/list", params).await?;
+            return Ok(filter_instances_by_clusters(parse_instances(value), &requested_clusters));
+        }
+
         let mut errors = Vec::new();
-        for path in ["/v3/console/ns/instance/list", "/v3/console/ns/instance"] {
+        let v3_instance_list_path = self.v3_path("/v3/admin/ns/instance/list", "/v3/console/ns/instance/list");
+        if self.api_path_allowed(v3_instance_list_path) {
+            match self.list_v3_admin_instances(&query, &namespace).await {
+                Ok(instances) => return Ok(filter_instances_by_clusters(instances, &requested_clusters)),
+                Err(err) => {
+                    let try_next = self.should_try_next_candidate(&err);
+                    errors.push(err);
+                    if !try_next {
+                        return Err(format!("Failed to list Nacos instances: {}", errors.join("; ")));
+                    }
+                }
+            }
+        }
+
+        // Nacos v2's ordinary Naming list endpoint omits disabled instances.
+        // The Catalog controller is the management view and deliberately
+        // includes them, so use it before v1/v2 Naming fallbacks.
+        if self.api_path_allowed("/v1/ns/catalog/instances") {
+            match self.list_v1_catalog_instances(&query, &namespace).await {
+                Ok(instances) => return Ok(filter_instances_by_clusters(instances, &requested_clusters)),
+                Err(err) => {
+                    let try_next = self.should_try_next_candidate(&err);
+                    errors.push(err);
+                    if !try_next {
+                        return Err(format!("Failed to list Nacos instances: {}", errors.join("; ")));
+                    }
+                }
+            }
+        }
+
+        for path in ["/v1/ns/instance/list", "/v2/ns/instance/list"] {
             if !self.api_path_allowed(path) {
                 continue;
             }
             match self.get_json(path, params.clone()).await {
-                Ok(value) => return Ok(parse_instances(value)),
-                Err(err) => errors.push(err),
+                Ok(value) => return Ok(filter_instances_by_clusters(parse_instances(value), &requested_clusters)),
+                Err(err) => {
+                    let try_next = self.should_try_next_candidate(&err);
+                    errors.push(err);
+                    if !try_next {
+                        return Err(format!("Failed to list Nacos instances: {}", errors.join("; ")));
+                    }
+                }
             }
         }
-
-        if self.api_path_allowed("/v1/ns/catalog/instances") {
-            match self.list_v1_catalog_instances(&query, &namespace).await {
-                Ok(instances) => return Ok(instances),
-                Err(err) => errors.push(err),
-            }
-        }
-
-        if !self.api_path_allowed("/v1/ns/instance/list") {
-            return Err(format!("Failed to list Nacos instances: {}", errors.join("; ")));
-        }
-        match self.get_json("/v1/ns/instance/list", params).await {
-            Ok(value) => Ok(parse_instances(value)),
-            Err(err) => {
-                errors.push(err);
-                Err(format!("Failed to list Nacos instances: {}", errors.join("; ")))
-            }
-        }
+        Err(format!("Failed to list Nacos instances: {}", errors.join("; ")))
     }
 
-    async fn update_instance(&self, req: NacosInstanceUpdate) -> Result<(), String> {
+    async fn list_instances_for_service_delete(
+        &self,
+        query: NacosInstanceQuery,
+    ) -> Result<Vec<NacosInstanceInfo>, String> {
+        if self.is_rnacos_compatible() {
+            if self.cfg.rnacos_console_addr.trim().is_empty() {
+                return Err(
+                    "NACOS_ERROR[endpointUnavailable]: r-nacos service deletion requires a configured r-nacos console address so DBX can verify disabled instances"
+                        .to_string(),
+                );
+            }
+            let namespace = self.namespace(query.namespace.as_deref());
+            let requested_clusters = split_nacos_cluster_names(query.clusters.as_deref());
+            return self.list_rnacos_console_instances(&query, &namespace, &requested_clusters).await;
+        }
+        self.list_instances(query).await
+    }
+
+    async fn update_instance(&self, req: NacosInstanceUpdateRequest) -> Result<(), String> {
+        if req.target.service_name.trim().is_empty()
+            || req.target.ip.parse::<std::net::IpAddr>().is_err()
+            || req.target.port == 0
+        {
+            return Err("Nacos instance service name, valid IP, and port are required".to_string());
+        }
+        if req.patch.enabled.is_none()
+            && req.patch.healthy.is_none()
+            && req.patch.weight.is_none()
+            && req.patch.metadata.is_none()
+        {
+            return Err("Nacos instance update patch must contain at least one field".to_string());
+        }
+        if req.patch.weight.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err("Nacos instance weight must be a finite number greater than or equal to 0".to_string());
+        }
+        if req.patch.metadata.as_ref().is_some_and(|value| !value.is_object()) {
+            return Err("Nacos instance metadata must be a JSON object".to_string());
+        }
+        if self.is_official_v3() && req.patch.healthy.is_some() {
+            return Err(classified_error(
+                "unsupportedOperation",
+                "Official Nacos 3 management APIs cannot override an instance health state",
+            ));
+        }
+        let v3_instance_update_path = self.v3_path("/v3/admin/ns/instance/partial", "/v3/console/ns/instance");
+        if self.api_path_allowed(v3_instance_update_path) {
+            match self.update_v3_admin_instance(req.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(err) if self.should_try_next_candidate(&err) => {}
+                Err(err) => return Err(format!("Failed to update Nacos instance: {err}")),
+            }
+        }
+        if !self.api_path_allowed("/v1/ns/instance") {
+            return Err("Failed to update Nacos instance: no compatible management endpoint is available".to_string());
+        }
+        let namespace = self.namespace(req.target.namespace.as_deref());
+        let form = instance_update_form(namespace, req);
+        let response = self.request(reqwest::Method::PUT, "/v1/ns/instance", Vec::new(), Some(form), None).await?;
+        error_for_status(response, "/v1/ns/instance").await?;
+        Ok(())
+    }
+
+    async fn register_instance(&self, req: NacosInstanceRegistration) -> Result<(), String> {
+        if req.service_name.trim().is_empty() || req.ip.parse::<std::net::IpAddr>().is_err() || req.port == 0 {
+            return Err("Nacos instance service name, valid IP, and port are required".to_string());
+        }
+        if req.weight.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err("Nacos instance weight must be a finite number greater than or equal to 0".to_string());
+        }
+        if req.metadata.as_ref().is_some_and(|value| !value.is_object()) {
+            return Err("Nacos instance metadata must be a JSON object".to_string());
+        }
+        let form = instance_registration_form(self.namespace(req.namespace.as_deref()), req);
+        self.submit_service_form_candidates(
+            "register Nacos instance",
+            reqwest::Method::POST,
+            vec![("/v3/admin/ns/instance", form.clone()), ("/v1/ns/instance", form)],
+        )
+        .await
+    }
+
+    async fn deregister_instance(&self, req: NacosInstanceRef) -> Result<(), String> {
+        if req.service_name.trim().is_empty() || req.ip.parse::<std::net::IpAddr>().is_err() || req.port == 0 {
+            return Err("Nacos instance service name, valid IP, and port are required".to_string());
+        }
         let namespace = self.namespace(req.namespace.as_deref());
-        let mut form = vec![
+        let mut params = vec![
+            ("namespaceId".to_string(), namespace),
             ("serviceName".to_string(), req.service_name),
             ("ip".to_string(), req.ip),
             ("port".to_string(), req.port.to_string()),
-            ("namespaceId".to_string(), namespace),
         ];
-        push_optional(&mut form, "groupName", req.group_name);
-        push_optional(&mut form, "clusterName", req.cluster_name);
-        if let Some(value) = req.healthy {
-            form.push(("healthy".to_string(), value.to_string()));
+        push_optional(&mut params, "groupName", req.group_name);
+        push_optional(&mut params, "clusterName", req.cluster_name);
+        if let Some(ephemeral) = req.ephemeral {
+            params.push(("ephemeral".to_string(), ephemeral.to_string()));
         }
-        if let Some(value) = req.enabled {
-            form.push(("enabled".to_string(), value.to_string()));
-        }
-        if let Some(value) = req.ephemeral {
-            form.push(("ephemeral".to_string(), value.to_string()));
-        }
-        if let Some(value) = req.weight {
-            form.push(("weight".to_string(), value.to_string()));
-        }
-        if let Some(value) = req.metadata {
-            form.push(("metadata".to_string(), value.to_string()));
-        }
-        self.submit_form_candidates(
-            "update Nacos instance",
-            reqwest::Method::PUT,
-            vec![
-                ("/v3/console/ns/instance", form.clone()),
-                ("/v3/console/ns/instance/update", form.clone()),
-                ("/v1/ns/instance", form),
-            ],
+        self.submit_service_query_candidates(
+            "deregister Nacos instance",
+            reqwest::Method::DELETE,
+            vec![("/v3/admin/ns/instance", params.clone()), ("/v1/ns/instance", params)],
         )
         .await
     }
 
     async fn get_dashboard(&self, query: NacosDashboardQuery) -> Result<NacosDashboardSnapshot, String> {
         let namespace = self.namespace(query.namespace.as_deref());
-        let metrics_future = self.get_json_from_candidates(
-            "load Nacos dashboard metrics",
-            vec![
-                ("/v3/admin/ns/ops/metrics", vec![("onlyStatus".to_string(), "false".to_string())]),
-                ("/v2/ns/operator/metrics", vec![("onlyStatus".to_string(), "false".to_string())]),
-                ("/v1/ns/operator/metrics", Vec::new()),
-            ],
-        );
+        let metrics_future = async {
+            if self.is_v3_console() {
+                None
+            } else {
+                Some(
+                    self.get_json_from_candidates(
+                        "load Nacos dashboard metrics",
+                        vec![
+                            ("/v3/admin/ns/ops/metrics", vec![("onlyStatus".to_string(), "false".to_string())]),
+                            ("/v2/ns/operator/metrics", vec![("onlyStatus".to_string(), "false".to_string())]),
+                            ("/v1/ns/operator/metrics", Vec::new()),
+                        ],
+                    )
+                    .await,
+                )
+            }
+        };
         let nodes_future = self.get_dashboard_nodes();
         let namespaces_future = self.list_namespaces();
         let configs_future = self.list_configs(NacosConfigQuery {
             namespace: Some(namespace.clone()),
             group: None,
+            group_contains: false,
             data_id: None,
             app_name: None,
             search: None,
@@ -1665,11 +3274,12 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let mut warnings = Vec::new();
 
         let mut metrics = match metrics_result {
-            Ok(value) => Some(parse_dashboard_metrics(value)),
-            Err(error) => {
+            Some(Ok(value)) => Some(parse_dashboard_metrics(value)),
+            Some(Err(error)) => {
                 warnings.push(self.dashboard_warning(error));
                 None
             }
+            None => None,
         };
         let nodes = match nodes_result {
             Ok(value) => value,
@@ -1722,6 +3332,12 @@ impl NacosAdmin for NacosOpenApiAdmin {
 
     async fn raw_request(&self, req: NacosRawRequest) -> Result<NacosRawResponse, String> {
         validate_raw_api_path(&req.path)?;
+        if !self.api_path_allowed(&req.path) {
+            return Err(classified_error(
+                "unsupportedOperation",
+                "The raw Nacos API path is outside the selected API mode",
+            ));
+        }
         let method = reqwest::Method::from_bytes(req.method.to_ascii_uppercase().as_bytes())
             .map_err(|e| format!("Invalid Nacos raw request method: {e}"))?;
         let mut query = req.query.unwrap_or_default().into_iter().collect::<Vec<_>>();
@@ -1764,7 +3380,7 @@ pub fn validate_raw_api_path(path: &str) -> Result<(), String> {
 
 fn parse_namespaces(value: Value) -> Vec<NacosNamespaceInfo> {
     let data = value.get("data").unwrap_or(&value);
-    let items = data
+    let items: Vec<Value> = data
         .as_array()
         .cloned()
         .or_else(|| data.get("namespaces").and_then(Value::as_array).cloned())
@@ -1794,7 +3410,10 @@ fn parse_namespaces(value: Value) -> Vec<NacosNamespaceInfo> {
             }
         })
         .collect();
-    if !namespaces.iter().any(|item| item.namespace.is_empty()) {
+    // Nacos 3 reports the default namespace with the concrete `public` ID,
+    // while older endpoints commonly use an empty ID. Add a synthetic default
+    // only when neither representation was returned.
+    if !namespaces.iter().any(|item| item.namespace.is_empty() || item.namespace == "public") {
         namespaces.insert(
             0,
             NacosNamespaceInfo {
@@ -1808,6 +3427,207 @@ fn parse_namespaces(value: Value) -> Vec<NacosNamespaceInfo> {
         );
     }
     namespaces
+}
+
+fn validated_nacos_username(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(classified_error("invalidUser", "Nacos username is required"));
+    }
+    Ok(value.to_string())
+}
+
+fn validated_nacos_role(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(classified_error("invalidRole", "Nacos role is required"));
+    }
+    Ok(value.to_string())
+}
+
+fn validated_nacos_permission_action(value: &str) -> Result<String, String> {
+    let value = value.trim().to_ascii_lowercase();
+    if matches!(value.as_str(), "r" | "w" | "rw") {
+        Ok(value)
+    } else {
+        Err(classified_error("invalidPermission", "Nacos permission action must be r, w, or rw"))
+    }
+}
+
+fn parse_permission_scope(resource: &str) -> Option<NacosPermissionScope> {
+    let resource = resource.trim();
+    if resource.is_empty() {
+        return Some(NacosPermissionScope { kind: NacosPermissionScopeKind::Unknown, namespace_id: None });
+    }
+    if resource == "*:*:*" {
+        return Some(NacosPermissionScope { kind: NacosPermissionScopeKind::Global, namespace_id: None });
+    }
+    if let Some(namespace_id) = resource.strip_suffix(":*:*") {
+        if !namespace_id.contains(':') && namespace_id != "*" {
+            return Some(NacosPermissionScope {
+                kind: NacosPermissionScopeKind::Namespace,
+                namespace_id: Some(if namespace_id.is_empty() {
+                    "public".to_string()
+                } else {
+                    namespace_id.to_string()
+                }),
+            });
+        }
+        return Some(NacosPermissionScope { kind: NacosPermissionScopeKind::Custom, namespace_id: None });
+    }
+    Some(NacosPermissionScope { kind: NacosPermissionScopeKind::Custom, namespace_id: None })
+}
+
+fn rnacos_user_payload(
+    username: &str,
+    password: Option<&str>,
+    nickname: Option<&str>,
+    enabled: Option<bool>,
+    roles: Option<&[String]>,
+    namespace_privilege: Option<&NacosNamespacePrivilege>,
+    create: bool,
+) -> Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("username".to_string(), Value::String(username.to_string()));
+    if let Some(password) = password.filter(|value| !value.is_empty()) {
+        payload.insert("password".to_string(), Value::String(password.to_string()));
+    }
+    if let Some(nickname) = nickname.map(str::trim).filter(|value| !value.is_empty()) {
+        payload.insert("nickname".to_string(), Value::String(nickname.to_string()));
+    } else if create {
+        payload.insert("nickname".to_string(), Value::String(username.to_string()));
+    }
+    if let Some(enabled) = enabled {
+        payload.insert("enable".to_string(), Value::Bool(enabled));
+    }
+    if let Some(roles) = roles {
+        payload.insert(
+            "roles".to_string(),
+            Value::String(
+                roles.iter().map(|role| role.trim()).filter(|role| !role.is_empty()).collect::<Vec<_>>().join(","),
+            ),
+        );
+    }
+    if let Some(privilege) = namespace_privilege {
+        // r-nacos' UpdateUserInfoParam accepts only PrivilegeGroupOptionParam
+        // here. The response's `enabled` flag is derived server-side and is
+        // intentionally not a writable request field.
+        payload.insert(
+            "namespacePrivilegeParam".to_string(),
+            serde_json::json!({
+                "whitelistIsAll": privilege.whitelist_is_all,
+                "whitelist": privilege.whitelist,
+                "blacklistIsAll": privilege.blacklist_is_all,
+                "blacklist": privilege.blacklist,
+            }),
+        );
+    }
+    Value::Object(payload)
+}
+
+fn parse_user_list(value: Value, page_no: u32, page_size: u32) -> NacosUserList {
+    let data = value.get("data").unwrap_or(&value);
+    let total_count = optional_u64_field(data, &["totalCount", "count"])
+        .or_else(|| optional_u64_field(&value, &["totalCount", "count"]))
+        .unwrap_or_default();
+    let items: Vec<NacosUserInfo> = data
+        .get("pageItems")
+        .or_else(|| data.get("list"))
+        .or_else(|| data.get("items"))
+        .or_else(|| value.get("pageItems"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let username = optional_string_field(&item, &["username", "userName"])?;
+            let roles = item
+                .get("roles")
+                .and_then(Value::as_array)
+                .map(|roles| roles.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let namespace_privilege = item.get("namespacePrivilege").map(|privilege| NacosNamespacePrivilege {
+                enabled: optional_bool_field(privilege, &["enabled"]).unwrap_or(true),
+                whitelist_is_all: optional_bool_field(privilege, &["whitelistIsAll"]).unwrap_or(true),
+                whitelist: privilege
+                    .get("whitelist")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default(),
+                blacklist_is_all: optional_bool_field(privilege, &["blacklistIsAll"]).unwrap_or(false),
+                blacklist: privilege
+                    .get("blacklist")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .unwrap_or_default(),
+            });
+            Some(NacosUserInfo {
+                username,
+                nickname: optional_string_field(&item, &["nickname"]),
+                enabled: optional_bool_field(&item, &["enable", "enabled"]),
+                roles,
+                namespace_privilege,
+                source: optional_string_field(&item, &["source"]),
+            })
+        })
+        .collect();
+    let total_count = if total_count == 0 { items.len() as u64 } else { total_count };
+    NacosUserList { page_no, page_size, total_count, items }
+}
+
+fn parse_role_list(value: Value, page_no: u32, page_size: u32) -> NacosRoleList {
+    let data = value.get("data").unwrap_or(&value);
+    let total_count = optional_u64_field(data, &["totalCount", "count"])
+        .or_else(|| optional_u64_field(&value, &["totalCount", "count"]))
+        .unwrap_or_default();
+    let items: Vec<NacosRoleBinding> = data
+        .get("pageItems")
+        .or_else(|| data.get("list"))
+        .or_else(|| data.get("items"))
+        .or_else(|| value.get("pageItems"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            Some(NacosRoleBinding {
+                username: optional_string_field(&item, &["username", "userName"])?,
+                role: optional_string_field(&item, &["role"])?,
+            })
+        })
+        .collect();
+    let total_count = if total_count == 0 { items.len() as u64 } else { total_count };
+    NacosRoleList { page_no, page_size, total_count, items }
+}
+
+fn parse_permission_list(value: Value, page_no: u32, page_size: u32) -> NacosPermissionList {
+    let data = value.get("data").unwrap_or(&value);
+    let total_count = optional_u64_field(data, &["totalCount", "count"])
+        .or_else(|| optional_u64_field(&value, &["totalCount", "count"]))
+        .unwrap_or_default();
+    let items: Vec<NacosPermissionInfo> = data
+        .get("pageItems")
+        .or_else(|| data.get("list"))
+        .or_else(|| data.get("items"))
+        .or_else(|| value.get("pageItems"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| {
+            let role = optional_string_field(&item, &["role"])?;
+            let resource_raw = optional_string_field(&item, &["resource"])?;
+            let action_raw = optional_string_field(&item, &["action"])?;
+            Some(NacosPermissionInfo {
+                role,
+                parsed_scope: parse_permission_scope(&resource_raw),
+                resource_raw,
+                action_raw,
+            })
+        })
+        .collect();
+    let total_count = if total_count == 0 { items.len() as u64 } else { total_count };
+    NacosPermissionList { page_no, page_size, total_count, items }
 }
 
 fn parse_dashboard_metrics(value: Value) -> NacosDashboardMetrics {
@@ -1943,12 +3763,6 @@ fn admin_endpoint_error(server_addr: &str, errors: &[String]) -> String {
             ),
         );
     }
-    if lower.contains("410 gone") && lower.contains("/v3/console/server/state") {
-        return classified_error(
-            "apiVersionMismatch",
-            "Nacos v1 console API is disabled on this server. DBX already tried the v3 console state API first; please check that Server points to the Nacos console/admin URL and Context Path matches the console mount path.",
-        );
-    }
     classified_error(
         classify_nacos_error(&joined),
         &format!("Failed to detect Nacos admin endpoint at {server_addr}: {}", joined.trim()),
@@ -2004,6 +3818,12 @@ async fn response_json_or_text(resp: reqwest::Response) -> Result<Value, String>
     Ok(serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string())))
 }
 
+fn rnacos_namespace_directory_endpoint_unavailable(error: &str) -> bool {
+    ["404 Not Found", "405 Method Not Allowed", "410 Gone"]
+        .iter()
+        .any(|status| error.contains(&format!("returned {status}")))
+}
+
 async fn error_for_status(resp: reqwest::Response, path: &str) -> Result<reqwest::Response, String> {
     let status = resp.status();
     if status.is_success() {
@@ -2042,6 +3862,10 @@ fn classified_error(kind: &str, message: &str) -> String {
     format!("{NACOS_ERROR_PREFIX}[{kind}]: {message}")
 }
 
+fn is_official_session_expired(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("session expired")
+}
+
 fn classify_nacos_error(message: &str) -> &'static str {
     let lower = message.to_ascii_lowercase();
     if lower.contains("unauthorized")
@@ -2063,7 +3887,11 @@ fn classify_nacos_error(message: &str) -> &'static str {
     {
         return "unsupportedConfigHistory";
     }
-    if lower.contains("410 gone") || lower.contains("not found") || lower.contains("404") {
+    if lower.contains("410 gone")
+        || lower.contains("405 method not allowed")
+        || lower.contains("not found")
+        || lower.contains("404")
+    {
         return "apiVersionMismatch";
     }
     if lower.contains("connection refused")
@@ -2075,6 +3903,17 @@ fn classify_nacos_error(message: &str) -> &'static str {
         return "connectionFailed";
     }
     "requestFailed"
+}
+
+fn validate_nacos_json_authorization(value: &Value, path: &str) -> Result<(), String> {
+    let code = value.get("code").and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse::<i64>().ok()));
+    if !matches!(code, Some(403 | 10001)) {
+        return Ok(());
+    }
+    let message = value.get("message").and_then(Value::as_str).unwrap_or("access denied");
+    let detail = value.get("data").and_then(Value::as_str).unwrap_or_default();
+    let detail = format!("Nacos {path} returned code {}: {message} {detail}", code.unwrap_or_default());
+    Err(classified_error("authFailed", detail.trim()))
 }
 
 fn extract_server_version(raw: &Value) -> Option<String> {
@@ -2133,7 +3972,10 @@ fn parse_config_detail(value: Value, data_id: String, group: String, namespace: 
         config_type: config_format_for_item(data).or_else(|| infer_config_format(&data_id)),
         md5: optional_string_field(data, &["md5"]),
         encrypted_data_key: optional_string_field(data, &["encryptedDataKey"]),
-        content: optional_string_field(data, &["content", "value", "configValue", "config_value"])
+        // Prefer string fields only. Try each key so null `content` does not hide `value`.
+        content: ["content", "value", "configValue", "config_value"]
+            .iter()
+            .find_map(|key| data.get(*key).and_then(Value::as_str).map(str::to_string))
             .or_else(|| value.as_str().map(str::to_string)),
     }
 }
@@ -2193,12 +4035,48 @@ fn parse_config_history_item(
         operator: optional_string_field(&item, &["operator", "opUser", "srcUser", "createUser", "modifyUser", "user"]),
         last_modified_time: optional_string_field(
             &item,
-            &["lastModifiedTime", "lastModifiedTs", "gmtModified", "modifiedTime", "opTime", "createdTime"],
+            &[
+                "lastModifiedTime",
+                "lastModifiedTs",
+                "lastModified",
+                "last_modified_time",
+                "last_modified",
+                "gmtModified",
+                "gmt_modified",
+                "modifiedTime",
+                "modifyTime",
+                "updateTime",
+                "update_time",
+                "publishTime",
+                "publish_time",
+                "opTime",
+                "createdTime",
+                "createTime",
+                "create_time",
+            ],
         )
         .or_else(|| {
             optional_u64_field(
                 &item,
-                &["lastModifiedTime", "lastModifiedTs", "gmtModified", "modifiedTime", "opTime", "createdTime"],
+                &[
+                    "lastModifiedTime",
+                    "lastModifiedTs",
+                    "lastModified",
+                    "last_modified_time",
+                    "last_modified",
+                    "gmtModified",
+                    "gmt_modified",
+                    "modifiedTime",
+                    "modifyTime",
+                    "updateTime",
+                    "update_time",
+                    "publishTime",
+                    "publish_time",
+                    "opTime",
+                    "createdTime",
+                    "createTime",
+                    "create_time",
+                ],
             )
             .map(|value| value.to_string())
         }),
@@ -2323,6 +4201,80 @@ fn parse_service_list(value: Value, page_no: u32, page_size: u32) -> NacosServic
     NacosServiceList { page_no, page_size, total_count, items }
 }
 
+fn parse_service_detail(value: Value) -> NacosServiceDetail {
+    let data = value.get("data").unwrap_or(&value);
+    let raw_name = string_field(data, &["name", "serviceName"]);
+    let (embedded_group_name, service_name) = split_nacos_service_name(&raw_name);
+    NacosServiceDetail {
+        service_name,
+        group_name: optional_string_field(data, &["groupName"]).or(embedded_group_name),
+        metadata: data.get("metadata").cloned().unwrap_or(Value::Null),
+        protect_threshold: data.get("protectThreshold").and_then(Value::as_f64),
+        selector: data.get("selector").cloned().filter(|value| !value.is_null()),
+        ephemeral: data.get("ephemeral").and_then(Value::as_bool),
+    }
+}
+
+fn instance_ref_form(namespace: String, target: NacosInstanceRef) -> Vec<(String, String)> {
+    let mut form = vec![
+        ("serviceName".to_string(), target.service_name),
+        ("ip".to_string(), target.ip),
+        ("port".to_string(), target.port.to_string()),
+        ("namespaceId".to_string(), namespace),
+    ];
+    push_optional(&mut form, "groupName", target.group_name);
+    push_optional(&mut form, "clusterName", target.cluster_name);
+    if let Some(value) = target.ephemeral {
+        form.push(("ephemeral".to_string(), value.to_string()));
+    }
+    form
+}
+
+fn instance_update_form(namespace: String, req: NacosInstanceUpdateRequest) -> Vec<(String, String)> {
+    let mut form = instance_ref_form(namespace, req.target);
+    if let Some(value) = req.patch.healthy {
+        form.push(("healthy".to_string(), value.to_string()));
+    }
+    if let Some(value) = req.patch.enabled {
+        form.push(("enabled".to_string(), value.to_string()));
+    }
+    if let Some(value) = req.patch.weight {
+        if value.is_finite() && value >= 0.0 {
+            form.push(("weight".to_string(), value.to_string()));
+        }
+    }
+    if let Some(value) = req.patch.metadata {
+        if value.is_object() {
+            form.push(("metadata".to_string(), value.to_string()));
+        }
+    }
+    form
+}
+
+fn instance_registration_form(namespace: String, req: NacosInstanceRegistration) -> Vec<(String, String)> {
+    let target = NacosInstanceRef {
+        namespace: req.namespace,
+        service_name: req.service_name,
+        ip: req.ip,
+        port: req.port,
+        group_name: req.group_name,
+        cluster_name: req.cluster_name,
+        ephemeral: Some(false),
+    };
+    let mut form = instance_ref_form(namespace, target);
+    if let Some(value) = req.weight {
+        if value.is_finite() && value >= 0.0 {
+            form.push(("weight".to_string(), value.to_string()));
+        }
+    }
+    if let Some(value) = req.metadata {
+        if value.is_object() {
+            form.push(("metadata".to_string(), value.to_string()));
+        }
+    }
+    form
+}
+
 fn split_nacos_service_name(value: &str) -> (Option<String>, String) {
     let trimmed = value.trim();
     if let Some((group, name)) = trimmed.split_once("@@") {
@@ -2347,17 +4299,63 @@ fn split_nacos_cluster_names(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn filter_instances_by_clusters(
+    instances: Vec<NacosInstanceInfo>,
+    requested_clusters: &[String],
+) -> Vec<NacosInstanceInfo> {
+    if requested_clusters.is_empty() {
+        return instances;
+    }
+    instances
+        .into_iter()
+        .filter(|instance| {
+            instance
+                .cluster_name
+                .as_deref()
+                .is_some_and(|cluster| requested_clusters.iter().any(|requested| requested == cluster))
+        })
+        .collect()
+}
+
+fn deduplicate_management_instances(
+    mut instances: Vec<NacosInstanceInfo>,
+    namespace: &str,
+    group_name: Option<&str>,
+    service_name: &str,
+) -> Vec<NacosInstanceInfo> {
+    let mut seen = HashSet::new();
+    let default_group = group_name.unwrap_or("DEFAULT_GROUP").to_string();
+    let service_name = service_name.to_string();
+    instances.retain(|instance| {
+        seen.insert((
+            namespace,
+            instance.group_name.clone().unwrap_or_else(|| default_group.clone()),
+            instance.service_name.clone().unwrap_or_else(|| service_name.clone()),
+            instance.ip.clone(),
+            instance.port,
+            instance.cluster_name.clone(),
+            instance.ephemeral,
+        ))
+    });
+    instances
+}
+
 fn parse_catalog_cluster_names(value: &Value) -> Vec<String> {
     let data = value.get("data").unwrap_or(value);
     let mut seen = HashSet::new();
-    data.get("clusters")
+    let mut names: Vec<String> = data
+        .get("clusters")
         .or_else(|| value.get("clusters"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|cluster| optional_string_field(cluster, &["name", "clusterName"]))
         .filter(|name| seen.insert(name.clone()))
-        .collect()
+        .collect();
+    if let Some(cluster_map) = data.get("clusterMap").and_then(Value::as_object) {
+        names.extend(cluster_map.keys().filter(|name| seen.insert((*name).clone())).cloned());
+    }
+    names
 }
 
 fn catalog_instance_count(value: &Value) -> Option<u64> {
@@ -2372,7 +4370,8 @@ fn catalog_instance_count(value: &Value) -> Option<u64> {
 
 fn parse_instances(value: Value) -> Vec<NacosInstanceInfo> {
     let data = value.get("data").unwrap_or(&value);
-    data.get("hosts")
+    let items = data
+        .get("hosts")
         .or_else(|| data.get("instances"))
         .or_else(|| data.get("list"))
         .or_else(|| data.get("pageItems"))
@@ -2382,21 +4381,31 @@ fn parse_instances(value: Value) -> Vec<NacosInstanceInfo> {
         .or_else(|| value.get("list"))
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default()
+        // Nacos 3 Naming Admin returns `data` as the instance array directly,
+        // unlike the v1/v2 `hosts` and Catalog `list` wrappers.
+        .or_else(|| data.as_array().cloned())
+        .or_else(|| data.is_object().then(|| vec![data.clone()]))
+        .unwrap_or_default();
+    items
         .into_iter()
-        .map(|item| NacosInstanceInfo {
-            ip: string_field(&item, &["ip"]),
-            port: item.get("port").and_then(Value::as_u64).unwrap_or(0) as u16,
-            service_name: optional_string_field(&item, &["serviceName"]),
-            cluster_name: optional_string_field(&item, &["clusterName"]),
-            group_name: optional_string_field(&item, &["groupName"]),
-            healthy: item.get("healthy").and_then(Value::as_bool),
-            enabled: item.get("enabled").and_then(Value::as_bool),
-            ephemeral: item.get("ephemeral").and_then(Value::as_bool),
-            weight: item.get("weight").and_then(Value::as_f64),
-            metadata: item.get("metadata").cloned().unwrap_or(Value::Null),
-        })
+        .filter(|item| item.get("ip").is_some() && item.get("port").is_some())
+        .map(parse_instance)
         .collect()
+}
+
+fn parse_instance(item: Value) -> NacosInstanceInfo {
+    NacosInstanceInfo {
+        ip: string_field(&item, &["ip"]),
+        port: item.get("port").and_then(Value::as_u64).unwrap_or(0) as u16,
+        service_name: optional_string_field(&item, &["serviceName"]),
+        cluster_name: optional_string_field(&item, &["clusterName"]),
+        group_name: optional_string_field(&item, &["groupName"]),
+        healthy: item.get("healthy").and_then(Value::as_bool),
+        enabled: item.get("enabled").and_then(Value::as_bool),
+        ephemeral: item.get("ephemeral").and_then(Value::as_bool),
+        weight: item.get("weight").and_then(Value::as_f64),
+        metadata: item.get("metadata").cloned().unwrap_or(Value::Null),
+    }
 }
 
 fn string_field(value: &Value, keys: &[&str]) -> String {
@@ -2412,6 +4421,7 @@ fn optional_string_field(value: &Value, keys: &[&str]) -> Option<String> {
                 .map(str::to_string)
                 .or_else(|| value.as_i64().map(|v| v.to_string()))
                 .or_else(|| value.as_u64().map(|v| v.to_string()))
+                .or_else(|| value.as_bool().map(|v| v.to_string()))
         })
         .filter(|value| !value.is_empty())
 }
@@ -2550,6 +4560,14 @@ mod tests {
         request.split_whitespace().nth(1).unwrap().to_string()
     }
 
+    fn request_form_value<'a>(request: &'a str, key: &str) -> Option<&'a str> {
+        let body = request.split_once("\r\n\r\n")?.1;
+        body.split('&').find_map(|entry| {
+            let (entry_key, value) = entry.split_once('=')?;
+            (entry_key == key).then_some(value)
+        })
+    }
+
     async fn write_json_response(socket: &mut tokio::net::TcpStream, body: &str) {
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2557,6 +4575,22 @@ mod tests {
             body
         );
         socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    async fn write_json_response_with_cookie(socket: &mut tokio::net::TcpStream, body: &str, cookie: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: {cookie}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    async fn accept_json_request(listener: &tokio::net::TcpListener, body: &str) -> String {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let target = read_request_target(&mut socket).await;
+        write_json_response(&mut socket, body).await;
+        target
     }
 
     async fn write_text_response(socket: &mut tokio::net::TcpStream, body: &str) {
@@ -2608,10 +4642,12 @@ mod tests {
         NacosAdminConfig {
             implementation: None,
             version_mode: None,
+            api_plane: None,
             server_addr: server_addr.clone(),
             display_server_addr: server_addr,
             namespace: String::new(),
             context_path: String::new(),
+            managed_namespaces: Vec::new(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: None,
             rnacos_console_auth: Default::default(),
@@ -2622,6 +4658,209 @@ mod tests {
             page_size: 100,
             connect_override: None,
         }
+    }
+
+    #[tokio::test]
+    async fn v3_namespace_list_uses_managed_namespaces_after_admin_denial() {
+        let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_address = api_listener.local_addr().unwrap();
+        let api_server = tokio::spawn(async move {
+            let (mut socket, _) = api_listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+            let (mut socket, _) = api_listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert_eq!(target, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{api_address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.managed_namespaces = vec!["team-a".to_string(), "public".to_string()];
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let namespaces = admin.list_namespaces().await.unwrap();
+        assert!(namespaces.iter().any(|namespace| namespace.namespace == "team-a"));
+        assert!(namespaces.iter().any(|namespace| namespace.namespace == "public"));
+        api_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_namespace_list_requires_managed_namespaces_after_admin_denial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let target = request.split_whitespace().nth(1).unwrap();
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=ordinary-token"));
+            assert!(!request.to_ascii_lowercase().contains("\r\naccesstoken:"));
+            write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
+                .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let error = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_namespace_list_uses_console_directory_after_admin_denial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let target = request.split_whitespace().nth(1).unwrap();
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=ordinary-token"));
+            assert!(!request.to_ascii_lowercase().contains("\r\naccesstoken:"));
+            write_json_response(
+                &mut socket,
+                r#"{"data":[{"namespace":"f8b8c4e2-8195-4041-adb2-683a8259384b","namespaceShowName":"bb"}]}"#,
+            )
+            .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let namespaces = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap();
+
+        assert!(namespaces.iter().any(|namespace| {
+            namespace.namespace == "f8b8c4e2-8195-4041-adb2-683a8259384b" && namespace.namespace_show_name == "bb"
+        }));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_namespace_list_requires_managed_namespaces_after_admin_denial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
+                .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let error = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespacesRequired]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_namespace_list_uses_explicit_scope_after_admin_denial() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=ordinary-token"));
+            write_json_response(&mut socket, r#"{"code":403,"message":"authorization failed","data":"access denied"}"#)
+                .await;
+        });
+
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string(), "public".to_string()];
+
+        let namespaces = NacosOpenApiAdmin::new(config).unwrap().list_namespaces().await.unwrap();
+        assert_eq!(
+            namespaces.into_iter().map(|namespace| namespace.namespace).collect::<Vec<_>>(),
+            vec!["team-a".to_string(), "public".to_string()]
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn official_nacos_v2_ordinary_users_can_define_an_explicit_namespace_scope() {
+        let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string(), "public".to_string()];
+
+        assert_eq!(
+            NacosOpenApiAdmin::new(config).unwrap().explicitly_scoped_namespace_ids(),
+            Some(vec!["team-a".to_string(), "public".to_string()])
+        );
+    }
+
+    #[test]
+    fn recognizes_v3_authorization_errors_returned_inside_http_200_json() {
+        let error = validate_nacos_json_authorization(
+            &serde_json::json!({"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}),
+            "/v3/admin/cs/config/list",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[authFailed]"));
+        assert!(error.contains("authorization failed"));
+        assert!(
+            validate_nacos_json_authorization(&serde_json::json!({"code":0,"message":"success"}), "success").is_ok()
+        );
     }
 
     #[tokio::test]
@@ -2642,6 +4881,123 @@ mod tests {
         server.await.unwrap();
     }
 
+    async fn assert_group_filter_uses_client_side_contains_match(
+        implementation: Option<NacosImplementation>,
+        version_mode: Option<NacosVersionMode>,
+        expected_path: &str,
+        group_param: &str,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_path = expected_path.to_string();
+        let group_param = group_param.to_string();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), expected_path);
+            assert_eq!(params.get(group_param.as_str()).map(|value| value.as_ref()), Some(""));
+            write_json_response(
+                &mut socket,
+                r#"{"totalCount":2,"pageItems":[{"dataId":"service.yaml","group":"SENSITIVE_GROUP","tenant":"ops","type":"yaml"},{"dataId":"other.yaml","group":"DEFAULT_GROUP","tenant":"ops","type":"yaml"}]}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.implementation = implementation;
+        config.version_mode = version_mode;
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let list = admin
+            .list_configs(NacosConfigQuery {
+                namespace: Some("ops".to_string()),
+                group: Some("sensitive".to_string()),
+                group_contains: true,
+                data_id: None,
+                app_name: None,
+                search: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(list.total_count, 1);
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].group, "SENSITIVE_GROUP");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn group_filter_uses_consistent_client_side_contains_matching() {
+        assert_group_filter_uses_client_side_contains_match(
+            None,
+            Some(NacosVersionMode::V2),
+            "/nacos/v1/cs/configs",
+            "group",
+        )
+        .await;
+        assert_group_filter_uses_client_side_contains_match(
+            None,
+            Some(NacosVersionMode::V3),
+            "/nacos/v3/admin/cs/config/list",
+            "groupName",
+        )
+        .await;
+        assert_group_filter_uses_client_side_contains_match(
+            Some(NacosImplementation::RNacos),
+            None,
+            "/nacos/v1/cs/configs",
+            "group",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn exact_group_filter_keeps_server_side_matching() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), "/nacos/v3/admin/cs/config/list");
+            assert_eq!(params.get("groupName").map(|value| value.as_ref()), Some("SENSITIVE_GROUP"));
+            assert_eq!(params.get("dataId").map(|value| value.as_ref()), Some("service.yaml"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"data":{"totalCount":1,"pageItems":[{"dataId":"service.yaml","groupName":"SENSITIVE_GROUP","namespaceId":"ops","type":"yaml"}]}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let list = admin
+            .list_configs(NacosConfigQuery {
+                namespace: Some("ops".to_string()),
+                group: Some("SENSITIVE_GROUP".to_string()),
+                group_contains: false,
+                data_id: Some("service.yaml".to_string()),
+                app_name: None,
+                search: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(list.total_count, 1);
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].group, "SENSITIVE_GROUP");
+        server.await.unwrap();
+    }
+
     #[test]
     fn explicit_v3_rejects_legacy_admin_api_paths() {
         let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
@@ -2650,8 +5006,569 @@ mod tests {
 
         assert!(admin.api_path_allowed("/v3/admin/ns/ops/metrics"));
         assert!(admin.api_path_allowed("/health"));
+        assert!(!admin.api_path_allowed("/v3/console/cs/config/list"));
         assert!(!admin.api_path_allowed("/v2/ns/operator/metrics"));
         assert!(!admin.api_path_allowed("/v1/ns/operator/metrics"));
+    }
+
+    #[tokio::test]
+    async fn service_upsert_normalizes_empty_selector() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /nacos/v1/ns/service HTTP/1.1"));
+            assert!(request.contains("selector="));
+            assert!(request.contains("%22type%22%3A%22none%22"));
+            write_json_response(&mut socket, r#"{"code":200,"message":"ok"}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_service(NacosServiceUpsert {
+                namespace: Some("public".to_string()),
+                service_name: "dbx-e2e".to_string(),
+                group_name: Some("DEFAULT_GROUP".to_string()),
+                metadata: Some(serde_json::json!({})),
+                protect_threshold: Some(0.3),
+                selector: Some(serde_json::json!({})),
+                ephemeral: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_instance_update_uses_v1_naming_api() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("PUT /nacos/v1/ns/instance HTTP/1.1"));
+            assert!(request.contains("weight=2.5"));
+            assert!(request.contains("ephemeral=false"));
+            write_json_response(&mut socket, r#"{"code":200,"message":"ok"}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .update_instance(NacosInstanceUpdateRequest {
+                target: NacosInstanceRef {
+                    namespace: Some("public".to_string()),
+                    service_name: "dbx-e2e".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    port: 19001,
+                    group_name: Some("DBX_E2E".to_string()),
+                    cluster_name: Some("blue".to_string()),
+                    ephemeral: Some(false),
+                },
+                patch: NacosInstancePatch { weight: Some(2.5), ..Default::default() },
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_instance_update_uses_partial_patch_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("PUT /nacos/v3/admin/ns/instance/partial HTTP/1.1"));
+            assert!(request.contains("serviceName=dbx-e2e"));
+            assert!(request.contains("groupName=DBX_E2E"));
+            assert!(request.contains("clusterName=blue"));
+            assert!(request.contains("ip=127.0.0.1"));
+            assert!(request.contains("port=19001"));
+            assert!(request.contains("enabled=false"));
+            assert!(request.contains("ephemeral=false"));
+            assert!(!request.contains("healthy="));
+            assert!(!request.contains("weight="));
+            assert!(!request.contains("metadata="));
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":"ok"}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let health_error = admin
+            .update_instance(NacosInstanceUpdateRequest {
+                target: NacosInstanceRef {
+                    namespace: Some("public".to_string()),
+                    service_name: "dbx-e2e".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    port: 19001,
+                    group_name: Some("DBX_E2E".to_string()),
+                    cluster_name: Some("blue".to_string()),
+                    ephemeral: Some(false),
+                },
+                patch: NacosInstancePatch { healthy: Some(false), ..Default::default() },
+            })
+            .await
+            .unwrap_err();
+        assert!(health_error.contains("NACOS_ERROR[unsupportedOperation]"));
+        assert!(health_error.contains("Official Nacos 3"));
+
+        admin
+            .update_instance(NacosInstanceUpdateRequest {
+                target: NacosInstanceRef {
+                    namespace: Some("public".to_string()),
+                    service_name: "dbx-e2e".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    port: 19001,
+                    group_name: Some("DBX_E2E".to_string()),
+                    cluster_name: Some("blue".to_string()),
+                    ephemeral: Some(false),
+                },
+                patch: NacosInstancePatch { enabled: Some(false), ..Default::default() },
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_service_and_instance_lists_use_documented_naming_admin_routes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut service_socket, _) = listener.accept().await.unwrap();
+            let service_target = read_request_target(&mut service_socket).await;
+            let service_url = reqwest::Url::parse(&format!("http://localhost{service_target}")).unwrap();
+            assert_eq!(service_url.path(), "/nacos/v3/admin/ns/service/list");
+            let service_params = service_url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(service_params.get("groupNameParam").map(|value| value.as_ref()), Some("DBX_E2E"));
+            write_json_response(
+                &mut service_socket,
+                r#"{"code":0,"message":"success","data":{"totalCount":1,"pageNumber":1,"pagesAvailable":1,"pageItems":[{"name":"dbx-e2e","groupName":"DBX_E2E","clusterCount":1,"ipCount":2,"healthyInstanceCount":1,"triggerFlag":"false"}]}}"#,
+            )
+            .await;
+
+            let (mut detail_socket, _) = listener.accept().await.unwrap();
+            let detail_target = read_request_target(&mut detail_socket).await;
+            let detail_url = reqwest::Url::parse(&format!("http://localhost{detail_target}")).unwrap();
+            assert_eq!(detail_url.path(), "/nacos/v3/admin/ns/service");
+            write_json_response(
+                &mut detail_socket,
+                r#"{"code":0,"message":"success","data":{"clusterMap":{"blue":{"clusterName":"blue"},"green":{"clusterName":"green"}}}}"#,
+            )
+            .await;
+
+            let (mut instance_socket, _) = listener.accept().await.unwrap();
+            let instance_target = read_request_target(&mut instance_socket).await;
+            let instance_url = reqwest::Url::parse(&format!("http://localhost{instance_target}")).unwrap();
+            assert_eq!(instance_url.path(), "/nacos/v3/admin/ns/instance/list");
+            let instance_params = instance_url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(instance_params.get("serviceName").map(|value| value.as_ref()), Some("dbx-e2e"));
+            assert_eq!(instance_params.get("clusterName").map(|value| value.as_ref()), Some("blue"));
+            write_json_response(
+                &mut instance_socket,
+                r#"{"code":0,"message":"success","data":[{"ip":"127.0.0.1","port":19001,"clusterName":"blue","ephemeral":false,"enabled":true,"healthy":true,"weight":1.0}]}"#,
+            )
+            .await;
+
+            let (mut green_socket, _) = listener.accept().await.unwrap();
+            let green_target = read_request_target(&mut green_socket).await;
+            let green_url = reqwest::Url::parse(&format!("http://localhost{green_target}")).unwrap();
+            assert_eq!(green_url.path(), "/nacos/v3/admin/ns/instance/list");
+            let green_params = green_url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(green_params.get("clusterName").map(|value| value.as_ref()), Some("green"));
+            write_json_response(
+                &mut green_socket,
+                r#"{"code":0,"message":"success","data":[{"ip":"127.0.0.1","port":19002,"clusterName":"green","ephemeral":false,"enabled":false,"healthy":false,"weight":0.5}]}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let services = admin
+            .list_services(NacosServiceQuery {
+                namespace: Some("public".to_string()),
+                group_name: Some("DBX_E2E".to_string()),
+                service_name: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+        assert_eq!(services.items.len(), 1);
+
+        let instances = admin
+            .list_instances(NacosInstanceQuery {
+                namespace: Some("public".to_string()),
+                service_name: "dbx-e2e".to_string(),
+                group_name: Some("DBX_E2E".to_string()),
+                clusters: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 2);
+        assert_eq!(instances[1].enabled, Some(false));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_empty_service_instance_list_returns_empty_without_inventing_a_default_cluster() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            assert_eq!(url.path(), "/nacos/v3/admin/ns/service");
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":{"clusterMap":{}}}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let instances = admin
+            .list_instances(NacosInstanceQuery {
+                namespace: Some("public".to_string()),
+                service_name: "custom-cluster-service".to_string(),
+                group_name: Some("DBX_V3".to_string()),
+                clusters: None,
+            })
+            .await
+            .unwrap();
+        assert!(instances.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_service_list_uses_catalog_to_enumerate_groups() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), "/nacos/v1/ns/catalog/services");
+            assert_eq!(params.get("groupNameParam").map(|value| value.as_ref()), Some("DBX_CURL"));
+            write_json_response(
+                &mut socket,
+                r#"{"count":1,"serviceList":[{"name":"dbx-curl-e2e","groupName":"DBX_CURL","clusterCount":1,"ipCount":1}]}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let result = admin
+            .list_services(NacosServiceQuery {
+                namespace: Some("public".to_string()),
+                service_name: None,
+                group_name: Some("DBX_CURL".to_string()),
+                page_no: Some(1),
+                page_size: Some(100),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].service_name, "dbx-curl-e2e");
+        assert_eq!(result.items[0].group_name.as_deref(), Some("DBX_CURL"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_service_list_uses_catalog_without_a_v3_admin_probe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), "/nacos/v1/ns/catalog/services");
+            assert_eq!(params.get("groupNameParam").map(|value| value.as_ref()), Some("DBX_RNACOS"));
+            write_json_response(
+                &mut socket,
+                r#"{"count":1,"serviceList":[{"name":"dbx-demo-api","groupName":"DBX_RNACOS"}]}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let result = admin
+            .list_services(NacosServiceQuery {
+                namespace: Some("public".to_string()),
+                service_name: None,
+                group_name: Some("DBX_RNACOS".to_string()),
+                page_no: Some(1),
+                page_size: Some(100),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].service_name, "dbx-demo-api");
+        assert_eq!(result.items[0].group_name.as_deref(), Some("DBX_RNACOS"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_instance_list_uses_v1_naming_without_catalog_or_v3_probes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            assert_eq!(url.path(), "/nacos/v1/ns/instance/list");
+            write_json_response(
+                &mut socket,
+                r#"{"hosts":[{"ip":"127.0.0.1","port":19201,"clusterName":"blue","healthy":true,"enabled":true,"ephemeral":false}]}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let instances = admin
+            .list_instances(NacosInstanceQuery {
+                namespace: Some("public".to_string()),
+                service_name: "dbx-demo-api".to_string(),
+                group_name: Some("DBX_RNACOS".to_string()),
+                clusters: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].port, 19201);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_console_instance_list_includes_disabled_instances() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let target = request.split_whitespace().nth(1).unwrap();
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), "/rnacos/api/console/v2/instance/list");
+            assert_eq!(params.get("namespaceId").map(|value| value.as_ref()), Some("public"));
+            assert_eq!(params.get("groupName").map(|value| value.as_ref()), Some("DBX_RNACOS"));
+            assert_eq!(params.get("serviceName").map(|value| value.as_ref()), Some("dbx-demo-api"));
+            assert!(request.to_ascii_lowercase().contains("\ntoken: console-token\r"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"totalCount":3,"list":[{"ip":"127.0.0.1","port":19201,"clusterName":"blue","healthy":true,"enabled":true,"ephemeral":false},{"ip":"127.0.0.1","port":19202,"clusterName":"green","healthy":true,"enabled":true,"ephemeral":false},{"ip":"127.0.0.1","port":19203,"clusterName":"green-shadow","healthy":true,"enabled":false,"ephemeral":false}]}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "admin".to_string(), password: "admin".to_string() };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        admin.rnacos_console_session.lock().await.token = Some(RNacosConsoleToken {
+            token: "console-token".to_string(),
+            expires_at: Instant::now() + Duration::from_secs(300),
+        });
+
+        let instances = admin
+            .list_instances(NacosInstanceQuery {
+                namespace: Some("public".to_string()),
+                service_name: "dbx-demo-api".to_string(),
+                group_name: Some("DBX_RNACOS".to_string()),
+                clusters: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 3);
+        assert!(instances.iter().any(|instance| instance.port == 19203 && instance.enabled == Some(false)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_service_and_instance_crud_use_only_compatible_v1_routes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (method, path) in [
+                ("POST", "/nacos/v1/ns/service"),
+                ("PUT", "/nacos/v1/ns/service"),
+                ("DELETE", "/nacos/v1/ns/service?"),
+                ("PUT", "/nacos/v1/ns/instance"),
+                ("POST", "/nacos/v1/ns/instance"),
+                ("DELETE", "/nacos/v1/ns/instance?"),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let request_line = request.lines().next().unwrap();
+                assert!(request_line.starts_with(&format!("{method} {path}")), "unexpected request: {request_line}");
+                assert!(!request_line.contains("/v3/"));
+                write_text_response(&mut socket, "ok").await;
+            }
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        let service = NacosServiceUpsert {
+            namespace: Some("public".to_string()),
+            service_name: "dbx-rnacos-crud".to_string(),
+            group_name: Some("DBX_RNACOS".to_string()),
+            metadata: Some(serde_json::json!({ "managed-by": "dbx" })),
+            protect_threshold: Some(0.2),
+            selector: None,
+            ephemeral: None,
+        };
+        admin.create_service(service.clone()).await.unwrap();
+        admin.update_service(service.clone()).await.unwrap();
+        admin
+            .delete_service(NacosServiceQuery {
+                namespace: Some("public".to_string()),
+                service_name: Some(service.service_name.clone()),
+                group_name: service.group_name.clone(),
+                page_no: None,
+                page_size: None,
+            })
+            .await
+            .unwrap();
+
+        let target = NacosInstanceRef {
+            namespace: Some("public".to_string()),
+            service_name: service.service_name.clone(),
+            group_name: service.group_name.clone(),
+            ip: "127.0.0.1".to_string(),
+            port: 19299,
+            cluster_name: Some("manual".to_string()),
+            ephemeral: Some(false),
+        };
+        admin
+            .update_instance(NacosInstanceUpdateRequest {
+                target: target.clone(),
+                patch: NacosInstancePatch { enabled: Some(false), ..Default::default() },
+            })
+            .await
+            .unwrap();
+        admin
+            .register_instance(NacosInstanceRegistration {
+                namespace: target.namespace.clone(),
+                service_name: target.service_name.clone(),
+                group_name: target.group_name.clone(),
+                ip: target.ip.clone(),
+                port: target.port,
+                cluster_name: target.cluster_name.clone(),
+                weight: Some(1.0),
+                metadata: Some(serde_json::json!({ "managed-by": "dbx" })),
+            })
+            .await
+            .unwrap();
+        admin.deregister_instance(target).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_service_detail_embeds_the_group_in_the_service_name() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), "/nacos/v1/ns/service");
+            assert_eq!(params.get("serviceName").map(|value| value.as_ref()), Some("DBX_RNACOS@@dbx-demo-api"));
+            assert!(!params.contains_key("groupName"));
+            write_json_response(
+                &mut socket,
+                r#"{"namespaceId":"public","groupName":"DBX_RNACOS","name":"dbx-demo-api","metadata":{},"selector":{"type":"none","contextType":"NONE"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_service(NacosServiceQuery {
+                namespace: Some("public".to_string()),
+                service_name: Some("dbx-demo-api".to_string()),
+                group_name: Some("DBX_RNACOS".to_string()),
+                page_no: None,
+                page_size: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.service_name, "dbx-demo-api");
+        assert_eq!(detail.group_name.as_deref(), Some("DBX_RNACOS"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_service_list_uses_group_api_for_empty_service() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            assert_eq!(url.path(), "/nacos/v1/ns/catalog/services");
+            write_json_response(&mut socket, r#"{"count":0,"serviceList":[]}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            let url = reqwest::Url::parse(&format!("http://localhost{target}")).unwrap();
+            let params = url.query_pairs().collect::<HashMap<_, _>>();
+            assert_eq!(url.path(), "/nacos/v2/ns/service/list");
+            assert_eq!(params.get("groupName").map(|value| value.as_ref()), Some("DBX_CURL"));
+            assert!(!params.contains_key("groupNameParam"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":{"count":1,"services":["dbx-empty-e2e"]}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let result = admin
+            .list_services(NacosServiceQuery {
+                namespace: Some("public".to_string()),
+                service_name: None,
+                group_name: Some("DBX_CURL".to_string()),
+                page_no: Some(1),
+                page_size: Some(100),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].service_name, "dbx-empty-e2e");
+        assert_eq!(result.items[0].group_name.as_deref(), Some("DBX_CURL"));
+        server.await.unwrap();
     }
 
     #[test]
@@ -2667,12 +5584,19 @@ mod tests {
     fn gives_nacos_v3_dashboard_endpoint_guidance() {
         let mut config = test_admin_config("http://127.0.0.1:8080".to_string());
         config.version_mode = Some(NacosVersionMode::V3);
-        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        let admin = NacosOpenApiAdmin::new(config.clone()).unwrap();
 
         let warning =
             admin.dashboard_warning("NACOS_ERROR[contextPathMismatch]: No static resource v3/admin".to_string());
+        assert!(warning.contains("Server / Admin API endpoint"));
         assert!(warning.contains("http://host:8848/nacos"));
-        assert!(warning.contains("not the port 8080 Console"));
+
+        config.api_plane = Some(NacosApiPlane::Console);
+        let console = NacosOpenApiAdmin::new(config).unwrap();
+        let warning =
+            console.dashboard_warning("NACOS_ERROR[contextPathMismatch]: No static resource v3/console".to_string());
+        assert!(warning.contains("Console API endpoint"));
+        assert!(warning.contains("http://host:8080"));
     }
 
     #[test]
@@ -2766,7 +5690,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/console/cs/config/list?"));
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/admin/cs/config/list?"));
             write_json_response(&mut socket, r#"{"totalCount":0,"pageItems":[]}"#).await;
         });
         let mut config = test_admin_config(format!("http://{address}"));
@@ -2779,15 +5703,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v3_console_namespace_creation_uses_custom_namespace_id() {
+    async fn v3_admin_namespace_creation_uses_namespace_id() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert_eq!(request.split_whitespace().next(), Some("POST"));
-            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/console/core/namespace"));
-            assert!(request.contains("customNamespaceId=team-dev"));
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/admin/core/namespace"));
+            assert!(request.contains("namespaceId=team-dev"));
+            assert!(!request.contains("customNamespaceId="));
             write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
         });
         let mut config = test_admin_config(format!("http://{address}"));
@@ -2803,6 +5728,629 @@ mod tests {
             })
             .await
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_console_namespace_creation_uses_custom_namespace_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().next(), Some("POST"));
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/console/core/namespace"));
+            assert_eq!(request_form_value(&request, "customNamespaceId"), Some("team-console"));
+            assert!(request_form_value(&request, "namespaceId").is_none());
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.api_plane = Some(NacosApiPlane::Console);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: Some("team-console".to_string()),
+                namespace_name: "Team Console".to_string(),
+                namespace_desc: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_admin_namespace_creation_generates_namespace_id_when_empty() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v3/admin/core/namespace"));
+            let namespace_id = request_form_value(&request, "namespaceId").expect("namespaceId should be present");
+            uuid::Uuid::parse_str(namespace_id).expect("namespaceId should be a UUID");
+            assert!(request_form_value(&request, "customNamespaceId").is_none());
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: Some("   ".to_string()),
+                namespace_name: "Generated V3 ID".to_string(),
+                namespace_desc: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_connection_check_uses_only_admin_core_and_naming_endpoints() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut state_socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut state_socket).await, "/nacos/v3/admin/core/state");
+            write_json_response(&mut state_socket, r#"{"version":"3.1.0","auth_enabled":"false"}"#).await;
+
+            let (mut namespaces_socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut namespaces_socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut namespaces_socket,
+                r#"{"code":0,"message":"success","data":[{"namespace":"public","namespaceShowName":"public"}]}"#,
+            )
+            .await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let info = admin.test_connection().await.unwrap();
+        assert_eq!(info.server_version.as_deref(), Some("3.1.0"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_console_connection_uses_console_routes_and_access_token_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /v3/console/server/state HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("accesstoken:"));
+            write_json_response(&mut socket, r#"{"version":"3.2.1","auth_enabled":"true"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /v3/auth/user/login HTTP/1.1"));
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"console-token","tokenTtl":18000}}"#)
+                .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let target = request.split_whitespace().nth(1).unwrap();
+            assert!(target.starts_with("/v3/console/core/namespace/list"), "unexpected request target: {target}");
+            assert!(!target.contains("accessToken="));
+            assert!(request.to_ascii_lowercase().contains("accesstoken: console-token"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"data":[{"namespace":"public","namespaceShowName":"public"}]}"#,
+            )
+            .await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.api_plane = Some(NacosApiPlane::Console);
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "secret".to_string() };
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert_eq!(info.server_version.as_deref(), Some("3.2.1"));
+        assert!(!info.capabilities.supports_raw_api);
+        assert!(!info.capabilities.service_management.update_instance_health.supported);
+        assert!(!info.capabilities.service_management.register_instance.supported);
+        assert!(!info.capabilities.service_management.deregister_instance.supported);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_regular_connection_does_not_probe_access_control() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/ns/operator/servers");
+            write_json_response(&mut socket, "{}").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_json_response(&mut socket, r#"[{"namespace":"public","namespaceShowName":"public"}]"#).await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert!(!info.capabilities.access_control.enhanced_workspace);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_regular_connection_without_scope_defers_workspace_validation_to_namespace_selection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/state");
+            write_json_response(&mut socket, r#"{"version":"3.1.0"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":[{"namespace":"public","namespaceShowName":"public"}]}"#,
+            )
+            .await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert!(!info.capabilities.access_control.enhanced_workspace);
+        assert_eq!(info.capabilities.access_control.list_permissions.reason, Some(NacosCapabilityReason::NotVerified));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_connection_check_with_explicit_scope_skips_permission_probe() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/ns/operator/servers");
+            write_json_response(&mut socket, "{}").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_json_response(&mut socket, r#"[{"namespace":"public","namespaceShowName":"public"}]"#).await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string()];
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert!(!info.capabilities.access_control.enhanced_workspace);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_explicit_connection_test_validates_every_managed_namespace() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/ns/operator/servers");
+            write_json_response(&mut socket, "{}").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_forbidden_response(&mut socket).await;
+
+            for namespace in ["team-a", "team-b"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                assert!(target.starts_with("/nacos/v1/cs/configs?"));
+                assert!(target.contains(&format!("tenant={namespace}")));
+                write_json_response(&mut socket, r#"{"totalCount":0,"pageItems":[]}"#).await;
+
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                assert!(target.starts_with("/nacos/v1/ns/catalog/services?"));
+                assert!(target.contains(&format!("namespaceId={namespace}")));
+                write_json_response(&mut socket, r#"{"count":0,"serviceList":[]}"#).await;
+            }
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string(), "team-b".to_string()];
+
+        NacosOpenApiAdmin::new(config).unwrap().test_connection_with_scope_validation().await.unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_explicit_connection_test_rejects_an_unreadable_managed_namespace() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/ns/operator/servers");
+            write_json_response(&mut socket, "{}").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"ordinary-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/console/namespaces?"));
+            write_forbidden_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/cs/configs?"));
+            write_forbidden_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/ns/catalog/services?"));
+            write_json_response(&mut socket, r#"{"count":0,"serviceList":[]}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string()];
+
+        let error = NacosOpenApiAdmin::new(config).unwrap().test_connection_with_scope_validation().await.unwrap_err();
+
+        assert!(error.contains("NACOS_ERROR[managedNamespaceAccessDenied]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_regular_connection_with_explicit_scope_validates_one_representative_namespace() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/state");
+            write_json_response(&mut socket, r#"{"version":"3.1.0"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v3/admin/ns/service/list?"));
+            assert!(target.contains("namespaceId=team-a"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":{"totalCount":0,"pageItems":[]}}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v3/admin/cs/config/list?"));
+            assert!(target.contains("namespaceId=team-a"));
+            write_json_response(
+                &mut socket,
+                r#"{"code":0,"message":"success","data":{"totalCount":0,"pageItems":[]}}"#,
+            )
+            .await;
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string()];
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+
+        assert!(!info.capabilities.access_control.enhanced_workspace);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_explicit_connection_test_validates_every_managed_namespace() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/state");
+            write_json_response(&mut socket, r#"{"version":"3.1.0"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/auth/user/login");
+            write_json_response(&mut socket, r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000}}"#)
+                .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/admin/core/namespace/list");
+            write_json_response(
+                &mut socket,
+                r#"{"code":10001,"message":"access denied","data":"Code: 403, Message: authorization failed!."}"#,
+            )
+            .await;
+
+            for namespace in ["team-a", "team-b"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                assert!(target.starts_with("/nacos/v3/admin/ns/service/list?"));
+                assert!(target.contains(&format!("namespaceId={namespace}")));
+                write_json_response(
+                    &mut socket,
+                    r#"{"code":0,"message":"success","data":{"totalCount":0,"pageItems":[]}}"#,
+                )
+                .await;
+
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let target = read_request_target(&mut socket).await;
+                assert!(target.starts_with("/nacos/v3/admin/cs/config/list?"));
+                assert!(target.contains(&format!("namespaceId={namespace}")));
+                write_json_response(
+                    &mut socket,
+                    r#"{"code":0,"message":"success","data":{"totalCount":0,"pageItems":[]}}"#,
+                )
+                .await;
+            }
+
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        config.managed_namespaces = vec!["team-a".to_string(), "team-b".to_string()];
+
+        NacosOpenApiAdmin::new(config).unwrap().test_connection_with_scope_validation().await.unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_access_control_reads_are_probed_per_resource() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            assert_eq!(accept_json_request(&listener, r#"{"version":"3.1.0"}"#).await, "/nacos/v3/admin/core/state");
+            assert_eq!(
+                accept_json_request(
+                    &listener,
+                    r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000,"globalAdmin":false}}"#,
+                )
+                .await,
+                "/nacos/v3/auth/user/login"
+            );
+            assert!(
+                accept_json_request(
+                    &listener,
+                    r#"{"code":0,"data":[{"namespace":"public","namespaceShowName":"public"}]}"#,
+                )
+                .await
+                    == "/nacos/v3/admin/core/namespace/list"
+            );
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/auth/user/list?"));
+            write_forbidden_response(&mut socket).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/auth/role/list?"));
+            write_forbidden_response(&mut socket).await;
+
+            assert!(accept_json_request(&listener, r#"{"code":0,"data":{"totalCount":0,"pageItems":[]}}"#,)
+                .await
+                .starts_with("/nacos/v3/auth/permission/list?"));
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().inspect_connection().await.unwrap();
+        let capabilities = info.capabilities.access_control;
+
+        assert!(!capabilities.list_users.supported);
+        assert_eq!(capabilities.list_users.reason, Some(NacosCapabilityReason::PermissionDenied));
+        assert!(!capabilities.list_role_bindings.supported);
+        assert_eq!(capabilities.list_role_bindings.reason, Some(NacosCapabilityReason::PermissionDenied));
+        assert!(capabilities.list_permissions.supported);
+        assert!(!capabilities.create_user.supported);
+        assert!(!capabilities.assign_role.supported);
+        assert!(!capabilities.grant_permission.supported);
+        assert!(!capabilities.enhanced_workspace);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_namespace_authorization_reuses_capability_probe_rows() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            assert_eq!(
+                accept_json_request(
+                    &listener,
+                    r#"{"code":0,"data":{"accessToken":"ordinary-token","tokenTtl":18000,"globalAdmin":false}}"#,
+                )
+                .await,
+                "/nacos/v3/auth/user/login"
+            );
+            assert!(
+                accept_json_request(
+                    &listener,
+                    r#"{"code":0,"data":[{"namespace":"team-a","namespaceShowName":"Team A"}]}"#,
+                )
+                .await
+                    == "/nacos/v3/admin/core/namespace/list"
+            );
+            assert!(accept_json_request(
+                &listener,
+                r#"{"code":0,"data":{"totalCount":1,"pageItems":[{"username":"ordinary"}]}}"#,
+            )
+            .await
+            .starts_with("/nacos/v3/auth/user/list?"));
+            assert!(accept_json_request(
+                &listener,
+                r#"{"code":0,"data":{"totalCount":1,"pageItems":[{"username":"ordinary","role":"reader"}]}}"#,
+            )
+            .await
+            .starts_with("/nacos/v3/auth/role/list?"));
+            assert!(accept_json_request(
+                &listener,
+                r#"{"code":0,"data":{"totalCount":1,"pageItems":[{"role":"reader","resource":"team-a:*:*","action":"r"}]}}"#,
+            )
+            .await
+            .starts_with("/nacos/v3/auth/permission/list?"));
+            assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err());
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin.list_namespaces().await.unwrap();
+        let authorization = admin.refresh_namespace_authorization("ordinary").await.unwrap().unwrap();
+
+        assert_eq!(authorization.roles, vec!["reader"]);
+        assert_eq!(authorization.permissions.len(), 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v3_read_only_admin_has_read_capabilities_but_no_write_capabilities() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            assert_eq!(accept_json_request(&listener, r#"{"version":"3.1.0"}"#).await, "/nacos/v3/admin/core/state");
+            assert_eq!(
+                accept_json_request(
+                    &listener,
+                    r#"{"code":0,"data":{"accessToken":"readonly-token","tokenTtl":18000,"globalAdmin":false}}"#,
+                )
+                .await,
+                "/nacos/v3/auth/user/login"
+            );
+            assert!(
+                accept_json_request(
+                    &listener,
+                    r#"{"code":0,"data":[{"namespace":"public","namespaceShowName":"public"}]}"#,
+                )
+                .await
+                    == "/nacos/v3/admin/core/namespace/list"
+            );
+            assert!(accept_json_request(
+                &listener,
+                r#"{"code":0,"data":{"totalCount":1,"pageItems":[{"username":"readonly"}]}}"#,
+            )
+            .await
+            .starts_with("/nacos/v3/auth/user/list?"));
+            assert!(accept_json_request(
+                &listener,
+                r#"{"code":0,"data":{"totalCount":1,"pageItems":[{"username":"readonly","role":"READ_ONLY"}]}}"#,
+            )
+            .await
+            .starts_with("/nacos/v3/auth/role/list?"));
+            assert!(accept_json_request(
+                &listener,
+                r#"{"code":0,"data":{"totalCount":3,"pageItems":[{"role":"READ_ONLY","resource":"console/users","action":"r"},{"role":"READ_ONLY","resource":"console/roles","action":"r"},{"role":"READ_ONLY","resource":"console/permissions","action":"r"}]}}"#,
+            )
+            .await
+            .starts_with("/nacos/v3/auth/permission/list?"));
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "readonly".to_string(), password: "secret".to_string() };
+
+        let info = NacosOpenApiAdmin::new(config).unwrap().inspect_connection().await.unwrap();
+        let capabilities = info.capabilities.access_control;
+
+        assert!(capabilities.list_users.supported);
+        assert!(capabilities.list_role_bindings.supported);
+        assert!(capabilities.list_permissions.supported);
+        for operation in [
+            NacosAccessControlOperation::CreateUser,
+            NacosAccessControlOperation::UpdateUser,
+            NacosAccessControlOperation::DeleteUser,
+            NacosAccessControlOperation::AssignRole,
+            NacosAccessControlOperation::RemoveRole,
+            NacosAccessControlOperation::GrantPermission,
+            NacosAccessControlOperation::RevokePermission,
+        ] {
+            let capability = capabilities.operation(operation);
+            assert!(!capability.supported);
+            assert_eq!(capability.reason, Some(NacosCapabilityReason::PermissionDenied));
+        }
+        assert!(capabilities.enhanced_workspace);
         server.await.unwrap();
     }
 
@@ -2835,17 +6383,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v2_namespace_creation_generates_matching_namespace_ids_when_empty() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert_eq!(request.split_whitespace().nth(1), Some("/nacos/v1/console/namespaces"));
+            let custom_namespace_id =
+                request_form_value(&request, "customNamespaceId").expect("customNamespaceId should be present");
+            let namespace_id = request_form_value(&request, "namespaceId").expect("namespaceId should be present");
+            assert_eq!(custom_namespace_id, namespace_id);
+            uuid::Uuid::parse_str(namespace_id).expect("generated namespace ID should be a UUID");
+            write_json_response(&mut socket, "true").await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .create_namespace(NacosNamespaceCreate {
+                namespace_id: None,
+                namespace_name: "Generated V2 ID".to_string(),
+                namespace_desc: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn rnacos_namespace_creation_falls_back_to_nacos_compatible_v1_route() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in ["/v3/console/core/namespace", "/v3/console/core/namespace/create"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let request = read_http_request(&mut socket).await;
-                assert_eq!(request.split_whitespace().nth(1), Some(expected_path));
-                write_not_found_response(&mut socket).await;
-            }
-
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert_eq!(request.split_whitespace().nth(1), Some("/v1/console/namespaces"));
@@ -2868,14 +6440,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_mode_auto_falls_back_from_v3_to_v1_config_paths() {
+    async fn legacy_auto_mode_uses_v1_config_paths_without_cross_version_fallback() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/nacos/v3/console/cs/config/list?"));
-            write_not_found_response(&mut socket).await;
-
             let (mut socket, _) = listener.accept().await.unwrap();
             assert!(read_request_target(&mut socket).await.starts_with("/nacos/v1/cs/configs?"));
             write_json_response(&mut socket, r#"{"totalCount":0,"pageItems":[]}"#).await;
@@ -2890,23 +6458,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_rnacos_falls_back_to_console_namespace_api() {
+    async fn explicit_rnacos_reports_unavailable_openapi_namespace_directory() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/v1/console/namespaces");
             write_not_found_response(&mut socket).await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut socket).await;
-            assert_eq!(request.split_whitespace().nth(1), Some("/rnacos/api/console/v2/namespaces/list"));
-            assert!(request.to_ascii_lowercase().contains("token: console-token"));
-            write_json_response(
-                &mut socket,
-                r#"{"success":true,"data":[{"namespaceId":"prod","namespaceName":"production"}]}"#,
-            )
-            .await;
         });
         let mut config = test_admin_config(format!("http://{address}"));
         config.implementation = Some(NacosImplementation::RNacos);
@@ -2921,26 +6479,306 @@ mod tests {
             expires_at: Instant::now() + Duration::from_secs(300),
         });
 
-        let namespaces = admin.list_namespaces().await.unwrap();
-        assert_eq!(namespaces[1].namespace, "prod");
+        let error = admin.list_namespaces().await.unwrap_err();
+        assert!(error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]"));
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn rnacos_config_detail_enriches_raw_openapi_content_with_console_metadata() {
+    async fn rnacos_connection_accepts_a_missing_namespace_directory() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
-                write_not_found_response(&mut socket).await;
-            }
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/health");
+            write_json_response(&mut socket, "success").await;
 
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/console/namespaces");
+            write_not_found_response(&mut socket).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.context_path = "/nacos".to_string();
 
+        NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_connection_rejects_namespace_directory_authorization_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/health");
+            write_json_response(&mut socket, "success").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response(&mut socket, r#"{"accessToken":"rnacos-token","tokenTtl":18000}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v1/console/namespaces?"));
+            assert!(target.contains("accessToken=rnacos-token"));
+            write_forbidden_response(&mut socket).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "ordinary".to_string(), password: "secret".to_string() };
+
+        let error = NacosOpenApiAdmin::new(config).unwrap().test_connection().await.unwrap_err();
+
+        assert!(error.contains("/v1/console/namespaces returned 403 Forbidden"));
+        assert!(!error.contains("NACOS_ERROR[rnacosNamespaceDirectoryUnavailable]"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_uses_console_for_content_and_type() {
+        // r-nacos console is the source of truth for content + configType.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(request.contains("dataId=hello.json"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\n  \"Name\": \"Hello\"\n}","configType":"JSON","desc":"from-console","md5":"abc"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        assert_eq!(detail.desc.as_deref(), Some("from-console"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_falls_back_to_openapi_without_console() {
+        // Without a console URL, OpenAPI body text is the only available content.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(!target.contains("show=all"));
+            write_json_response(&mut socket, "{\n  \"Name\": \"Hello\"\n}").await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_falls_back_to_openapi_when_console_is_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(&mut socket, r#"{"success":false,"message":"console unavailable"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(!target.contains("show=all"));
+            write_json_response(&mut socket, body).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_preserves_invalid_json_via_console_value() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\",\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\n  \"Name\": \"Hello\",\n}","configType":"JSON"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn official_nacos_uses_show_all_detail_document() {
+        // Official Nacos implements show=all as a JSON detail document.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(target.contains("show=all"));
+            write_json_response(
+                &mut socket,
+                r#"{"dataId":"app.json","group":"DEFAULT_GROUP","tenant":"ops","type":"json","content":"{\"Name\":\"Hello\"}"}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("ops".to_string()),
+                data_id: "app.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.data_id, "app.json");
+        assert_eq!(detail.namespace, "ops");
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        assert_eq!(detail.content.as_deref(), Some(r#"{"Name":"Hello"}"#));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detected_rnacos_uses_console_when_configured() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"Name":"Hello"}"#;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\"Name\":\"Hello\"}","configType":"JSON"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        admin.detected_rnacos.store(true, Ordering::Relaxed);
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_console_detail_keeps_json_with_data_id_field_as_text() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"dataId":"nested-key","enabled":true}"#;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(
+                &mut socket,
+                r#"{"success":true,"data":{"value":"{\"dataId\":\"nested-key\",\"enabled\":true}","configType":"JSON"}}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "settings.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.data_id, "settings.json");
+        assert_eq!(detail.config_type.as_deref(), Some("json"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_config_detail_loads_from_console_with_session_token() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
@@ -2987,23 +6825,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
-                write_not_found_response(&mut socket).await;
-            }
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
-
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
             assert!(!request.to_ascii_lowercase().contains("\ntoken:"));
             write_json_response(
                 &mut socket,
-                r#"{"success":true,"data":{"configType":"YAML","desc":"anonymous console metadata"}}"#,
+                r#"{"success":true,"data":{"value":"cloud_providers: {}\n","configType":"YAML","desc":"anonymous console metadata"}}"#,
             )
             .await;
         });
@@ -3020,6 +6848,7 @@ mod tests {
             })
             .await
             .unwrap();
+        assert_eq!(detail.content.as_deref(), Some("cloud_providers: {}\n"));
         assert_eq!(detail.config_type.as_deref(), Some("yaml"));
         assert_eq!(detail.desc.as_deref(), Some("anonymous console metadata"));
         server.await.unwrap();
@@ -3030,16 +6859,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
-                write_not_found_response(&mut socket).await;
-            }
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
-
+            // Anonymous console detail fails and triggers captcha login flow.
             let (mut socket, _) = listener.accept().await.unwrap();
             assert!(read_request_target(&mut socket).await.starts_with("/rnacos/api/console/v2/config/info?"));
             write_text_response(&mut socket, "<html><body>login required</body></html>").await;
@@ -3075,10 +6895,6 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v3/console/cs/config/list?"));
-            write_not_found_response(&mut socket).await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
             assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
             write_json_response(
                 &mut socket,
@@ -3086,22 +6902,14 @@ mod tests {
             )
             .await;
 
-            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
-                write_not_found_response(&mut socket).await;
-            }
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "cloud_providers: {}\n").await;
-
+            // list enrichment loads each item through console detail.
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            assert!(request.to_ascii_lowercase().contains("token: console-token"));
             write_json_response(
                 &mut socket,
-                r#"{"success":true,"data":{"configType":"YAML","desc":"r-nacos description"}}"#,
+                r#"{"success":true,"data":{"value":"cloud_providers: {}\n","configType":"YAML","desc":"r-nacos description"}}"#,
             )
             .await;
         });
@@ -3122,6 +6930,7 @@ mod tests {
             .list_configs(NacosConfigQuery {
                 namespace: Some("ops".to_string()),
                 group: None,
+                group_contains: false,
                 data_id: None,
                 app_name: None,
                 search: None,
@@ -3142,10 +6951,6 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v3/console/cs/config/list?"));
-            write_not_found_response(&mut socket).await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
             assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
             write_json_response(
                 &mut socket,
@@ -3153,23 +6958,13 @@ mod tests {
             )
             .await;
 
-            for expected_path in ["/v3/console/cs/config", "/v3/console/cs/config/detail"] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert!(read_request_target(&mut socket).await.starts_with(expected_path));
-                write_not_found_response(&mut socket).await;
-            }
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert!(read_request_target(&mut socket).await.starts_with("/v1/cs/configs?"));
-            write_text_response(&mut socket, "server:\n  port: 8848\n").await;
-
             let (mut socket, _) = listener.accept().await.unwrap();
             let request = read_http_request(&mut socket).await;
             assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
             assert!(!request.to_ascii_lowercase().contains("\ntoken:"));
             write_json_response(
                 &mut socket,
-                r#"{"success":true,"data":{"configType":"YAML","desc":"anonymous list description"}}"#,
+                r#"{"success":true,"data":{"value":"server:\n  port: 8848\n","configType":"YAML","desc":"anonymous list description"}}"#,
             )
             .await;
         });
@@ -3182,6 +6977,7 @@ mod tests {
             .list_configs(NacosConfigQuery {
                 namespace: Some("ops".to_string()),
                 group: None,
+                group_contains: false,
                 data_id: None,
                 app_name: None,
                 search: None,
@@ -3201,12 +6997,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in [
-                "/nacos/health",
-                "/nacos/v3/console/server/state",
-                "/nacos/v1/ns/operator/servers",
-                "/nacos/v1/console/server/state",
-            ] {
+            for expected_path in ["/nacos/health", "/nacos/v1/ns/operator/servers", "/nacos/v1/console/server/state"] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 assert_eq!(read_request_target(&mut socket).await, expected_path);
                 write_service_unavailable_response(&mut socket).await;
@@ -3306,6 +7097,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nacos_v2_password_update_reuses_login_session_cookie() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/auth/users/login");
+            write_json_response_with_cookie(
+                &mut socket,
+                r#"{"accessToken":"nacos-token","tokenTtl":18000}"#,
+                "JSESSIONID=nacos-session; Path=/nacos; HttpOnly",
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let target = request.split_whitespace().nth(1).unwrap();
+            assert!(request.starts_with("PUT "));
+            assert!(target.starts_with("/nacos/v1/auth/users?"));
+            assert!(target.contains("accessToken=nacos-token"));
+            assert!(request.to_ascii_lowercase().contains("cookie: jsessionid=nacos-session"));
+            assert!(request.contains("username=alice"));
+            assert!(request.contains("newPassword=new-secret"));
+            write_json_response(&mut socket, r#"{"code":0,"message":"success","data":true}"#).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        config.auth =
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "nacos".to_string() };
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        admin
+            .update_user(NacosUserUpdate {
+                username: "alice".to_string(),
+                password: Some("new-secret".to_string()),
+                nickname: None,
+                enabled: None,
+                roles: None,
+                namespace_privilege: None,
+            })
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn explicit_nacos_v2_auth_failure_does_not_probe_rnacos() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3394,13 +7232,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uses_health_endpoint_when_console_state_apis_are_unavailable() {
+    async fn health_response_identifies_rnacos_when_v3_state_endpoint_is_unavailable() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in
-                ["/nacos/v3/console/server/state", "/nacos/v1/ns/operator/servers", "/nacos/v1/console/server/state"]
-            {
+            for expected_path in ["/nacos/v3/admin/core/state"] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 assert_eq!(read_request_target(&mut socket).await, expected_path);
                 write_not_found_response(&mut socket).await;
@@ -3413,6 +7249,7 @@ mod tests {
 
         let mut config = test_admin_config(format!("http://{address}"));
         config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V3);
         let admin = NacosOpenApiAdmin::new(config).unwrap();
 
         let state = admin.get_server_state().await.unwrap();
@@ -3426,21 +7263,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in
-                ["/nacos/v3/console/server/state", "/nacos/v1/ns/operator/servers", "/nacos/v1/console/server/state"]
-            {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert_eq!(read_request_target(&mut socket).await, expected_path);
-                write_not_found_response(&mut socket).await;
-            }
-
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/nacos/health");
             write_json_response(&mut socket, "success").await;
-
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/console/core/namespace/list");
-            write_not_found_response(&mut socket).await;
 
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/console/namespaces");
@@ -3449,6 +7274,7 @@ mod tests {
 
         let mut config = test_admin_config(format!("http://{address}"));
         config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
         let admin = NacosOpenApiAdmin::new(config).unwrap();
 
         let info = admin.test_connection().await.unwrap();
@@ -3457,25 +7283,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connection_accepts_client_openapi_when_console_state_and_health_are_unavailable() {
+    async fn rnacos_connection_accepts_client_openapi_when_state_and_health_are_unavailable() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in
-                ["/nacos/v3/console/server/state", "/nacos/v1/ns/operator/servers", "/nacos/v1/console/server/state"]
-            {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                assert_eq!(read_request_target(&mut socket).await, expected_path);
-                write_not_found_response(&mut socket).await;
-            }
-
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/nacos/health");
             write_service_unavailable_response(&mut socket).await;
 
-            let (mut socket, _) = listener.accept().await.unwrap();
-            assert_eq!(read_request_target(&mut socket).await, "/nacos/v3/console/core/namespace/list");
-            write_not_found_response(&mut socket).await;
+            for expected_path in ["/nacos/v1/ns/operator/servers", "/nacos/v1/console/server/state"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert_eq!(read_request_target(&mut socket).await, expected_path);
+                write_not_found_response(&mut socket).await;
+            }
 
             let (mut socket, _) = listener.accept().await.unwrap();
             assert_eq!(read_request_target(&mut socket).await, "/nacos/v1/console/namespaces");
@@ -3484,12 +7304,13 @@ mod tests {
 
         let mut config = test_admin_config(format!("http://{address}"));
         config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
         let admin = NacosOpenApiAdmin::new(config).unwrap();
 
         let info = admin.test_connection().await.unwrap();
         assert!(info.raw.is_none());
         assert_eq!(info.auth, "none");
-        assert!(info.capabilities.supports_config_history);
+        assert!(!info.capabilities.supports_config_history);
         server.await.unwrap();
     }
 
@@ -3498,13 +7319,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in [
-                "/nacos/v3/console/cs/history/list",
-                "/nacos/v3/console/cs/history",
-                "/nacos/v1/cs/history/list",
-                "/nacos/v1/cs/history",
-                "/nacos/v1/cs/history/configs",
-            ] {
+            for expected_path in ["/nacos/v1/cs/history/list", "/nacos/v1/cs/history", "/nacos/v1/cs/history/configs"] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 assert!(read_request_target(&mut socket).await.starts_with(expected_path));
                 write_not_found_response(&mut socket).await;
@@ -3533,6 +7348,7 @@ mod tests {
 
         let mut config = test_admin_config(format!("http://{address}"));
         config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
         config.rnacos_console_addr = format!("http://{address}");
         config.auth =
             NacosAuthConfig::UsernamePassword { username: "admin".to_string(), password: "admin".to_string() };
@@ -3563,12 +7379,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for expected_path in [
-                "/nacos/v3/console/cs/history/detail",
-                "/nacos/v3/console/cs/history",
-                "/nacos/v1/cs/history",
-                "/nacos/v1/cs/history/config",
-            ] {
+            for expected_path in ["/nacos/v1/cs/history", "/nacos/v1/cs/history/config"] {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 assert!(read_request_target(&mut socket).await.starts_with(expected_path));
                 write_not_found_response(&mut socket).await;
@@ -3590,6 +7401,7 @@ mod tests {
 
         let mut config = test_admin_config(format!("http://{address}"));
         config.context_path = "/nacos".to_string();
+        config.implementation = Some(NacosImplementation::RNacos);
         config.rnacos_console_addr = format!("http://{address}");
         config.auth =
             NacosAuthConfig::UsernamePassword { username: "admin".to_string(), password: "admin".to_string() };
@@ -3901,11 +7713,11 @@ mod tests {
     #[test]
     fn namespace_list_error_keeps_v3_and_v1_details() {
         let err = namespace_list_error(
-            "NACOS_ERROR[authFailed]: Nacos admin /v3/console/core/namespace/list returned 403 Forbidden",
+            "NACOS_ERROR[authFailed]: Nacos admin /v3/admin/core/namespace/list returned 403 Forbidden",
             "NACOS_ERROR[apiVersionMismatch]: Nacos admin /v1/console/namespaces returned 410 Gone",
         );
         assert!(err.starts_with("NACOS_ERROR[authFailed]:"));
-        assert!(err.contains("/v3/console/core/namespace/list returned 403 Forbidden"));
+        assert!(err.contains("/v3/admin/core/namespace/list returned 403 Forbidden"));
         assert!(err.contains("/v1/console/namespaces returned 410 Gone"));
     }
 
@@ -3930,6 +7742,42 @@ mod tests {
         assert_eq!(parsed.config_type.as_deref(), Some("yaml"));
         assert_eq!(parsed.tags.as_deref(), Some("prod,gray"));
         assert_eq!(parsed.content.as_deref(), Some("cloud_providers:\n  aliyun: {}\n"));
+    }
+
+    #[test]
+    fn console_detail_reads_value_and_config_type() {
+        let parsed = parse_config_detail(
+            serde_json::json!({
+                "success": true,
+                "data": {
+                    "value": "{\n  \"Name\": \"Hello\"\n}",
+                    "configType": "JSON",
+                    "desc": "from-console"
+                }
+            }),
+            "3432".to_string(),
+            "DEFAULT_GROUP".to_string(),
+            "public".to_string(),
+        );
+        assert_eq!(parsed.content.as_deref(), Some("{\n  \"Name\": \"Hello\"\n}"));
+        assert_eq!(parsed.config_type.as_deref(), Some("json"));
+        assert_eq!(parsed.desc.as_deref(), Some("from-console"));
+    }
+
+    #[test]
+    fn content_field_falls_back_to_value_when_content_is_null() {
+        let parsed = parse_config_detail(
+            serde_json::json!({
+                "dataId": "app.json",
+                "group": "DEFAULT_GROUP",
+                "content": null,
+                "value": "from-value-field"
+            }),
+            "fallback".to_string(),
+            "DEFAULT_GROUP".to_string(),
+            "public".to_string(),
+        );
+        assert_eq!(parsed.content.as_deref(), Some("from-value-field"));
     }
 
     #[test]
@@ -4007,6 +7855,35 @@ mod tests {
         assert_eq!(parsed.items[0].nid, Some(7));
         assert_eq!(parsed.items[0].namespace, "ops");
         assert_eq!(parsed.items[0].operation.as_deref(), Some("publish"));
+    }
+
+    #[test]
+    fn parses_history_last_modified_aliases() {
+        let parsed = parse_config_history_list(
+            serde_json::json!({
+                "data": {
+                    "pageItems": [{
+                        "id": 7,
+                        "dataId": "app.yaml",
+                        "group": "DEFAULT_GROUP",
+                        "lastModified": "2026-08-11 15:07:48"
+                    }, {
+                        "id": 8,
+                        "dataId": "app.yaml",
+                        "group": "DEFAULT_GROUP",
+                        "publish_time": 1786430868000i64
+                    }]
+                }
+            }),
+            "public".to_string(),
+            1,
+            20,
+            "fallback.yaml",
+            "DEFAULT_GROUP",
+        );
+
+        assert_eq!(parsed.items[0].last_modified_time.as_deref(), Some("2026-08-11 15:07:48"));
+        assert_eq!(parsed.items[1].last_modified_time.as_deref(), Some("1786430868000"));
     }
 
     #[test]
@@ -4117,6 +7994,20 @@ mod tests {
     }
 
     #[test]
+    fn filters_instance_list_when_nacos_ignores_cluster_parameter() {
+        let instances = parse_instances(serde_json::json!({
+            "hosts": [
+                { "ip": "127.0.0.1", "port": 19001, "clusterName": "blue" },
+                { "ip": "127.0.0.1", "port": 19002, "clusterName": "green" }
+            ]
+        }));
+
+        let filtered = filter_instances_by_clusters(instances, &["blue".to_string()]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].cluster_name.as_deref(), Some("blue"));
+    }
+
+    #[test]
     fn parses_v1_catalog_service_clusters_and_requested_cluster_filter() {
         let clusters = parse_catalog_cluster_names(&serde_json::json!({
             "service": { "name": "svc" },
@@ -4156,7 +8047,9 @@ mod tests {
             write_json_response(&mut instances_socket, r#"{"list":[],"count":0}"#).await;
         });
 
-        let admin = NacosOpenApiAdmin::new(test_admin_config(format!("http://{address}"))).unwrap();
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
         let instances = admin
             .list_v1_catalog_instances(
                 &NacosInstanceQuery {
@@ -4171,6 +8064,42 @@ mod tests {
             .unwrap();
 
         assert!(instances.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v2_instance_list_uses_catalog_and_keeps_disabled_instances() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut detail_socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut detail_socket).await.starts_with("/nacos/v1/ns/catalog/service?"));
+            write_json_response(&mut detail_socket, r#"{"clusters":[{"name":"manual"}]}"#).await;
+
+            let (mut instances_socket, _) = listener.accept().await.unwrap();
+            assert!(read_request_target(&mut instances_socket).await.starts_with("/nacos/v1/ns/catalog/instances?"));
+            write_json_response(
+                &mut instances_socket,
+                r#"{"list":[{"ip":"127.0.0.1","port":19101,"clusterName":"manual","healthy":false,"enabled":false,"ephemeral":false}],"count":1}"#,
+            )
+            .await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.context_path = "/nacos".to_string();
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let instances = admin
+            .list_instances(NacosInstanceQuery {
+                namespace: Some("public".to_string()),
+                service_name: "dbx-ui-crud".to_string(),
+                group_name: Some("DBX_E2E".to_string()),
+                clusters: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].enabled, Some(false));
         server.await.unwrap();
     }
 
@@ -4192,11 +8121,11 @@ mod tests {
                     "/v3/admin/core/cluster/node/list" => {
                         r#"{"code":0,"data":[{"address":"127.0.0.1:8848","ip":"127.0.0.1","port":8848,"state":"UP"}]}"#
                     }
-                    "/v3/console/core/namespace/list" => {
-                        r#"{"code":0,"data":{"pageItems":[{"namespaceId":"dev","namespaceName":"Development"}]}}"#
+                    "/v3/admin/core/namespace/list" => {
+                        r#"{"code":0,"data":[{"namespace":"dev","namespaceShowName":"Development"}]}"#
                     }
-                    "/v3/console/cs/config/list" => r#"{"code":0,"data":{"totalCount":21,"pageItems":[]}}"#,
-                    "/v3/console/ns/service/list" => r#"{"code":0,"data":{"count":3,"serviceList":[]}}"#,
+                    "/v3/admin/cs/config/list" => r#"{"code":0,"data":{"totalCount":21,"pageItems":[]}}"#,
+                    "/v3/admin/ns/service/list" => r#"{"code":0,"data":{"count":3,"serviceList":[]}}"#,
                     "/actuator/prometheus" => {
                         "# TYPE system_cpu_usage gauge\nsystem_cpu_usage 0.25\n# TYPE nacos_monitor gauge\nnacos_monitor{module=\"config\",name=\"configCount\"} 12\nnacos_monitor{module=\"naming\",name=\"serviceCount\"} 4\nnacos_monitor{module=\"naming\",name=\"ipCount\"} 14\n"
                     }
@@ -4207,7 +8136,9 @@ mod tests {
             paths
         });
 
-        let admin = NacosOpenApiAdmin::new(test_admin_config(format!("http://{address}"))).unwrap();
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.version_mode = Some(NacosVersionMode::V3);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
         let snapshot = admin.get_dashboard(NacosDashboardQuery { namespace: Some("dev".to_string()) }).await.unwrap();
 
         assert_eq!(snapshot.namespace, "dev");
@@ -4233,6 +8164,16 @@ mod tests {
         assert_eq!(parsed[0].namespace_show_name, "public");
         assert_eq!(parsed[1].namespace, "dev");
         assert_eq!(parsed[1].namespace_desc.as_deref(), Some("dev ns"));
+    }
+
+    #[test]
+    fn does_not_add_a_second_default_namespace_when_v3_returns_public() {
+        let parsed = parse_namespaces(serde_json::json!({
+            "code": 0,
+            "data": [{ "namespace": "public", "namespaceShowName": "public" }]
+        }));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].namespace, "public");
     }
 
     #[test]
@@ -4307,7 +8248,7 @@ mod tests {
 
     #[test]
     fn validates_raw_api_paths() {
-        for path in ["/v1/cs/configs", "/v2/console/example", "/v3/console/server/state"] {
+        for path in ["/v1/cs/configs", "/v2/console/example", "/v3/admin/core/state"] {
             validate_raw_api_path(path).unwrap();
         }
 
@@ -4328,7 +8269,7 @@ mod tests {
     #[test]
     fn classifies_common_nacos_errors() {
         assert_eq!(classify_nacos_error("401 Unauthorized invalid access token"), "authFailed");
-        assert_eq!(classify_nacos_error("No static resource nacos/v3/console/server/state"), "contextPathMismatch");
+        assert_eq!(classify_nacos_error("No static resource nacos/v3/admin/core/state"), "contextPathMismatch");
         assert_eq!(
             classify_nacos_error(
                 r#"410 Gone {"message":"Current API will be deprecated","path":"/v1/console/namespaces"}"#
@@ -4347,5 +8288,390 @@ mod tests {
         assert!(!content_search_endpoint_is_unsupported(
             "NACOS_ERROR[requestFailed]: Nacos admin /v3/admin/cs/config/list returned 500 Internal Server Error: database unavailable"
         ));
+    }
+
+    #[test]
+    fn instance_update_form_keeps_identity_separate_from_the_patch() {
+        let form = instance_update_form(
+            "public".to_string(),
+            NacosInstanceUpdateRequest {
+                target: NacosInstanceRef {
+                    namespace: Some("public".to_string()),
+                    service_name: "api".to_string(),
+                    ip: "127.0.0.1".to_string(),
+                    port: 8080,
+                    group_name: Some("DBX_TEST".to_string()),
+                    cluster_name: Some("blue".to_string()),
+                    ephemeral: Some(false),
+                },
+                patch: NacosInstancePatch {
+                    weight: Some(2.5),
+                    metadata: Some(serde_json::json!({ "role": "api" })),
+                    ..Default::default()
+                },
+            },
+        );
+        let form = form.into_iter().collect::<HashMap<_, _>>();
+        assert_eq!(form.get("ephemeral").map(String::as_str), Some("false"));
+        assert_eq!(form.get("weight").map(String::as_str), Some("2.5"));
+        assert!(form.contains_key("metadata"));
+        assert!(!form.contains_key("enabled"));
+        assert!(!form.contains_key("healthy"));
+    }
+
+    #[test]
+    fn instance_registration_form_is_always_persistent() {
+        let form = instance_registration_form(
+            "public".to_string(),
+            NacosInstanceRegistration {
+                namespace: Some("public".to_string()),
+                service_name: "api".to_string(),
+                ip: "127.0.0.1".to_string(),
+                port: 8080,
+                group_name: Some("DBX_TEST".to_string()),
+                cluster_name: Some("manual".to_string()),
+                weight: Some(1.0),
+                metadata: Some(serde_json::json!({})),
+            },
+        );
+        let form = form.into_iter().collect::<HashMap<_, _>>();
+        assert_eq!(form.get("ephemeral").map(String::as_str), Some("false"));
+    }
+
+    #[test]
+    fn management_instance_deduplication_includes_full_identity() {
+        let instance = NacosInstanceInfo {
+            ip: "127.0.0.1".to_string(),
+            port: 8080,
+            service_name: Some("api".to_string()),
+            cluster_name: Some("blue".to_string()),
+            group_name: Some("DBX_TEST".to_string()),
+            healthy: Some(true),
+            enabled: Some(true),
+            ephemeral: None,
+            weight: Some(1.0),
+            metadata: serde_json::json!({}),
+        };
+        let instances = deduplicate_management_instances(
+            vec![
+                instance.clone(),
+                NacosInstanceInfo { ephemeral: Some(false), ..instance.clone() },
+                NacosInstanceInfo { ephemeral: Some(true), ..instance.clone() },
+                NacosInstanceInfo { group_name: Some("OTHER_GROUP".to_string()), ..instance.clone() },
+                NacosInstanceInfo { service_name: Some("worker".to_string()), ..instance.clone() },
+                instance,
+            ],
+            "public",
+            Some("DBX_TEST"),
+            "api",
+        );
+        assert_eq!(instances.len(), 5);
+    }
+
+    #[test]
+    fn cluster_names_support_catalog_arrays_and_service_detail_maps() {
+        assert_eq!(
+            parse_catalog_cluster_names(&serde_json::json!({
+                "data": {
+                    "clusters": [{ "clusterName": "blue" }],
+                    "clusterMap": { "blue": {}, "green": {} }
+                }
+            })),
+            vec!["blue".to_string(), "green".to_string()]
+        );
+    }
+
+    #[test]
+    fn rnacos_requires_console_management_view_for_safe_service_deletion() {
+        let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        let capabilities = admin.service_capabilities();
+        assert!(capabilities.list_services.supported);
+        assert!(capabilities.list_instances.supported);
+        assert!(capabilities.create_service.supported);
+        assert!(capabilities.update_service.supported);
+        assert!(!capabilities.delete_service.supported);
+        assert_eq!(capabilities.delete_service.reason, Some(NacosCapabilityReason::EndpointUnavailable));
+        assert!(capabilities.update_instance.supported);
+        assert!(capabilities.register_instance.supported);
+        assert!(capabilities.deregister_instance.supported);
+    }
+
+    #[tokio::test]
+    async fn rnacos_service_delete_guard_does_not_fall_back_to_lossy_discovery() {
+        let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+        config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let error = admin
+            .list_instances_for_service_delete(NacosInstanceQuery {
+                namespace: Some("public".to_string()),
+                service_name: "orders".to_string(),
+                group_name: None,
+                clusters: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("r-nacos service deletion requires a configured r-nacos console address"));
+    }
+
+    #[test]
+    fn rnacos_console_enables_safe_service_deletion_capability() {
+        let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = "http://127.0.0.1:10848".to_string();
+        let capabilities = NacosOpenApiAdmin::new(config).unwrap().service_capabilities();
+        assert!(capabilities.delete_service.supported);
+    }
+
+    #[test]
+    fn official_v2_and_v3_expose_the_verified_management_matrix() {
+        for version_mode in [NacosVersionMode::V2, NacosVersionMode::V3] {
+            let supports_health_override = version_mode == NacosVersionMode::V2;
+            let mut config = test_admin_config("http://127.0.0.1:8848".to_string());
+            config.implementation = Some(NacosImplementation::Nacos);
+            config.version_mode = Some(version_mode);
+            let capabilities = NacosOpenApiAdmin::new(config).unwrap().service_capabilities();
+            assert!(capabilities.list_services.supported);
+            assert!(capabilities.get_service.supported);
+            assert!(capabilities.create_service.supported);
+            assert!(capabilities.update_service.supported);
+            assert!(capabilities.delete_service.supported);
+            assert!(capabilities.list_instances.supported);
+            assert!(capabilities.update_instance.supported);
+            assert_eq!(capabilities.update_instance_health.supported, supports_health_override);
+            assert!(capabilities.register_instance.supported);
+            assert!(capabilities.deregister_instance.supported);
+        }
+    }
+
+    #[test]
+    fn v3_console_plane_exposes_only_verified_instance_mutations() {
+        let mut config = test_admin_config("http://127.0.0.1:8080".to_string());
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V3);
+        config.api_plane = Some(NacosApiPlane::Console);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        assert!(admin.api_path_allowed("/v3/console/ns/service/list"));
+        assert!(admin.api_path_allowed("/v3/auth/user/login"));
+        assert!(!admin.api_path_allowed("/v3/admin/ns/service/list"));
+        let capabilities = admin.service_capabilities();
+        assert!(capabilities.update_instance.supported);
+        assert!(!capabilities.update_instance_health.supported);
+        assert!(!capabilities.register_instance.supported);
+        assert!(!capabilities.deregister_instance.supported);
+    }
+
+    #[test]
+    fn legacy_auto_mode_never_falls_back_across_api_generations() {
+        let mut auto = test_admin_config("http://127.0.0.1:8848".to_string());
+        auto.version_mode = Some(NacosVersionMode::Auto);
+        let auto = NacosOpenApiAdmin::new(auto).unwrap();
+        assert!(!auto.should_try_next_candidate("NACOS_ERROR[apiVersionMismatch]: missing"));
+        assert!(!auto.should_try_next_candidate("NACOS_ERROR[contextPathMismatch]: missing"));
+        assert!(!auto.should_try_next_candidate("NACOS_ERROR[authFailed]: forbidden"));
+        assert!(!auto.should_try_next_candidate("NACOS_ERROR[requestFailed]: selector error"));
+        assert!(auto.api_path_allowed("/v1/ns/service"));
+        assert!(!auto.api_path_allowed("/v3/admin/ns/service"));
+
+        let mut explicit = test_admin_config("http://127.0.0.1:8848".to_string());
+        explicit.version_mode = Some(NacosVersionMode::V3);
+        let explicit = NacosOpenApiAdmin::new(explicit).unwrap();
+        assert!(!explicit.should_try_next_candidate("NACOS_ERROR[apiVersionMismatch]: missing"));
+    }
+
+    #[test]
+    fn permission_scope_preserves_public_namespace_and_raw_custom_resources() {
+        assert_eq!(
+            parse_permission_scope(":*:*").unwrap(),
+            NacosPermissionScope {
+                kind: NacosPermissionScopeKind::Namespace,
+                namespace_id: Some("public".to_string()),
+            }
+        );
+        assert_eq!(
+            parse_permission_scope("team-a:*:*").unwrap(),
+            NacosPermissionScope {
+                kind: NacosPermissionScopeKind::Namespace,
+                namespace_id: Some("team-a".to_string()),
+            }
+        );
+        assert_eq!(parse_permission_scope("*:*:*").unwrap().kind, NacosPermissionScopeKind::Global);
+        assert_eq!(parse_permission_scope("team-a:group:data").unwrap().kind, NacosPermissionScopeKind::Custom);
+        assert_eq!(parse_permission_scope("team-a:GROUP_A:*").unwrap().kind, NacosPermissionScopeKind::Custom);
+    }
+
+    #[test]
+    fn rnacos_user_payload_uses_only_writable_namespace_privilege_fields() {
+        let payload = rnacos_user_payload(
+            "alice",
+            None,
+            Some("Alice"),
+            Some(true),
+            Some(&["0".to_string(), "2".to_string()]),
+            Some(&NacosNamespacePrivilege {
+                enabled: false,
+                whitelist_is_all: false,
+                whitelist: vec!["team-a".to_string()],
+                blacklist_is_all: false,
+                blacklist: vec!["team-b".to_string()],
+            }),
+            false,
+        );
+
+        assert_eq!(payload["enable"], true);
+        assert_eq!(payload["roles"], "0,2");
+        assert_eq!(payload["namespacePrivilegeParam"]["whitelistIsAll"], false);
+        assert_eq!(payload["namespacePrivilegeParam"]["whitelist"], serde_json::json!(["team-a"]));
+        assert_eq!(payload["namespacePrivilegeParam"]["blacklistIsAll"], false);
+        assert_eq!(payload["namespacePrivilegeParam"]["blacklist"], serde_json::json!(["team-b"]));
+        assert!(payload["namespacePrivilegeParam"].get("enabled").is_none());
+    }
+
+    #[test]
+    fn rnacos_user_list_preserves_roles_and_derived_privilege_state() {
+        let users = parse_user_list(
+            serde_json::json!({
+                "data": {
+                    "totalCount": 1,
+                    "list": [{
+                        "username": "alice",
+                        "roles": ["0", "2"],
+                        "namespacePrivilege": {
+                            "enabled": false,
+                            "whitelistIsAll": true,
+                            "whitelist": [],
+                            "blacklistIsAll": false,
+                            "blacklist": ["team-b"]
+                        }
+                    }]
+                }
+            }),
+            1,
+            20,
+        );
+
+        assert_eq!(users.total_count, 1);
+        assert_eq!(users.items[0].roles, vec!["0", "2"]);
+        let privilege = users.items[0].namespace_privilege.as_ref().unwrap();
+        assert!(!privilege.enabled);
+        assert!(privilege.whitelist_is_all);
+        assert_eq!(privilege.blacklist, vec!["team-b"]);
+    }
+
+    #[test]
+    fn official_nacos_v2_and_v3_share_the_enhanced_access_workspace() {
+        let mut v2 = test_admin_config("http://127.0.0.1:8848".to_string());
+        v2.version_mode = Some(NacosVersionMode::V2);
+        let v2 = NacosOpenApiAdmin::new(v2).unwrap().access_control_capabilities();
+        assert!(v2.enhanced_workspace);
+        assert!(v2.list_permissions.supported);
+        assert!(v2.grant_permission.supported);
+        assert!(v2.revoke_permission.supported);
+
+        let mut v3 = test_admin_config("http://127.0.0.1:8848".to_string());
+        v3.version_mode = Some(NacosVersionMode::V3);
+        let v3 = NacosOpenApiAdmin::new(v3).unwrap().access_control_capabilities();
+        assert!(v3.enhanced_workspace);
+        assert!(v3.list_permissions.supported);
+        assert!(v3.grant_permission.supported);
+        assert!(v3.revoke_permission.supported);
+    }
+
+    #[test]
+    fn access_control_probe_classifies_authorization_failures() {
+        assert_eq!(
+            access_control_probe_reason("NACOS_ERROR[authFailed]: 403 Forbidden: access denied"),
+            NacosCapabilityReason::PermissionDenied
+        );
+        assert_eq!(
+            access_control_probe_reason("NACOS_ERROR[invalidResponse]: endpoint returned 404 Not Found"),
+            NacosCapabilityReason::EndpointUnavailable
+        );
+    }
+
+    #[test]
+    fn unverified_write_capability_fails_closed() {
+        let capability = write_capability(&NacosOperationCapability::supported(), false, true);
+        assert!(!capability.supported);
+        assert_eq!(capability.reason, Some(NacosCapabilityReason::NotVerified));
+    }
+
+    #[tokio::test]
+    async fn official_nacos_v2_uses_v1_permission_endpoints() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v1/auth/permissions?"));
+            assert!(target.contains("pageNo=1"));
+            assert!(target.contains("pageSize=20"));
+            assert!(target.contains("role=app_developer"));
+            write_json_response(
+                &mut socket,
+                r#"{"totalCount":1,"pageItems":[{"role":"app_developer","resource":"team-a:*:*","action":"rw"}]}"#,
+            )
+            .await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("POST /nacos/v1/auth/permissions HTTP/1.1"));
+            assert!(request.contains("role=app_developer"));
+            assert!(request.contains("action=rw"));
+            write_text_response(&mut socket, "ok").await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/nacos/v1/auth/permissions?"));
+            assert!(target.contains("role=app_developer"));
+            assert!(target.contains("action=rw"));
+            write_text_response(&mut socket, "ok").await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::Nacos);
+        config.version_mode = Some(NacosVersionMode::V2);
+        config.context_path = "/nacos".to_string();
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let listed = admin
+            .list_permissions(NacosPermissionQuery {
+                role: Some("app_developer".to_string()),
+                resource: None,
+                page_no: Some(1),
+                page_size: Some(20),
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed.total_count, 1);
+        let permission = listed.items.into_iter().next().unwrap();
+        assert_eq!(permission.resource_raw, "team-a:*:*");
+
+        admin.grant_permission(permission.clone()).await.unwrap();
+        admin.revoke_permission(permission).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_creation_requires_an_explicit_group() {
+        let mut config = test_admin_config("http://127.0.0.1:9".to_string());
+        config.version_mode = Some(NacosVersionMode::V2);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+        let error = admin
+            .create_service(NacosServiceUpsert {
+                namespace: Some("public".to_string()),
+                service_name: "api".to_string(),
+                group_name: Some("  ".to_string()),
+                metadata: Some(serde_json::json!({})),
+                protect_threshold: Some(0.0),
+                selector: None,
+                ephemeral: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("group name is required"));
     }
 }

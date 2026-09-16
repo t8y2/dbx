@@ -463,7 +463,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="relative flex items-center px-2 py-1">
         <Search class="absolute left-3 w-3 h-3 text-muted-foreground pointer-events-none" />
-        <input v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 text-xs bg-transparent border rounded pl-5 pr-1 outline-none placeholder:text-muted-foreground" :placeholder="t('history.search')" />
+        <input data-history-search v-model="searchText" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 text-xs bg-transparent border rounded pl-5 pr-1 outline-none placeholder:text-muted-foreground" :placeholder="t('history.search')" />
         <Popover :open="dateRangeOpen" @update:open="setDateRangeOpen">
           <PopoverTrigger as-child>
             <button
@@ -598,8 +598,8 @@ onBeforeUnmount(() => {
     <div class="flex min-h-0 flex-1 flex-col">
       <RecycleScroller v-if="shouldVirtualizeHistory(store.entries.length)" class="min-h-0 flex-1" :items="store.entries" :item-size="HISTORY_ROW_HEIGHT" :buffer="HISTORY_SCROLL_BUFFER" :skip-hover="true" key-field="id">
         <template #default="{ item: entry }">
-          <CustomContextMenu :items="getHistoryMenuItems(entry)" v-slot="{ onContextMenu }">
-            <div class="h-[72px] cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-accent/50" @click="selectedEntry = entry" @contextmenu="onContextMenu">
+          <CustomContextMenu :items="getHistoryMenuItems(entry)" v-slot="{ onContextMenu, isOpen }">
+            <div class="h-[72px] cursor-pointer select-none border-b border-border/50 px-3 py-2 text-xs" :class="isOpen || selectedEntry?.id === entry.id ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40'" @click="selectedEntry = entry" @contextmenu="onContextMenu">
               <div class="mb-0.5 flex items-center gap-1">
                 <span class="inline-flex h-5 w-9 shrink-0 items-center justify-center rounded border px-1 text-[10px] leading-none text-muted-foreground">
                   {{ kindShortLabel(entry) }}

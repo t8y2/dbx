@@ -53,10 +53,11 @@ export function useTabScroll(tabsContainerRef: Ref<HTMLElement | null>) {
 
     const previousScrollLeft = el.scrollLeft;
     el.scrollLeft = Math.min(maxScrollLeft, Math.max(0, previousScrollLeft + delta));
-    if (el.scrollLeft !== previousScrollLeft) {
-      event.preventDefault();
-      updateScrollButtons();
-    }
+    // Consume the gesture even at either boundary. Letting the native wheel
+    // handler run there causes trackpad rubber-banding and a visible reversal.
+    event.preventDefault();
+    event.stopPropagation();
+    if (el.scrollLeft !== previousScrollLeft) updateScrollButtons();
   }
 
   function applyScrollbarDrag(clientX: number) {

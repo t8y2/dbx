@@ -14,12 +14,14 @@ const mountedApps: App[] = [];
 interface DialogState {
   open: boolean;
   portableMode: boolean;
+  releaseNotes: string;
   manualUpdateOnly: boolean;
   isDownloadingUpdate: boolean;
-  downloadProgress: number;
+  downloadProgress: number | null;
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
   updateReady: boolean;
+  isIgnoringUpdate: boolean;
 }
 
 async function flushDialog() {
@@ -31,16 +33,19 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   const state = reactive<DialogState>({
     open: true,
     portableMode: false,
+    releaseNotes: "",
     manualUpdateOnly: false,
     isDownloadingUpdate: false,
     downloadProgress: 0,
     updateDownloaded: false,
     isInstallingUpdate: false,
     updateReady: false,
+    isIgnoringUpdate: false,
     ...initialState,
   });
-  const downloadAndInstall = vi.fn();
+  const downloadInBackground = vi.fn();
   const cancelDownload = vi.fn();
+  const ignoreVersion = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -73,18 +78,23 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
               manual_update_only: state.manualUpdateOnly,
               release_name: "DBX v0.5.61",
               release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
-              release_notes: "",
+              release_notes: state.releaseNotes,
             },
             updateCheckMessage: "",
+            checkingUpdates: false,
+            updateCheckFailed: false,
+            updateDownloadSource: "official",
             isDownloadingUpdate: state.isDownloadingUpdate,
             downloadProgress: state.downloadProgress,
             updateDownloaded: state.updateDownloaded,
             isInstallingUpdate: state.isInstallingUpdate,
             updateReady: state.updateReady,
+            isIgnoringUpdate: state.isIgnoringUpdate,
             activeTaskCount,
-            "onDownload-and-install": downloadAndInstall,
+            "onDownload-in-background": downloadInBackground,
             "onCancel-download": cancelDownload,
             "onInstall-downloaded": handleInstallDownloaded,
+            "onIgnore-version": ignoreVersion,
           });
       },
     }),
@@ -94,7 +104,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   app.mount(container);
   await flushDialog();
 
-  return { state, downloadAndInstall, cancelDownload, installDownloaded };
+  return { state, downloadInBackground, cancelDownload, installDownloaded, ignoreVersion };
 }
 
 function buttonWithText(text: string): HTMLButtonElement | undefined {
@@ -102,15 +112,24 @@ function buttonWithText(text: string): HTMLButtonElement | undefined {
 }
 
 function downloadButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Download & Install");
+  return buttonWithText("Retry Download");
+}
+
+function cancelDownloadButton(): HTMLButtonElement | undefined {
+  return buttonWithText("Cancel Download");
 }
 
 function installDownloadedButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Exit & Update");
+  return buttonWithText("Restart & Update");
 }
 
 async function pressEscape() {
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await flushDialog();
+}
+
+async function clickOutside() {
+  document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
   await flushDialog();
 }
 
@@ -120,11 +139,11 @@ afterEach(() => {
 });
 
 describe("UpdateDialog active task guard", () => {
-  it("shows the task warning and disables installation while work is running", async () => {
+  it("shows the task warning but still allows starting a background download while work is running", async () => {
     await mountDialog(2);
 
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain("2");
-    expect(downloadButton()?.disabled).toBe(true);
+    expect(downloadButton()?.disabled).toBe(false);
   });
 
   it("allows installation after all tasks finish", async () => {
@@ -183,18 +202,51 @@ describe("UpdateDialog download progress", () => {
 
     expect(buttonWithText("Downloading 100%")?.classList.contains("w-52")).toBe(true);
   });
+
+  it("falls back to 0% while the download size is unknown", async () => {
+    await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: null });
+
+    expect(buttonWithText("Downloading 0%")).toBeDefined();
+  });
 });
 
 describe("UpdateDialog close protection", () => {
-  it("cancels the background download when the close button is clicked", async () => {
+  it("closes without cancelling the background download when the close button is clicked", async () => {
     const { state, cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });
 
     const closeButton = document.body.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
     closeButton?.click();
     await flushDialog();
 
-    expect(cancelDownload).toHaveBeenCalledOnce();
+    expect(cancelDownload).not.toHaveBeenCalled();
     expect(state.open).toBe(false);
+  });
+
+  it("closes without cancelling the background download when dismissed by clicking outside", async () => {
+    const { state, cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });
+
+    await clickOutside();
+
+    expect(cancelDownload).not.toHaveBeenCalled();
+    expect(state.open).toBe(false);
+  });
+
+  it("closes without cancelling the background download when dismissed with Escape", async () => {
+    const { state, cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });
+
+    await pressEscape();
+
+    expect(cancelDownload).not.toHaveBeenCalled();
+    expect(state.open).toBe(false);
+  });
+
+  it("cancels the download only when the explicit Cancel Download button is clicked", async () => {
+    const { cancelDownload } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 42 });
+
+    cancelDownloadButton()?.click();
+    await flushDialog();
+
+    expect(cancelDownload).toHaveBeenCalledOnce();
   });
 
   it("allows closing while a downloaded update is idle", async () => {
@@ -244,7 +296,7 @@ describe("UpdateDialog close protection", () => {
     const installDownloaded = vi.fn(async () => {
       throw new Error("install failed");
     });
-    const { state, downloadAndInstall } = await mountDialog(0, { updateDownloaded: true }, installDownloaded);
+    const { state, downloadInBackground } = await mountDialog(0, { updateDownloaded: true }, installDownloaded);
 
     installDownloadedButton()?.click();
     await flushDialog();
@@ -255,12 +307,12 @@ describe("UpdateDialog close protection", () => {
     await flushDialog();
 
     expect(installDownloaded).toHaveBeenCalledTimes(2);
-    expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(downloadInBackground).not.toHaveBeenCalled();
   });
 
   it("allows dismissing after a successful install while restart remains available", async () => {
     const installDownloaded = vi.fn(async () => {});
-    const { state, downloadAndInstall } = await mountDialog(0, { updateDownloaded: true }, installDownloaded);
+    const { state, downloadInBackground } = await mountDialog(0, { updateDownloaded: true }, installDownloaded);
 
     installDownloadedButton()?.click();
     await flushDialog();
@@ -272,6 +324,42 @@ describe("UpdateDialog close protection", () => {
     await pressEscape();
     expect(state.open).toBe(false);
     expect(installDownloaded).toHaveBeenCalledOnce();
-    expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(downloadInBackground).not.toHaveBeenCalled();
+  });
+});
+
+describe("UpdateDialog ignore version", () => {
+  it("emits ignore-version when the ignore button is clicked", async () => {
+    const { ignoreVersion } = await mountDialog(0);
+
+    const ignoreButton = buttonWithText("Ignore this version");
+    expect(ignoreButton).toBeDefined();
+    ignoreButton?.click();
+    await flushDialog();
+
+    expect(ignoreVersion).toHaveBeenCalledOnce();
+  });
+
+  it("allows ignoring a downloaded update", async () => {
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
+
+    expect(buttonWithText("Ignore this version")).toBeDefined();
+  });
+
+  it("disables the ignore button while the setting is being persisted", async () => {
+    await mountDialog(0, { isIgnoringUpdate: true });
+
+    expect(buttonWithText("Ignore this version")?.disabled).toBe(true);
+  });
+});
+
+describe("UpdateDialog release notes safety", () => {
+  it("renders remote HTML as text and never creates unsafe links or image requests", async () => {
+    await mountDialog(0, { releaseNotes: '<img src="https://example.com/tracker" onerror="alert(1)"><script>alert(1)</script> [bad](javascript:alert) ![remote](https://example.com/image) [safe](https://example.com/release)' });
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('a[href="https://example.com/release"]')).not.toBeNull();
+    });
+    expect(document.body.querySelector("script, img")).toBeNull();
+    expect(Array.from(document.body.querySelectorAll("a")).every((anchor) => anchor.href.startsWith("https://"))).toBe(true);
   });
 });

@@ -8,6 +8,7 @@ function source(relativePath: string): string {
 }
 
 test("shares the configured download source with agent driver management", () => {
+  const app = source("apps/desktop/src/App.vue");
   const driverStore = source("apps/desktop/src/components/config/DriverStoreDialog.vue");
   const backendApi = source("apps/desktop/src/lib/backend/api.ts");
 
@@ -20,4 +21,6 @@ test("shares the configured download source with agent driver management", () =>
   assert.match(backendApi, /backend\.installAgent\(dbType, useSettingsStore\(\)\.editorSettings\.updateDownloadSource(?:, operationId)?\)/);
   assert.match(backendApi, /backend\.upgradeAllAgents\(useSettingsStore\(\)\.editorSettings\.updateDownloadSource(?:, operationId)?\)/);
   assert.match(backendApi, /backend\.reinstallJre\(jreKey, useSettingsStore\(\)\.editorSettings\.updateDownloadSource(?:, operationId)?\)/);
+  assert.match(app, /const drivers = await api\.listInstalledAgents\(\)/);
+  assert.doesNotMatch(app, /invoke<[^>]+>\("list_installed_agents"\)/);
 });

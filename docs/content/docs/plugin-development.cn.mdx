@@ -1,0 +1,571 @@
+---
+title: 开发和提交 DBX 插件
+description: 从 CLI、Manifest、Workbench 和 Sidecar 开始开发 DBX 插件，完成本地调试、打包、自动上架和官方签名发布。
+---
+
+DBX 插件是独立安装的 `.dbxp` 包，可以提供连接类型、工作台、文件系统和原生 Sidecar。插件源码、DBX 插件框架和官方商店目录由不同仓库负责。
+
+<Callout type="info">
+  **推荐路径：** 使用 `dbx-plugin create` 创建项目，在自己的仓库开发并发布未签名候选包；`dbx-store` 会为已注册的插件自动创建或更新候选 PR，维护者审核并签名后才会进入官方目录。
+</Callout>
+
+<Callout type="warn">
+  **插件上架 Pull Request 提交到 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)，不是 `t8y2/dbx`。** 插件自己的功能代码通常保留在开发者自己的源码仓库；只有修改 DBX Host、SDK、CLI、协议、Schema、文档或官方示例时，才向 [`t8y2/dbx`](https://github.com/t8y2/dbx) 提交 PR。
+</Callout>
+
+## 应该提交到哪个仓库
+
+| 你要修改的内容 | 提交位置 | 是否向 DBX 官方提 PR |
+| --- | --- | --- |
+| 你的插件前端、Rust/Go 后端、测试和发布脚本 | 插件自己的源码仓库 | 不向 `dbx` 提交；在自己的仓库开发和发布 |
+| 新插件上架、版本更新、商店图标和介绍 | [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store) | 是，目标分支为 `main` |
+| DBX 插件 Host、Manifest/Marketplace Schema、SDK、CLI、Packager | [`t8y2/dbx`](https://github.com/t8y2/dbx) | 是，目标分支为 `main` |
+| DBX 官方示例或插件开发文档 | [`t8y2/dbx`](https://github.com/t8y2/dbx) | 是 |
+| 某个第三方插件自身的 Bug | 该插件的源码仓库 | 不要提交到 `dbx-store` |
+| 自定义或企业私有仓库 | 你的私有仓库 | 不需要向官方商店提交 |
+| 数据库厂商 JDBC Driver JAR | 不提交到 Git 仓库 | 用户在本机或服务器中导入 |
+
+DBX 官方维护但需要独立发布节奏的插件，通常也应使用独立源码仓库。只有与 Host 强耦合的最小示例、SDK 验证项目或维护者明确同意的组件才放进 `t8y2/dbx`。
+
+## 插件由哪些部分组成
+
+```text
+my-plugin/
+├── manifest.json
+├── dbx-plugin.toml
+├── assets/
+├── ui/
+├── backend/                       # frontend 模板没有此目录
+├── .github/workflows/
+│   └── plugin-release.yml
+└── dist/                          # 构建输出，不提交到 Git
+```
+
+- `manifest.json` 声明插件身份、版本、权限、入口和 Contributions。
+- `ui/` 在沙箱工作台中运行，通过 Host API 与 DBX 交互。
+- `backend/` 是可选的原生 Sidecar，可以使用 Rust、Go 或其他能够实现 DBX JSON-RPC 协议的语言。
+- `.dbxp` 是安装包，不是源码仓库。
+- 前端插件可以发布一个 `universal` 包；包含原生 Sidecar 的插件需要按操作系统和 CPU 架构分别构建。
+
+## Manifest 完整说明
+
+`manifest.json` 是运行时契约，文件名必须位于插件包根目录。Manifest v1 不接受未声明字段，建议在编辑器中引用仓库内的 [`plugins/manifest.schema.json`](https://github.com/t8y2/dbx/blob/main/plugins/manifest.schema.json)。最小的纯前端 Manifest 如下：
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/t8y2/dbx/main/plugins/manifest.schema.json",
+  "manifest_version": 1,
+  "id": "com.example.files",
+  "name": "Example Files",
+  "version": "0.1.0",
+  "publisher": "example",
+  "description": "Browse files from an example service.",
+  "icon": "assets/plugin.svg",
+  "source": "https://github.com/example/dbx-plugin-files",
+  "homepage": "https://github.com/example/dbx-plugin-files",
+  "engines": { "host_api": "1" },
+  "permissions": [],
+  "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+  "contributions": [
+    { "type": "workbench", "id": "com.example.files.main", "label": "Files", "icon": "assets/plugin.svg" }
+  ]
+}
+```
+
+Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含 `..`、反斜杠或重复斜杠。`ui.entry` 必须位于 `ui.root` 内：当 root 为 `ui` 时，入口写 `ui/index.html`，不是 `index.html`。`signingKeyId` 属于商店 artifact metadata，不是 Manifest 字段。
+
+| 字段 | 必需 | 说明 |
+| --- | --- | --- |
+| `$schema` | 否 | 编辑器使用的 JSON Schema 地址，不参与身份校验。 |
+| `manifest_version` | 是 | 当前必须为数字 `1`。 |
+| `id` | 是 | 全局稳定 ID，只能使用小写字母、数字、`.`, `_`, `-`，例如 `io.github.example.files`；发布后不要更改。 |
+| `name` | 是 | 默认显示名称。 |
+| `icon` | 否 | 插件默认图标的包内相对路径；推荐 SVG 或 PNG。 |
+| `version` | 是 | `major.minor.patch` 语义化版本，可带 prerelease/build 后缀。相同 ID 和版本的正式包不能覆盖。 |
+| `publisher` | 是 | 发布者标识；首次上架后应保持不变。 |
+| `description` | 否 | 插件说明。 |
+| `source` | 否 | 源码仓库 HTTPS 地址，安装后可在插件信息中查看。 |
+| `homepage` | 否 | 项目主页、文档或支持地址。 |
+| `engines` | 是 | 运行时兼容范围，至少包含 `host_api`。 |
+| `permissions` | 否 | 最小权限集合，见下文。 |
+| `entrypoints` | 否 | UI 和原生 Sidecar 入口；贡献点存在时按需声明。 |
+| `contributions` | 否 | 连接、工作台、文件系统、连接右键菜单和结果视图声明。 |
+| `localizations` | 否 | 按 locale 覆盖名称、说明、贡献点、字段和动作文案。 |
+
+### `engines`、权限和入口
+
+```json
+{
+  "engines": { "dbx": ">=0.6.0", "host_api": "1" },
+  "permissions": [
+    "host.workbench",
+    "host.events",
+    "host.filesystem",
+    "host.binary",
+    "host.network:https://s3.example.com:443"
+  ],
+  "entrypoints": {
+    "ui": { "root": "ui", "entry": "ui/index.html" },
+    "backend": {
+      "protocol_versions": [1],
+      "transport": "stdio-jsonl",
+      "executable": "bin/linux-x64/backend"
+    }
+  }
+}
+```
+
+- `engines.dbx` 是可选的 DBX 版本范围；`engines.host_api` 是必需的 Host API 版本声明。
+- `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
+- `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
+- `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
+- `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
+
+### Connection Provider
+
+连接 Provider 负责声明连接表单，DBX 负责渲染表单和保存生命周期；插件只处理自己的连接协议。`binding` 决定字段语义：`config` 写入外部配置，`secret` 写入 Secret Store，`name`、`host`、`port`、`username`、`password`、`database` 映射到标准连接字段。
+
+```json
+{
+  "type": "connection-provider",
+  "id": "com.example.files.connection",
+  "label": "Example Service",
+  "icon": "assets/connection.svg",
+  "database_type": "example-files",
+  "description": "Connect to an Example Service.",
+  "fields": [
+    { "key": "display_name", "label": "Name", "type": "text", "binding": "name", "required": true },
+    { "key": "endpoint", "label": "Endpoint", "type": "text", "binding": "host", "required": true },
+    { "key": "port", "label": "Port", "type": "number", "binding": "port", "default": 443 },
+    { "key": "region", "label": "Region", "type": "radio", "options": [{ "label": "US", "value": "us" }, { "label": "EU", "value": "eu" }], "binding": "config" },
+    { "key": "token", "label": "Access token", "type": "password", "binding": "secret", "required": true }
+  ],
+  "workbench": "com.example.files.main",
+  "capabilities": ["test", "connect", "disconnect"],
+  "actions": [
+    { "id": "refresh", "label": "Refresh metadata", "variant": "outline", "when": "edit", "requires_valid_form": true, "timeout_ms": 30000 }
+  ]
+}
+```
+
+字段类型为 `text`、`password`、`number`、`boolean`、`select`、`radio` 或 `textarea`；`select`/`radio` 必须提供非空 `options`，每项包含 `label` 和字符串 `value`。`binding: "port"` 必须使用 `number`。不要把密码、Token 或私钥放进 `config`、Workbench context、事件或日志。
+
+每个字段必须声明 `key`、`label`、`type`，可选 `description`、`placeholder`、`required`、`default`、`options` 和 `binding`；默认值必须符合字段类型。省略 binding 的 `password` 字段默认按 `secret` 处理。`database_type` 是插件自定义类型标识，不会给 DBX 内置数据库枚举添加成员。
+
+连接生命周期使用固定的 `connection/test`、`connection/connect`、`connection/disconnect`，自定义表单动作使用 `connection/action`，参数包含 `provider`、`connection`、`runtime`；动作额外包含 `action: { id }`。后端使用 `connection.id` 保存会话，并使用 `runtime.host`/`runtime.port` 连接经过 DBX 隧道或代理转换后的端点。仅在后端生命周期请求中接收补齐 Secret 的连接；前端通过 `connectionId` 使用已经建立的会话。
+
+动作的 `when` 可为 `always`、`create`、`edit`；`variant` 可为 `default`、`outline`、`secondary`、`destructive`、`ghost`；`timeout_ms` 为 1–120000。`requires_valid_form` 决定是否要求完整表单，`close_on_success` 决定成功后是否关闭。返回 `{ "success": true, "message": "...", "fieldValues": { "port": 443 } }` 可以更新已声明的字段；返回 `success: false` 表示失败。
+
+### 其他 Contributions
+
+| 类型 | 必需字段 | 用途 |
+| --- | --- | --- |
+| `workbench` | `type`, `id`, `label` | 注册可从侧边栏或插件入口打开的工作台。 |
+| `filesystem-provider` | `type`, `id`, `label`, `schemes` | 注册虚拟文件系统；`root_uri` 例如 `s3://bucket`，能力可选 `read`、`write`、`delete`、`rename`、`mkdir`。 |
+| `context-menu` | `type`, `id`, `label`, `menu: "connection"` | 向连接的右键菜单增加动作。 |
+| `result-view` | `type`, `id`, `label` | 注册查询或任务结果视图。 |
+
+同一插件内通过 `id` 互相引用：Connection Provider 的 `workbench` 必须指向一个已声明的工作台，`filesystem_provider` 必须指向一个已声明的文件系统 Provider。图标优先使用 Contribution 的 `icon`，缺失时回退到插件级 `icon`。
+
+自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。`context-menu` 调用后端 `contextMenu/<contribution-id>`，`result-view` 则在工作台 context 中接收结果快照；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
+
+### 文件系统协议
+
+使用 DBX 通用文件管理器时，后端实现以下方法；自定义工作台也可以自行通过 RPC 使用这些方法，但不能把声明 Contribution 当成已经实现业务逻辑。
+
+| 方法 | 参数与返回 |
+| --- | --- |
+| `filesystem/list` | `providerId`、可选 `connectionId`、`uri`、可选 `cursor`、`limit`；返回 `{ entries, nextCursor? }`。 |
+| `filesystem/read` | 同上身份字段、`uri`、`maxBytes`；返回 `{ dataBase64, contentType?, truncated, etag? }`。 |
+| `filesystem/write` | `uri`、`dataBase64`、`create`、`overwrite`、可选 `etag`；需声明 `write`。 |
+| `filesystem/createDirectory` | `uri`；需声明 `mkdir`。 |
+| `filesystem/delete` | `uri`、`recursive`；需声明 `delete`。 |
+| `filesystem/rename` | `sourceUri`、`targetUri`、`overwrite`；需声明 `rename`。 |
+
+所有方法都携带 `providerId` 和可选 `connectionId`。目录项包含单个文件名 `name`、完整 `uri`、`kind`（`file`、`directory`、`symlink`、`other`）以及可选 `size`、`modifiedAt`、`contentType`。`name` 不能包含 `/`、`\\` 或是 `.`/`..`；完整路径放在 `uri`。最后一页省略 `nextCursor`，不要返回已经使用的 cursor。图片预览应返回实际 MIME 和 base64 字节，不能把二进制当作 UTF-8 文本。
+
+写操作返回 `{ success, message?, entry? }`；内联读写限制为 4 MiB。大文件传输应采用分块与进度/取消协议，而不是一个巨大的 JSON/base64 值。
+
+### 国际化
+
+`localizations` 的 key 使用 `zh-CN`、`en` 等 locale。可覆盖插件名称、说明以及每个 Contribution 的 `label`、`description`、字段和动作文案；它不会翻译插件 UI 自己的文本。
+
+```json
+{
+"localizations": {
+  "zh-CN": {
+    "name": "示例文件",
+    "contributions": {
+      "com.example.files.connection": {
+        "label": "示例服务",
+        "fields": { "token": { "label": "访问令牌" } }
+      }
+    }
+  }
+}
+}
+```
+
+## Workbench 上下文契约
+
+Workbench 上下文跨越 DBX 与插件边界时是 JSON 数据快照。宿主会递归移除 Vue 响应式包装并发送独立副本，因此插件不能依赖 Vue ref、Proxy、DOM 节点、函数、组件实例或凭据。
+
+上下文可以包含 `null`、布尔值、有限数字、字符串、数组和普通对象。对象中的 `undefined` 字段会省略，数组中的 `undefined` 会转换为 `null`。Date、Map、Set、Symbol、BigInt、非有限数字、循环引用和自定义 class 实例会被拒绝并返回错误。上下文 UTF-8 编码后的大小上限为 2 MiB。
+
+连接 Provider 使用 `binding: "config"` 的字段会保存到 `external_config`；使用 `binding: "secret"` 的字段会保存到 Secret Store。插件连接的 `external_config` 会在新建、编辑、保存和重新连接流程中保留。
+
+## 前端 Host API
+
+UI 在隔离的 iframe 中运行，DBX 通过 `window.dbxPlugin` 提供桥接对象。不要导入 DBX 的 Vue/Tauri 模块，也不要假设浏览器页面能直接访问 Node.js、文件系统或网络。
+
+以下自定义 `objects/list` 和 `objects/changed` 需要由插件后端实现，资源示例假设包内存在 `ui/assets/empty-state.svg`：
+
+```js
+await window.dbxPlugin.ready;
+
+const context = window.dbxPlugin.context;
+const result = await window.dbxPlugin.invoke("objects/list", { prefix: "docs/" }, { timeoutMs: 30000 });
+const off = window.dbxPlugin.onContext((nextContext) => render(nextContext));
+
+await window.dbxPlugin.notify("objects/changed", { count: result.items.length });
+const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
+```
+
+| API | 作用 |
+| --- | --- |
+| `ready` | 等待 Host 完成初始化；应用启动逻辑放在 `await dbxPlugin.ready` 之后。 |
+| `context` / `onContext(fn)` | 读取或监听当前工作台上下文。 |
+| `locale` | 读取当前语言；插件 UI 需自行完成翻译。 |
+| `theme` | 读取 `appearance` 和 DBX 设计 tokens，适配明暗主题。 |
+| `request(method, params)` | 调用 Host API；常用内部方法包括 `host.getContext`、`ui.readAsset`。 |
+| `invoke(method, params, { timeoutMs })` | 向自己的 Sidecar 发送有响应的 RPC。 |
+| `notify(method, params)` | 向 Sidecar 发送无需返回业务结果的通知。 |
+| `sendBinary(channel, data)` / `onBinary(fn)` | 发送或接收二进制数据；需要 `stdio-framed` 和 `host.binary`。 |
+| `readAsset(path)` / `readAssetUrl(path)` | 读取包内资源；路径不能越出插件资源根目录。 |
+| `openWorkbench(id, context)` | 打开本插件的另一个工作台；需要 `host.workbench`。 |
+| `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
+| `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
+
+调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。
+
+`readAsset` 的路径相对于 `ui.root`，所以这里的 `assets/empty-state.svg` 对应包内 `ui/assets/empty-state.svg`。资源不用时调用 `URL.revokeObjectURL(assetUrl)`；组件销毁时调用 `onContext`/`onEvent` 等返回的取消订阅函数，避免重复监听。
+
+### 主题、布局和静态资源
+
+DBX 将主题 tokens 注入文档根元素，并更新 `data-dbx-theme`。自定义组件库（包括 Svelte、shadcn-svelte）应使用这些变量，不要依赖父页面 CSS 自动穿透 iframe：
+
+```css
+body {
+  margin: 0;
+  background: var(--color-background, #fff);
+  color: var(--color-foreground, #18181b);
+}
+button {
+  background: var(--color-primary, #2563eb);
+  color: var(--color-primary-foreground, #fff);
+  cursor: pointer;
+}
+```
+
+使用 `window.addEventListener("dbx-plugin-env", handler)` 响应语言或主题变化。先读取 `dbxPlugin.locale`/`theme` 初始化，再在事件中刷新自己的状态。DBX 提供轻量 `dbx-btn`、`dbx-input` 等样式，但开发宿主不模拟完整组件 kit，自定义 token 样式在两者中更一致。
+
+UI 必须构建为包内静态资源，不要把 Vite 开发服务器或 CDN 的脚本地址写入发行包。宿主把入口及资源转换成沙箱可加载内容；CSP 报错时检查构建产物是否存在、路径是否落在 `ui.root` 内，并使用匹配版本的 CLI 复现。用插件自己的对话框组件处理删除/重命名，不要依赖沙箱中的原生 `alert`/`confirm`/`prompt`。
+
+## 原生 Sidecar 和 RPC
+
+只有浏览器沙箱无法完成的能力才需要原生后端，例如 S3/SSH 协议、系统凭据、长连接或高性能计算。Sidecar 不是操作系统沙箱，会以当前用户权限运行。
+
+Rust 和 Go SDK 都实现 Sidecar Protocol v1：
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"plugin/initialize","params":{"host":{"protocolVersions":[1]}}}
+{"jsonrpc":"2.0","id":2,"method":"objects/list","params":{"prefix":"docs/"}}
+```
+
+响应必须使用相同的 `id`，成功返回 `result`，失败返回 JSON-RPC `error`。初始化响应至少包含 `protocolVersion`、`capabilities` 和 `plugin: { id, version }`；ID 和版本必须与 Manifest 一致，协议必须在双方支持范围内，否则会出现 `Sidecar identity or protocol does not match manifest`。初始化 capabilities 描述后端能力，不等于 Manifest 的 Host 权限列表。
+
+```rust
+use dbx_plugin_sdk::{PluginEmitter, PluginError, PluginHandler, PluginMetadata, PluginServer, RequestContext};
+use serde_json::{json, Value};
+
+struct Plugin;
+
+impl PluginHandler for Plugin {
+    fn handle(&self, _context: RequestContext, method: &str, _params: Value, _emitter: &PluginEmitter) -> Result<Value, PluginError> {
+        match method {
+            "example/ping" => Ok(json!({ "ok": true })),
+            _ => Err(PluginError::method_not_found(method)),
+        }
+    }
+}
+
+fn main() -> std::io::Result<()> {
+    let metadata = PluginMetadata::new("com.example.files", env!("CARGO_PKG_VERSION"));
+    PluginServer::new(metadata, Plugin).serve()
+}
+```
+
+Sidecar 约束：stdout 只能输出协议消息，日志写 stderr；请求 ID 必须支持并发关联；连接和断开应幂等；长任务应设计超时、取消和分块确认；不要在事件、context 或错误消息中泄露 Secret。
+
+上例可替换 Rust 模板的 `backend/src/main.rs`，同时让 Cargo 包版本与 Manifest 一致。Go 使用模板生成的 `dbxpluginsdk.NewServer(metadata, handler).Serve()`；当前 Go SDK 支持 JSONL，Rust SDK 还支持 framed transport。不要仅修改 Manifest transport 就认为 Go 已具备二进制帧处理能力。完整接口见 [Rust SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk) 和 [Go SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/go/dbx-plugin-sdk)。
+
+## 创建插件
+
+直接安装预编译 CLI，不需要 Rust，也不需要克隆 DBX 源码：
+
+```bash
+npm install --global @dbx-app/plugin-cli
+dbx-plugin --help
+```
+
+也可以直接使用 `npx`：
+
+```bash
+npx @dbx-app/plugin-cli create my-ui-plugin --template frontend
+```
+
+npm 包会自动选择当前平台的预编译二进制，并携带匹配版本的 Rust/Go 插件 SDK。纯前端插件不需要 Rust 或 Go；原生编译环境只用于构建插件自己的 Sidecar。
+
+创建项目：
+
+```bash
+# 纯前端、跨平台
+dbx-plugin create my-ui-plugin --template frontend
+
+# Svelte + Vite、跨平台
+dbx-plugin create my-svelte-plugin --template svelte
+
+# Rust Sidecar + 前端
+dbx-plugin create my-rust-plugin --template rust
+
+# Go Sidecar + 前端
+dbx-plugin create my-go-plugin --template go
+```
+
+四种模板的选择：`frontend` 适合原生 HTML 或自行接入 Vue/React 的静态 UI；`svelte` 自带 Svelte 5 + Vite；`rust` 和 `go` 额外生成原生 Sidecar。`--backend none|svelte|rust|go` 可以作为模板别名，`--language rust|go` 是原生项目兼容别名。脚本或 CI 中可以用 `--yes` 跳过交互向导：
+
+```bash
+dbx-plugin create my-plugin \
+  --template svelte \
+  --id com.example.my-plugin \
+  --name "My Plugin" \
+  --publisher example \
+  --description "A DBX plugin." \
+  --version 0.1.0 \
+  --yes
+```
+
+Svelte 模板构建脚本会把 Vite 输出到 `ui/`，并在成功构建后输出 `DBX_UI_BUILD_SUCCESS`：
+
+```bash
+cd my-svelte-plugin
+npm install
+npm run build
+dbx-plugin dev --port 5190
+```
+
+生成项目后，先在自己的插件源码仓库开发、测试和维护版本记录。不要为了发布一个普通插件而把整个源码目录复制进 `t8y2/dbx`。
+
+## 构建候选包
+
+在插件项目根目录执行：
+
+```bash
+dbx-plugin package .
+```
+
+该命令只生成**未签名审核候选包**：
+
+```text
+dist/<plugin-id>-<version>-<target>.dbxp
+dist/<plugin-id>-<version>-<target>.artifact.json
+```
+
+前端-only 项目默认使用 `universal` target；Rust/Go 项目使用当前平台 target。`--output-dir` 可以改变输出目录，`--artifact-url` 可以写入发布后的 HTTPS 地址：
+
+```bash
+dbx-plugin package . --target universal --output-dir dist --artifact-url https://downloads.example.com/my-plugin.dbxp
+```
+
+CLI 会只打包 `dbx-plugin.toml` 的 `[package].include` 声明目录，并拒绝符号链接、越界路径、`.dbx-dev`、过大的文件和不安全的输出位置。不要把 `dist/` 或开发数据再次作为输入目录。
+
+官方插件作者不创建或持有 DBX Store 私钥。生成的 GitHub Release 工作流会按目标平台构建候选包，并合并产生 `release-candidates.json`。
+
+本地测试未签名包时，需要在插件中心显式开启“允许安装未签名开发包”。该选项不会放宽官方商店安装校验。
+
+## 本地调试和验证
+
+需要实时观察前端时，在插件项目根目录运行独立开发宿主；它不会启动 DBX 桌面端：
+
+```bash
+dbx-plugin dev --path . --port 5190
+```
+
+打开终端输出的 `http://127.0.0.1:5190/`。`--port 0` 或端口被占用时会选择可用端口，`--data-dir` 可以把开发数据移出项目目录：
+
+```bash
+dbx-plugin dev --path . --data-dir /tmp/my-plugin-dev
+```
+
+`dbx-plugin dev` 不会自动安装插件依赖；前端构建由 `dbx-plugin.toml` 的 `[dev]` 命令决定：
+
+```toml
+[dev]
+ui_build = ["npm", "run", "build"]
+ui_watch = ["npm", "run", "build:watch"]
+```
+
+配置 `ui_watch` 时，命令只有在一次完整成功构建后输出独立一行 `DBX_UI_BUILD_SUCCESS`，开发宿主才会重载 UI。不要在失败路径或无条件的退出钩子中输出这个标记。
+
+调试页可以切换语言、主题、自动重载和日志面板。日志只保留内存中的最近 500 条，密码、Token 和 Manifest 中的 Secret 字段会脱敏，二进制和过大的值会省略或截断；开发目录 `.dbx-dev/` 可能包含明文凭据，必须加入 `.gitignore`，不要提交或共享。
+
+需要从脚本读取脱敏日志时：
+
+```bash
+curl -sS 'http://127.0.0.1:5190/api/diagnostics?after=0&limit=100&level=error'
+```
+
+后续请求使用响应里的 `nextAfter` 和 `instanceId`。开发宿主只模拟受支持的 Host API 子集；安装、签名、真实 Secret Store、桌面端生命周期和生产权限必须再用 DBX 验证。
+
+### 本地验收清单
+
+- 关闭未使用的权限，确认 Manifest 中的权限与实际调用一致。
+- 用空配置、错误凭据、超时、断网和 Sidecar 重启分别测试失败路径。
+- 测试 DBX 浅色/深色主题和 `zh-CN`/`en`；不要依赖宿主替你翻译插件 UI。
+- 测试重新连接、关闭工作台、重复打开同一工作台以及上下文为空的情况。
+- 检查包内所有资源路径、可执行文件权限和最终包是否包含不应发布的文件。
+
+## 提交官方商店的完整流程
+
+### 第一步：发布源码和候选 Release
+
+在插件自己的源码仓库创建版本 Tag 和 GitHub Release。Release 中应包含：
+
+- 每个平台的未签名 `.dbxp` 候选包；
+- 每个候选包对应的 `.artifact.json`；
+- 汇总后的 `release-candidates.json`；
+- Release Notes 和对应源码 Tag。
+
+候选包可以放在插件源码仓库的 GitHub Releases、CDN 或对象存储中，但不要把 `.dbxp` 提交到 Git 历史。
+
+### 第二步：让 dbx-store 自动创建候选 PR
+
+`dbx-store` 的同步 Workflow 会定期检查已在 `automation/plugin-sources.json` 注册且 `autoUpdate: true` 的公开插件仓库。它读取最新 Release 的 `release-candidates.json`，创建或更新唯一的：
+
+```text
+candidates/<plugin-id>.json
+```
+
+因此，已启用自动更新的插件作者**不需要每个版本手工创建 Issue 或 PR**，也不需要在插件仓库配置商店签名 Secret。插件仓库的 Release、候选 metadata 和可访问的源码 Tag 是同步所需的主要信息。首次上架或需要修改商店展示字段时，才按 [`dbx-store` 的贡献指南](https://github.com/t8y2/dbx-store/blob/main/CONTRIBUTING.md) 提供发布者和候选信息。
+
+`.dbx-store.json` 是可选的商店元数据文件：首次登记或主动修改商店名称、标签、许可证、主页等信息时使用；仅发布新版本时不需要重复修改它。它不是插件运行时 Manifest，也不能放签名私钥。
+
+例如：
+
+```json
+{
+  "name": "Example Files",
+  "description": "Browse files from an example service.",
+  "icon": "assets/plugin.svg",
+  "tags": ["files", "storage"],
+  "permissions": ["host.workbench"],
+  "source": "https://github.com/example/dbx-plugin-files",
+  "homepage": "https://github.com/example/dbx-plugin-files",
+  "license": "Apache-2.0",
+  "releaseNotes": "Initial release."
+}
+```
+
+允许的商店字段是 `name`、`description`、`icon`、`tags`、`permissions`、`source`、`homepage`、`license`、`releaseNotes` 和 `localizations`；`icon` 可以是包内相对路径，自动同步时会转换成源码 Tag 下的 HTTPS 地址。`autoUpdate` 是 `dbx-store/automation/plugin-sources.json` 的注册字段，不是这个文件的字段。
+
+自动同步只创建或更新候选 PR，**不会自动批准、签名或合并**。候选 PR 的目标仓库是 [`t8y2/dbx-store`](https://github.com/t8y2/dbx-store)，目标分支是 `main`，而不是 `t8y2/dbx`。
+
+如果插件还没有登记到自动同步列表，首次上架可以手动 Fork `dbx-store`，向 `main` 提交**一个** PR，包含发布者首次需要的 `publishers/<publisher-id>.json` 和 `candidates/<plugin-id>.json`。不需要先创建单独的 Issue；CI 会在签名前有意保持 `open candidate(s) awaiting DBX Store signing`，签名 Workflow 回写正式目录后才会变绿。插件作者可以在 `dbx-store` 提交登记自动同步源的 PR，或请维护者登记；无需在插件仓库增加 App 私钥。
+
+候选文件的关键结构如下。它只引用插件仓库自己的未签名 Release 资产，不能填写官方 `signingKeyId`：
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "com.example.files",
+  "publisher": "example",
+  "version": "0.1.0",
+  "name": "Example Files",
+  "source": "https://github.com/example/dbx-plugin-files/tree/v0.1.0",
+  "license": "Apache-2.0",
+  "targets": [{
+    "target": "universal",
+    "url": "https://github.com/example/dbx-plugin-files/releases/download/v0.1.0/com.example.files-0.1.0-universal.dbxp",
+    "sha256": "<64 位十六进制 SHA-256>",
+    "size": 123456
+  }]
+}
+```
+
+新版本仅提交新增版本；生成的 `plugins/<plugin-id>.json` 和 `catalog/index.json` 不要手工编辑。
+
+### 第三步：DBX Store 审核并签名
+
+维护者会检查源码、Manifest、权限、候选 SHA-256、大小和原生行为。审核通过后，受保护的 DBX Store 工作流会：
+
+1. 按已审核 SHA-256 和大小下载候选包；
+2. 确认候选包没有已有签名，并核对插件 ID 和版本；
+3. 使用 DBX Store 仓库密钥添加 Ed25519 签名；
+4. 发布最终 `.dbxp`、最终 artifact metadata 和 signing receipt。
+
+开发者不会接触官方仓库私钥。
+
+### 第四步：合并候选 PR
+
+维护者运行受保护的签名 Workflow 后，Workflow 会把最终的 `plugins/<plugin-id>.json` 和生成的 `catalog/index.json` 回写到同一个候选 PR，并将签名包、artifact metadata 和 signing receipt 发布到 `dbx-store` Release。校验通过后，维护者再审核并合并这个 PR。
+
+上架或更新 PR 中不要包含：
+
+- `.dbxp` 二进制；
+- 插件完整源码副本；
+- Ed25519 私钥、Token 或下载凭据；
+- 未经 DBX Store 签名的候选包 URL；
+- 自行伪造的 `verified: true`。
+
+## 更新已有插件
+
+每次更新都发布新语义版本，不允许覆盖旧版本的 Release 资产：
+
+1. 修改插件源码，并递增 `manifest.json` 的 `version`；不要复用旧版本号。
+2. 发布新的源码 Tag 和候选 Release；旧 Release 资产不可覆盖。
+3. 等待同步 Workflow 创建或更新 `automation/plugin-release/<plugin-id>/<version>` 候选 PR。
+4. 维护者审核、签名并合并该 PR；目录随后包含新版本和对应平台包。
+
+如果仓库未启用自动同步，才需要按照 `dbx-store` 贡献指南手动提交 `candidates/<plugin-id>.json`。新版本只提交新版本候选信息，不要手工重写已生成的 `plugins/` 或 `catalog/` 文件。
+
+插件代码问题继续在插件源码仓库修复；只有目录、审核状态、最终下载地址、哈希、大小或商店文案变更才进入 `dbx-store`。
+
+## 签名和发布者身份
+
+DBX 当前使用单一仓库签名：
+
+- `publisher` 表示作者归属和商店记录；
+- `signingKeyId` 表示发布最终安装包的仓库密钥；
+- 官方插件由 DBX Store 审核后统一签名；
+- 自定义或私有仓库由仓库运营方维护自己的密钥；
+- 开发者签名或双签名不是当前上架要求。
+
+人工审核决定插件能否展示，Ed25519 仓库签名保证审核后的安装包没有被替换。签名不能替代源码审查，也不是原生 Sidecar 的操作系统沙箱。
+
+官方商店插件作者不要运行 `keygen`，也不要自行填写 `signingKeyId`。如果你运营自己的私有插件仓库，才使用 CLI 的高级签名工具：
+
+```bash
+dbx-plugin keygen company.plugins.release
+source .dbx-repository-signing-key.env
+```
+
+该命令生成 32 字节 Ed25519 seed 的受保护环境文件（Unix 权限为 `0600`），并输出 Key ID 和 Base64 公钥；私钥文件绝不能提交 Git。自定义仓库还必须把公钥加入自己的 DBX 信任配置。官方商店的私钥只存在 `dbx-store` 受保护的 Environment Secret 中，公钥由 DBX 客户端随官方信任列表发布。
+
+`artifact.json` 中的 `target`、`url`、`sha256` 和 `size` 绑定确切字节；官方签名后才会增加 `signingKeyId`。已发布资产不可覆盖，任何字节变化都必须递增插件版本并重新审核。
+
+## 相关资料
+
+- [JDBC 插件与数据库驱动](/cn/docs/plugins)
+- [参与 DBX 主仓库贡献](/cn/docs/contributing)
+- [`t8y2/dbx` 插件平台源码](https://github.com/t8y2/dbx/tree/main/plugins)
+- [`t8y2/dbx-store` 官方商店仓库](https://github.com/t8y2/dbx-store)

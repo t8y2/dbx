@@ -1,8 +1,14 @@
 import type { Extension } from "@codemirror/state";
 import type { EditorTheme, CustomThemeColors } from "@/stores/settingsStore";
-import type { AppThemeAppearance, AppThemePalette } from "@/lib/app/appTheme";
+import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, type AppThemePalette } from "@/lib/app/appTheme";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
+
+// @codemirror/lang-sql tags dialect builtin-list words (COUNT, DATE_FORMAT, ...) as
+// standard(name) — not standard(variableName), which is a *child* tag of name and so never
+// matches a token tagged with the parent. Shared so both editor theme builders below stay in
+// sync with what the SQL tokenizer actually emits.
+export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
 
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
 type LucideIconNode = Array<[string, Record<string, string>]>;
@@ -25,7 +31,25 @@ export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HT
 export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
   return EditorView.theme({
     ".cm-sql-table-name, .cm-sql-table-name *": {
-      color: `var(${SQL_TABLE_COLOR_CSS_VAR}) !important`,
+      // Built-in CodeMirror themes do not define the editor-specific table color
+      // variable. Keep semantic table names visible there as well, while custom
+      // and IDE themes continue to use their configured table color.
+      color: `var(${SQL_TABLE_COLOR_CSS_VAR}, #b4530b) !important`,
+    },
+  });
+}
+
+// MongoDB and other shell-style editors keep the SQL grammar, so their `//` comments are decorated
+// manually. The decoration carries the active theme's comment highlight class, so it only has to
+// keep the SQL grammar's colours from leaking through on the tokens it wraps.
+export function shellLineCommentTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
+  return EditorView.theme({
+    ".cm-shell-line-comment": {
+      fontStyle: "italic",
+    },
+    ".cm-shell-line-comment *": {
+      color: "inherit !important",
+      fontStyle: "italic",
     },
   });
 }
@@ -68,12 +92,20 @@ const customThemeColors = {
   invalid: "#f38ba8", // 无效字符
 };
 
+export function resolveCustomThemeBackgrounds(colors?: Pick<CustomThemeColors, "background">, isDark: boolean = true): { background: string; gutterBackground: string } {
+  return {
+    background: colors?.background ?? (isDark ? "#1e1e2e" : "#fafafa"),
+    gutterBackground: colors?.background ?? customThemeColors.gutterBackground,
+  };
+}
+
 /** 创建自定义 CodeMirror 主题 */
 function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorView, colors?: CustomThemeColors, isDark: boolean = true): Extension {
   // 根据系统主题设置默认背景色和前景色
-  const defaultColors = isDark ? { background: "#1e1e2e", foreground: "#cdd6f4" } : { background: "#fafafa", foreground: "#242424" };
+  const backgrounds = resolveCustomThemeBackgrounds(colors, isDark);
+  const defaultColors = { background: backgrounds.background, foreground: isDark ? "#cdd6f4" : "#242424" };
 
-  const c = { ...defaultColors, ...customThemeColors, ...colors };
+  const c = { ...defaultColors, ...customThemeColors, ...colors, gutterBackground: backgrounds.gutterBackground };
 
   // 映射用户自定义属性名到 CodeMirror 内部属性名
   if (colors) {
@@ -142,7 +174,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.definition(tags.variableName), color: c.variable },
     { tag: tags.function(tags.variableName), color: c.function },
     { tag: tags.function(tags.propertyName), color: c.function },
-    { tag: tags.standard(tags.variableName), color: c.builtin },
+    { tag: SQL_BUILTIN_HIGHLIGHT_TAG, color: c.builtin },
     { tag: tags.propertyName, color: c.property },
     { tag: tags.operator, color: c.operator },
     { tag: tags.compareOperator, color: c.operator },
@@ -540,7 +572,7 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
     { tag: [tags.typeName, tags.typeOperator, tags.unit], color: c.type },
     { tag: [tags.name, tags.variableName, tags.definition(tags.variableName)], color: c.variable },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.function(tags.name), tags.macroName], color: c.function },
-    { tag: [tags.standard(tags.variableName), tags.special(tags.name)], color: c.builtin },
+    { tag: [SQL_BUILTIN_HIGHLIGHT_TAG, tags.special(tags.name)], color: c.builtin },
     { tag: [tags.propertyName, tags.labelName, tags.annotation], color: c.property },
     { tag: [tags.operator, tags.compareOperator, tags.logicOperator, tags.arithmeticOperator, tags.derefOperator], color: c.operator },
     { tag: [tags.punctuation, tags.separator, tags.paren, tags.brace, tags.bracket, tags.angleBracket], color: c.punctuation },
@@ -600,6 +632,12 @@ const FUNCTION_ICON: LucideIconNode = [
   ["path", { d: "M4 4v7a4 4 0 0 0 4 4h12" }],
 ];
 
+const DATABASE_LINK_ICON: LucideIconNode = [
+  ["path", { d: "M9 17H7A5 5 0 0 1 7 7h2" }],
+  ["path", { d: "M15 7h2a5 5 0 0 1 0 10h-2" }],
+  ["path", { d: "M8 12h8" }],
+];
+
 const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
 
 function encodeSvgIcon(iconNode: LucideIconNode): string {
@@ -650,11 +688,38 @@ export function resolveEditorTheme(theme: EditorTheme, appAppearance: AppThemeAp
         return appAppearance === "dark" ? "cursor-dark" : "cursor-light";
       case "claude":
         return appAppearance === "dark" ? "claude-dark" : "claude-light";
+      case "custom":
+        // The custom UI palette routes the follow-app editor to verified,
+        // self-consistent themes. The caller derives appAppearance from the
+        // actual custom background luminance, so dark backgrounds pick the
+        // dark theme and light backgrounds the light theme.
+        return appAppearance === "dark" ? "one-dark" : "vscode-light";
       default:
         return appAppearance === "dark" ? "one-dark" : "vscode-light";
     }
   }
   return theme;
+}
+
+/**
+ * Effective appearance for the "Follow app theme" editor: with the custom UI
+ * palette the mode's light/dark flag is replaced by the custom background's
+ * luminance, keeping tokens, selection, cursor, search matches and diagnostics
+ * readable on arbitrarily dark/light custom backgrounds. Other palettes keep
+ * the previous appearance unchanged.
+ */
+export function editorThemeAppearanceFor(appAppearance: AppThemeAppearance, appPalette: AppThemePalette, customUiColors?: AppCustomUiColors): AppThemeAppearance {
+  if (appPalette === "custom" && customUiColors) return customUiAppearance(customUiColors);
+  return appAppearance;
+}
+
+/**
+ * Diagnostic marker colors for the editor surface, chosen from the resolved
+ * editor appearance so error/warning underlines stay legible on the actual
+ * editor background instead of using app-level warning/destructive tokens.
+ */
+export function editorDiagnosticColors(appearance: AppThemeAppearance): { error: string; warning: string } {
+  return appearance === "dark" ? { error: "#f87171", warning: "#fbbf24" } : { error: "#dc2626", warning: "#b45309" };
 }
 
 /** Load a CodeMirror theme extension by theme name. */
@@ -713,6 +778,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ...(opts?.scrollable ? { ".cm-scroller": { overflowX: "auto", overflowY: "auto" } } : {}),
     ".cm-content": {
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
+      // Ligature fonts (Fira Code, Cascadia Code, JetBrains Mono, ...) combine
+      // runs like `--`/`==` into a single shaped glyph. CodeMirror repaints
+      // edited lines by patching individual character spans, and that
+      // per-keystroke patching can race the browser's ligature reshaping when
+      // the same character is typed repeatedly in place, leaving earlier
+      // characters unpainted until something else forces a repaint (dbx#7900).
+      // Disabling ligatures here avoids the reshaping entirely, matching the
+      // same fix already applied to DataGridConditionEditor.vue.
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
       lineHeight: "1.6",
       padding: "0",
     },
@@ -722,9 +797,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ".cm-selectionLayer .cm-selectionBackground": {
       display: "none",
     },
+    // 光标是零宽元素，可见部分只来自 border-left。在 WebView 页面缩放（uiScale）下
+    // 1 CSS px 不再映射为整数设备像素，1.2px 的小数边框加上 transform 造成的独立绘制层
+    // 会被 WebKit 舍入丢弃，表现为光标在部分列/部分窗口宽度下不显示。
+    // 因此：用 margin-top 代替 transform（不产生绘制层），并给边框整数宽度。
+    // 颜色仍由各主题的 borderLeftColor 提供，无需改动主题。
     ".cm-cursor": {
       height: "1.6em !important",
-      transform: "translateY(-0.3em)",
+      marginTop: "-0.3em",
+      borderLeftWidth: "2px",
+      marginLeft: "-1px",
     },
     ".cm-trimmedSelection": {
       backgroundColor: `var(${EDITOR_SELECTION_BACKGROUND_CSS_VAR}, rgb(148 163 184 / 38%))`,
@@ -760,21 +842,28 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       width: "1px",
       zIndex: "10",
     },
+    // Single lines render vertically centered here. Wrapped lines are anchored
+    // to the first visual row by createQueryEditorLineNumberAlignmentExtension,
+    // which sets an inline `align-items: flex-start` (inline style survives
+    // CodeMirror's className rebuild, unlike a toggled class).
     ".cm-lineNumbers .cm-gutterElement": {
+      alignItems: "center",
       cursor: "pointer",
-      paddingRight: "16px",
+      display: "flex",
+      justifyContent: "flex-end",
+      paddingRight: "8px",
       userSelect: "none",
     },
     ".cm-run-statement-gutter": {
-      minWidth: "34px",
+      minWidth: "28px",
     },
     ".cm-run-statement-gutter .cm-gutterElement": {
       alignItems: "center",
       boxSizing: "border-box",
       display: "flex",
       justifyContent: "center",
-      minWidth: "34px",
-      padding: "0 5px",
+      minWidth: "28px",
+      padding: "0 2px",
     },
     ".cm-run-statement-marker": {
       alignItems: "center",
@@ -917,6 +1006,15 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: "var(--popover-foreground) !important",
       outline: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--primary) 22%, transparent)"),
     },
+    ".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action": {
+      background: "var(--popover)",
+      borderRadius: "0",
+      borderTop: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
+      bottom: "0",
+      boxShadow: "0 -6px 12px rgb(0 0 0 / 0.06)",
+      position: "sticky",
+      zIndex: "1",
+    },
     ".cm-completionIcon": {
       alignItems: "center",
       display: "inline-flex",
@@ -933,7 +1031,13 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       backgroundColor: "currentColor",
       content: "''",
       display: "block",
-      height: "14px",
+      height: "15px",
+      // The pseudo element must be pinned to the icon box: with `left`/`top`
+      // left auto, engines disagree on the static position of an absolutely
+      // positioned child of a flex container, and WebKit places it far enough
+      // left for `overflow: hidden` to cut off half the glyph.
+      left: "0",
+      top: "0",
       position: "absolute",
       WebkitMaskImage: "var(--dbx-completion-icon-mask)",
       WebkitMaskPosition: "center",
@@ -943,7 +1047,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       maskPosition: "center",
       maskRepeat: "no-repeat",
       maskSize: "14px 14px",
-      width: "14px",
+      width: "15px",
     },
     ".cm-completionIcon:after": {
       content: "'none'",
@@ -969,9 +1073,19 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(FUNCTION_ICON),
     },
+    ".cm-completionIcon-namespace": {
+      color: colorMixValue("var(--sky-500, #0ea5e9)", "color-mix(in oklch, var(--sky-500, #0ea5e9) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(DATABASE_LINK_ICON),
+    },
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(SCHEMA_ICON),
+    },
+    // Reuse the table glyph for aliases instead of CodeMirror's default text
+    // icon, which is rendered as a solid black square in some themes.
+    ".cm-completionIcon-text": {
+      color: colorMixValue("var(--violet-500, #8b5cf6)", "color-mix(in oklch, var(--violet-500, #8b5cf6) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(TABLE_ICON),
     },
     ".cm-completionLabel": {
       color: "inherit",

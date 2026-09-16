@@ -192,3 +192,21 @@ test("changed PG array value returns new array reference", () => {
   assert.notStrictEqual(result, oldValue);
   assert.deepEqual(result, [1, 2, 3, 4]);
 });
+
+test("MySQL text BLOB editor decodes UTF-8 and writes edited bytes as hex", () => {
+  const oldValue = "0x2332303035383035";
+  const columnInfo = { data_type: "longblob" };
+
+  assert.equal(dataGridCellEditorText({ value: oldValue, databaseType: "mysql", columnInfo }), "#2005805");
+  assert.strictEqual(coerceDataGridCellValue({ value: "#2005805", oldValue, databaseType: "mysql", columnInfo }), oldValue);
+  assert.equal(coerceDataGridCellValue({ value: "新表达式", oldValue, databaseType: "mysql", columnInfo }), "0xe696b0e8a1a8e8bebee5bc8f");
+  assert.equal(coerceDataGridCellValue({ value: "", oldValue, databaseType: "mysql", columnInfo }), "0x");
+});
+
+test("MySQL binary BLOB editor keeps non-text bytes in hex", () => {
+  const oldValue = "0x89504e470d0a1a0a";
+  const columnInfo = { data_type: "longblob" };
+
+  assert.equal(dataGridCellEditorText({ value: oldValue, databaseType: "mysql", columnInfo }), oldValue);
+  assert.equal(coerceDataGridCellValue({ value: oldValue, oldValue, databaseType: "mysql", columnInfo }), oldValue);
+});

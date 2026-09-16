@@ -1,0 +1,33 @@
+schemaVersion: 1
+order: 520
+dbType: kyuubi
+rustVariant: Kyuubi
+label: Apache Kyuubi
+runtimeMode: agent
+mcpMode: bridge
+agentKey: hive
+driverStoreVisible: false
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 10009
+traits:
+  schemaAware: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: true
+  userAdmin: false
+  driverManagement: true

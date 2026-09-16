@@ -85,8 +85,8 @@ async fn native_sqlite_pool(
 ) -> Result<(String, db::sqlite::SqliteHandle), String> {
     let database = (!database.trim().is_empty()).then_some(database);
     let pool_key = state.get_or_create_pool(connection_id, database).await?;
-    let connections = state.connections.read().await;
-    match connections.get(&pool_key) {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    match pool_handle.as_ref() {
         Some(PoolKind::Sqlite(pool)) => Ok((pool_key, pool.clone())),
         Some(_) => Err("SQLite table rebuild is only available for native SQLite connections.".to_string()),
         None => Err("SQLite connection pool not found.".to_string()),
@@ -688,6 +688,7 @@ fn execute_change_transaction(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         }),
     }
 }
@@ -1483,6 +1484,7 @@ mod tests {
     ) -> TableStructureSqlOptions {
         TableStructureSqlOptions {
             database_type: Some(DatabaseType::Sqlite),
+            driver_profile: None,
             schema: None,
             table_name: table_name.to_string(),
             columns: vec![EditableStructureColumn {
@@ -1515,6 +1517,10 @@ mod tests {
             triggers: Vec::new(),
             table_comment: None,
             original_table_comment: None,
+            mysql_engine: None,
+            partitioned: false,
+            is_gaussdb_m_mode: false,
+            table_collation: None,
         }
     }
 
@@ -1689,7 +1695,9 @@ mod tests {
             filter: String::new(),
             index_type: String::new(),
             included_columns: Vec::new(),
+            column_opclasses: Vec::new(),
             comment: String::new(),
+            concurrently: false,
             original: None,
             marked_for_drop: false,
         });
@@ -2007,7 +2015,9 @@ mod tests {
             filter: String::new(),
             index_type: String::new(),
             included_columns: Vec::new(),
+            column_opclasses: Vec::new(),
             comment: String::new(),
+            concurrently: false,
             original: Some(IndexInfo {
                 name: "uq_items_value".to_string(),
                 columns: vec!["value".to_string()],
@@ -2017,6 +2027,9 @@ mod tests {
                 index_type: None,
                 included_columns: None,
                 comment: None,
+                key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             }),
             marked_for_drop: true,
         });

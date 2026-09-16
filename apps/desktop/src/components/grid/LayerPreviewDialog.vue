@@ -4,9 +4,11 @@ import { useI18n } from "vue-i18n";
 import { Camera, Loader2, Map, Maximize2, Minimize2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { renderGeometryFeaturesIndependently } from "@/lib/dataGrid/geometryLayerPreview";
 import { prepareCoordsToLatLng, type CoordinateToLatLng } from "@/lib/dataGrid/geometryProjection";
 import { getSpatialReference, SHORTLIST_SRIDS } from "@/lib/dataGrid/spatialReferenceCatalog";
+import { escapeCustomBasemapAttribution, loadCustomBasemapConfig, loadSelectedBasemapId, normalizeCustomBasemapConfig, resolveSelectedBasemapId, saveCustomBasemapConfig, saveSelectedBasemapId, type CustomBasemapConfig } from "@/lib/dataGrid/customBasemap";
 import type { GeoJsonGeometry } from "@/lib/dataGrid/geometryPreview";
 import "leaflet/dist/leaflet.css";
 import type L from "leaflet";
@@ -110,6 +112,7 @@ let map: L.Map | null = null;
 let geoLayer: L.FeatureGroup | null = null;
 let labelLayer: L.LayerGroup | null = null;
 let tileLayer: L.TileLayer | null = null;
+let overlayTileLayer: L.TileLayer | null = null;
 let mapResizeObserver: ResizeObserver | null = null;
 let _geojsonData: any = null;
 let mapGeneration = 0;
@@ -144,6 +147,9 @@ interface BasemapOption {
   label: string;
   url: string;
   attribution: string;
+  overlayUrl?: string;
+  maxZoom?: number;
+  custom?: boolean;
 }
 
 const basemaps: BasemapOption[] = [
@@ -179,8 +185,45 @@ const basemaps: BasemapOption[] = [
   },
 ];
 
-const selectedBasemap = ref(basemaps[0]);
-const selectedBasemapId = ref(basemaps[0].id);
+function sessionStorageOrNull(): Storage | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function customBasemapOption(config: CustomBasemapConfig): BasemapOption {
+  return {
+    id: "custom",
+    label: config.name,
+    url: config.url,
+    overlayUrl: config.overlayUrl || undefined,
+    attribution: config.attribution,
+    maxZoom: config.maxZoom,
+    custom: true,
+  };
+}
+
+const basemapStorage = sessionStorageOrNull();
+const storedCustomBasemap = loadCustomBasemapConfig(basemapStorage);
+const storedSelectedBasemapId = loadSelectedBasemapId(basemapStorage);
+const initialBasemapId = resolveSelectedBasemapId(
+  storedSelectedBasemapId,
+  basemaps.map((basemap) => basemap.id),
+  storedCustomBasemap !== null,
+);
+const initialBasemap = initialBasemapId === "custom" && storedCustomBasemap ? customBasemapOption(storedCustomBasemap) : (basemaps.find((basemap) => basemap.id === initialBasemapId) ?? basemaps[0]);
+const customBasemapConfig = ref<CustomBasemapConfig | null>(storedCustomBasemap);
+const selectedBasemap = ref<BasemapOption>(initialBasemap);
+const selectedBasemapId = ref(selectedBasemap.value.id);
+const customBasemapOpen = ref(false);
+const customBasemapName = ref(storedCustomBasemap?.name ?? "");
+const customBasemapUrl = ref(storedCustomBasemap?.url ?? "");
+const customBasemapOverlayUrl = ref(storedCustomBasemap?.overlayUrl ?? "");
+const customBasemapAttribution = ref(storedCustomBasemap?.attribution ?? "");
+const customBasemapMaxZoom = ref(String(storedCustomBasemap?.maxZoom ?? 18));
+const customBasemapError = ref("");
 const dialogTitle = computed(() => props.title || t("grid.layerPreview"));
 
 // ── Label property ─────────────────────────────────────────────────────────
@@ -323,11 +366,7 @@ async function initMap() {
     });
     map.invalidateSize();
 
-    tileLayer = L.tileLayer(selectedBasemap.value.url, {
-      attribution: selectedBasemap.value.attribution,
-      maxZoom: 19,
-      crossOrigin: true,
-    }).addTo(map);
+    addBasemapLayers(selectedBasemap.value);
     // Sync ID ref
     selectedBasemapId.value = selectedBasemap.value.id;
     await addGeoJsonToMap(generation);
@@ -487,21 +526,74 @@ function onCustomSridSubmit() {
 function switchBasemap(basemap: BasemapOption) {
   selectedBasemap.value = basemap;
   selectedBasemapId.value = basemap.id;
+  saveSelectedBasemapId(basemapStorage, basemap.id);
   if (!map) return;
-  const L = _L!;
-  if (tileLayer) map.removeLayer(tileLayer);
-  tileLayer = L.tileLayer(basemap.url, {
-    attribution: basemap.attribution,
-    maxZoom: 19,
-    crossOrigin: true,
-  }).addTo(map);
+  removeBasemapLayers();
+  addBasemapLayers(basemap);
 }
 
-// Watch the dropdown-driven basemap ID and switch when it changes.
-watch(selectedBasemapId, (id) => {
-  const bm = basemaps.find((b) => b.id === id);
-  if (bm && bm !== selectedBasemap.value) switchBasemap(bm);
-});
+function basemapAttribution(basemap: BasemapOption): string {
+  return basemap.custom ? escapeCustomBasemapAttribution(basemap.attribution) : basemap.attribution;
+}
+
+function addBasemapLayers(basemap: BasemapOption) {
+  if (!map || !_L) return;
+  const options = {
+    attribution: basemapAttribution(basemap),
+    maxZoom: basemap.maxZoom ?? 19,
+    crossOrigin: true,
+  };
+  tileLayer = _L.tileLayer(basemap.url, options).addTo(map);
+  if (basemap.overlayUrl) overlayTileLayer = _L.tileLayer(basemap.overlayUrl, options).addTo(map);
+}
+
+function removeBasemapLayers() {
+  if (!map) return;
+  if (tileLayer) map.removeLayer(tileLayer);
+  if (overlayTileLayer) map.removeLayer(overlayTileLayer);
+  tileLayer = null;
+  overlayTileLayer = null;
+}
+
+function openCustomBasemapEditor() {
+  const current = customBasemapConfig.value;
+  customBasemapName.value = current?.name ?? customBasemapName.value;
+  customBasemapUrl.value = current?.url ?? customBasemapUrl.value;
+  customBasemapOverlayUrl.value = current?.overlayUrl ?? customBasemapOverlayUrl.value;
+  customBasemapAttribution.value = current?.attribution ?? customBasemapAttribution.value;
+  customBasemapMaxZoom.value = String(current?.maxZoom ?? (customBasemapMaxZoom.value || 18));
+  customBasemapError.value = "";
+  customBasemapOpen.value = true;
+}
+
+function onBasemapSelect(id: string) {
+  if (id === "custom-editor") {
+    selectedBasemapId.value = selectedBasemap.value.id;
+    openCustomBasemapEditor();
+    return;
+  }
+  const basemap = id === "custom" && customBasemapConfig.value ? customBasemapOption(customBasemapConfig.value) : basemaps.find((candidate) => candidate.id === id);
+  if (basemap) switchBasemap(basemap);
+}
+
+function applyCustomBasemap() {
+  const config = normalizeCustomBasemapConfig({
+    name: customBasemapName.value,
+    url: customBasemapUrl.value,
+    overlayUrl: customBasemapOverlayUrl.value,
+    attribution: customBasemapAttribution.value,
+    maxZoom: Number(customBasemapMaxZoom.value),
+  });
+  if (!config) {
+    customBasemapError.value = t("grid.layerPreviewCustomBasemapInvalid");
+    return;
+  }
+  saveCustomBasemapConfig(basemapStorage, config);
+  customBasemapConfig.value = config;
+  switchBasemap(customBasemapOption(config));
+  customBasemapOpen.value = false;
+  customBasemapError.value = "";
+}
 
 function cleanupMap() {
   mapGeneration++;
@@ -510,6 +602,7 @@ function cleanupMap() {
   labelLayer = null;
   geoLayer = null;
   tileLayer = null;
+  overlayTileLayer = null;
   if (map) {
     map.remove();
     map = null;
@@ -617,11 +710,50 @@ onBeforeUnmount(() => cleanupMap());
         </select>
 
         <!-- Basemap selector -->
-        <select v-model="selectedBasemapId" class="ml-auto h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none">
-          <option v-for="bm in basemaps" :key="bm.id" :value="bm.id">
-            {{ bm.label }}
-          </option>
-        </select>
+        <Popover v-model:open="customBasemapOpen">
+          <PopoverAnchor as-child>
+            <select class="ml-auto h-6 shrink-0 rounded border bg-background px-1.5 text-[11px] outline-none" :value="selectedBasemapId" @change="onBasemapSelect(($event.target as HTMLSelectElement).value)">
+              <option v-for="bm in basemaps" :key="bm.id" :value="bm.id">
+                {{ bm.label }}
+              </option>
+              <option v-if="customBasemapConfig" value="custom">{{ customBasemapConfig.name }}</option>
+              <option value="custom-editor">{{ t("grid.layerPreviewCustomBasemapAction") }}</option>
+            </select>
+          </PopoverAnchor>
+          <PopoverContent align="end" class="w-[26rem] space-y-3 p-3">
+            <div>
+              <div class="text-sm font-medium">{{ t("grid.layerPreviewCustomBasemapTitle") }}</div>
+              <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t("grid.layerPreviewCustomBasemapHint") }}</p>
+            </div>
+            <label class="block space-y-1">
+              <span class="text-xs font-medium">{{ t("grid.layerPreviewCustomBasemapName") }}</span>
+              <input v-model="customBasemapName" maxlength="50" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus-visible:border-ring" :placeholder="t('grid.layerPreviewCustomBasemapNamePlaceholder')" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-xs font-medium">{{ t("grid.layerPreviewCustomBasemapUrl") }}</span>
+              <input v-model="customBasemapUrl" type="url" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus-visible:border-ring" placeholder="https://tiles.example.com/{z}/{x}/{y}.png" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-xs font-medium">{{ t("grid.layerPreviewCustomBasemapOverlayUrl") }}</span>
+              <input v-model="customBasemapOverlayUrl" type="url" spellcheck="false" class="h-8 w-full rounded border bg-background px-2 font-mono text-xs outline-none focus-visible:border-ring" :placeholder="t('grid.layerPreviewCustomBasemapOptional')" />
+            </label>
+            <div class="grid grid-cols-[minmax(0,1fr)_6rem] gap-2">
+              <label class="block space-y-1">
+                <span class="text-xs font-medium">{{ t("grid.layerPreviewCustomBasemapAttribution") }}</span>
+                <input v-model="customBasemapAttribution" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus-visible:border-ring" :placeholder="t('grid.layerPreviewCustomBasemapOptional')" />
+              </label>
+              <label class="block space-y-1">
+                <span class="text-xs font-medium">{{ t("grid.layerPreviewCustomBasemapMaxZoom") }}</span>
+                <input v-model="customBasemapMaxZoom" type="number" min="1" max="24" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus-visible:border-ring" />
+              </label>
+            </div>
+            <p v-if="customBasemapError" class="text-xs text-destructive">{{ customBasemapError }}</p>
+            <div class="flex justify-end gap-2">
+              <Button variant="ghost" size="sm" class="h-7" @click="customBasemapOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+              <Button size="sm" class="h-7" @click="applyCustomBasemap">{{ t("grid.layerPreviewCustomBasemapApply") }}</Button>
+            </div>
+          </PopoverContent>
+        </Popover>
 
         <!-- Save as image -->
         <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-muted-foreground hover:bg-accent hover:text-accent-foreground" :title="t('grid.layerPreviewExport')" :disabled="isExporting" @click="saveAsImage">

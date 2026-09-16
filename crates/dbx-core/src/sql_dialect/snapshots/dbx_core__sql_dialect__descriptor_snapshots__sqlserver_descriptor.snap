@@ -5,7 +5,7 @@ expression: desc
 ---
 {
   "dialect": "sql_server",
-  "flags": 3086983151,
+  "flags": 3019874287,
   "max_identifier_length": 128,
   "supports_schemas": true,
   "supports_catalogs": true,

@@ -59,12 +59,15 @@ Read-only cells can still open details, copy, and export. Check the data header 
 - **Set NULL** explicitly instead of writing an empty string
 - **Use defaults** for new fields where the database and column support it
 - **Generate values** with built-in test-data generators for selected cells
+- **Update by `WHERE`** in MySQL table-data views to set one writable column for every database row matching a condition you enter, including rows outside the loaded page
 
 DBX uses specialized controls for recognizable date/time, enum, JSON, and related types. Before bulk editing, verify that the selected region matches the target column types.
 
 ## SQL Preview and Save
 
-Relational mutations remain local until saved. DBX then shows the generated `INSERT`, `UPDATE`, and `DELETE` statements.
+Row-level relational mutations remain local until saved. DBX then shows the generated `INSERT`, `UPDATE`, and `DELETE` statements.
+
+A MySQL condition-wide bulk update is different because not all matching rows are necessarily loaded into the grid. In the bulk-edit dialog, use the current table filter or build matching conditions by choosing columns, operators, and values; combine multiple rules with `AND` or `OR`. A custom `WHERE` expression remains available as an advanced option. You can preview the estimated affected-row count before continuing; it is a snapshot and the actual count can differ when the update executes. DBX shows the exact `UPDATE ... WHERE ...` statement in a danger confirmation and executes it immediately after confirmation. The database evaluates the condition at execution time, and DBX cannot generate reliable rollback SQL for rows that were not loaded.
 
 Review these details before saving:
 

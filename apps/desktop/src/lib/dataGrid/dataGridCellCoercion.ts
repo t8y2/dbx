@@ -1,54 +1,120 @@
 import type { GridCellValue } from "@/lib/dataGrid/dataGridSql";
 import type { DatabaseType, ColumnInfo } from "@/types/database";
+import { binaryCellBytesToHexValue, binaryCellUtf8Text, isBlobCellColumnType } from "@/lib/dataGrid/binaryCellDownload";
+import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
 
 export interface CoerceDataGridCellValueOptions {
   value: string;
   oldValue: GridCellValue | undefined;
   databaseType: DatabaseType | undefined;
   columnInfo: Pick<ColumnInfo, "data_type"> | undefined;
+  numberFormat?: NumericInputNumberFormat;
   preserveEmptyString?: boolean;
+  /** Treat an empty inline bulk edit as SQL NULL before type coercion. */
+  emptyStringAsNull?: boolean;
 }
+
+export interface NumericInputNumberFormat {
+  groupSeparator?: string;
+  decimalSeparator?: string;
+}
+
+let cachedRuntimeNumberFormat: NumericInputNumberFormat | undefined;
 
 export function coerceDataGridCellValue(options: CoerceDataGridCellValueOptions): GridCellValue {
   const { value, oldValue } = options;
+  if (value === "" && options.emptyStringAsNull) return null;
   if (value === "" && oldValue === null && !options.preserveEmptyString) return null;
+  const blobValue = coerceMysqlBlobTextValue(options);
+  if (blobValue !== undefined) return blobValue;
   const postgresArrayValue = coercePostgresArrayValue(options);
   if (postgresArrayValue !== undefined) return postgresArrayValue;
-  if (typeof oldValue === "number") {
-    const num = Number(value);
+  // Excel-pasted values often carry separators that make Number() return NaN
+  // and the literal fail to convert on the server. Use the runtime number
+  // format to resolve single-comma values, then keep the normalized text for
+  // the precision checks below so exact values survive as text.
+  const useSampledValueType = normalizeDataType(options.columnInfo?.data_type) === "";
+  const numericInput = isNumericColumnType(options.columnInfo?.data_type) || (useSampledValueType && typeof oldValue === "number");
+  const numericText = normalizeGroupedNumberText(value, options.columnInfo, oldValue, options.numberFormat ?? runtimeNumberFormat());
+  if (isBooleanInputColumn(options) || (useSampledValueType && typeof oldValue === "boolean")) {
+    // MySQL exposes TINYINT(1) as an integer in the grid. Keep its numeric
+    // 0/1 edits numeric while still accepting explicit TRUE/FALSE aliases.
+    const booleanValue = parseBooleanInput(numericText, !isMysqlTinyintOneColumn(options));
+    if (booleanValue !== undefined) return booleanValue;
+  }
+  if (numericInput) {
+    const num = Number(numericText);
     if (!Number.isNaN(num)) {
-      if (shouldPreserveNumericText(options, num)) {
+      if (shouldPreserveNumericText(options, num, numericText)) {
         // Keep precision-sensitive numeric edits as text; JS Number rounds 64-bit integers.
-        const text = value.trim();
-        if (text === String(oldValue)) return oldValue;
+        const text = numericText.trim();
+        if (oldValue !== undefined && text === String(oldValue)) return oldValue;
         return text;
       }
       return num;
     }
   }
-  if (typeof oldValue === "boolean") {
-    return value === "true" || value === "1";
-  }
-  return normalizeSmartQuotedJsonInput(value);
+  return normalizeSmartQuotedJsonInput(numericText);
+}
+
+function isBooleanInputColumn(options: CoerceDataGridCellValueOptions): boolean {
+  if (isBooleanColumnType(options.columnInfo?.data_type, options.databaseType)) return true;
+  return options.databaseType === "mysql" && options.columnInfo?.data_type.trim().toLowerCase() === "tinyint(1)";
+}
+
+function isMysqlTinyintOneColumn(options: CoerceDataGridCellValueOptions): boolean {
+  return options.databaseType === "mysql" && options.columnInfo?.data_type.trim().toLowerCase() === "tinyint(1)";
+}
+
+function parseBooleanInput(value: string, allowNumericAliases: boolean): boolean | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  if (allowNumericAliases && normalized === "1") return true;
+  if (allowNumericAliases && normalized === "0") return false;
+  return undefined;
 }
 
 export function dataGridCellEditorText(options: { value: GridCellValue | undefined; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string {
   const value = options.value ?? null;
   if (value === null) return "";
+  if (options.databaseType === "mysql" && isBlobCellColumnType(options.columnInfo?.data_type)) {
+    const text = binaryCellUtf8Text(value, options.columnInfo?.data_type, options.databaseType);
+    if (text !== null) return text;
+  }
   if (Array.isArray(value) && options.databaseType === "postgres" && isPostgresArrayColumn(options.columnInfo, value)) {
     return formatPostgresArrayText(value);
   }
   return typeof value === "object" ? JSON.stringify(value) : String(value);
 }
 
+function coerceMysqlBlobTextValue(options: CoerceDataGridCellValueOptions): GridCellValue | undefined {
+  if (options.databaseType !== "mysql" || !isBlobCellColumnType(options.columnInfo?.data_type)) return undefined;
+  const originalText = binaryCellUtf8Text(options.oldValue, options.columnInfo?.data_type, options.databaseType);
+  if (originalText === null) return undefined;
+  if (options.value === originalText) return options.oldValue;
+  return binaryCellBytesToHexValue(new TextEncoder().encode(options.value));
+}
+
 export function dataGridCellDisplayText(options: { value: GridCellValue; databaseType: DatabaseType | undefined; columnInfo: Pick<ColumnInfo, "data_type"> | undefined }): string | undefined {
   if (Array.isArray(options.value) && options.databaseType === "postgres" && isPostgresArrayColumn(options.columnInfo, options.value)) {
     return formatPostgresArrayText(options.value);
+  }
+  if (typeof options.value === "string") {
+    const timestampDisplay = normalizeTimestampFractionDisplayText(options.value, options.columnInfo?.data_type);
+    if (timestampDisplay !== options.value) return timestampDisplay;
   }
   if (typeof options.value === "string" && isOracleDateColumn(options.databaseType, options.columnInfo)) {
     return formatOracleDateDisplayText(options.value);
   }
   return undefined;
+}
+
+function normalizeTimestampFractionDisplayText(value: string, dataType: string | undefined): string {
+  if (!/^timestamp(?:\s*\([^)]*\))?(?:\s+(?:with|without)\s+time\s+zone)?$/i.test(dataType?.trim() ?? "")) return value;
+  const match = value.match(/^(\d{4}[-/]\d{1,2}[-/]\d{1,2}[ T]\d{1,2}:\d{1,2}:\d{1,2})\.(\d{1,2})(Z|[+-]\d{2}:?\d{2})?$/);
+  return match ? `${match[1]}.${match[2].padEnd(3, "0")}${match[3] ?? ""}` : value;
 }
 
 function coercePostgresArrayValue(options: CoerceDataGridCellValueOptions): unknown[] | undefined {
@@ -92,10 +158,43 @@ function isPostgresArrayColumn(columnInfo: Pick<ColumnInfo, "data_type"> | undef
   return dataType === "array" || dataType.endsWith("[]") || dataType.startsWith("_");
 }
 
-function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, parsedNumber: number): boolean {
-  const text = options.value.trim();
+function shouldPreserveNumericText(options: CoerceDataGridCellValueOptions, parsedNumber: number, text: string): boolean {
   if (!isNumericLiteralText(text)) return false;
   return shouldPreserveNumericTextForType(options.columnInfo?.data_type, text, parsedNumber);
+}
+
+function normalizeGroupedNumberText(value: string, columnInfo: Pick<ColumnInfo, "data_type"> | undefined, oldValue: GridCellValue | undefined, numberFormat: NumericInputNumberFormat): string {
+  const useSampledNumberType = normalizeDataType(columnInfo?.data_type) === "" && typeof oldValue === "number";
+  if (!isNumericColumnType(columnInfo?.data_type) && !useSampledNumberType) return value;
+  return normalizeCommaSeparatedNumberText(value, numberFormat);
+}
+
+function normalizeCommaSeparatedNumberText(value: string, numberFormat: NumericInputNumberFormat): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^([+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?)([eE][+-]?\d+)?$/);
+  if (!match) return value;
+  const mantissa = match[1];
+  const exponent = match[2] ?? "";
+  if (/^[+-]?\d{1,3},\d{3}$/.test(mantissa)) {
+    if (numberFormat.groupSeparator === "," && numberFormat.decimalSeparator !== ",") {
+      return `${mantissa.replace(",", "")}${exponent}`;
+    }
+    if (numberFormat.decimalSeparator === ",") {
+      return `${mantissa.replace(",", ".")}${exponent}`;
+    }
+    return value;
+  }
+  return `${mantissa.replace(/,/g, "")}${exponent}`;
+}
+
+function runtimeNumberFormat(): NumericInputNumberFormat {
+  if (cachedRuntimeNumberFormat) return cachedRuntimeNumberFormat;
+  const parts = new Intl.NumberFormat().formatToParts(12345.6);
+  cachedRuntimeNumberFormat = {
+    groupSeparator: parts.find((part) => part.type === "group")?.value,
+    decimalSeparator: parts.find((part) => part.type === "decimal")?.value,
+  };
+  return cachedRuntimeNumberFormat;
 }
 
 function postgresArrayElementDataType(dataType: string | undefined): string {

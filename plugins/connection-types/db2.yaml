@@ -1,0 +1,35 @@
+schemaVersion: 1
+order: 540
+dbType: db2
+rustVariant: Db2
+label: IBM DB2
+runtimeMode: agent
+mcpMode: bridge
+agentKey: db2
+driverStoreVisible: true
+driverStoreOrder: 24
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 50000
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

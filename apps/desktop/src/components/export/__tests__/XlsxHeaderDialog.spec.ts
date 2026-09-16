@@ -30,4 +30,27 @@ describe("XlsxHeaderDialog", () => {
     expect(cancelCount).toBe(1);
     app.unmount();
   });
+
+  it("emits the selected header mode and filter option", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let selectedOptions: { headerMode: string; autoFilter: boolean } | undefined;
+    const app = createApp(XlsxHeaderDialog, {
+      open: true,
+      onConfirm: (options: { headerMode: string; autoFilter: boolean }) => {
+        selectedOptions = options;
+      },
+    });
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    document.querySelector<HTMLInputElement>('input[value="name-comment"]')!.click();
+    await nextTick();
+    document.querySelector<HTMLButtonElement>("[data-xlsx-header-confirm]")!.click();
+    await nextTick();
+
+    expect(selectedOptions).toEqual({ headerMode: "name-comment", autoFilter: false });
+    app.unmount();
+  });
 });

@@ -1,0 +1,32 @@
+schemaVersion: 1
+order: 40
+dbType: rqlite
+rustVariant: Rqlite
+label: RQLite
+dialect: Rqlite
+runtimeMode: native
+mcpMode: direct
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: false
+defaultPort: 4001
+traits:
+  diagramSql: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: true
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: false

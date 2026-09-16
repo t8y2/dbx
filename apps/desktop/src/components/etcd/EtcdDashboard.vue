@@ -7,18 +7,22 @@ import { Badge } from "@/components/ui/badge";
 import * as api from "@/lib/backend/api";
 import { classifyEtcdDashboardError } from "@/lib/kv/etcdDashboardError";
 import { counterMapRates, counterRate, histogramAverageMilliseconds, histogramMapAverageMilliseconds, ratePercentage } from "@/lib/kv/etcdDashboardMetrics";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{ connectionId: string }>();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ refreshSeconds?: number }>({}, "EtcdDashboard");
 const { t } = useI18n();
 const status = ref<api.KvStatusResponse | null>(null);
 const previousMetrics = ref<api.KvPrometheusMetrics | null>(null);
 const loading = ref(false);
 const error = ref("");
 const unsupported = ref(false);
-const refreshSeconds = ref(0);
+const refreshSeconds = ref([0, 5, 10, 30, 60].includes(restoredUiState.refreshSeconds ?? -1) ? restoredUiState.refreshSeconds! : 0);
 let timer: ReturnType<typeof setInterval> | null = null;
 let loadGeneration = 0;
 let loadingConnectionId: string | null = null;
+
+trackUiState(() => ({ refreshSeconds: refreshSeconds.value }));
 
 const reachable = computed(() => status.value?.members.filter((member) => member.reachable).length ?? 0);
 const totalDbSize = computed(() => status.value?.members.reduce((sum, member) => sum + Number(member.dbSize || 0), 0) ?? 0);

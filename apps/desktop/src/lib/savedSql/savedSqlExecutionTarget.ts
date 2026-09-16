@@ -9,7 +9,7 @@ export interface SavedSqlExecutionTarget {
   catalog?: string;
 }
 
-type SavedSqlFileTarget = Pick<SavedSqlFile, "connectionId" | "database" | "schema">;
+type SavedSqlFileTarget = Pick<SavedSqlFile, "connectionId" | "database" | "schema" | "catalog">;
 type QueryTabTarget = Pick<QueryTab, "connectionId" | "database" | "schema" | "catalog">;
 
 export function savedSqlExecutionTargetFromFile(file: SavedSqlFileTarget): SavedSqlExecutionTarget {
@@ -17,6 +17,7 @@ export function savedSqlExecutionTargetFromFile(file: SavedSqlFileTarget): Saved
     connectionId: file.connectionId,
     database: file.database,
     schema: file.schema,
+    catalog: file.catalog,
   };
 }
 
@@ -35,11 +36,11 @@ export function resolveSavedSqlExecutionTarget(file: SavedSqlFileTarget, mode: S
   return savedSqlExecutionTargetFromFile(file);
 }
 
-export function savedSqlDefaultTargetForWrite(currentTarget: SavedSqlExecutionTarget, existingFile?: SavedSqlFileTarget): SavedSqlFileTarget {
-  if (existingFile) return savedSqlExecutionTargetFromFile(existingFile);
+export function savedSqlDefaultTargetForWrite(currentTarget: SavedSqlExecutionTarget): SavedSqlFileTarget {
   return {
     connectionId: currentTarget.connectionId,
     database: currentTarget.database,
     schema: currentTarget.schema,
+    catalog: currentTarget.catalog,
   };
 }

@@ -40,6 +40,12 @@ describe("production SQL safety", () => {
     expect(productionContextForDatabase(connection(), "staging").active).toBe(false);
   });
 
+  it("treats Nacos public and empty namespace IDs as the same protected namespace", () => {
+    const nacos = connection({ db_type: "nacos", production_databases: [""] });
+    expect(productionContextForDatabase(nacos, "public")).toMatchObject({ active: true, reason: "database", databases: ["public"] });
+    expect(productionContextForDatabase(nacos, "")).toMatchObject({ active: true, reason: "database", databases: ["public"] });
+  });
+
   it("detects a write after a USE production switch despite comments", () => {
     const assessment = assessProductionSql("-- install\nUSE `prod_app`; /* migration */ DELETE FROM users", connection(), "staging");
     expect(assessment).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
@@ -85,6 +91,18 @@ describe("production SQL safety", () => {
     }
   });
 
+  it("detects VACUUM in a production PostgreSQL database", () => {
+    const pg = connection({ db_type: "postgres", production_databases: ["prod_app"] });
+    for (const sql of ['VACUUM "public"."orders"', 'VACUUM ANALYZE "public"."orders"', 'VACUUM FULL ANALYZE "public"."orders"']) {
+      expect(assessProductionSql(sql, pg, "prod_app")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("detects qualified VACUUM targets for database-qualified dialects", () => {
+    const mysql = connection({ db_type: "mysql", production_databases: ["prod_app"] });
+    expect(assessProductionSql("VACUUM FULL prod_app.orders", mysql, "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+  });
+
   it("detects qualified procedure calls and privilege targets", () => {
     for (const sql of ["CALL prod_app.purge_users()", "CALL `prod_app`.`purge_users`()", "GRANT ALL ON prod_app.* TO 'u'@'%'", "GRANT EXECUTE ON PROCEDURE prod_app.purge_users TO 'u'@'%'"]) {
       expect(assessProductionSql(sql, connection(), "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
@@ -113,5 +131,17 @@ describe("production SQL safety", () => {
 
   it("does not require a production confirmation for reads", () => {
     expect(assessProductionSql("SELECT * FROM prod_app.orders", connection(), "staging")).toMatchObject({ active: false, isMutation: false });
+  });
+
+  it("does not classify Mongo shell reads as production mutations", () => {
+    const mongo = connection({ db_type: "mongodb", production_databases: ["app"] });
+    expect(assessProductionSql('db.getCollection("demo").find({}).skip(0).limit(100)', mongo, "app")).toMatchObject({ active: true, isMutation: false });
+    expect(assessProductionSql('db.getCollection("demo").find({}).skip(0).limit(100)', mongo, "scratch")).toMatchObject({ active: false, isMutation: false });
+  });
+
+  it("keeps Mongo shell writes and aggregate output stages protected", () => {
+    const mongo = connection({ db_type: "mongodb", production_databases: ["app"] });
+    expect(assessProductionSql('db.getCollection("demo").updateOne({"_id": 1}, {$set: {"active": true}})', mongo, "app")).toMatchObject({ active: true, isMutation: true });
+    expect(assessProductionSql('db.getCollection("demo").aggregate([{$out: "archive"}])', mongo, "app")).toMatchObject({ active: true, isMutation: true });
   });
 });

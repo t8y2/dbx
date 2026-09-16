@@ -2,6 +2,7 @@
 
 import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import i18n from "@/i18n";
 import SidebarTreeItemDialogs from "../SidebarTreeItemDialogs.vue";
 
 const mountedApps: ReturnType<typeof createApp>[] = [];
@@ -12,6 +13,65 @@ afterEach(() => {
 });
 
 describe("SidebarTreeItemDialogs MongoDB index form", () => {
+  it("keeps the group deletion dialog locked while deletion is running", async () => {
+    const controller = reactive({
+      node: { id: "group-parent", label: "Parent", type: "connection-group" },
+      t: (key: string) => key,
+      highlight: (value: string) => value,
+      showDeleteConfirm: false,
+      showMoveToNewGroupDialog: false,
+      showDeleteGroupConfirm: true,
+      deleteConnectionsWithGroup: true,
+      connectionGroupDeleteConfirmMessage: () => "confirm",
+      connectionGroupDeleteMenuLabel: () => "delete",
+      deletingConnectionGroups: true,
+      confirmDeleteGroup: vi.fn(),
+      showRenameObjectDialog: false,
+      showStructurePreviewDialog: false,
+      showStructureDocCopyDialog: false,
+      showDuplicateDialog: false,
+      showPasteDialog: false,
+      showCreateDatabaseDialog: false,
+      showCreateDatabasePreviewDialog: false,
+      showEditDatabasePropertiesDialog: false,
+      showCreateNacosNamespaceDialog: false,
+      showEditNacosNamespaceDialog: false,
+      showRenameMongoCollectionDialog: false,
+      showCloneMongoCollectionDialog: false,
+      showCreateMongoIndexDialog: false,
+      showMongoIndexManagerDialog: false,
+      showRedisDatabaseAliasDialog: false,
+      showCreateSchemaDialog: false,
+      showEditSchemaCommentDialog: false,
+    });
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeItemDialogs, { controller }),
+      }),
+    );
+    mountedApps.push(app);
+    app.use(i18n);
+    app.mount(document.createElement("div"));
+    await nextTick();
+
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]');
+    const checkbox = dialog?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkbox?.disabled).toBe(true);
+    expect(dialog?.querySelector('[data-slot="dialog-close"]')).toBeNull();
+
+    dialog?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(controller.showDeleteGroupConfirm).toBe(true);
+
+    controller.deletingConnectionGroups = false;
+    await nextTick();
+    expect(checkbox?.disabled).toBe(false);
+    const closeButton = dialog?.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
+    expect(closeButton).not.toBeNull();
+    closeButton?.click();
+    await vi.waitFor(() => expect(controller.showDeleteGroupConfirm).toBe(false));
+  });
+
   it("mounts the form and overlay from the same controlled dialog state", async () => {
     const confirmCreateMongoIndex = vi.fn();
     const closed = vi.fn();
@@ -54,6 +114,7 @@ describe("SidebarTreeItemDialogs MongoDB index form", () => {
       }),
     );
     mountedApps.push(app);
+    app.use(i18n);
     app.mount(document.createElement("div"));
     await nextTick();
 

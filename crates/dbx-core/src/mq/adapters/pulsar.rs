@@ -16,8 +16,6 @@ use crate::mq::port::MessageQueueAdmin;
 use crate::mq::types::*;
 use crate::mq::util::truncate;
 
-/// How long to wait for a single admin REST call.
-const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// How long to wait for the initial version-probe during construction.
 const PROBE_TIMEOUT_SECS: u64 = 8;
 const DETAIL_REQUEST_CONCURRENCY: usize = 8;
@@ -39,7 +37,12 @@ impl PulsarAdmin {
     /// the API profile. Probe failure degrades gracefully to the 3.1.x baseline.
     pub async fn new(cfg: MqAdminConfig) -> Result<Self, String> {
         let base = normalize_base(&cfg.admin_url);
-        let http = build_http_client(cfg.tls_skip_verify, cfg.connect_override.as_ref(), &cfg.admin_url)?;
+        // Unlimited query timeout still needs a finite HTTP client timeout; mirror
+        // request_timeout_ms (1h) so Advanced "0 = unlimited" is not silently clamped to 30s.
+        let request_timeout =
+            cfg.rpc_timeout().unwrap_or_else(|| std::time::Duration::from_millis(cfg.request_timeout_ms()));
+        let http =
+            build_http_client(cfg.tls_skip_verify, cfg.connect_override.as_ref(), &cfg.admin_url, request_timeout)?;
         let auth = cfg.auth.clone();
         let token_cache = TokenCache::default();
 
@@ -294,6 +297,10 @@ impl MessageQueueAdmin for PulsarAdmin {
                         internal: false,
                         message_type: None,
                         namespace: None,
+                        message_count: None,
+                        messages_ready: None,
+                        messages_unacked: None,
+                        ..Default::default()
                     })
                 })
                 .buffered(PARTITION_METADATA_CONCURRENCY)
@@ -320,6 +327,10 @@ impl MessageQueueAdmin for PulsarAdmin {
                     internal: false,
                     message_type: None,
                     namespace: None,
+                    message_count: None,
+                    messages_ready: None,
+                    messages_unacked: None,
+                    ..Default::default()
                 });
             }
         }
@@ -397,9 +408,12 @@ impl MessageQueueAdmin for PulsarAdmin {
     }
 
     async fn create_subscription(&self, topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<(), String> {
+        if matches!(pos, ResetPosition::PartitionOffset { .. }) {
+            return Err("Pulsar does not support cursor reset by Kafka partition offset".to_string());
+        }
         // PUT .../subscription/{sub} with the desired message id in the body.
         let path = self.profile.subscription_path(topic.domain(), &topic.path(), sub);
-        let body = reset_position_message_id(&pos);
+        let body = reset_position_message_id(&pos)?;
         self.send_empty(reqwest::Method::PUT, &path, Some(&body), None).await
     }
 
@@ -433,8 +447,11 @@ impl MessageQueueAdmin for PulsarAdmin {
             ResetPosition::MessageId { .. } | ResetPosition::Earliest | ResetPosition::Latest => {
                 // POST .../resetcursor with a message id body.
                 let path = self.profile.subscription_reset_cursor_path(topic.domain(), &topic.path(), sub);
-                let body = reset_position_message_id(&pos);
+                let body = reset_position_message_id(&pos)?;
                 self.send_empty(reqwest::Method::POST, &path, Some(&body), None).await
+            }
+            ResetPosition::PartitionOffset { .. } => {
+                Err("Pulsar does not support cursor reset by Kafka partition offset".to_string())
             }
         }
     }
@@ -451,9 +468,9 @@ impl MessageQueueAdmin for PulsarAdmin {
         sub: &str,
         count: u32,
         _options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String> {
+    ) -> Result<PeekMessagesResult, String> {
         if count == 0 {
-            return Ok(Vec::new());
+            return Ok(PeekMessagesResult::default());
         }
 
         let messages: Vec<PeekedMessage> = stream::iter(1..=count)
@@ -477,7 +494,7 @@ impl MessageQueueAdmin for PulsarAdmin {
             .flatten()
             .collect();
 
-        Ok(messages)
+        Ok(PeekMessagesResult::complete(messages))
     }
 
     async fn expire_messages(&self, topic: &TopicRef, sub: &str, expire_seconds: i64) -> Result<(), String> {
@@ -807,9 +824,9 @@ fn build_http_client(
     tls_skip_verify: bool,
     connect_override: Option<&MqConnectOverride>,
     admin_url: &str,
+    request_timeout: std::time::Duration,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = crate::db::http_client_builder(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    let mut builder = crate::db::http_client_builder(request_timeout).timeout(request_timeout);
     if tls_skip_verify {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -992,15 +1009,18 @@ fn is_partition_member(full: &str, partitioned: &std::collections::HashSet<Strin
 /// Build a message-id body for reset-cursor / create-subscription based on the
 /// requested position. Earliest/latest use the sentinel ledger/entry ids Pulsar
 /// recognises.
-fn reset_position_message_id(pos: &ResetPosition) -> serde_json::Value {
+fn reset_position_message_id(pos: &ResetPosition) -> Result<serde_json::Value, String> {
     match pos {
-        ResetPosition::Earliest => serde_json::json!({ "ledgerId": -1, "entryId": -1 }),
-        ResetPosition::Latest => serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX }),
+        ResetPosition::Earliest => Ok(serde_json::json!({ "ledgerId": -1, "entryId": -1 })),
+        ResetPosition::Latest => Ok(serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX })),
         ResetPosition::MessageId { ledger_id, entry_id } => {
-            serde_json::json!({ "ledgerId": ledger_id, "entryId": entry_id })
+            Ok(serde_json::json!({ "ledgerId": ledger_id, "entryId": entry_id }))
+        }
+        ResetPosition::PartitionOffset { .. } => {
+            Err("Pulsar does not support cursor reset by Kafka partition offset".to_string())
         }
         // Timestamp is handled by a dedicated path; default to latest here.
-        ResetPosition::Timestamp { .. } => serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX }),
+        ResetPosition::Timestamp { .. } => Ok(serde_json::json!({ "ledgerId": i64::MAX, "entryId": i64::MAX })),
     }
 }
 
@@ -1074,7 +1094,7 @@ fn backlog_stats_from_topic_stats(profile: &PulsarApiProfile, stats: &TopicStats
         None => subs.into_iter().fold(0_i64, |total, sub| total.saturating_add(sub.msg_backlog)),
     };
 
-    BacklogStats { msg_backlog, backlog_size: stats.backlog_size }
+    BacklogStats { msg_backlog, backlog_size: stats.backlog_size, partitions: Vec::new() }
 }
 
 #[cfg(test)]
@@ -1151,6 +1171,9 @@ mod tests {
                 token_signing: None,
                 connect_override: None,
                 management_connect_override: None,
+                socks_proxy: None,
+                query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+                connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
                 extra: serde_json::Value::Null,
             })
             .await
@@ -1585,6 +1608,7 @@ mod tests {
             msg_out_counter: 0,
             subscription_count: 2,
             producer_count: 0,
+            rates_unavailable: false,
             raw: serde_json::json!({
                 "subscriptions": {
                     "sub-a": { "msgBacklog": 7 },
@@ -1602,11 +1626,12 @@ mod tests {
     #[test]
     fn reset_position_message_ids() {
         assert_eq!(
-            reset_position_message_id(&ResetPosition::Earliest),
+            reset_position_message_id(&ResetPosition::Earliest).unwrap(),
             serde_json::json!({"ledgerId": -1, "entryId": -1})
         );
-        let mid = reset_position_message_id(&ResetPosition::MessageId { ledger_id: 5, entry_id: 9 });
+        let mid = reset_position_message_id(&ResetPosition::MessageId { ledger_id: 5, entry_id: 9 }).unwrap();
         assert_eq!(mid, serde_json::json!({"ledgerId": 5, "entryId": 9}));
+        assert!(reset_position_message_id(&ResetPosition::PartitionOffset { partition: 0, offset: 9 }).is_err());
     }
 
     #[test]

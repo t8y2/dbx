@@ -41,11 +41,29 @@ test("database label synchronization includes every catalog entry once", () => {
   );
 });
 
+test("Kingbase aliases retain historical and current company names", () => {
+  const kingbase = databaseIssueDrivers.find((driver) => driver.dbType === "kingbase");
+  assert.ok(kingbase);
+  assert.equal(kingbase.aliases.includes("人大金仓"), true);
+  assert.equal(kingbase.aliases.includes("金仓"), true);
+  assert.equal(kingbase.aliases.includes("电科金仓"), true);
+  assert.equal(kingbase.aliases.includes("中电科金仓"), false);
+});
+
+test("supplemental aliases merge into manifest entries without duplicating labels", () => {
+  const mqttEntries = databaseIssueDrivers.filter((driver) => driver.dbType === "mqtt");
+  assert.equal(mqttEntries.length, 1);
+  assert.equal(mqttEntries[0].aliases.includes("emqx"), true);
+  assert.equal(mqttEntries[0].aliases.includes("hivemq"), true);
+  assert.equal(mqttEntries[0].aliases.includes("mosquitto"), true);
+});
+
 test("labels native and compatibility database products with their families", () => {
   const cases = [
     ["Turso", ["db/turso"]],
     ["Nacos 2.0.1", ["db/nacos"]],
     ["r-nacos", ["db/nacos"]],
+    ["HashiCorp Consul", ["db/consul"]],
     ["Apache Cloudberry", ["db/cloudberry", "db/postgres"]],
     ["TiDB v8.5", ["db/mysql", "db/tidb"]],
     ["OceanBase", ["db/oceanbase"]],
@@ -57,6 +75,10 @@ test("labels native and compatibility database products with their families", ()
     ["Dremio", ["db/dremio", "db/jdbc"]],
     ["Apache Kafka", ["db/kafka", "db/mq"]],
     ["RabbitMQ", ["db/mq", "db/rabbitmq"]],
+    ["MQTT 5.0", ["db/mqtt"]],
+    ["EMQX 5.8", ["db/mqtt"]],
+    ["电科金仓 KingbaseES V9", ["db/kingbase"]],
+    ["中电科金仓 KingbaseES V9", ["db/kingbase"]],
   ];
 
   for (const [database, expected] of cases) {

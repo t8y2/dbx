@@ -41,9 +41,7 @@ export function clampDocumentPage(page: number, pageSize: number, paginationTota
   return Math.min(normalizedPage, lastPage);
 }
 
-export function documentPageRequestLimit(page: number, pageSize: number, paginationTotal?: number): number {
-  const normalizedPageSize = Math.max(1, Math.floor(pageSize));
-  if (paginationTotal === undefined) return normalizedPageSize;
-  const remaining = paginationTotal - Math.max(0, Math.floor(page)) * normalizedPageSize;
-  return remaining > 0 ? Math.min(normalizedPageSize, remaining) : normalizedPageSize;
-}
+// Elasticsearch rejects any from+size combination above this by default (index.max_result_window).
+// DBX can't know a target index's actual configured value up front, so it clamps requests to the
+// out-of-the-box default rather than letting an oversized "rows per page" preference reach the cluster as-is.
+export const ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW = 10_000;

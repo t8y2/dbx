@@ -88,6 +88,15 @@ pub struct MongoRenameCollectionRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MongoCloneCollectionRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub source_collection: String,
+    pub target_collection: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MongoFindRequest {
     pub connection_id: String,
     pub database: String,
@@ -97,6 +106,23 @@ pub struct MongoFindRequest {
     pub filter: Option<String>,
     pub projection: Option<String>,
     pub sort: Option<String>,
+    pub collation: Option<String>,
+    pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoFindExplainRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub collection: String,
+    pub skip: Option<u64>,
+    pub limit: Option<i64>,
+    pub filter: Option<String>,
+    pub projection: Option<String>,
+    pub sort: Option<String>,
+    pub collation: Option<String>,
+    pub verbosity: Option<String>,
     pub execution_id: Option<String>,
 }
 
@@ -172,6 +198,24 @@ pub struct MongoCreateIndexRequest {
     pub collection: String,
     pub keys_json: String,
     pub options_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoCreateUserRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub user_json: String,
+    pub write_concern_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MongoRunCommandRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub command_json: String,
+    pub execution_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -294,32 +338,10 @@ pub async fn list_collections(
     Json(req): Json<MongoCollectionRequest>,
 ) -> Result<Json<Vec<dbx_core::document_ops::CollectionInfo>>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
-    let result = dbx_core::mongo_ops::mongo_list_collections_core(&state.app, &req.connection_id, &req.database)
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    let result = dbx_core::mongo_ops::mongo_list_collections_core(&state.app, &req.connection_id, &database)
         .await
         .map_err(AppError::from)?;
-    Ok(Json(result))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VectorCollectionDetailRequest {
-    pub connection_id: String,
-    pub database: String,
-    pub collection: String,
-}
-
-pub async fn vector_collection_detail(
-    State(state): State<Arc<WebState>>,
-    Json(req): Json<VectorCollectionDetailRequest>,
-) -> Result<Json<dbx_core::db::vector_driver::CollectionInfo>, AppError> {
-    let result = dbx_core::schema::get_vector_collection_detail_core(
-        &state.app,
-        &req.connection_id,
-        &req.database,
-        &req.collection,
-    )
-    .await
-    .map_err(AppError::from)?;
     Ok(Json(result))
 }
 
@@ -339,10 +361,10 @@ pub async fn drop_database(
     headers: HeaderMap,
     Json(req): Json<MongoCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop database")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Drop database").await?;
     ensure_writable(&state.app, &req.connection_id, "Drop database").await?;
-    dbx_core::mongo_ops::mongo_drop_database_core(&state.app, &req.connection_id, &req.database)
+    dbx_core::mongo_ops::mongo_drop_database_core(&state.app, &req.connection_id, &database)
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -353,10 +375,11 @@ pub async fn drop_collection(
     headers: HeaderMap,
     Json(req): Json<MongoCollectionNameRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop collection")
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Drop collection")
         .await?;
     ensure_writable(&state.app, &req.connection_id, "Drop collection").await?;
-    dbx_core::mongo_ops::mongo_drop_collection_core(&state.app, &req.connection_id, &req.database, &req.collection)
+    dbx_core::mongo_ops::mongo_drop_collection_core(&state.app, &req.connection_id, &database, &req.collection)
         .await
         .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -367,13 +390,14 @@ pub async fn rename_collection(
     headers: HeaderMap,
     Json(req): Json<MongoRenameCollectionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Rename collection")
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Rename collection")
         .await?;
     ensure_writable(&state.app, &req.connection_id, "Rename collection").await?;
     dbx_core::mongo_ops::mongo_rename_collection_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.new_name,
     )
@@ -382,29 +406,83 @@ pub async fn rename_collection(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+pub async fn clone_collection(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCloneCollectionRequest>,
+) -> Result<Json<dbx_core::db::mongo_driver::MongoCloneCollectionResult>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Clone collection")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Clone collection").await?;
+    let result = dbx_core::mongo_ops::mongo_clone_collection_core(
+        &state.app,
+        &req.connection_id,
+        &database,
+        &req.source_collection,
+        &req.target_collection,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn find_documents(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Json(req): Json<MongoFindRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     let result = run_cancellable(
         &state,
         req.execution_id.clone(),
         dbx_core::document_ops::find_documents_core(
             &state.app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.collection,
             req.skip.unwrap_or(0),
             req.limit.unwrap_or(50),
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+            req.collation.as_deref(),
+            None,
+            false,
         ),
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn explain_find(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoFindExplainRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    let verbosity = req.verbosity.as_deref().unwrap_or("queryPlanner");
+    let result = run_cancellable(
+        &state,
+        req.execution_id.clone(),
+        dbx_core::mongo_ops::mongo_explain_find_core(
+            &state.app,
+            &req.connection_id,
+            &database,
+            &req.collection,
+            req.skip.unwrap_or(0),
+            req.limit.unwrap_or(100),
+            req.filter.as_deref(),
+            req.projection.as_deref(),
+            req.sort.as_deref(),
+            req.collation.as_deref(),
+            verbosity,
+        ),
+    )
+    .await?;
+    Ok(Json(result))
 }
 
 pub async fn find_one(
@@ -434,13 +512,14 @@ pub async fn count_documents(
     Json(req): Json<MongoCountRequest>,
 ) -> Result<Json<u64>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     let result = run_cancellable(
         &state,
         req.execution_id,
         dbx_core::mongo_ops::mongo_count_documents_core(
             &state.app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.collection,
             req.filter.as_deref(),
             req.mode.as_deref(),
@@ -456,10 +535,11 @@ pub async fn server_version(
     Json(req): Json<MongoServerVersionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     let result = run_cancellable(
         &state,
         req.execution_id.clone(),
-        dbx_core::mongo_ops::mongo_server_version_core(&state.app, &req.connection_id, &req.database),
+        dbx_core::mongo_ops::mongo_server_version_core(&state.app, &req.connection_id, &database),
     )
     .await?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
@@ -471,13 +551,14 @@ pub async fn collection_stats(
     Json(req): Json<MongoCollectionStatsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     let result = run_cancellable(
         &state,
         req.execution_id.clone(),
         dbx_core::mongo_ops::mongo_collection_stats_core(
             &state.app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.collection,
             req.scale,
         ),
@@ -492,21 +573,21 @@ pub async fn aggregate_documents(
     Json(req): Json<MongoAggregateRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::ensure_mongo_pipeline_target(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.pipeline_json,
+    )
+    .await?;
     if super::mcp_policy::mongo_pipeline_has_write_stage(&req.pipeline_json) {
         super::mcp_policy::ensure_dangerous_write(
             &state,
             &headers,
             &req.connection_id,
-            &req.database,
+            &database,
             "MongoDB aggregate write",
-        )
-        .await?;
-        super::mcp_policy::ensure_mongo_pipeline_target(
-            &state,
-            &headers,
-            &req.connection_id,
-            &req.database,
-            &req.pipeline_json,
         )
         .await?;
     }
@@ -516,7 +597,7 @@ pub async fn aggregate_documents(
         dbx_core::mongo_ops::mongo_aggregate_documents_core(
             &state.app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.collection,
             &req.pipeline_json,
             req.max_rows,
@@ -533,13 +614,14 @@ pub async fn distinct(
     Json(req): Json<MongoDistinctRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     let result = run_cancellable(
         &state,
         req.execution_id.clone(),
         dbx_core::mongo_ops::mongo_distinct_core(
             &state.app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.collection,
             &req.field,
             req.filter.as_deref(),
@@ -549,18 +631,32 @@ pub async fn distinct(
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
 }
 
+pub async fn list_index_specs(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCollectionNameRequest>,
+) -> Result<Json<Vec<dbx_core::db::mongo_driver::MongoIndexSpec>>, AppError> {
+    super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    let result =
+        dbx_core::mongo_ops::mongo_list_index_specs_core(&state.app, &req.connection_id, &database, &req.collection)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn create_index(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Json(req): Json<MongoCreateIndexRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Create index")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Create index").await?;
     ensure_writable(&state.app, &req.connection_id, "Create index").await?;
     let name = dbx_core::mongo_ops::mongo_create_index_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.keys_json,
         req.options_json.as_deref(),
@@ -570,18 +666,56 @@ pub async fn create_index(
     Ok(Json(serde_json::json!({ "name": name })))
 }
 
+pub async fn create_user(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoCreateUserRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Create user").await?;
+    ensure_writable(&state.app, &req.connection_id, "Create user").await?;
+    let affected_rows = dbx_core::mongo_ops::mongo_create_user_core(
+        &state.app,
+        &req.connection_id,
+        &database,
+        &req.user_json,
+        req.write_concern_json.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(serde_json::json!({ "affected_rows": affected_rows })))
+}
+
+pub async fn run_command(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Json(req): Json<MongoRunCommandRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Run MongoDB command")
+        .await?;
+    ensure_writable(&state.app, &req.connection_id, "Run MongoDB command").await?;
+    let result = run_cancellable(
+        &state,
+        req.execution_id.clone(),
+        dbx_core::mongo_ops::mongo_run_command_core(&state.app, &req.connection_id, &database, &req.command_json),
+    )
+    .await?;
+    Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
 pub async fn drop_indexes(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Json(req): Json<MongoDropIndexesRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Drop indexes")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Drop indexes").await?;
     ensure_writable(&state.app, &req.connection_id, "Drop indexes").await?;
     let result = dbx_core::mongo_ops::mongo_drop_indexes_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         req.indexes_json.as_deref(),
         req.single,
@@ -614,12 +748,13 @@ pub async fn insert_documents(
     headers: HeaderMap,
     Json(req): Json<MongoInsertDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &req.database, "Insert").await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &database, "Insert").await?;
     ensure_writable(&state.app, &req.connection_id, "Insert").await?;
     let result = dbx_core::mongo_ops::mongo_insert_documents_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.docs_json,
     )
@@ -652,17 +787,17 @@ pub async fn update_documents(
     headers: HeaderMap,
     Json(req): Json<MongoUpdateDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     if super::mcp_policy::mongo_filter_is_effectively_unbounded(&req.filter_json) {
-        super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Update")
-            .await?;
+        super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Update").await?;
     } else {
-        super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &req.database, "Update").await?;
+        super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &database, "Update").await?;
     }
     ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::mongo_ops::mongo_update_documents_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.filter_json,
         &req.update_json,
@@ -679,13 +814,13 @@ pub async fn find_one_and_update(
     headers: HeaderMap,
     Json(req): Json<MongoFindOneAndUpdateRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_find_one_write_policy(&state, &headers, &req.connection_id, &req.database, &req.filter_json, "Update")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    ensure_find_one_write_policy(&state, &headers, &req.connection_id, &database, &req.filter_json, "Update").await?;
     ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::mongo_ops::mongo_find_one_and_update_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.filter_json,
         &req.update_json,
@@ -701,13 +836,13 @@ pub async fn find_one_and_replace(
     headers: HeaderMap,
     Json(req): Json<MongoFindOneAndReplaceRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_find_one_write_policy(&state, &headers, &req.connection_id, &req.database, &req.filter_json, "Replace")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    ensure_find_one_write_policy(&state, &headers, &req.connection_id, &database, &req.filter_json, "Replace").await?;
     ensure_writable(&state.app, &req.connection_id, "Update").await?;
     let result = dbx_core::mongo_ops::mongo_find_one_and_replace_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.filter_json,
         &req.replacement_json,
@@ -723,13 +858,13 @@ pub async fn find_one_and_delete(
     headers: HeaderMap,
     Json(req): Json<MongoFindOneAndDeleteRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    ensure_find_one_write_policy(&state, &headers, &req.connection_id, &req.database, &req.filter_json, "Delete")
-        .await?;
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
+    ensure_find_one_write_policy(&state, &headers, &req.connection_id, &database, &req.filter_json, "Delete").await?;
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result = dbx_core::mongo_ops::mongo_find_one_and_delete_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.filter_json,
         req.options_json.as_deref(),
@@ -762,17 +897,17 @@ pub async fn delete_documents(
     headers: HeaderMap,
     Json(req): Json<MongoDeleteDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     if super::mcp_policy::mongo_filter_is_effectively_unbounded(&req.filter_json) {
-        super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &req.database, "Delete")
-            .await?;
+        super::mcp_policy::ensure_dangerous_write(&state, &headers, &req.connection_id, &database, "Delete").await?;
     } else {
-        super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &req.database, "Delete").await?;
+        super::mcp_policy::ensure_write(&state, &headers, &req.connection_id, &database, "Delete").await?;
     }
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
     let result = dbx_core::mongo_ops::mongo_delete_documents_core(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.collection,
         &req.filter_json,
         req.many,
@@ -799,7 +934,10 @@ async fn ensure_find_one_write_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::{drop_database, ensure_find_one_write_policy, MongoCollectionRequest};
+    use super::{
+        clone_collection, drop_database, ensure_find_one_write_policy, MongoCloneCollectionRequest,
+        MongoCollectionRequest,
+    };
     use crate::state::WebState;
     use axum::{
         extract::State,
@@ -851,6 +989,7 @@ mod tests {
             read_only: false,
             allow_dangerous_sql: false,
             allowed_connection_ids: Some(vec![connection.id.clone()]),
+            ..Default::default()
         };
         state.app.storage.save_mcp_global_policy(&writable_policy).await.unwrap();
 
@@ -897,6 +1036,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: true,
                 allowed_connection_ids: Some(vec!["different-connection".to_string()]),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -921,6 +1061,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec![connection.id.clone()]),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -929,6 +1070,41 @@ mod tests {
             State(state.clone()),
             mcp_headers(),
             Json(MongoCollectionRequest { connection_id: connection.id, database: "app".to_string() }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.starts_with("SQL_BLOCKED:"), "{}", error.message);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn clone_collection_requires_mcp_dangerous_write_approval() {
+        let (state, dir) = test_web_state().await;
+        let connection = mongo_config(false);
+        state.app.storage.save_connections(std::slice::from_ref(&connection)).await.unwrap();
+        state
+            .app
+            .storage
+            .save_mcp_global_policy(&McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: false,
+                allowed_connection_ids: Some(vec![connection.id.clone()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let error = clone_collection(
+            State(state.clone()),
+            mcp_headers(),
+            Json(MongoCloneCollectionRequest {
+                connection_id: connection.id,
+                database: "app".to_string(),
+                source_collection: "users".to_string(),
+                target_collection: "users_copy".to_string(),
+            }),
         )
         .await
         .unwrap_err();

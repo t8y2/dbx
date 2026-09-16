@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { AuthAction, MqIssuedToken, MqSystemKind, MqTokenRecord, PermissionMap, PolicyScope, TopicInfo } from "@/types/mq";
 import { mqGrantPermission, mqIssueToken, mqListPermissions, mqListTokenRecords, mqRevokePermission } from "@/lib/backend/api";
 import { formatMqTokenIssueError, type MqTokenIssueErrorView } from "@/lib/mq/mqTokenErrors";
+import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
   connectionId: string;
@@ -17,6 +18,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 
 const actionOptions: AuthAction[] = ["produce", "consume", "functions", "sources", "sinks", "packages"];
 
@@ -78,13 +80,13 @@ const permissionRows = computed(() => {
   return Object.entries(permissions.value).map(([role, actions]) => ({ role, actions }));
 });
 
-function guardWritable() {
+async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
     notice.value = undefined;
     return false;
   }
-  return true;
+  return confirmMqWrite(operation);
 }
 
 function formatActionLabel(action: AuthAction): string {
@@ -120,7 +122,7 @@ async function loadPermissions() {
 }
 
 async function grantPermission() {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqPermissions.grant")))) return;
   const current = scope.value;
   const role = roleName.value.trim();
   roleNameError.value = "";
@@ -163,7 +165,7 @@ async function grantPermission() {
 }
 
 async function revokePermission(role: string) {
-  if (!guardWritable()) return;
+  if (!(await guardWritable(t("mqPermissions.revoke")))) return;
   const current = scope.value;
   if (!current) {
     error.value = t("mqPermissions.selectNamespaceOrTopic");
@@ -225,6 +227,10 @@ async function loadTokenRecords() {
 async function issueToken() {
   if (props.readOnly) {
     tokenError.value = readOnlyMessage.value;
+    tokenIssueError.value = undefined;
+    return;
+  }
+  if (!(await confirmMqWrite(t("mqPermissions.generateToken")))) {
     tokenIssueError.value = undefined;
     return;
   }
@@ -475,6 +481,8 @@ watch(
 </template>
 
 <style scoped>
+@import "./shared/mqPanel.css";
+
 .permissions-panel {
   height: 100%;
   display: flex;
@@ -677,30 +685,6 @@ th {
   color: var(--color-warning);
 }
 
-.btn-primary,
-.btn-secondary,
-.btn-sm,
-.btn-danger {
-  padding: 6px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--dbx-radius-fixed-4);
-  background: var(--color-background);
-  color: var(--color-text);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.btn-primary {
-  background: var(--color-primary);
-  border-color: var(--color-primary);
-  color: white;
-}
-
-.btn-danger {
-  color: var(--color-error);
-  border-color: var(--color-error);
-}
-
 .dialog-overlay {
   position: fixed;
   inset: 0;
@@ -734,15 +718,6 @@ th {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-}
-
-.btn-close {
-  border: none;
-  background: none;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: 22px;
-  line-height: 1;
 }
 
 .dialog-body {

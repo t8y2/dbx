@@ -1,18 +1,30 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, X } from "@lucide/vue";
+import { Loader2, CheckCircle2, XCircle, AlertCircle, FolderOpen, Minimize2, Wrench, X } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { formatDataTransferDuration } from "@/composables/useExportTracker";
+import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 
 const { t } = useI18n();
 const { toast } = useToast();
 const open = defineModel<boolean>("open", { default: false });
 const isRevealing = ref(false);
+const currentTime = ref(Date.now());
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  elapsedTimer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 1000);
+});
+onBeforeUnmount(() => {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+});
 
 const props = defineProps<{
   title: string;
@@ -23,19 +35,34 @@ const props = defineProps<{
   status: string;
   errorMessage: string | null;
   filePath?: string | null;
+  startedAt?: number;
+  finishedAt?: number;
   disableCancel?: boolean;
   canMinimize?: boolean;
+  connectionId?: string;
 }>();
 
 const emit = defineEmits<{
   cancel: [];
   minimize: [];
+  changeQueryTimeout: [];
   "update:open": [value: boolean];
 }>();
 
 const translatedErrorMessage = computed(() => (props.errorMessage ? translateBackendError(t, props.errorMessage) : ""));
+// Prefer the real saved file name from the save dialog path; the synthetic
+// "Query Result" style label is only a fallback when no path is available.
+const displayName = computed(() => {
+  const filePath = props.filePath?.trim() ?? "";
+  if (filePath) {
+    const segments = filePath.split(/[\\/]+/).filter((segment) => segment.length > 0);
+    if (segments.length > 0) return segments[segments.length - 1];
+  }
+  return `${props.tableName} (.${props.format})`;
+});
 const isActive = computed(() => props.status === "Running" || props.status === "Writing");
 const isFinished = computed(() => props.status === "Done" || props.status === "Error" || props.status === "Cancelled");
+const canChangeQueryTimeout = computed(() => props.status === "Error" && !!props.connectionId && !!props.errorMessage && isQueryTimeoutErrorMessage(props.errorMessage));
 const canRevealFile = computed(() => props.status === "Done" && !!props.filePath && isTauriRuntime());
 const progressPercent = computed(() => {
   if (!props.totalRows || props.totalRows <= 0) return 0;
@@ -49,6 +76,10 @@ const rowsText = computed(() => {
     });
   }
   return t("exportProgress.rowsExported", { count: props.rowsExported.toLocaleString() });
+});
+const elapsedText = computed(() => {
+  if (props.startedAt === undefined) return "";
+  return formatDataTransferDuration((props.finishedAt ?? currentTime.value) - props.startedAt);
 });
 
 async function revealExportFile() {
@@ -79,8 +110,8 @@ async function revealExportFile() {
       </DialogHeader>
 
       <div class="py-4 space-y-4">
-        <!-- Table name and format info -->
-        <div class="text-sm text-muted-foreground">{{ tableName }} (.{{ format }})</div>
+        <!-- Real saved file name (falls back to table name and format) -->
+        <div class="text-sm text-muted-foreground" :title="filePath || undefined">{{ displayName }}</div>
 
         <!-- Progress bar -->
         <div class="w-full bg-muted rounded-full h-2 overflow-hidden">
@@ -120,6 +151,7 @@ async function revealExportFile() {
         <!-- Row count -->
         <div class="text-xs text-muted-foreground tabular-nums">
           {{ rowsText }}
+          <span v-if="elapsedText" class="ml-2">{{ t("exportProgress.elapsed", { duration: elapsedText }) }}</span>
         </div>
       </div>
 
@@ -135,6 +167,10 @@ async function revealExportFile() {
           </Button>
         </template>
         <template v-else-if="isFinished">
+          <Button v-if="canChangeQueryTimeout" variant="outline" size="sm" @click="emit('changeQueryTimeout')">
+            <Wrench class="mr-1 h-3.5 w-3.5" />
+            {{ t("editor.changeQueryTimeout") }}
+          </Button>
           <Button v-if="canRevealFile" size="sm" :disabled="isRevealing" @click="revealExportFile">
             <Loader2 v-if="isRevealing" class="mr-1 h-3.5 w-3.5 animate-spin" />
             <FolderOpen v-else class="mr-1 h-3.5 w-3.5" />

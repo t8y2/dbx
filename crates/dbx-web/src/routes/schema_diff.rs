@@ -14,6 +14,25 @@ pub struct GenerateSchemaSyncSqlRequest {
     pub cascade_delete: Option<bool>,
     pub source_dialect: Option<String>,
     pub field_mappings: Option<Vec<dbx_core::schema_diff::FieldMapping>>,
+    pub enable_rollback: Option<bool>,
+}
+
+pub async fn generate_schema_sync_plan(
+    Json(req): Json<GenerateSchemaSyncSqlRequest>,
+) -> Json<dbx_core::schema_diff::SchemaSyncSqlPlan> {
+    Json(dbx_core::schema_diff::generate_schema_sync_sql_plan(
+        &req.diffs,
+        req.function_diffs.as_deref().unwrap_or_default(),
+        req.sequence_diffs.as_deref().unwrap_or_default(),
+        req.rule_diffs.as_deref().unwrap_or_default(),
+        req.owner_diffs.as_deref().unwrap_or_default(),
+        req.database_type,
+        req.target_schema.as_deref(),
+        req.cascade_delete.unwrap_or(false),
+        req.source_dialect.as_deref().and_then(dbx_core::sql_dialect::descriptor::DialectKind::from_label),
+        req.field_mappings.as_deref().unwrap_or(&[]),
+        req.enable_rollback.unwrap_or(false),
+    ))
 }
 
 pub async fn prepare_schema_diff(

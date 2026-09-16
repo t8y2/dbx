@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,12 @@ type ErrorResponse = {
     code: number;
   };
 };
+
+test("hides the native server console window on Windows", async () => {
+  const launcher = await readFile(mcpBin, "utf8");
+
+  assert.match(launcher, /windowsHide:\s*true/);
+});
 
 test("falls back from server discovery when invoked through an npm-style symlink", async () => {
   const bin = await symlinkedMcpServer();

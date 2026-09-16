@@ -72,18 +72,20 @@ function tableCellText(value: unknown): string {
 
 <template>
   <div class="flex h-full min-h-0 flex-col bg-background">
-    <div class="h-9 shrink-0 border-b px-3 flex items-center gap-2 text-xs">
-      <span class="inline-flex items-center gap-1 rounded border bg-muted px-2 py-0.5 font-medium">
+    <div class="h-9 shrink-0 border-b px-3 flex items-center gap-2 text-xs overflow-x-auto overflow-y-hidden">
+      <span class="shrink-0 whitespace-nowrap inline-flex items-center gap-1 rounded border bg-muted px-2 py-0.5 font-medium">
         <GitBranch class="h-3.5 w-3.5" />
         {{ t("explain.title") }}
       </span>
-      <span v-if="plan || hasTableView" class="text-muted-foreground">
+      <span v-if="plan || hasTableView" class="shrink-0 whitespace-nowrap text-muted-foreground">
         {{ plan?.databaseType.toUpperCase() || "MYSQL" }}<template v-if="plan"> · {{ t("explain.nodeCount", { count: nodeCount }) }}</template>
       </span>
-      <span v-if="plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')" class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size: 10px">A-TRACE</span>
-      <span v-if="measuredRowsLabel" class="ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size: 10px">{{ measuredRowsLabel }}</span>
-      <span class="flex-1" />
-      <div v-if="plan || hasTableView" class="inline-flex rounded-md border bg-muted/40 p-0.5">
+      <span v-if="plan?.databaseType === 'dameng' && isRawString && rawContent.includes('->')" class="shrink-0 whitespace-nowrap ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size: 10px"
+        >A-TRACE</span
+      >
+      <span v-if="measuredRowsLabel" class="shrink-0 whitespace-nowrap ml-1 inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 font-semibold text-green-700 dark:bg-green-900/30 dark:text-green-300" style="font-size: 10px">{{ measuredRowsLabel }}</span>
+      <span class="flex-1 min-w-2" />
+      <div v-if="plan || hasTableView" class="shrink-0 inline-flex rounded-md border bg-muted/40 p-0.5">
         <Button v-if="plan" size="sm" :variant="activeView === 'canvas' ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs gap-1" @click="activeView = 'canvas'">
           <Workflow class="h-3.5 w-3.5" />
           {{ t("explain.canvas") }}

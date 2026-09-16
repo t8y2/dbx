@@ -1,7 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 
-export type SyntheticEditKey = "oracle-rowid" | "neo4j-element-id";
+export type SyntheticEditKey = "oracle-rowid" | "xugu-rowid" | "neo4j-element-id";
 
 export interface TableDataCapability {
   insert: boolean;
@@ -84,13 +84,46 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "db2",
   "informix",
   "bigquery",
+  "spanner",
   "sundb",
   "oscar",
   "databend",
 ]);
 
 const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<DatabaseCapability>>> = {
+  kyuubi: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
+  impala: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
   hive: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: true,
+      transaction: false,
+    },
+  },
+  argo: {
     tableData: {
       insert: true,
       updateRequiresPrimaryKey: false,
@@ -124,6 +157,20 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
   },
   oracle: {
     syntheticKey: "oracle-rowid",
+  },
+  xugu: {
+    // Xugu exposes a stable ROWID pseudo-column for base, partitioned and
+    // temporary tables. Keep this capability scoped to Xugu instead of
+    // broadening Oracle-compatible behavior for other drivers.
+    syntheticKey: "xugu-rowid",
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: true,
+    },
   },
   "oceanbase-oracle": {
     syntheticKey: "oracle-rowid",
@@ -165,6 +212,18 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
     },
   },
   influxdb: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
+  victoriametrics: {
     tableData: {
       insert: false,
       updateRequiresPrimaryKey: false,

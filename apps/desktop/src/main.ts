@@ -4,6 +4,8 @@ import VueVirtualScroller from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import "./styles/globals.css";
 import { installDebugLogCapture } from "@/lib/backend/debugLog";
+import { clearStartupPreloadRetry, retryStartupAfterPreloadFailure } from "@/lib/startup/startupPreloadRecovery";
+import { applyLegacyWebViewClass } from "@/lib/ui/legacyWebView";
 
 function startupErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -13,6 +15,7 @@ function startupErrorMessage(error: unknown): string {
 }
 
 function renderStartupError(error: unknown) {
+  if (retryStartupAfterPreloadFailure(error)) return;
   const message = startupErrorMessage(error);
   console.error("[STARTUP] bootstrap failed", error);
   const root = document.querySelector<HTMLDivElement>("#root");
@@ -84,6 +87,8 @@ async function bootstrap() {
   app.use(i18n);
   app.use(VueVirtualScroller);
   app.mount("#root");
+  clearStartupPreloadRetry();
+  window.dispatchEvent(new Event("dbx:startup-ready"));
   console.log("[STARTUP] vue mounted");
 
   installGlobalInputAttrs();
@@ -91,4 +96,5 @@ async function bootstrap() {
 
 installDebugLogCapture();
 installStartupErrorHandlers();
+applyLegacyWebViewClass();
 void bootstrap().catch(renderStartupError);

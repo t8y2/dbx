@@ -1,0 +1,37 @@
+/*
+ * The standalone export's Tailwind entry point.
+ *
+ * `source(none)` turns OFF automatic content detection, which otherwise scans
+ * the whole repository from the project root and would emit every utility in
+ * DBX — the same reason this file cannot simply import globals.css. `@source`
+ * is additive with no way to un-source, so the narrowing has to happen here,
+ * at the import.
+ */
+@import "tailwindcss" source(none);
+@source "../docs/**/*.vue";
+@source "../docs-export/**/*.vue";
+
+/*
+ * Carries the raw `--background`/`--border` properties AND the `@theme inline`
+ * block that maps them onto `--color-*`. Without that block Tailwind defines
+ * every custom property and generates none of `bg-background`,
+ * `border-border`, `fill-card` — a build that succeeds while emitting an
+ * unstyled page.
+ */
+@import "../styles/tokens.css";
+
+/*
+ * The export owns its own page box. Task 6 emits the surrounding HTML from
+ * Rust, so nothing outside this bundle can be relied on to size the document:
+ * DocsApp is `h-full` and would collapse to zero height against an unsized
+ * ancestor.
+ */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+/* No `@font-face` here — the Vite plugin prepends one with the font already
+ * inlined as a data URI, so no rule can reference a path that fails under
+ * `file://`. */

@@ -91,6 +91,11 @@ public final class JsonRpcServer {
     Object dispatchForRuntime(String method, JsonObject params) throws Exception {
         return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> {
             AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
+            if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
+                && jdbcAgent != null
+                && jdbcAgent.hasActivePooledLeases()) {
+                return Collections.singletonMap("ok", true);
+            }
             boolean manageConnection = jdbcAgent != null && requiresConnectedConnection(method);
             if (manageConnection) {
                 jdbcAgent.beginPooledRequest();
@@ -106,7 +111,9 @@ public final class JsonRpcServer {
                         jdbcExecutor,
                         succeeded,
                         requiresSessionAffinity(method, params),
-                        evictAfterRequest(method)
+                        evictAfterRequest(method),
+                        endsSessionAffinity(method),
+                        preservesSchemaContext()
                     );
                 }
             }
@@ -157,7 +164,8 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_TEST_CONNECTION.equals(method)) {
             Map<String, Object> result = agent.testConnectionWithInfo(gson.fromJson(params, ConnectParams.class));
             if (!Boolean.TRUE.equals(result.get("ok"))) {
-                throw new RuntimeException("Connection failed");
+                Object error = result.get("error");
+                throw new RuntimeException(error == null ? "Connection failed" : String.valueOf(error));
             }
             return result;
         }
@@ -166,8 +174,10 @@ public final class JsonRpcServer {
             boolean valid = false;
             if (conn != null) {
                 try {
-                    valid = !conn.isClosed() && conn.isValid(2);
-                } catch (Exception ignored) {
+                    valid = agent instanceof AbstractJdbcAgent jdbcAgent
+                        ? jdbcAgent.isConnectionValid(conn, 2)
+                        : !conn.isClosed() && conn.isValid(2);
+                } catch (Exception | AbstractMethodError ignored) {
                 }
             }
             if (!valid) {
@@ -307,6 +317,15 @@ public final class JsonRpcServer {
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
             return agent.executeTransaction(statements, stringOrNull(params, "schema"));
         }
+        if (AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION.equals(method)) {
+            return agent.beginManualTransaction(stringOrNull(params, "schema"));
+        }
+        if (AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION.equals(method)) {
+            return agent.commitManualTransaction();
+        }
+        if (AgentProtocol.METHOD_ROLLBACK_MANUAL_TRANSACTION.equals(method)) {
+            return agent.rollbackManualTransaction();
+        }
         if (AgentProtocol.METHOD_EXECUTE_BATCH.equals(method)) {
             Type statementsType = new TypeToken<List<String>>() {}.getType();
             List<String> statements = gson.fromJson(params.get("statements"), statementsType);
@@ -365,8 +384,10 @@ public final class JsonRpcServer {
         }
         boolean valid = false;
         try {
-            valid = !conn.isClosed() && conn.isValid(2);
-        } catch (Exception ignored) {
+            valid = agent instanceof AbstractJdbcAgent validationAgent
+                ? validationAgent.isConnectionValid(conn, 2)
+                : !conn.isClosed() && conn.isValid(2);
+        } catch (Exception | AbstractMethodError ignored) {
         }
         if (valid) {
             lastConnectionValidationTimeMillis = now;
@@ -412,6 +433,9 @@ public final class JsonRpcServer {
     }
 
     private boolean requiresSessionAffinity(String method, JsonObject params) {
+        if (AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION.equals(method)) {
+            return true;
+        }
         try {
             if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)
                 || AgentProtocol.METHOD_EXECUTE_QUERY_PAGE.equals(method)
@@ -435,6 +459,23 @@ public final class JsonRpcServer {
             return false;
         }
         return false;
+    }
+
+    private static boolean endsSessionAffinity(String method) {
+        return AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION.equals(method)
+            || AgentProtocol.METHOD_ROLLBACK_MANUAL_TRANSACTION.equals(method);
+    }
+
+    private boolean preservesSchemaContext() {
+        Connection connection = agent.getConnection();
+        if (connection == null) {
+            return false;
+        }
+        try {
+            return !connection.getAutoCommit();
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private static boolean evictAfterRequest(String method) {

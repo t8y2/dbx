@@ -10,6 +10,13 @@ const backend = vi.hoisted(() => ({
   vectorGetCollectionDetail: vi.fn(),
 }));
 
+vi.mock("vue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue")>();
+  return {
+    ...actual,
+    defineAsyncComponent: () => actual.defineComponent({ render: () => null }),
+  };
+});
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/lib/backend/api", () => backend);
 vi.mock("@lucide/vue", async () => {
@@ -43,10 +50,10 @@ vi.mock("@/components/ui/ErrorBanner.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return { default: defineComponent({ setup: () => () => h("div") }) };
 });
-vi.mock("@/components/grid/DataGrid.vue", async () => {
-  const { defineComponent, h } = await import("vue");
-  return { __esModule: true, default: defineComponent({ setup: () => () => h("div") }) };
-});
+vi.mock("@/components/grid/DataGrid.vue", () => ({
+  __esModule: true,
+  default: { render: () => null },
+}));
 
 import VectorBrowser from "@/components/vector/VectorBrowser.vue";
 
@@ -85,9 +92,13 @@ beforeEach(() => {
   document.body.appendChild(root);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await vi.dynamicImportSettled();
+  await flushUi();
   app?.unmount();
   app = null;
+  await vi.dynamicImportSettled();
+  await flushUi();
   root?.remove();
   root = null;
   document.body.innerHTML = "";
@@ -100,7 +111,8 @@ describe("VectorBrowser default requests", () => {
       ["weaviate", "GET /v1/objects?class=demo&limit=100"],
       ["chromadb", "POST /api/v2/tenants/default_tenant/databases/default_database/collections/demo/get"],
     ] as const) {
-      app = createApp(VectorBrowser, { connectionId: "vector-1", database: "default", collection: "demo", databaseType });
+      const database = databaseType === "chromadb" ? "default_database" : "default";
+      app = createApp(VectorBrowser, { connectionId: "vector-1", database, collection: "demo", databaseType });
       app.mount(root!);
       await flushUi();
       expect(root!.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain(expected);
@@ -109,6 +121,31 @@ describe("VectorBrowser default requests", () => {
       root!.replaceChildren();
     }
     expect(backend.vectorGetCollectionDetail).not.toHaveBeenCalled();
+  });
+
+  it("uses the configured Chroma Cloud namespace in generated requests", async () => {
+    app = createApp(VectorBrowser, {
+      connectionId: "chroma-cloud-1",
+      database: "support/kb",
+      collection: "collection/id",
+      databaseType: "chromadb",
+      tenant: "tenant /eu",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const prefix = "/api/v2/tenants/tenant%20%2Feu/databases/support%2Fkb/collections/collection%2Fid";
+    expect(root!.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain(`POST ${prefix}/get`);
+
+    for (const [button, operation] of [
+      ["vector.search", "query"],
+      ["vector.upsert", "upsert"],
+      ["vector.delete", "delete"],
+    ] as const) {
+      buttonWithText(button).click();
+      await nextTick();
+      expect(root!.querySelector<HTMLTextAreaElement>("textarea")!.value).toContain(`POST ${prefix}/${operation}`);
+    }
   });
 
   it("resolves the schema before executing a generated upsert request", async () => {

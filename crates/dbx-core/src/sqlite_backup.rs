@@ -14,11 +14,46 @@ pub struct SqliteBackupOptions {
 pub async fn backup_sqlite_database(pool: SqliteHandle, options: SqliteBackupOptions) -> Result<(), String> {
     let destination = prepare_destination_path(&options)?;
     let temp = backup_temp_path(&destination);
+    if let Some(worker) = pool.worker() {
+        let result = worker.backup_to_local_path(&temp).await;
+        return match result {
+            Ok(()) => replace_backup_file(&temp, &destination),
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                Err(error)
+            }
+        };
+    }
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.backup(DatabaseName::Main, &temp, None).map_err(|e| format!("SQLite backup failed: {e}"))
         })?;
         replace_backup_file(&temp, &destination)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn restore_sqlite_database(pool: SqliteHandle, source_path: &str) -> Result<(), String> {
+    let src = source_path.trim();
+    if src.is_empty() {
+        return Err("Restore source path is empty".to_string());
+    }
+    if src.contains('\0') {
+        return Err("Path contains an invalid NUL byte".to_string());
+    }
+    if let Some(worker) = pool.worker() {
+        let source = PathBuf::from(expand_tilde(src));
+        if !source.is_file() {
+            return Err("Restore source file does not exist".to_string());
+        }
+        return worker.restore_from_local_path(&source).await;
+    }
+    let source = PathBuf::from(expand_tilde(src));
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            conn.restore(DatabaseName::Main, &source, None::<fn(_)>).map_err(|e| format!("SQLite restore failed: {e}"))
+        })
     })
     .await
     .map_err(|e| e.to_string())?

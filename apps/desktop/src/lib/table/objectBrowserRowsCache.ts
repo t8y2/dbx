@@ -4,6 +4,7 @@ import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 
 const OBJECT_BROWSER_ROWS_CACHE_TTL_MS = 30_000;
 const OBJECT_BROWSER_ROWS_CACHE_MAX_ENTRIES = 24;
+const OBJECT_BROWSER_ROWS_GENERATION_MAX_ENTRIES = 128;
 
 export interface ObjectBrowserRowsCacheScope {
   connectionId: string;
@@ -28,6 +29,7 @@ const objectBrowserRowsCache = new MetadataResultCache<ObjectBrowserRow[]>({
   now: () => Date.now(),
 });
 const objectBrowserRowsCacheGenerations = new Map<string, ObjectBrowserRowsCacheGeneration>();
+let nextObjectBrowserRowsCacheGeneration = 0;
 
 function objectBrowserRowsScope(scope: ObjectBrowserRowsCacheScope): MetadataScopeInput {
   return {
@@ -48,7 +50,15 @@ function objectBrowserRowsCacheGeneration(scope: ObjectBrowserRowsCacheScope): O
   const key = metadataScopeKey(cacheScope);
   let state = objectBrowserRowsCacheGenerations.get(key);
   if (!state) {
-    state = { generation: 0, scope: metadataScopeParts(cacheScope) };
+    state = { generation: ++nextObjectBrowserRowsCacheGeneration, scope: metadataScopeParts(cacheScope) };
+    objectBrowserRowsCacheGenerations.set(key, state);
+    while (objectBrowserRowsCacheGenerations.size > OBJECT_BROWSER_ROWS_GENERATION_MAX_ENTRIES) {
+      const oldest = objectBrowserRowsCacheGenerations.keys().next().value;
+      if (oldest === undefined) break;
+      objectBrowserRowsCacheGenerations.delete(oldest);
+    }
+  } else {
+    objectBrowserRowsCacheGenerations.delete(key);
     objectBrowserRowsCacheGenerations.set(key, state);
   }
   return state;
@@ -68,6 +78,28 @@ export function getCachedObjectBrowserRows(scope: ObjectBrowserRowsCacheScope): 
   return hit ? cloneRows(hit.value) : undefined;
 }
 
+export interface ObjectBrowserRowsCacheHit {
+  rows: ObjectBrowserRow[];
+  stale: boolean;
+  ageMs: number;
+  cachedAt: number;
+}
+
+/**
+ * Reads the cached rows for a scope as a **scaffold**, allowing stale entries
+ * (beyond the TTL) to be surfaced and refreshed in the background. This never
+ * adds a new cache entry or expands capacity — a stale hit is the same Map entry
+ * the TTL would otherwise refuse to return, only now with its freshness metadata.
+ *
+ * Carries `stale`/`ageMs`/`cachedAt` so the caller can decide: keep an entry
+ * under TTL as-is, or present it immediately then revalidate in the background.
+ */
+export function getCachedObjectBrowserRowsForScaffold(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheHit | undefined {
+  const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope), { allowStale: true });
+  if (!hit) return undefined;
+  return { rows: cloneRows(hit.value), stale: hit.stale, ageMs: hit.ageMs, cachedAt: hit.cachedAt };
+}
+
 export function createObjectBrowserRowsCacheWriteToken(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheWriteToken {
   const frozenScope = Object.freeze({ ...scope });
   return Object.freeze({ generation: objectBrowserRowsCacheGeneration(frozenScope).generation, scope: frozenScope });
@@ -83,13 +115,13 @@ export function cacheObjectBrowserRows(token: ObjectBrowserRowsCacheWriteToken, 
 export function invalidateObjectBrowserRowsCache(match: MetadataCacheInvalidation): number {
   const projected = objectBrowserRowsCacheInvalidation(match);
   const matches = metadataCacheInvalidationMatcher(projected);
-  for (const state of objectBrowserRowsCacheGenerations.values()) {
-    if (matches(state.scope)) state.generation++;
+  for (const [key, state] of objectBrowserRowsCacheGenerations) {
+    if (matches(state.scope)) objectBrowserRowsCacheGenerations.delete(key);
   }
   return objectBrowserRowsCache.invalidate(projected);
 }
 
 export function clearObjectBrowserRowsCache(): void {
   objectBrowserRowsCache.clear();
-  for (const state of objectBrowserRowsCacheGenerations.values()) state.generation++;
+  objectBrowserRowsCacheGenerations.clear();
 }

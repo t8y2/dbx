@@ -65,7 +65,7 @@ export function summarizeLineageCounts(items: FieldLineageItem[]) {
 export function identifierInSql(sql: string, identifier: string): boolean {
   const escaped = escapeRegExp(identifier);
   const quoted = [`"${escapeRegExp(identifier)}"`, `\`${escapeRegExp(identifier)}\``, `\\[${escapeRegExp(identifier)}\\]`];
-  const pattern = `(?:${quoted.join("|")}|(?<![\\w$])${escaped}(?![\\w$]))`;
+  const pattern = `(?:${quoted.join("|")}|(?:^|[^\\w$])${escaped}(?![\\w$]))`;
   return new RegExp(pattern, "i").test(sql);
 }
 

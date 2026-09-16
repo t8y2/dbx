@@ -52,7 +52,8 @@ const generatedSql = computed(() => {
 });
 
 const inputParameterCount = computed(() => parameters.value.filter(acceptsRoutineInput).length);
-const outputParameterCount = computed(() => parameters.value.filter((parameter) => parameter.mode === "OUT").length);
+const outputParameterCount = computed(() => parameters.value.filter((parameter) => parameter.mode === "OUT" || (props.databaseType === "xugu" && parameter.mode === "INOUT")).length);
+const isXugu = computed(() => props.databaseType === "xugu");
 
 watch(
   () => [open.value, props.connectionId, props.database, props.databaseType, props.schema, props.routineName] as const,
@@ -134,6 +135,11 @@ function execute() {
 function canEditParameter(parameter: RoutineParameterValue): boolean {
   return acceptsRoutineInput(parameter);
 }
+
+function displayParameterDefault(parameter: RoutineParameterValue): string {
+  if (!parameter.hasDefault) return "-";
+  return parameter.defaultValue?.trim() || "DEFAULT";
+}
 </script>
 
 <template>
@@ -169,8 +175,11 @@ function canEditParameter(parameter: RoutineParameterValue): boolean {
         </div>
 
         <div v-else-if="parameters.length" class="overflow-x-auto rounded-md border bg-background">
-          <div class="min-w-[650px]">
-            <div class="grid grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px] border-b bg-muted px-3 py-2 text-xs font-medium text-muted-foreground">
+          <div :class="isXugu ? 'min-w-[720px]' : 'min-w-[650px]'">
+            <div
+              class="grid border-b bg-muted px-3 py-2 text-xs font-medium text-muted-foreground"
+              :class="isXugu ? 'grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(150px,1.4fr)_56px_minmax(130px,1.1fr)]' : 'grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px]'"
+            >
               <div>{{ t("contextMenu.parameterName") }}</div>
               <div>{{ t("contextMenu.parameterType") }}</div>
               <div>{{ t("contextMenu.parameterMode") }}</div>
@@ -185,13 +194,22 @@ function canEditParameter(parameter: RoutineParameterValue): boolean {
                 </LightTooltip>
               </div>
             </div>
-            <div v-for="parameter in parameters" :key="`${parameter.ordinal}:${parameter.name}`" class="grid grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px] items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0">
+            <div
+              v-for="parameter in parameters"
+              :key="`${parameter.ordinal}:${parameter.name}`"
+              class="grid items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
+              :class="isXugu ? 'grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(150px,1.4fr)_56px_minmax(130px,1.1fr)]' : 'grid-cols-[minmax(120px,1.2fr)_minmax(96px,1fr)_72px_minmax(160px,1.5fr)_64px_86px]'"
+            >
               <div class="min-w-0 truncate font-medium">{{ parameter.name }}</div>
               <div class="min-w-0 truncate text-muted-foreground">{{ parameter.dataType || "-" }}</div>
               <div class="text-xs text-muted-foreground">{{ parameter.mode }}</div>
               <Input v-model="parameter.value" class="h-8 bg-background font-mono text-xs" :disabled="!canEditParameter(parameter) || parameter.useNull || parameter.useDefault" :placeholder="canEditParameter(parameter) ? t('contextMenu.parameterValuePlaceholder') : t('contextMenu.outputOnly')" />
               <input type="checkbox" class="h-4 w-4 accent-primary" :checked="!!parameter.useNull" :disabled="!canEditParameter(parameter) || parameter.useDefault" @change="(event: Event) => (parameter.useNull = (event.target as HTMLInputElement).checked)" />
-              <input type="checkbox" class="h-4 w-4 accent-primary" :checked="!!parameter.useDefault" :disabled="!canEditParameter(parameter) || !parameter.hasDefault || parameter.useNull" @change="(event: Event) => (parameter.useDefault = (event.target as HTMLInputElement).checked)" />
+              <label v-if="isXugu" class="flex min-w-0 items-center gap-2" :title="displayParameterDefault(parameter)">
+                <input type="checkbox" class="h-4 w-4 shrink-0 accent-primary" :checked="!!parameter.useDefault" :disabled="!canEditParameter(parameter) || !parameter.hasDefault || parameter.useNull" @change="(event: Event) => (parameter.useDefault = (event.target as HTMLInputElement).checked)" />
+                <span class="truncate font-mono text-xs text-muted-foreground">{{ displayParameterDefault(parameter) }}</span>
+              </label>
+              <input v-else type="checkbox" class="h-4 w-4 accent-primary" :checked="!!parameter.useDefault" :disabled="!canEditParameter(parameter) || !parameter.hasDefault || parameter.useNull" @change="(event: Event) => (parameter.useDefault = (event.target as HTMLInputElement).checked)" />
             </div>
           </div>
         </div>

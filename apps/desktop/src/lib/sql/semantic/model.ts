@@ -1,5 +1,6 @@
 import { sqlSemanticDialectFor, type SqlSemanticDialectAdapter } from "@/lib/sql/semantic/dialect";
 import { findActiveSqlStatementSpan, isSuppressedSqlSemanticContext, tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import { resolveSqlStatementWindow } from "@/lib/sql/sqlSyntaxTreeWindow";
 import type {
   SqlSemanticBuildOptions,
   SqlSemanticClauseSpans,
@@ -33,6 +34,14 @@ interface ParseState {
   tokens: SqlSemanticToken[];
   statement: SqlSemanticStatement;
   cteSources: SqlSemanticRowSource[];
+  expandGroupedSources?: boolean;
+  groupedSourceScopes?: SqlSemanticGroupedSourceScope[];
+}
+
+export interface SqlSemanticGroupedSourceScope {
+  span: SqlSemanticSpan;
+  depth: number;
+  sources: SqlSemanticRowSource[];
 }
 
 interface QuerySourceRange {
@@ -130,18 +139,6 @@ function updateIntroducesMutationTarget(tokens: readonly SqlSemanticToken[], upd
   return true;
 }
 
-function commaContinuesTableList(tokens: readonly SqlSemanticToken[], commaIndex: number): boolean {
-  const comma = tokens[commaIndex];
-  if (comma?.text !== ",") return false;
-  for (let index = commaIndex - 1; index >= 0; index -= 1) {
-    const item = tokens[index];
-    if (!item || item.depth !== comma.depth || item.kind !== "word") continue;
-    if (item.normalized === "from") return true;
-    if (item.normalized === "select" || item.normalized === "join" || TABLE_INTRODUCERS.has(item.normalized) || CLAUSE_BOUNDARIES.has(item.normalized)) return false;
-  }
-  return false;
-}
-
 /**
  * Finds concrete table-name tokens for visual highlighting without consulting
  * metadata. Only the final identifier in a qualified name is returned, so
@@ -152,11 +149,18 @@ export function sqlSemanticTableNameSpans(sql: string, options: SqlSemanticBuild
   const tokens = significantTokens(tokenizeSqlSemantic(sql, dialect.id));
   const spans: SqlSemanticSpan[] = [];
   const seen = new Set<string>();
+  const commaContinuesTableListByDepth = new Map<number, boolean>();
 
   for (let index = 0; index < tokens.length; index += 1) {
     const item = tokens[index];
+    if (!item) continue;
+    const commaContinuesTableList = item.text === "," && commaContinuesTableListByDepth.get(item.depth) === true;
+    if (item.kind === "word") {
+      if (item.normalized === "from") commaContinuesTableListByDepth.set(item.depth, true);
+      else if (item.normalized === "select" || item.normalized === "join" || TABLE_INTRODUCERS.has(item.normalized) || CLAUSE_BOUNDARIES.has(item.normalized)) commaContinuesTableListByDepth.set(item.depth, false);
+    }
     const introduced = item?.kind === "word" && TABLE_INTRODUCERS.has(item.normalized) && (item.normalized !== "update" || updateIntroducesMutationTarget(tokens, index));
-    if (!introduced && !commaContinuesTableList(tokens, index)) continue;
+    if (!introduced && !commaContinuesTableList) continue;
 
     let target = index + 1;
     while (TABLE_TARGET_MODIFIERS.has(tokens[target]?.normalized ?? "")) target += 1;
@@ -441,6 +445,65 @@ function parseRowSource(state: ParseState, target: number, introducer: string, s
   return parseTableFunctionSource(state, target, introducer, sourceIndex) ?? parseTableSource(state, target, introducer, sourceIndex);
 }
 
+function parseRowSourceList(state: ParseState, target: number, introducer: string, sourceIndex: number): { sources: SqlSemanticRowSource[]; nextIndex: number } | null {
+  const open = state.tokens[target];
+  if (state.expandGroupedSources && open?.text === "(" && open.depth < 128) {
+    const close = findMatchingParenToken(state.tokens, target);
+    const first = state.tokens[target + 1];
+    const isQuery = first?.kind === "word" && (first.normalized === "select" || first.normalized === "with");
+    if (close >= 0 && !isQuery) {
+      // An unaliased parenthesized join is transparent to the surrounding query scope.
+      // A SELECT body or an explicitly aliased group must retain its own boundary.
+      const from: SqlSemanticToken = { ...open, kind: "word", text: "from", normalized: "from", depth: open.depth + 1 };
+      const sources = parseRowSourcesAtDepth({ ...state, tokens: [from, ...state.tokens.slice(target + 1, close)] }, from.depth, sourceIndex);
+      if (!aliasAfter(state.tokens, close + 1, state.dialect).alias) return { sources, nextIndex: close + 1 };
+      state.groupedSourceScopes?.push({ span: { start: open.span.end, end: state.tokens[close].span.start }, depth: from.depth, sources });
+    }
+  }
+  const parsed = parseRowSource(state, target, introducer, sourceIndex);
+  return parsed ? { sources: [parsed.source], nextIndex: parsed.nextIndex } : null;
+}
+
+function parseDorisLateralView(state: ParseState, index: number, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
+  if (state.dialect.id !== "doris" || state.tokens[index]?.normalized !== "lateral" || state.tokens[index + 1]?.normalized !== "view") return null;
+  // Doris's `LATERAL VIEW [OUTER] fn(...) alias AS col` -- skip the optional OUTER marker so the
+  // OUTER form models the same function columns as the plain form.
+  let functionIndex = index + 2;
+  if (state.tokens[functionIndex]?.normalized === "outer") functionIndex += 1;
+  const functionName = readQualifiedName(state.tokens, functionIndex, state.dialect);
+  if (!functionName || state.tokens[functionName.nextIndex]?.text !== "(") return null;
+  const close = findMatchingParenToken(state.tokens, functionName.nextIndex);
+  if (close < 0) return null;
+  let aliasIndex = close + 1;
+  if (state.tokens[aliasIndex]?.normalized === "as") aliasIndex += 1;
+  const alias = state.tokens[aliasIndex];
+  if (!alias || alias.kind !== "word") return null;
+  let columnIndex = aliasIndex + 1;
+  if (state.tokens[columnIndex]?.normalized === "as") columnIndex += 1;
+  const columns: string[] = [];
+  while (state.tokens[columnIndex]?.kind === "word") {
+    columns.push(state.tokens[columnIndex].text);
+    columnIndex += 1;
+    if (state.tokens[columnIndex]?.text !== ",") break;
+    columnIndex += 1;
+  }
+  const endToken = state.tokens[Math.max(aliasIndex, columnIndex - 1)] ?? alias;
+  const name = alias.text;
+  return {
+    source: {
+      id: `table-function:${sourceIndex}:${name}`,
+      kind: "table_function",
+      name,
+      alias: name,
+      qualifierParts: [name],
+      qualifiedName: functionName.name,
+      sourceSpan: { start: state.tokens[index].span.start, end: endToken.span.end },
+      columns: columns.length ? columns : undefined,
+    },
+    nextIndex: columnIndex,
+  };
+}
+
 function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIndexOffset = 0): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [];
   let inSelectFromClause = false;
@@ -453,9 +516,9 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
       else if (inSelectFromClause && FROM_CLAUSE_BOUNDARIES.has(item.normalized)) inSelectFromClause = false;
     }
     if (inSelectFromClause && item.text === ",") {
-      const parsed = parseRowSource(state, index + 1, "from", sourceIndexOffset + sources.length);
+      const parsed = parseRowSourceList(state, index + 1, "from", sourceIndexOffset + sources.length);
       if (parsed) {
-        sources.push(parsed.source);
+        sources.push(...parsed.sources);
         index = parsed.nextIndex - 1;
       }
       continue;
@@ -469,17 +532,39 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
     while (JOIN_MODIFIERS.has(state.tokens[target]?.normalized ?? "")) target += 1;
     target = sqlServerMaintenanceTableTarget(state.tokens, target, normalized, state.dialect);
     for (;;) {
-      const parsed = parseRowSource(state, target, normalized, sourceIndexOffset + sources.length);
+      const parsed = parseRowSourceList(state, target, normalized, sourceIndexOffset + sources.length);
       if (!parsed) break;
-      sources.push(parsed.source);
+      sources.push(...parsed.sources);
       index = parsed.nextIndex - 1;
 
-      const separator = state.tokens[parsed.nextIndex];
+      // Track the position past any LATERAL VIEW clauses so the FROM-list separator check sees
+      // the real comma after them (parsed.nextIndex points at the first "lateral" token itself).
+      let afterSources = parsed.nextIndex;
+      let lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
+      while (lateral) {
+        sources.push(lateral.source);
+        index = lateral.nextIndex - 1;
+        afterSources = lateral.nextIndex;
+        lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
+      }
+
+      const separator = state.tokens[afterSources];
       if (normalized !== "from" || separator?.text !== "," || separator.depth !== sourceDepth) break;
-      target = parsed.nextIndex + 1;
+      target = afterSources + 1;
     }
   }
   return dedupeSources(sources);
+}
+
+/** Parse declarations in one query block without merging outer or sibling sources. */
+export function sqlSemanticQueryBlockSources(tokens: SqlSemanticToken[], options: SqlSemanticBuildOptions = {}, groupedSourceScopes?: SqlSemanticGroupedSourceScope[]): SqlSemanticRowSource[] {
+  if (!tokens.length) return [];
+  const statement: SqlSemanticStatement = {
+    kind: statementKind(tokens),
+    span: { start: tokens[0].span.start, end: tokens[tokens.length - 1].span.end },
+    text: "",
+  };
+  return parseRowSourcesAtDepth({ dialect: sqlSemanticDialectFor(options), tokens, statement, cteSources: [], expandGroupedSources: true, groupedSourceScopes }, tokens[0].depth);
 }
 
 function querySourceRanges(tokens: readonly SqlSemanticToken[], cursor: number): QuerySourceRange[] {
@@ -675,7 +760,8 @@ function sourceForQualifier(sources: readonly SqlSemanticRowSource[], qualifierP
 
 function starQualifierParts(before: readonly SqlSemanticToken[], starIndex: number, dialect: SqlSemanticDialectAdapter): string[] {
   let index = starIndex - 1;
-  if (before[index]?.text === ".") index -= 1;
+  if (before[index]?.text !== ".") return [];
+  index -= 1;
   const qualifierParts: string[] = [];
   while (index >= 0) {
     const identifier = before[index];
@@ -784,8 +870,16 @@ function buildScope(statement: SqlSemanticStatement, rowSources: SqlSemanticRowS
 export function buildSqlSemanticModel(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): SqlSemanticModel {
   const safeCursor = Math.max(0, Math.min(cursor, sql.length));
   const dialect = sqlSemanticDialectFor(options);
-  const allTokens = tokenizeSqlSemantic(sql, dialect.id);
-  const statementSpan = findActiveSqlStatementSpan(sql, allTokens, safeCursor);
+  const window = resolveSqlStatementWindow(sql, safeCursor, options.editorState, dialect.id);
+  const windowSql = sql.slice(window.from, window.to);
+  const windowCursor = safeCursor - window.from;
+  const localTokens = tokenizeSqlSemantic(windowSql, dialect.id);
+  const localStatementSpan = findActiveSqlStatementSpan(windowSql, localTokens, windowCursor);
+  const allTokens = localTokens.map((token) => ({
+    ...token,
+    span: { start: token.span.start + window.from, end: token.span.end + window.from },
+  }));
+  const statementSpan = { start: localStatementSpan.start + window.from, end: localStatementSpan.end + window.from };
   const tokens = significantTokens(allTokens.filter((item) => item.span.end > statementSpan.start && item.span.start < statementSpan.end));
   const kind = statementKind(tokens);
   const statement: SqlSemanticStatement = {

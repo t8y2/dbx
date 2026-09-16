@@ -126,4 +126,28 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits);
 .dark .dbx-switch[aria-checked="true"] .dbx-switch-thumb {
   background-color: var(--primary-foreground) !important;
 }
+
+html.dbx-legacy-webview.dark .dbx-switch[data-state="unchecked"] .dbx-switch-thumb,
+html.dbx-legacy-webview.dark .dbx-switch[data-unchecked] .dbx-switch-thumb,
+html.dbx-legacy-webview.dark .dbx-switch[aria-checked="false"] .dbx-switch-thumb {
+  background-color: rgb(215, 215, 219) !important;
+}
+
+html.dbx-legacy-webview.dark .dbx-switch {
+  border-color: rgba(180, 180, 190, 0.46) !important;
+  background-color: rgba(110, 110, 114, 0.44) !important;
+}
+
+html.dbx-legacy-webview.dark .dbx-switch[data-state="checked"],
+html.dbx-legacy-webview.dark .dbx-switch[data-checked],
+html.dbx-legacy-webview.dark .dbx-switch[aria-checked="true"] {
+  border-color: rgb(208, 208, 214) !important;
+  background-color: rgb(208, 208, 214) !important;
+}
+
+html.dbx-legacy-webview.dark .dbx-switch[data-state="checked"] .dbx-switch-thumb,
+html.dbx-legacy-webview.dark .dbx-switch[data-checked] .dbx-switch-thumb,
+html.dbx-legacy-webview.dark .dbx-switch[aria-checked="true"] .dbx-switch-thumb {
+  background-color: rgb(19, 20, 22) !important;
+}
 </style>

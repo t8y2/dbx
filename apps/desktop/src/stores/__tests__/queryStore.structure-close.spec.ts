@@ -77,6 +77,28 @@ describe("queryStore structure editor close protection", () => {
     expect(store.closeConfirmContext).toBe("app");
   });
 
+  it("protects scoped dirty structure tabs when SQL confirmation is disabled", async () => {
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.confirmUnsavedSqlClose = false;
+    const store = useQueryStore();
+    const structureId = store.openTableStructure("mysql-1", "app", undefined, "users");
+    const structureTab = store.tabs.find((item) => item.id === structureId)!;
+    structureTab.structureDraft = { dirty: true } as typeof structureTab.structureDraft;
+    const queryId = store.createTab("mysql-1", "app", "Query", "query");
+    store.updateSql(queryId, "select 1");
+    const outsideId = store.createTab("mysql-2", "app", "Outside", "query");
+
+    store.closeConnectionTabs("mysql-1");
+
+    expect(store.showCloseConfirm).toBe(true);
+    expect(store.pendingCloseTabId).toBe(structureId);
+    expect(store.closeConfirmDirtyTabIds).toEqual([structureId]);
+    store.cancelClosePendingTab();
+    expect(store.tabs.map((tab) => tab.id)).toEqual([structureId, queryId, outsideId]);
+  });
+
   it("discards a structure draft before force closing", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

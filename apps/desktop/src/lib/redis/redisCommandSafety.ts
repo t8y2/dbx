@@ -1,3 +1,5 @@
+import { isRedisMonitorCommand } from "./redisMonitor";
+
 export type RedisCommandSafety = "allowed" | "write" | "confirm" | "blocked";
 
 const BLOCKED_COMMANDS = new Set(["KEYS", "FLUSHALL", "SHUTDOWN", "CONFIG", "SAVE", "BGSAVE", "SLAVEOF", "REPLICAOF", "MIGRATE", "MODULE", "SCRIPT", "EVAL", "EVALSHA"]);
@@ -21,6 +23,8 @@ const ALLOWED_COMMANDS = new Set([
   "HRANDFIELD",
   "HSCAN",
   "HSTRLEN",
+  "HPTTL",
+  "HTTL",
   "HVALS",
   "LINDEX",
   "LLEN",
@@ -148,6 +152,11 @@ const CONFIRM_COMMANDS = new Set([
   "RENAMENX",
   "GETDEL",
   "HDEL",
+  "HEXPIRE",
+  "HEXPIREAT",
+  "HPEXPIRE",
+  "HPEXPIREAT",
+  "HPERSIST",
   "JSON.ARRPOP",
   "JSON.ARRTRIM",
   "JSON.CLEAR",
@@ -266,6 +275,7 @@ export function firstRedisCommandToken(command: string): string {
 }
 
 export function classifyRedisCommandSafety(command: string): RedisCommandSafety {
+  if (isRedisMonitorCommand(command)) return "allowed";
   const token = firstRedisCommandToken(command);
   if (BLOCKED_COMMANDS.has(token)) return "blocked";
   if (CONFIRM_COMMANDS.has(token)) return "confirm";

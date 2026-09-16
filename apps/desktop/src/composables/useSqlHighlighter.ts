@@ -1,6 +1,6 @@
 import { onMounted, ref } from "vue";
 import { useTheme } from "@/composables/useTheme";
-import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { type SqlHighlighter, createShikiSqlHighlighter, escapeHtml } from "@/lib/sql/sqlHighlighter";
 
 export function useSqlHighlighter() {
   const { isDark } = useTheme();
@@ -13,7 +13,7 @@ export function useSqlHighlighter() {
   });
 
   function highlight(sql: string): string {
-    return sqlHighlighter.value?.(sql) ?? sql;
+    return sqlHighlighter.value?.(sql) ?? escapeHtml(sql);
   }
 
   return { highlight, sqlHighlighter };

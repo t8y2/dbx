@@ -1,45 +1,53 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Pane, Splitpanes } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { Activity, ChevronDown, ChevronRight, Clock3, Copy, Download, FolderClosed, FolderOpen, KeyRound, Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from "@lucide/vue";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { Activity, Check, ChevronDown, ChevronRight, Clock3, Copy, Download, FolderClosed, FolderOpen, KeyRound, Loader2, LockKeyhole, Pencil, Plus, RefreshCw, Search, Square, Trash2 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import KvValueEditor from "@/components/kv/KvValueEditor.vue";
 import type { KvCreateMode, KvDeleteOptions, KvGetOptions, KvGetResponse, KvHistoryEvent, KvHistoryResponse, KvInt64, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import type { KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, kvKeyTreeNodePath, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
 import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseSummaries, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
 import { classifyKvMutationError, type KvMutationErrorKind } from "@/lib/kv/kvMutationError";
 import { refreshedKvSelectionSummary } from "@/lib/kv/kvRefreshSelection";
 import { parseKvLeaseId, parseOptionalTtl } from "@/lib/kv/kvTtl";
-import { formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
+import { decodeBase64Utf8Preview, formatZooKeeperMetadataRows, formatZooKeeperSummaryBadges, prettyPrintJsonText } from "@/lib/kv/kvValueDisplay";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import {
   createLazyKvKeyTreeState,
-  createZooKeeperChildPathDraft,
+  createLazyKvChildPathDraft,
   flattenLazyKvKeyTree,
+  lazyKvRootPath,
   lazyExpandedKeyFromId,
-  normalizeZooKeeperPath,
-  parentZooKeeperPath,
+  normalizeLazyKvPath,
+  parentLazyKvPath,
   replaceLazyKvChildren,
   replaceLazyKvFocusedRoot,
   resetLazyKvKeyTree,
   type LazyKvKeyTreeNode,
   type LazyKvKeyTreeRow,
-} from "@/lib/zookeeper/zookeeperLazyKeyTree";
+  type LazyKvKeySummary,
+  type LazyKvPathStyle,
+} from "@/lib/kv/slashPrefixLazyKeyTree";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { detectKvValueFormat, validateKvValue, type KvValueFormat } from "@/lib/kv/kvValueFormat";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { copyToClipboard } from "@/lib/common/clipboard";
 
 interface KvKeyBrowserLabels {
   prefixPlaceholder: string;
@@ -54,6 +62,7 @@ interface KvKeyBrowserLabels {
   editKey: string;
   delete: string;
   deleteTitle: string;
+  keyLabel?: string;
   keyPlaceholder: string;
   keyRequired: string;
   rootReadonly?: string;
@@ -97,11 +106,26 @@ interface KvKeyBrowserLabels {
   summaryLease?: string;
   summarySize?: string;
   watch?: string;
+  stopWatching?: string;
   selectExistingLease?: string;
   enterLeaseId?: string;
   leasePickerHint?: string;
   noLeasePickerHint?: string;
   registryWarning?: string;
+  aclFiltered?: string;
+  locked?: string;
+  sessionProtected?: string;
+  sessionProtectedHint?: string;
+  sessionId?: string;
+  copy?: string;
+  copied?: string;
+  copyFailed?: string;
+  utf8PreviewLossy?: string;
+  utf8PreviewUnavailable?: string;
+  valueTooLarge?: string;
+  deletePrefix?: string;
+  selectAll?: string;
+  deselectAll?: string;
 }
 
 interface KvCreateModeOption {
@@ -109,13 +133,22 @@ interface KvCreateModeOption {
   label: string;
 }
 
+interface KvSearchHighlight {
+  key: string;
+  query: string;
+  caseSensitive: boolean;
+  matchesKey: boolean;
+  matchesValue: boolean;
+}
+
 interface KvKeyBrowserApi {
-  listPrefix: (connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null) => Promise<{ keys: KvKeySummary[]; continuation?: string | null; revision?: string | number | null }>;
+  listPrefix: (connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null) => Promise<{ keys: KvKeySummary[]; continuation?: string | null; revision?: string | number | null; filteredByAcls?: boolean | null }>;
   get: (connectionId: string, key: string, options?: KvGetOptions | null) => Promise<KvGetResponse>;
   getMetadata?: (connectionId: string, key: string, options?: KvGetOptions | null) => Promise<KvGetResponse>;
   put: (connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null) => Promise<KvPutResponse>;
   deleteKey: (connectionId: string, key: string, options?: KvDeleteOptions | null) => Promise<{ deleted: number }>;
   rename?: (connectionId: string, request: { key: string; keyBytes?: KvValue | null; newKey: string; expectedModRevision?: KvInt64 | null }) => Promise<{ renamed: boolean }>;
+  copy?: (connectionId: string, request: { key: string; keyBytes?: KvValue | null; newKey: string; expectedModRevision?: KvInt64 | null }) => Promise<{ copied: boolean }>;
   history?: (connectionId: string, request: { key: string; keyBytes?: KvValue | null; startRevision?: KvInt64 | null; endRevision?: KvInt64 | null; limit: number }) => Promise<KvHistoryResponse>;
   exportScope?: (connectionId: string, request: KvExportScopeRequest) => Promise<void>;
 }
@@ -124,6 +157,10 @@ interface KvKeyRoute {
   key: string;
   keyIdentity?: string | null;
   keyBytes?: KvValue | null;
+}
+
+interface KvMultiSelection extends KvKeyRoute {
+  modRevision?: KvInt64 | null;
 }
 
 type BrowserTreeNode = KvKeyTreeNode | LazyKvKeyTreeNode;
@@ -152,15 +189,27 @@ const props = withDefaults(
     supportsCreateModes?: boolean;
     supportsTtl?: boolean;
     supportsLeaseBinding?: boolean;
+    supportsFlags?: boolean;
     ttlCapabilityKnown?: boolean;
     createModeOptions?: KvCreateModeOption[];
     enableNodeActions?: boolean;
-    metadataStyle?: "default" | "zookeeper";
+    metadataStyle?: "default" | "zookeeper" | "consul";
     lazyHierarchy?: boolean;
+    lazyPathStyle?: LazyKvPathStyle;
     safeWrite?: boolean;
+    maxValueBytes?: number;
     allowBinaryEdit?: boolean;
+    enableBase64Utf8Preview?: boolean;
     readOnly?: boolean;
+    exportFormat?: string;
+    exportFileExtension?: string;
+    exportFallbackName?: string;
+    enableMultiSelect?: boolean;
+    canWriteKey?: (route: KvKeyRoute) => boolean;
     onWatchKey?: (route: KvKeyRoute) => void;
+    onDeletePrefix?: (prefix: string) => void;
+    watchActiveKey?: string | null;
+    searchHighlight?: KvSearchHighlight | null;
     leaseOptions?: Array<{ id: KvInt64; ttl: number; grantedTtl?: number }>;
     onLeaseOptionsRequested?: () => void;
   }>(),
@@ -168,57 +217,101 @@ const props = withDefaults(
     supportsCreateModes: false,
     supportsTtl: false,
     supportsLeaseBinding: false,
+    supportsFlags: false,
     ttlCapabilityKnown: true,
     createModeOptions: () => [],
     enableNodeActions: false,
     metadataStyle: "default",
     lazyHierarchy: false,
+    lazyPathStyle: "absolute",
     safeWrite: false,
+    maxValueBytes: 0,
     allowBinaryEdit: false,
+    enableBase64Utf8Preview: false,
     readOnly: false,
+    exportFormat: "dbx-kv-bundle",
+    exportFileExtension: ".dbx-kv.json",
+    exportFallbackName: "kv-key",
+    searchHighlight: null,
+    enableMultiSelect: false,
     leaseOptions: () => [],
   },
 );
 
+const emit = defineEmits<{
+  selectionChange: [selection: KvMultiSelection[]];
+}>();
+
+interface KvTabUiState {
+  prefix?: string;
+  expandedGroupIds?: string[];
+  selectedKey?: string | null;
+  showEditDialog?: boolean;
+  isCreating?: boolean;
+  editKey?: string;
+  editValue?: string;
+  editTtl?: string | number;
+  editFlags?: string;
+  editExpiryMode?: KvExpiryMode;
+  editLeaseId?: string;
+  editFormat?: KvValueFormat;
+  editEncoding?: "utf8" | "base64";
+  showRenameDialog?: boolean;
+  renameValue?: string;
+  renameMode?: "rename" | "copy";
+  selectedCreateMode?: KvCreateMode;
+  selectedBase64ViewMode?: "utf8" | "base64";
+  kvBrowserSplitSize?: number;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<KvTabUiState>({}, "KvKeyBrowser");
+
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const searchInputRef = ref<HTMLInputElement>();
-const prefix = ref("");
+const prefix = ref(restoredUiState.prefix ?? "");
 const keySuggestionOpen = ref(false);
 const keySuggestionIndex = ref(-1);
+const remoteKeySuggestions = ref<KvKeySummary[]>([]);
 const keys = ref<KvKeySummary[]>([]);
 const continuation = ref<string | null>(null);
 const listRevision = ref<KvInt64 | null>(null);
+const listFilteredByAcls = ref(false);
 const loading = ref(false);
 const loadingMore = ref(false);
-const expandedGroupIds = ref<Set<string>>(new Set());
-const selectedKey = ref<string | null>(null);
-const selectedKeyIdentity = ref<string | null>(null);
+const listError = ref("");
+const expandedGroupIds = ref<Set<string>>(new Set(restoredUiState.expandedGroupIds ?? []));
+const selectedKey = ref<string | null>(restoredUiState.selectedKey ?? null);
+const selectedKeyIdentity = ref<string | null>(restoredUiState.selectedKey ?? null);
 const selectedRouteKeyBytes = ref<KvValue | null>(null);
 const selectedValue = ref<KvGetResponse | null>(null);
 const detailLoading = ref(false);
 const detailError = ref("");
-const showEditDialog = ref(false);
-const isCreating = ref(false);
-const editKey = ref("");
-const editValue = ref("");
-const editTtl = ref<string | number>("");
-const editExpiryMode = ref<KvExpiryMode>("permanent");
-const editLeaseId = ref("");
-const editFormat = ref<KvValueFormat>("text");
-const editEncoding = ref<"utf8" | "base64">("utf8");
+const showEditDialog = ref(restoredUiState.showEditDialog ?? false);
+const isCreating = ref(restoredUiState.isCreating ?? false);
+const editKey = ref(restoredUiState.editKey ?? "");
+const editValue = ref(restoredUiState.editValue ?? "");
+const editTtl = ref<string | number>(restoredUiState.editTtl ?? "");
+const editFlags = ref(restoredUiState.editFlags ?? "0");
+const editExpiryMode = ref<KvExpiryMode>(restoredUiState.editExpiryMode ?? "permanent");
+const editLeaseId = ref(restoredUiState.editLeaseId ?? "");
+const editFormat = ref<KvValueFormat>(restoredUiState.editFormat ?? "text");
+const editEncoding = ref<"utf8" | "base64">(restoredUiState.editEncoding ?? "utf8");
 const editError = ref("");
 const editErrorKind = ref<KvMutationErrorKind>("request");
 const saving = ref(false);
+const refreshingEditConflict = ref(false);
 const showSaveDiff = ref(false);
 const pendingSave = ref<{ key: string; value: KvValue; options?: KvPutOptions } | null>(null);
 const showDeleteConfirm = ref(false);
 const deleting = ref(false);
-const showRenameDialog = ref(false);
-const renameValue = ref("");
+const showRenameDialog = ref(restoredUiState.showRenameDialog ?? false);
+const renameValue = ref(restoredUiState.renameValue ?? "");
 const renameError = ref("");
 const renaming = ref(false);
+const renameMode = ref<"rename" | "copy">(restoredUiState.renameMode ?? "rename");
 const showHistoryDialog = ref(false);
 const historyLoading = ref(false);
 const historyError = ref("");
@@ -226,16 +319,41 @@ const historyEvents = ref<KvHistoryEvent[]>([]);
 const selectedHistoryEvent = ref<KvHistoryEvent | null>(null);
 const showHistoryDiff = ref(false);
 const restoring = ref(false);
-const selectedCreateMode = ref<KvCreateMode>("persistent");
+const selectedCreateMode = ref<KvCreateMode>(restoredUiState.selectedCreateMode ?? "persistent");
 const selectedPrettyValue = ref<string | null>(null);
-const lazyTreeState = reactive(createLazyKvKeyTreeState());
+const selectedBase64ViewMode = ref<"utf8" | "base64">(restoredUiState.selectedBase64ViewMode ?? "utf8");
+const selectedValueCopied = ref(false);
+const lazyTreeState = reactive(createLazyKvKeyTreeState(lazyKvRootPath(props.lazyPathStyle), props.lazyPathStyle));
+const multiSelectedKeys = ref<Map<string, KvMultiSelection>>(new Map());
 const pageSize = 200;
 const metadataRefreshIntervalMs = 1000;
 const keyListRefreshBaseIntervalMs = 2000;
 const keyListRefreshMaxIntervalMs = 30000;
 const kvBrowserSplitSizeStorageKey = "dbx-kv-browser-split-size";
 const savedKvBrowserSplitSize = Number(safeLocalStorageGet(kvBrowserSplitSizeStorageKey));
-const kvBrowserSplitSize = ref(savedKvBrowserSplitSize >= 20 && savedKvBrowserSplitSize <= 70 ? savedKvBrowserSplitSize : 38);
+const kvBrowserSplitSize = ref(restoredUiState.kvBrowserSplitSize ?? (savedKvBrowserSplitSize >= 20 && savedKvBrowserSplitSize <= 70 ? savedKvBrowserSplitSize : 38));
+
+trackUiState(() => ({
+  prefix: prefix.value,
+  expandedGroupIds: [...expandedGroupIds.value].slice(0, 512),
+  selectedKey: selectedKey.value,
+  showEditDialog: showEditDialog.value,
+  isCreating: isCreating.value,
+  editKey: editKey.value,
+  editValue: editValue.value,
+  editTtl: editTtl.value,
+  editFlags: editFlags.value,
+  editExpiryMode: editExpiryMode.value,
+  editLeaseId: editLeaseId.value,
+  editFormat: editFormat.value,
+  editEncoding: editEncoding.value,
+  showRenameDialog: showRenameDialog.value,
+  renameValue: renameValue.value,
+  renameMode: renameMode.value,
+  selectedCreateMode: selectedCreateMode.value,
+  selectedBase64ViewMode: selectedBase64ViewMode.value,
+  kvBrowserSplitSize: kvBrowserSplitSize.value,
+}));
 let keyLoadGeneration = 0;
 let detailRequestId = 0;
 let metadataRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -245,8 +363,17 @@ let keyListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 let keyListRefreshGeneration = 0;
 let keyListRefreshDelayMs = keyListRefreshBaseIntervalMs;
 let initialLoadPromise: Promise<void> | null = null;
+const keySuggestionDebounceMs = 300;
+let keySuggestionTimer: ReturnType<typeof setTimeout> | null = null;
+let keySuggestionRequestId = 0;
+let selectedValueCopyTimer: ReturnType<typeof setTimeout> | null = null;
 type LoadKeysOptions = {
   preserveSelection?: boolean;
+};
+
+type LazyLoadContext = {
+  generation: number;
+  connectionId: string;
 };
 
 function summaryIdentity(summary: KvKeySummary): string {
@@ -255,6 +382,13 @@ function summaryIdentity(summary: KvKeySummary): string {
 
 function routeIdentity(route: KvKeyRoute): string {
   return route.keyIdentity ?? route.key;
+}
+
+function multiSelectionFromSummary(summary: KvKeySummary): KvMultiSelection {
+  return {
+    ...routeFromSummary(summary),
+    modRevision: summary.modRevision == null ? null : String(summary.modRevision),
+  };
 }
 
 function routeFromKey(input: string | KvKeyRoute): KvKeyRoute {
@@ -281,7 +415,8 @@ const keySuggestions = computed(() => {
 
   const seen = new Set<string>();
   const suggestions: KvKeySummary[] = [];
-  for (const key of keys.value) {
+  const candidates = props.lazyHierarchy ? [...lazyTreeState.nodeByKey.values(), ...remoteKeySuggestions.value] : keys.value;
+  for (const key of candidates) {
     if (key.key === query || !key.key.startsWith(query) || seen.has(summaryIdentity(key))) continue;
     seen.add(summaryIdentity(key));
     suggestions.push(key);
@@ -304,9 +439,47 @@ const selectedTextValue = computed(() => {
   if (!value) return "";
   return value.encoding === "utf8" ? value.data : value.data;
 });
-const displayedSelectedTextValue = computed(() => selectedPrettyValue.value ?? selectedTextValue.value);
 const selectedValueIsBase64 = computed(() => selectedValue.value?.value?.encoding === "base64");
+const selectedBase64Utf8Preview = computed(() => {
+  if (!props.enableBase64Utf8Preview || !selectedValueIsBase64.value) return null;
+  return decodeBase64Utf8Preview(selectedTextValue.value);
+});
+const showSelectedBase64Utf8Controls = computed(() => props.enableBase64Utf8Preview && selectedValueIsBase64.value);
+const selectedBase64DisplayMode = computed<"utf8" | "base64">(() => (selectedBase64ViewMode.value === "utf8" && selectedBase64Utf8Preview.value?.ok ? "utf8" : "base64"));
+const selectedValueUsesUtf8Preview = computed(() => showSelectedBase64Utf8Controls.value && selectedBase64DisplayMode.value === "utf8");
+const selectedBase64Utf8PreviewIsLossy = computed(() => {
+  const preview = selectedBase64Utf8Preview.value;
+  return preview?.ok === true && preview.lossy;
+});
+const selectedBase64Utf8PreviewUnavailable = computed(() => selectedBase64Utf8Preview.value?.ok === false);
+const displayedSelectedTextValue = computed(() => {
+  if (selectedPrettyValue.value != null) return selectedPrettyValue.value;
+  const preview = selectedBase64Utf8Preview.value;
+  return selectedValueUsesUtf8Preview.value && preview?.ok ? preview.value : selectedTextValue.value;
+});
+const selectedValueClipboardText = computed(() => {
+  const preview = selectedBase64Utf8Preview.value;
+  return selectedValueUsesUtf8Preview.value && preview?.ok ? preview.value : selectedTextValue.value;
+});
 const selectedKeyBytes = computed(() => selectedValue.value?.keyBytes ?? selectedRouteKeyBytes.value ?? null);
+function keyIsWritable(key: string, keyBytes?: KvValue | null): boolean {
+  return !props.readOnly && (props.canWriteKey?.({ key, keyBytes }) ?? true);
+}
+const selectedKeyWritable = computed(() => Boolean(selectedKey.value && keyIsWritable(selectedKey.value, selectedKeyBytes.value)));
+const editKeyWritable = computed(() => {
+  const key = editKey.value.trim();
+  if (!key) return false;
+  const keyBytes = !isCreating.value && key === selectedKey.value ? selectedKeyBytes.value : null;
+  return keyIsWritable(key, keyBytes);
+});
+const renameTargetWritable = computed(() => {
+  const target = renameValue.value.trim();
+  if (!target) return false;
+  return keyIsWritable(target) && (renameMode.value === "copy" || selectedKeyWritable.value);
+});
+const selectedKeyLocked = computed(() => Boolean(String(selectedMetadata.value?.session ?? "").trim()));
+const isWatchingSelectedKey = computed(() => Boolean(selectedKey.value && props.watchActiveKey === selectedKey.value));
+const activeSearchHighlight = computed(() => (props.searchHighlight?.key === selectedKey.value ? props.searchHighlight : null));
 const showExpiryControls = computed(() => props.supportsTtl || props.supportsLeaseBinding);
 const showTtlUnavailable = computed(() => props.ttlCapabilityKnown && !props.supportsTtl && !!props.labels.ttlUnavailable);
 const showCreateModeSelect = computed(() => props.supportsCreateModes && isCreating.value && props.createModeOptions.length > 0);
@@ -351,10 +524,43 @@ const editValueSize = computed(() => {
   }
   return new TextEncoder().encode(editValue.value).length;
 });
-const canEditSelectedValue = computed(() => !props.readOnly && (!selectedValueIsBase64.value || props.allowBinaryEdit));
+const canEditSelectedValue = computed(() => selectedKeyWritable.value && !selectedKeyLocked.value && (!selectedValueIsBase64.value || props.allowBinaryEdit));
+const canDeleteSelectedValue = computed(() => selectedKeyWritable.value && !selectedKeyLocked.value);
+const consulMetadataRows = computed(() => {
+  const metadata = selectedMetadata.value;
+  return [
+    ["CreateIndex", metadata?.createRevision],
+    ["ModifyIndex", metadata?.modRevision],
+    ["LockIndex", metadata?.lockIndex],
+    ["Flags", metadata?.flags],
+    [props.labels.summarySize || "Size", metadata?.valueSize == null ? null : `${metadata.valueSize} B`],
+  ].filter((row) => row[1] != null && String(row[1]).length > 0) as Array<[string, string | number]>;
+});
 const saveDiffBefore = computed(() => (isCreating.value ? "" : selectedTextValue.value));
 const saveDiffAfter = computed(() => pendingSave.value?.value.data ?? editValue.value);
 const historyRestoreValue = computed(() => selectedHistoryEvent.value?.value ?? selectedHistoryEvent.value?.previousValue ?? null);
+const selectedKeyHighlightSegments = computed(() => highlightText(selectedKey.value || "", activeSearchHighlight.value?.matchesKey ?? false));
+const selectedValueHighlightSegments = computed(() => highlightText(displayedSelectedTextValue.value, activeSearchHighlight.value?.matchesValue ?? false));
+
+function highlightText(value: string, enabled: boolean): Array<{ text: string; matched: boolean }> {
+  const highlight = activeSearchHighlight.value;
+  const query = highlight?.query.trim() || "";
+  if (!enabled || !query) return [{ text: value, matched: false }];
+
+  const haystack = highlight?.caseSensitive ? value : value.toLocaleLowerCase();
+  const needle = highlight?.caseSensitive ? query : query.toLocaleLowerCase();
+  const segments: Array<{ text: string; matched: boolean }> = [];
+  let cursor = 0;
+  let matchAt = haystack.indexOf(needle, cursor);
+  while (matchAt >= 0) {
+    if (matchAt > cursor) segments.push({ text: value.slice(cursor, matchAt), matched: false });
+    segments.push({ text: value.slice(matchAt, matchAt + query.length), matched: true });
+    cursor = matchAt + query.length;
+    matchAt = haystack.indexOf(needle, cursor);
+  }
+  if (cursor < value.length) segments.push({ text: value.slice(cursor), matched: false });
+  return segments.length ? segments : [{ text: value, matched: false }];
+}
 const highRiskRegistryKey = computed(() => editKey.value === "/registry" || editKey.value.startsWith("/registry/"));
 
 function preserveExpandedGroups(expandAll = false) {
@@ -366,10 +572,39 @@ function closeKeySuggestions() {
   keySuggestionIndex.value = -1;
 }
 
+function scheduleRemoteKeySuggestions(value: string) {
+  if (keySuggestionTimer) {
+    clearTimeout(keySuggestionTimer);
+    keySuggestionTimer = null;
+  }
+
+  const query = value.trim();
+  if (!props.lazyHierarchy || !query) {
+    remoteKeySuggestions.value = [];
+    return;
+  }
+
+  const requestId = ++keySuggestionRequestId;
+  const connectionId = props.connectionId;
+  keySuggestionTimer = setTimeout(() => {
+    void props.api
+      .listPrefix(connectionId, query, 8, null, { recursive: false })
+      .then((result) => {
+        if (requestId !== keySuggestionRequestId || connectionId !== props.connectionId || prefix.value.trim() !== query) return;
+        remoteKeySuggestions.value = result.keys;
+      })
+      .catch(() => {
+        if (requestId === keySuggestionRequestId) remoteKeySuggestions.value = [];
+      });
+  }, keySuggestionDebounceMs);
+}
+
 function onPrefixInput(event: Event) {
   const value = (event.target as HTMLInputElement).value;
+  clearMultiSelection();
   keySuggestionOpen.value = Boolean(value.trim());
   keySuggestionIndex.value = -1;
+  scheduleRemoteKeySuggestions(value);
 }
 
 function moveKeySuggestion(delta: number) {
@@ -381,8 +616,16 @@ function moveKeySuggestion(delta: number) {
 function acceptKeySuggestion(index: number) {
   const suggestion = keySuggestions.value[index];
   if (!suggestion) return;
+  clearMultiSelection();
   prefix.value = suggestion.key;
-  closeKeySuggestions();
+  keySuggestionIndex.value = -1;
+  if (props.lazyHierarchy && suggestion.key.endsWith("/")) {
+    keySuggestionOpen.value = true;
+    remoteKeySuggestions.value = [];
+    scheduleRemoteKeySuggestions(suggestion.key);
+  } else {
+    closeKeySuggestions();
+  }
   void loadKeys(true);
 }
 
@@ -405,13 +648,17 @@ function onPrefixKeydown(event: KeyboardEvent) {
     moveKeySuggestion(-1);
     return;
   }
-  if (event.key !== "Enter") return;
+  if (event.key !== "Enter" && event.key !== "Tab") return;
 
-  event.preventDefault();
-  if (showKeySuggestions.value && keySuggestionIndex.value >= 0) {
-    acceptKeySuggestion(keySuggestionIndex.value);
+  if (showKeySuggestions.value && keySuggestions.value.length > 0) {
+    event.preventDefault();
+    acceptKeySuggestion(keySuggestionIndex.value >= 0 ? keySuggestionIndex.value : 0);
     return;
   }
+
+  if (event.key === "Tab") return;
+
+  event.preventDefault();
   closeKeySuggestions();
   void loadKeys(true);
 }
@@ -435,8 +682,10 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
   const keyIdentityToRestore = options.preserveSelection ? selectedKeyIdentity.value : null;
   if (reset) {
     loading.value = true;
+    listError.value = "";
     continuation.value = null;
     listRevision.value = null;
+    listFilteredByAcls.value = false;
     keys.value = [];
     if (!options.preserveSelection) {
       clearSelectedKey();
@@ -448,6 +697,7 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     const result = await props.api.listPrefix(connectionId, searchQuery, pageSize, reset ? null : continuation.value, reset || !listRevision.value ? undefined : { revision: listRevision.value });
     if (generation !== keyLoadGeneration || props.connectionId !== connectionId) return;
     if (reset && result.revision != null) listRevision.value = String(result.revision);
+    if (result.filteredByAcls != null) listFilteredByAcls.value = Boolean(result.filteredByAcls);
     const existing = new Set(keys.value.map(summaryIdentity));
     const merged = reset ? result.keys : [...keys.value, ...result.keys.filter((key) => !existing.has(summaryIdentity(key)))];
     keys.value = merged;
@@ -460,6 +710,10 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
       } else {
         clearSelectedKey();
       }
+    }
+  } catch (error) {
+    if (reset && generation === keyLoadGeneration && props.connectionId === connectionId) {
+      listError.value = formatError(error);
     }
   } finally {
     if (generation === keyLoadGeneration && props.connectionId === connectionId) {
@@ -477,21 +731,47 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
     return;
   }
 
+  const context: LazyLoadContext = {
+    generation: ++keyLoadGeneration,
+    connectionId: props.connectionId,
+  };
   const previousExpanded = new Set(expandedGroupIds.value);
   loading.value = true;
+  listError.value = "";
   loadingMore.value = false;
+  listFilteredByAcls.value = false;
   if (!options.preserveSelection) {
     clearSelectedKey();
   }
 
   try {
-    const rootPath = normalizeZooKeeperPath(prefix.value);
-    resetLazyKvKeyTree(lazyTreeState, rootPath);
-    const result = await props.api.listPrefix(props.connectionId, rootPath, pageSize, null, { recursive: false });
-    if (rootPath === "/") {
+    const requestedRootPath = normalizeLazyKvPath(prefix.value, props.lazyPathStyle);
+    resetLazyKvKeyTree(lazyTreeState, requestedRootPath);
+    let rootPath = requestedRootPath;
+    let result = await props.api.listPrefix(context.connectionId, rootPath, pageSize, null, { recursive: false });
+    if (!lazyLoadContextValid(context)) return;
+    listFilteredByAcls.value = Boolean(result.filteredByAcls);
+    let rootSummary = rootPath === lazyKvRootPath(props.lazyPathStyle) ? null : await loadLazyRootSummary(context.connectionId, rootPath, result.keys, result.continuation);
+    if (!lazyLoadContextValid(context)) return;
+    // Consul returns `prefix/` as the sole immediate result for a search such as
+    // `prefix`. Load that prefix's children, while preserving an exact `prefix`
+    // Key when it coexists with the virtual directory.
+    const focusedDirectory = props.lazyPathStyle === "relative" && rootPath && !rootPath.endsWith("/") ? result.keys.find((key) => key.key === `${rootPath}/`) : undefined;
+    if (focusedDirectory) {
+      const childResult = await props.api.listPrefix(context.connectionId, focusedDirectory.key, pageSize, null, { recursive: false });
+      if (!lazyLoadContextValid(context)) return;
+      listFilteredByAcls.value ||= Boolean(childResult.filteredByAcls);
+      result = childResult;
+      if (rootSummary?.hasValue !== true) {
+        rootPath = focusedDirectory.key;
+        resetLazyKvKeyTree(lazyTreeState, rootPath);
+        rootSummary = await loadLazyRootSummary(context.connectionId, rootPath, result.keys, result.continuation);
+        if (!lazyLoadContextValid(context)) return;
+      }
+    }
+    if (rootPath === lazyKvRootPath(props.lazyPathStyle)) {
       replaceLazyKvChildren(lazyTreeState, null, result.keys, result.continuation);
     } else {
-      const rootSummary = await loadLazyRootSummary(rootPath, result.keys, result.continuation);
       if (rootSummary) {
         replaceLazyKvFocusedRoot(lazyTreeState, rootSummary, result.keys, result.continuation);
       } else {
@@ -500,7 +780,8 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
     }
 
     if (options.preserveSelection) {
-      await restoreLazyExpandedBranches(previousExpanded);
+      await restoreLazyExpandedBranches(previousExpanded, context);
+      if (!lazyLoadContextValid(context)) return;
       expandFocusedRoot(rootPath);
       if (keyToRestore && lazyTreeState.nodeByKey.has(keyToRestore)) {
         await loadSelectedKey(keyToRestore);
@@ -510,25 +791,44 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
     } else {
       expandedGroupIds.value = focusedRootExpansion(rootPath);
     }
+  } catch (error) {
+    if (lazyLoadContextValid(context)) {
+      listError.value = formatError(error);
+    }
   } finally {
-    loading.value = false;
+    if (lazyLoadContextValid(context)) loading.value = false;
   }
 }
 
-async function loadLazyRootSummary(rootPath: string, children: KvKeySummary[], continuation?: string | null): Promise<KvKeySummary | null> {
+function lazyLoadContextValid(context: LazyLoadContext): boolean {
+  return context.generation === keyLoadGeneration && context.connectionId === props.connectionId;
+}
+
+function currentLazyLoadContext(): LazyLoadContext {
+  return { generation: keyLoadGeneration, connectionId: props.connectionId };
+}
+
+async function loadLazyRootSummary(connectionId: string, rootPath: string, children: KvKeySummary[], continuation?: string | null): Promise<LazyKvKeySummary | null> {
   try {
-    const rootValue = await props.api.get(props.connectionId, rootPath);
-    if (rootValue.found) return { key: rootValue.key || rootPath, ...rootValue.metadata };
+    const rootValue = await props.api.get(connectionId, rootPath);
+    if (rootValue.found) {
+      return {
+        key: rootValue.key || rootPath,
+        ...rootValue.metadata,
+        numChildren: children.length + (continuation ? 1 : 0),
+        hasValue: true,
+      };
+    }
     if (children.length === 0 && !continuation) return null;
   } catch {
     if (children.length === 0 && !continuation) return null;
   }
-  return { key: rootPath, numChildren: children.length + (continuation ? 1 : 0) };
+  return { key: rootPath, numChildren: children.length + (continuation ? 1 : 0), hasValue: false };
 }
 
 function focusedRootExpansion(rootPath: string): Set<string> {
-  const normalized = normalizeZooKeeperPath(rootPath);
-  if (normalized === "/") return new Set();
+  const normalized = normalizeLazyKvPath(rootPath, props.lazyPathStyle);
+  if (normalized === lazyKvRootPath(props.lazyPathStyle)) return new Set();
   return new Set(
     focusedPathKeys(normalized)
       .filter((key) => lazyTreeState.nodeByKey.has(key))
@@ -541,11 +841,17 @@ function expandFocusedRoot(rootPath: string) {
 }
 
 function focusedPathKeys(rootPath: string): string[] {
-  const segments = normalizeZooKeeperPath(rootPath).split("/").filter(Boolean);
-  return segments.map((_, index) => `/${segments.slice(0, index + 1).join("/")}`);
+  const normalized = normalizeLazyKvPath(rootPath, props.lazyPathStyle);
+  const trailingSlash = props.lazyPathStyle === "relative" && normalized.endsWith("/");
+  const segments = normalized.split("/").filter(Boolean);
+  return segments.map((_, index) => {
+    const joined = segments.slice(0, index + 1).join("/");
+    const isLeaf = index === segments.length - 1;
+    return props.lazyPathStyle === "absolute" ? `/${joined}` : isLeaf && !trailingSlash ? joined : `${joined}/`;
+  });
 }
 
-async function restoreLazyExpandedBranches(previousExpanded: ReadonlySet<string>) {
+async function restoreLazyExpandedBranches(previousExpanded: ReadonlySet<string>, context: LazyLoadContext) {
   const restored = new Set<string>();
   const keysToExpand = [...previousExpanded]
     .map((id) => lazyExpandedKeyFromId(id))
@@ -553,26 +859,31 @@ async function restoreLazyExpandedBranches(previousExpanded: ReadonlySet<string>
     .sort((a, b) => a.split("/").length - b.split("/").length);
 
   for (const key of keysToExpand) {
+    if (!lazyLoadContextValid(context)) return;
     const node = lazyTreeState.nodeByKey.get(key);
     if (!node?.hasChildren) continue;
     restored.add(node.id);
-    await loadLazyChildren(key, true);
+    await loadLazyChildren(key, true, context);
   }
 
-  expandedGroupIds.value = restored;
+  if (lazyLoadContextValid(context)) expandedGroupIds.value = restored;
 }
 
-async function loadLazyChildren(parentKey: string, reset = true) {
+async function loadLazyChildren(parentKey: string, reset = true, context = currentLazyLoadContext()) {
+  if (!lazyLoadContextValid(context)) return;
   const node = lazyTreeState.nodeByKey.get(parentKey);
   if (!node || node.loading) return;
   node.loading = true;
   try {
     const continuationToUse = reset ? null : node.continuation;
-    const result = await props.api.listPrefix(props.connectionId, parentKey, pageSize, continuationToUse, { recursive: false });
-    replaceLazyKvChildren(lazyTreeState, parentKey, result.keys, result.continuation, { append: !reset });
+    const childPrefix = props.lazyPathStyle === "relative" && node.hasValue === true && !parentKey.endsWith("/") ? `${parentKey}/` : parentKey;
+    const result = await props.api.listPrefix(context.connectionId, childPrefix, pageSize, continuationToUse, { recursive: false });
+    if (!lazyLoadContextValid(context) || lazyTreeState.nodeByKey.get(parentKey) !== node) return;
+    if (result.filteredByAcls != null) listFilteredByAcls.value ||= Boolean(result.filteredByAcls);
+    replaceLazyKvChildren(lazyTreeState, parentKey, result.keys, result.continuation, { append: !reset, filteredByAcls: result.filteredByAcls });
   } finally {
     const latest = lazyTreeState.nodeByKey.get(parentKey);
-    if (latest) latest.loading = false;
+    if (lazyLoadContextValid(context) && latest === node) latest.loading = false;
   }
 }
 
@@ -583,30 +894,40 @@ async function loadMoreLazyChildren(parentKey: string | null) {
   }
 
   if (loadingMore.value || !lazyTreeState.rootContinuation) return;
+  const context = currentLazyLoadContext();
+  const rootPath = lazyTreeState.rootPath;
+  const continuationToUse = lazyTreeState.rootContinuation;
   loadingMore.value = true;
   try {
-    const result = await props.api.listPrefix(props.connectionId, lazyTreeState.rootPath, pageSize, lazyTreeState.rootContinuation, { recursive: false });
+    const result = await props.api.listPrefix(context.connectionId, rootPath, pageSize, continuationToUse, { recursive: false });
+    if (!lazyLoadContextValid(context) || lazyTreeState.rootPath !== rootPath || lazyTreeState.rootContinuation !== continuationToUse) return;
+    if (result.filteredByAcls != null) listFilteredByAcls.value ||= Boolean(result.filteredByAcls);
     replaceLazyKvChildren(lazyTreeState, null, result.keys, result.continuation, { append: true });
   } finally {
-    loadingMore.value = false;
+    if (lazyLoadContextValid(context) && lazyTreeState.rootPath === rootPath) loadingMore.value = false;
   }
 }
 
 async function refreshLazyParent(parentPath: string) {
-  const normalizedParent = normalizeZooKeeperPath(parentPath);
+  const context = currentLazyLoadContext();
+  const normalizedParent = normalizeLazyKvPath(parentPath, props.lazyPathStyle);
   if (normalizedParent === lazyTreeState.rootPath) {
-    if (lazyTreeState.rootPath === "/") {
-      const result = await props.api.listPrefix(props.connectionId, lazyTreeState.rootPath, pageSize, null, { recursive: false });
+    if (lazyTreeState.rootPath === lazyKvRootPath(props.lazyPathStyle)) {
+      const rootPath = lazyTreeState.rootPath;
+      const result = await props.api.listPrefix(context.connectionId, rootPath, pageSize, null, { recursive: false });
+      if (!lazyLoadContextValid(context) || lazyTreeState.rootPath !== rootPath) return;
+      if (result.filteredByAcls != null) listFilteredByAcls.value ||= Boolean(result.filteredByAcls);
       replaceLazyKvChildren(lazyTreeState, null, result.keys, result.continuation);
     } else {
-      await loadLazyChildren(lazyTreeState.rootPath, true);
+      await loadLazyChildren(lazyTreeState.rootPath, true, context);
+      if (!lazyLoadContextValid(context)) return;
       expandFocusedRoot(lazyTreeState.rootPath);
     }
     return;
   }
 
   if (lazyTreeState.nodeByKey.has(normalizedParent)) {
-    await loadLazyChildren(normalizedParent, true);
+    await loadLazyChildren(normalizedParent, true, context);
   } else {
     await loadLazyRoot(true, { preserveSelection: true });
   }
@@ -616,6 +937,7 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
   const route = routeFromKey(input);
   const key = route.key;
   const keyIdentity = routeIdentity(route);
+  const connectionId = props.connectionId;
   stopMetadataRefresh();
   const requestId = ++detailRequestId;
   selectedKey.value = key;
@@ -623,11 +945,17 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
   selectedRouteKeyBytes.value = route.keyBytes ?? null;
   selectedValue.value = null;
   selectedPrettyValue.value = null;
+  selectedBase64ViewMode.value = "utf8";
   detailLoading.value = true;
   detailError.value = "";
   try {
-    const result = await props.api.get(props.connectionId, key, route.keyBytes ? { keyBytes: route.keyBytes } : undefined);
-    if (requestId !== detailRequestId || selectedKey.value !== key) return;
+    const result = await props.api.get(connectionId, key, route.keyBytes ? { keyBytes: route.keyBytes } : undefined);
+    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
+    const lazyNode = lazyTreeState.nodeByKey.get(key);
+    if (lazyNode) {
+      lazyNode.hasValue = result.found;
+      if (result.found) Object.assign(lazyNode, result.metadata);
+    }
     if (!result.found) {
       removeExpiredSelectedKey(key);
       return;
@@ -638,10 +966,10 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
     startMetadataRefresh(key);
     startKeyListRefresh();
   } catch (error) {
-    if (requestId !== detailRequestId || selectedKey.value !== key) return;
-    detailError.value = error instanceof Error ? error.message : String(error);
+    if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
+    detailError.value = formatError(error);
   } finally {
-    if (requestId === detailRequestId) detailLoading.value = false;
+    if (requestId === detailRequestId && connectionId === props.connectionId) detailLoading.value = false;
   }
 }
 
@@ -653,6 +981,7 @@ function clearSelectedKey() {
   selectedRouteKeyBytes.value = null;
   selectedValue.value = null;
   selectedPrettyValue.value = null;
+  selectedBase64ViewMode.value = "utf8";
   detailLoading.value = false;
 }
 
@@ -734,6 +1063,21 @@ async function refreshKnownLeaseKeys(generation: number) {
 }
 
 function removeExpiredSelectedKey(key: string) {
+  if (props.lazyHierarchy) {
+    const lazyNode = lazyTreeState.nodeByKey.get(key);
+    if (lazyNode?.hasChildren) {
+      // A separator-based listing initially cannot tell whether `prefix/` is
+      // also a real Key. A failed exact GET only proves that it is a virtual
+      // directory; it must not clear the directory's expansion state.
+      lazyNode.hasValue = false;
+    } else {
+      // A known leaf disappeared. Refresh only its parent so the stale row is
+      // removed without rebuilding or collapsing the rest of the tree.
+      void refreshLazyParent(parentLazyKvPath(key, props.lazyPathStyle));
+    }
+    clearSelectedKey();
+    return;
+  }
   keys.value = selectedKeyIdentity.value ? keys.value.filter((item) => summaryIdentity(item) !== selectedKeyIdentity.value) : removeMissingKvKey(keys.value, key);
   preserveExpandedGroups();
   clearSelectedKey();
@@ -809,6 +1153,61 @@ function onRowClick(node: BrowserTreeNode) {
   }
 }
 
+function collectNodeMultiSelection(node: BrowserTreeNode): KvMultiSelection[] {
+  if (node.kind === "lazy") return [{ key: node.key }];
+
+  const selected: KvMultiSelection[] = [];
+  const collect = (candidate: KvKeyTreeNode) => {
+    if (candidate.kind === "leaf" || candidate.key) {
+      selected.push({
+        key: kvKeyTreeNodePath(candidate),
+        keyIdentity: candidate.keyIdentity,
+        keyBytes: candidate.keyBytes,
+        modRevision: candidate.modRevision == null ? null : String(candidate.modRevision),
+      });
+    }
+    if (candidate.kind === "group") candidate.children.forEach(collect);
+  };
+  collect(node);
+  return selected;
+}
+
+function emitMultiSelection(next: Map<string, KvMultiSelection>) {
+  multiSelectedKeys.value = next;
+  emit("selectionChange", [...next.values()]);
+}
+
+function setNodeMultiSelection(node: BrowserTreeNode, selected: boolean) {
+  const next = new Map(multiSelectedKeys.value);
+  for (const route of collectNodeMultiSelection(node)) {
+    const identity = routeIdentity(route);
+    if (selected) next.set(identity, route);
+    else next.delete(identity);
+  }
+  emitMultiSelection(next);
+}
+
+function nodeMultiSelectionState(node: BrowserTreeNode): { selected: boolean; indeterminate: boolean } {
+  const candidates = collectNodeMultiSelection(node);
+  if (!candidates.length) return { selected: false, indeterminate: false };
+  const selectedCount = candidates.filter((route) => multiSelectedKeys.value.has(routeIdentity(route))).length;
+  return { selected: selectedCount === candidates.length, indeterminate: selectedCount > 0 && selectedCount < candidates.length };
+}
+
+function selectAllMultiSelection() {
+  emitMultiSelection(new Map(keys.value.map((key) => [summaryIdentity(key), multiSelectionFromSummary(key)])));
+}
+
+function clearMultiSelection() {
+  if (multiSelectedKeys.value.size) emitMultiSelection(new Map());
+}
+
+function removeMultiSelection(selection: KvMultiSelection[]) {
+  const next = new Map(multiSelectedKeys.value);
+  selection.forEach((route) => next.delete(routeIdentity(route)));
+  emitMultiSelection(next);
+}
+
 function onRowDoubleClick(node: BrowserTreeNode) {
   if (!nodeIsExpandable(node)) {
     void loadSelectedKey(routeFromNode(node)).then(() => openEditDialog());
@@ -816,7 +1215,7 @@ function onRowDoubleClick(node: BrowserTreeNode) {
 }
 
 function createKeyPrefix(parentPath?: string): string {
-  if (props.lazyHierarchy) return createZooKeeperChildPathDraft(parentPath ?? prefix.value);
+  if (props.lazyHierarchy) return createLazyKvChildPathDraft(parentPath ?? prefix.value, props.lazyPathStyle);
   const path = parentPath ?? prefix.value.trim();
   if (!path) return "";
   if (path === "/") return "/";
@@ -829,6 +1228,7 @@ function openCreateDialog(parentPath?: string) {
   editKey.value = createKeyPrefix(parentPath);
   editValue.value = "";
   editTtl.value = "";
+  editFlags.value = "0";
   editExpiryMode.value = "permanent";
   editLeaseId.value = "";
   editEncoding.value = "utf8";
@@ -855,6 +1255,7 @@ function openEditDialog() {
   editExpiryMode.value = existingLease && existingLease !== "0" ? "lease" : "permanent";
   editLeaseId.value = editExpiryMode.value === "lease" ? existingLease : "";
   editTtl.value = "";
+  editFlags.value = String(selectedMetadata.value?.flags ?? "0");
   editError.value = "";
   editErrorKind.value = "request";
   showEditDialog.value = true;
@@ -873,6 +1274,8 @@ function putOptions(): KvPutOptions | undefined {
       options.keyBytes = selectedKeyBytes.value;
     }
   }
+  if (props.supportsFlags) options.flags = editFlags.value.trim();
+  else if (!isCreating.value && selectedMetadata.value?.flags != null) options.flags = String(selectedMetadata.value.flags);
   if (props.supportsCreateModes) {
     if (isCreating.value) {
       options.writeMode = "create";
@@ -899,7 +1302,7 @@ async function saveKey() {
     editError.value = props.labels.keyRequired;
     return;
   }
-  if (props.lazyHierarchy && normalizeZooKeeperPath(rawKey) === "/") {
+  if (props.lazyHierarchy && normalizeLazyKvPath(rawKey, props.lazyPathStyle) === lazyKvRootPath(props.lazyPathStyle)) {
     editError.value = props.labels.rootReadonly || props.labels.keyRequired;
     return;
   }
@@ -918,13 +1321,22 @@ async function saveKey() {
     editError.value = props.labels.leaseInvalid || "Lease ID must be a positive 64-bit integer";
     return;
   }
-  const key = props.lazyHierarchy ? normalizeZooKeeperPath(rawKey) : rawKey;
+  const key = props.lazyHierarchy ? normalizeLazyKvPath(rawKey, props.lazyPathStyle) : rawKey;
+  const keyBytes = !isCreating.value && key === selectedKey.value ? selectedKeyBytes.value : null;
+  if (!keyIsWritable(key, keyBytes)) {
+    editError.value = t("connection.readOnly");
+    return;
+  }
   const validationError = validateKvValue(editValue.value, editFormat.value);
   if (validationError) {
     editError.value = validationError;
     return;
   }
   const value: KvValue = { encoding: editEncoding.value, data: editValue.value.replace(editEncoding.value === "base64" ? /\s+/g : /$^/, "") };
+  if (props.maxValueBytes > 0 && editValueSize.value > props.maxValueBytes) {
+    editError.value = props.labels.valueTooLarge || `Value exceeds ${props.maxValueBytes} bytes`;
+    return;
+  }
   pendingSave.value = { key, value, options: putOptions() };
   showSaveDiff.value = true;
 }
@@ -932,6 +1344,7 @@ async function saveKey() {
 async function confirmSaveKey() {
   if (!pendingSave.value) return;
   const { key, value, options } = pendingSave.value;
+  if (!keyIsWritable(key, options?.keyBytes)) return;
   saving.value = true;
   editError.value = "";
   editErrorKind.value = "request";
@@ -942,7 +1355,7 @@ async function confirmSaveKey() {
     showEditDialog.value = false;
     pendingSave.value = null;
     if (props.lazyHierarchy) {
-      await refreshLazyParent(parentZooKeeperPath(keyToSelect));
+      await refreshLazyParent(parentLazyKvPath(keyToSelect, props.lazyPathStyle));
     } else {
       await loadKeys(true);
     }
@@ -961,9 +1374,26 @@ async function confirmSaveKey() {
   }
 }
 
+async function refreshAfterMutationConflict() {
+  const key = selectedKey.value;
+  if (!key || isCreating.value || refreshingEditConflict.value) return;
+  refreshingEditConflict.value = true;
+  try {
+    await loadSelectedKey(key);
+    if (selectedValue.value?.found) {
+      editError.value = "";
+      editErrorKind.value = "request";
+    } else {
+      editError.value = props.labels.notFound;
+    }
+  } finally {
+    refreshingEditConflict.value = false;
+  }
+}
+
 async function deleteSelectedKey() {
-  if (!selectedKey.value) return;
-  const parentPath = parentZooKeeperPath(selectedKey.value);
+  if (!selectedKey.value || !selectedValue.value?.found || !canDeleteSelectedValue.value) return;
+  const parentPath = parentLazyKvPath(selectedKey.value, props.lazyPathStyle);
   deleting.value = true;
   try {
     await props.api.deleteKey(
@@ -985,7 +1415,7 @@ async function deleteSelectedKey() {
     }
     toast(props.labels.deleted, 2500);
   } catch (error) {
-    detailError.value = error instanceof Error ? error.message : String(error);
+    detailError.value = formatError(error);
     showDeleteConfirm.value = false;
   } finally {
     deleting.value = false;
@@ -993,6 +1423,9 @@ async function deleteSelectedKey() {
 }
 
 async function selectNodeForAction(node: BrowserTreeNode) {
+  if (node.kind === "lazy" && node.hasValue === null) {
+    await loadSelectedKey(routeFromNode(node));
+  }
   if (!nodeHasValue(node)) return;
   const route = routeFromNode(node);
   if (selectedKeyIdentity.value !== routeIdentity(route)) await loadSelectedKey(route);
@@ -1004,8 +1437,10 @@ async function selectNodeForAction(node: BrowserTreeNode) {
 }
 
 async function openDeleteForNode(node: BrowserTreeNode) {
-  if (props.readOnly) return;
+  const route = routeFromNode(node);
+  if (!keyIsWritable(route.key, route.keyBytes)) return;
   await selectNodeForAction(node);
+  if (!selectedKey.value || !selectedValue.value?.found || !canDeleteSelectedValue.value) return;
   showDeleteConfirm.value = true;
 }
 
@@ -1016,6 +1451,31 @@ function revisionString(value: string | number | null | undefined): KvInt64 | un
 async function copySelectedKey() {
   if (!selectedKey.value) return;
   await navigator.clipboard.writeText(selectedKey.value);
+}
+
+async function copyText(value: string | number | null | undefined) {
+  const text = String(value ?? "").trim();
+  if (!text) return;
+  await navigator.clipboard.writeText(text);
+}
+
+async function copySelectedValue() {
+  if (!selectedValue.value?.found) return;
+  try {
+    await copyToClipboard(selectedValueClipboardText.value);
+    selectedValueCopied.value = true;
+    toast(props.labels.copied || "Copied", 1500);
+    if (selectedValueCopyTimer) clearTimeout(selectedValueCopyTimer);
+    selectedValueCopyTimer = setTimeout(() => {
+      selectedValueCopied.value = false;
+      selectedValueCopyTimer = null;
+    }, 1500);
+  } catch (error) {
+    selectedValueCopied.value = false;
+    const message = formatError(error);
+    const failureTemplate = props.labels.copyFailed || "Copy failed: {message}";
+    toast(failureTemplate.includes("{message}") ? failureTemplate.replace("{message}", message) : `${failureTemplate}: ${message}`, 3500);
+  }
 }
 
 function watchSelectedKey() {
@@ -1039,10 +1499,10 @@ function downloadText(filename: string, content: string, type = "application/jso
 function exportSelectedKey() {
   if (!selectedKey.value || !selectedValue.value?.found) return;
   downloadText(
-    `${selectedKey.value.split("/").filter(Boolean).pop() || "etcd-key"}.dbx-etcd.json`,
+    `${selectedKey.value.split("/").filter(Boolean).pop() || props.exportFallbackName}${props.exportFileExtension}`,
     JSON.stringify(
       {
-        format: "dbx-etcd-bundle",
+        format: props.exportFormat,
         version: 1,
         exportedAt: new Date().toISOString(),
         prefix: selectedKey.value,
@@ -1079,6 +1539,13 @@ async function exportNode(node: BrowserTreeNode) {
 
 async function openCloneDialog() {
   if (!selectedKey.value || !selectedValue.value?.found || props.readOnly) return;
+  if (props.api.copy) {
+    renameMode.value = "copy";
+    renameValue.value = selectedKey.value;
+    renameError.value = "";
+    showRenameDialog.value = true;
+    return;
+  }
   isCreating.value = true;
   editKey.value = selectedKey.value;
   editValue.value = selectedTextValue.value;
@@ -1087,6 +1554,7 @@ async function openCloneDialog() {
   editExpiryMode.value = "permanent";
   editLeaseId.value = "";
   editTtl.value = "";
+  editFlags.value = String(selectedMetadata.value?.flags ?? "0");
   editError.value = "";
   editErrorKind.value = "request";
   showEditDialog.value = true;
@@ -1102,23 +1570,30 @@ function onEditFormatChange(value: unknown) {
 }
 
 function openRenameDialog() {
-  if (!selectedKey.value || !props.api.rename || props.readOnly) return;
+  if (!selectedKey.value || !props.api.rename || !selectedKeyWritable.value) return;
+  renameMode.value = "rename";
   renameValue.value = selectedKey.value;
   renameError.value = "";
   showRenameDialog.value = true;
 }
 
-async function renameSelectedKey() {
-  if (!selectedKey.value || !props.api.rename) return;
+async function moveOrCopySelectedKey() {
+  if (!selectedKey.value) return;
+  const mutation = renameMode.value === "copy" ? props.api.copy : props.api.rename;
+  if (!mutation) return;
   const next = renameValue.value.trim();
   if (!next) {
     renameError.value = props.labels.keyRequired;
     return;
   }
+  if (!renameTargetWritable.value) {
+    renameError.value = t("connection.readOnly");
+    return;
+  }
   renaming.value = true;
   renameError.value = "";
   try {
-    await props.api.rename(props.connectionId, {
+    await mutation(props.connectionId, {
       key: selectedKey.value,
       keyBytes: selectedKeyBytes.value,
       newKey: next,
@@ -1129,7 +1604,7 @@ async function renameSelectedKey() {
     await loadSelectedKey({ key: next, keyIdentity: next, keyBytes: { encoding: "utf8", data: next } });
     toast(props.labels.saved, 2500);
   } catch (error) {
-    renameError.value = error instanceof Error ? error.message : String(error);
+    renameError.value = formatError(error);
   } finally {
     renaming.value = false;
   }
@@ -1152,7 +1627,7 @@ async function openHistory() {
     historyEvents.value = response.events;
   } catch (error) {
     historyEvents.value = [];
-    historyError.value = error instanceof Error ? error.message : String(error);
+    historyError.value = formatError(error);
   } finally {
     historyLoading.value = false;
   }
@@ -1164,7 +1639,7 @@ function compareHistory(event: KvHistoryEvent) {
 }
 
 async function restoreHistory() {
-  if (!selectedKey.value || !historyRestoreValue.value) return;
+  if (!selectedKey.value || !historyRestoreValue.value || !selectedKeyWritable.value) return;
   restoring.value = true;
   try {
     await props.api.put(props.connectionId, selectedKey.value, historyRestoreValue.value, {
@@ -1176,7 +1651,7 @@ async function restoreHistory() {
     await loadKeys(true, { preserveSelection: true });
     toast(props.labels.saved, 2500);
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    historyError.value = formatError(error);
   } finally {
     restoring.value = false;
   }
@@ -1184,6 +1659,8 @@ async function restoreHistory() {
 
 function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
   if (!props.enableNodeActions) return [];
+  const route = routeFromNode(node);
+  const nodeWritable = keyIsWritable(route.key, route.keyBytes);
   const items: ContextMenuItem[] = [
     {
       label: props.labels.add || props.labels.newKey,
@@ -1198,13 +1675,7 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
         label: props.labels.edit,
         icon: Pencil,
         action: () => void loadSelectedKey(routeFromNode(node)).then(openEditDialog),
-        disabled: props.readOnly,
-      },
-      {
-        label: props.labels.rename || "Rename",
-        icon: Pencil,
-        action: () => void loadSelectedKey(routeFromNode(node)).then(openRenameDialog),
-        disabled: props.readOnly || !props.api.rename,
+        disabled: !nodeWritable,
       },
       {
         label: props.labels.clone || "Clone",
@@ -1217,13 +1688,22 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
         icon: Copy,
         action: () => void copySelectedKey(),
       },
-      {
+    );
+    if (props.api.rename) {
+      items.splice(2, 0, {
+        label: props.labels.rename || "Rename",
+        icon: Pencil,
+        action: () => void loadSelectedKey(routeFromNode(node)).then(openRenameDialog),
+        disabled: !nodeWritable,
+      });
+    }
+    if (props.api.history) {
+      items.push({
         label: props.labels.history || "History",
         icon: Clock3,
         action: () => void loadSelectedKey(routeFromNode(node)).then(openHistory),
-        disabled: !props.api.history,
-      },
-    );
+      });
+    }
   }
   if (props.api.exportScope || nodeHasValue(node)) {
     items.push({
@@ -1232,19 +1712,30 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
       action: () => void exportNode(node),
     });
   }
-  items.push({
-    label: props.labels.delete,
-    icon: Trash2,
-    variant: "destructive",
-    action: () => void openDeleteForNode(node),
-    disabled: props.readOnly || !nodeHasValue(node),
-  });
+  if (nodeIsExpandable(node) && props.onDeletePrefix) {
+    items.push({
+      label: props.labels.deletePrefix || props.labels.delete,
+      icon: Trash2,
+      variant: "destructive",
+      action: () => props.onDeletePrefix?.(nodePath(node)),
+      disabled: props.readOnly,
+    });
+  } else {
+    items.push({
+      label: props.labels.delete,
+      icon: Trash2,
+      variant: "destructive",
+      action: () => void openDeleteForNode(node),
+      disabled: !nodeWritable || !nodeHasValue(node),
+    });
+  }
   return items;
 }
 
-function onRowContextMenu(event: MouseEvent, node: BrowserTreeNode, openContextMenu: (event: MouseEvent) => void) {
+async function onRowContextMenu(event: MouseEvent, node: BrowserTreeNode, openContextMenu: (event: MouseEvent) => void) {
   if (!props.enableNodeActions) return;
-  void selectNodeForAction(node);
+  await selectNodeForAction(node);
+  await nextTick();
   openContextMenu(event);
 }
 
@@ -1257,7 +1748,8 @@ function nodeIsExpandable(node: BrowserTreeNode): boolean {
 }
 
 function nodeHasValue(node: BrowserTreeNode): boolean {
-  return node.kind === "leaf" || node.kind === "lazy" || Boolean(node.key);
+  if (node.kind === "lazy") return node.hasValue === true;
+  return node.kind === "leaf" || Boolean(node.key);
 }
 
 function nodeIsExpanded(node: BrowserTreeNode): boolean {
@@ -1327,8 +1819,11 @@ async function selectKeyFromNavigation(key: string | KvKeyRoute) {
 watch(
   () => props.connectionId,
   async () => {
+    keySuggestionRequestId++;
+    remoteKeySuggestions.value = [];
     stopKeyListRefresh();
     clearSelectedKey();
+    clearMultiSelection();
     try {
       await connectionStore.ensureConnected(props.connectionId);
     } catch {
@@ -1349,6 +1844,11 @@ watch(
 watch(
   () => selectedKey.value,
   () => {
+    selectedValueCopied.value = false;
+    if (selectedValueCopyTimer) {
+      clearTimeout(selectedValueCopyTimer);
+      selectedValueCopyTimer = null;
+    }
     startKeyListRefresh();
   },
 );
@@ -1377,7 +1877,7 @@ onMounted(() => {
       console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
     }
     try {
-      await loadKeys(true);
+      await loadKeys(true, { preserveSelection: Boolean(restoredUiState.selectedKey) });
     } catch {
       // The browser's normal refresh path can retry after a transient failure.
     }
@@ -1385,7 +1885,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  keyLoadGeneration++;
+  if (keySuggestionTimer) clearTimeout(keySuggestionTimer);
+  if (selectedValueCopyTimer) clearTimeout(selectedValueCopyTimer);
   clearSelectedKey();
+  clearMultiSelection();
   stopKeyListRefresh();
 });
 defineExpose({
@@ -1394,30 +1898,43 @@ defineExpose({
   selectKey: selectKeyFromNavigation,
   openCreate: (parentPath?: string) => openCreateDialog(parentPath),
   selection: () => ({ key: selectedKey.value, value: selectedValue.value }),
+  multiSelection: () => [...multiSelectedKeys.value.values()],
+  selectAllMultiSelection,
+  clearMultiSelection,
+  removeMultiSelection,
 });
 </script>
 
 <template>
   <div class="flex h-full min-h-0 flex-col bg-background">
-    <div class="flex shrink-0 items-center gap-2 border-b px-3 py-2">
-      <div class="relative min-w-0 flex-1">
-        <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          ref="searchInputRef"
-          v-model="prefix"
-          class="h-8 pl-8"
-          role="combobox"
-          aria-autocomplete="list"
-          :aria-expanded="showKeySuggestions"
-          aria-controls="kv-key-prefix-suggestions"
-          :aria-activedescendant="keySuggestionIndex >= 0 ? `kv-key-prefix-suggestion-${keySuggestionIndex}` : undefined"
-          :placeholder="labels.prefixPlaceholder"
-          @input="onPrefixInput"
-          @focus="keySuggestionOpen = Boolean(prefix.trim())"
-          @blur="closeKeySuggestions"
-          @keydown="onPrefixKeydown"
-        />
-        <div v-if="showKeySuggestions" id="kv-key-prefix-suggestions" role="listbox" class="absolute z-50 mt-1 max-h-64 w-full overflow-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-lg">
+    <div class="flex shrink-0 items-center gap-2 border-b bg-muted/15 px-3 py-2.5 overflow-x-auto">
+      <div v-if="$slots['toolbar-actions']" class="flex shrink-0 items-center gap-1">
+        <slot name="toolbar-actions" />
+      </div>
+      <div v-if="$slots['toolbar-actions']" class="h-6 w-px shrink-0 bg-border" />
+      <Popover :open="showKeySuggestions">
+        <PopoverAnchor as-child>
+          <div class="relative min-w-64 flex-1">
+            <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              ref="searchInputRef"
+              v-model="prefix"
+              class="h-9 pl-8"
+              autocomplete="off"
+              role="combobox"
+              aria-autocomplete="list"
+              :aria-expanded="showKeySuggestions"
+              aria-controls="kv-key-prefix-suggestions"
+              :aria-activedescendant="keySuggestionIndex >= 0 ? `kv-key-prefix-suggestion-${keySuggestionIndex}` : undefined"
+              :placeholder="labels.prefixPlaceholder"
+              @input="onPrefixInput"
+              @focus="keySuggestionOpen = Boolean(prefix.trim())"
+              @blur="closeKeySuggestions"
+              @keydown="onPrefixKeydown"
+            />
+          </div>
+        </PopoverAnchor>
+        <PopoverContent v-if="showKeySuggestions" id="kv-key-prefix-suggestions" align="start" side="bottom" :collision-padding="12" class="z-[60] max-h-[var(--reka-popover-content-available-height)] w-[var(--reka-popover-trigger-width)] gap-0 overflow-y-auto p-1" @open-auto-focus.prevent>
           <button
             v-for="(suggestion, index) in keySuggestions"
             :id="`kv-key-prefix-suggestion-${index}`"
@@ -1433,17 +1950,29 @@ defineExpose({
             <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <span class="truncate">{{ suggestion.key }}</span>
           </button>
-        </div>
+        </PopoverContent>
+      </Popover>
+      <div v-if="enableMultiSelect && multiSelectedKeys.size" class="flex shrink-0 items-center gap-1.5">
+        <Button size="sm" variant="outline" class="h-7 px-2 text-xs" @click="selectAllMultiSelection()">{{ labels.selectAll || "Select all" }}</Button>
+        <Button size="sm" variant="outline" class="h-7 px-2 text-xs" @click="clearMultiSelection()">{{ labels.deselectAll || "Clear" }}</Button>
       </div>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loading" @click="loadKeys(true, { preserveSelection: true })">
         <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
         <RefreshCw v-else class="h-3.5 w-3.5" />
         {{ t("grid.refresh") }}
       </Button>
-      <Button size="sm" class="h-8 gap-1.5" :disabled="readOnly" @click="openCreateDialog()">
+      <Button size="sm" class="h-9 gap-1.5" :disabled="readOnly" @click="openCreateDialog()">
         <Plus class="h-3.5 w-3.5" />
         {{ labels.newKey }}
       </Button>
+      <div v-if="$slots['toolbar-trailing']" class="ml-1 flex shrink-0 items-center gap-1">
+        <div class="mx-1 h-6 w-px shrink-0 bg-border" />
+        <slot name="toolbar-trailing" />
+      </div>
+    </div>
+
+    <div v-if="listFilteredByAcls" class="shrink-0 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+      {{ labels.aclFiltered || "Some Consul KV keys are hidden by ACL policies." }}
     </div>
 
     <Splitpanes class="kv-browser-splitpanes min-h-0 flex-1" @resized="handleKvBrowserSplitResized">
@@ -1453,34 +1982,54 @@ defineExpose({
             <Loader2 class="mr-2 h-4 w-4 animate-spin" />
             {{ labels.loadingKeys }}
           </div>
+          <div v-else-if="listError" class="flex h-full items-center justify-center px-4 text-center text-sm text-destructive">
+            {{ listError }}
+          </div>
           <div v-else-if="visibleRows.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
             {{ labels.empty }}
           </div>
           <div v-else class="h-full overflow-auto py-1 text-sm">
             <template v-for="row in visibleRows" :key="row.type === 'node' ? row.node.id : row.id">
-              <CustomContextMenu v-if="row.type === 'node'" :items="nodeContextMenuItems(row.node)" v-slot="{ onContextMenu }">
-                <button
-                  type="button"
-                  class="flex h-8 w-full items-center gap-1.5 px-2 text-left transition-colors hover:bg-accent"
-                  :class="rowIsSelected(row.node) ? 'bg-primary/10 font-medium text-foreground shadow-[inset_3px_0_0_hsl(var(--primary))]' : ''"
+              <CustomContextMenu v-if="row.type === 'node'" :items="nodeContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
+                <div
+                  class="flex h-8 w-full select-none items-center gap-1.5 pr-2 text-left transition-colors"
+                  :class="isOpen || rowIsSelected(row.node) ? 'bg-accent font-medium text-accent-foreground shadow-[inset_3px_0_0_hsl(var(--primary))]' : 'hover:bg-accent/40'"
                   :style="{ paddingLeft: `${8 + row.depth * 18}px` }"
-                  @click="onRowClick(row.node)"
-                  @dblclick.stop.prevent="onRowDoubleClick(row.node)"
+                  @mousedown.right.prevent
                   @contextmenu="(event) => onRowContextMenu(event, row.node, onContextMenu)"
                 >
-                  <template v-if="nodeIsExpandable(row.node)">
-                    <Loader2 v-if="nodeIsLoading(row.node)" class="h-3.5 w-3.5 shrink-0 animate-spin" />
-                    <ChevronDown v-else-if="nodeIsExpanded(row.node)" class="h-3.5 w-3.5 shrink-0" />
-                    <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
-                    <FolderOpen v-if="nodeIsExpanded(row.node)" class="h-4 w-4 shrink-0 text-sky-500" />
-                    <FolderClosed v-else class="h-4 w-4 shrink-0 text-sky-500" />
-                  </template>
-                  <template v-else>
-                    <span class="w-3.5 shrink-0" />
-                    <KeyRound class="h-4 w-4 shrink-0 text-sky-500" />
-                  </template>
-                  <span class="truncate">{{ row.node.label }}</span>
-                </button>
+                  <button
+                    v-if="enableMultiSelect"
+                    type="button"
+                    role="checkbox"
+                    class="flex h-5 w-5 shrink-0 items-center justify-center text-foreground"
+                    :aria-label="`${row.node.label}`"
+                    :aria-checked="nodeMultiSelectionState(row.node).indeterminate ? 'mixed' : nodeMultiSelectionState(row.node).selected"
+                    @click.stop
+                    @click="setNodeMultiSelection(row.node, !nodeMultiSelectionState(row.node).selected)"
+                  >
+                    <span v-if="nodeMultiSelectionState(row.node).selected" class="flex h-3.5 w-3.5 items-center justify-center rounded-[2px] bg-primary text-primary-foreground">
+                      <Check class="h-2.5 w-2.5 stroke-[3]" />
+                    </span>
+                    <span v-else-if="nodeMultiSelectionState(row.node).indeterminate" class="h-3.5 w-3.5 rounded-[2px] bg-primary" />
+                    <span v-else class="h-3.5 w-3.5 rounded-[2px] border border-muted-foreground/50" />
+                  </button>
+                  <button type="button" class="flex min-w-0 flex-1 items-center gap-1.5 text-left" @click="onRowClick(row.node)" @dblclick.stop.prevent="onRowDoubleClick(row.node)">
+                    <template v-if="nodeIsExpandable(row.node)">
+                      <Loader2 v-if="nodeIsLoading(row.node)" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                      <ChevronDown v-else-if="nodeIsExpanded(row.node)" class="h-3.5 w-3.5 shrink-0" />
+                      <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
+                      <FolderOpen v-if="nodeIsExpanded(row.node)" class="h-4 w-4 shrink-0 text-sky-500" />
+                      <FolderClosed v-else class="h-4 w-4 shrink-0 text-sky-500" />
+                      <KeyRound v-if="row.node.kind === 'lazy' && row.node.hasValue === true" class="h-3.5 w-3.5 shrink-0 text-sky-500" />
+                    </template>
+                    <template v-else>
+                      <span class="w-3.5 shrink-0" />
+                      <KeyRound class="h-4 w-4 shrink-0 text-sky-500" />
+                    </template>
+                    <span class="truncate">{{ row.node.label }}</span>
+                  </button>
+                </div>
               </CustomContextMenu>
               <div v-else class="px-2 py-1" :style="{ paddingLeft: `${8 + row.depth * 18}px` }">
                 <Button size="sm" variant="outline" class="h-7 w-full gap-1.5" :disabled="row.loading || loadingMore" @click="loadMoreLazyChildren(row.parentKey)">
@@ -1507,12 +2056,24 @@ defineExpose({
           <div v-else class="flex min-h-full flex-col">
             <div class="flex shrink-0 items-start justify-between gap-3 border-b px-4 py-3">
               <div class="min-w-0">
-                <div class="truncate font-medium" :class="{ 'text-blue-600 dark:text-blue-400': metadataStyle === 'zookeeper' }">{{ selectedKey }}</div>
+                <div class="truncate font-medium" :class="{ 'text-blue-600 dark:text-blue-400': metadataStyle === 'zookeeper' }">
+                  <template v-for="(segment, index) in selectedKeyHighlightSegments" :key="index">
+                    <mark v-if="segment.matched" class="rounded-sm bg-amber-300/80 px-0.5 text-foreground dark:bg-amber-500/40">{{ segment.text }}</mark>
+                    <span v-else>{{ segment.text }}</span>
+                  </template>
+                </div>
                 <div class="mt-1 flex flex-wrap gap-1.5 text-xs text-muted-foreground">
                   <template v-if="metadataStyle === 'zookeeper'">
                     <Badge v-for="badge in zookeeperSummaryBadges" :key="badge.label" variant="outline" class="rounded-full">
                       {{ `${badge.label} ${badge.value}` }}
                     </Badge>
+                  </template>
+                  <template v-else-if="metadataStyle === 'consul'">
+                    <Badge variant="secondary">ModifyIndex {{ metadataLabel(selectedMetadata?.modRevision) }}</Badge>
+                    <Badge v-if="selectedKeyLocked" variant="outline" class="gap-1 border-amber-500/40 text-amber-700 dark:text-amber-300" :title="labels.locked || 'This key is held by a Consul session and cannot be edited or deleted.'">
+                      <LockKeyhole class="h-3 w-3" />{{ labels.sessionProtected || "Session protected" }}
+                    </Badge>
+                    <Badge variant="outline">{{ metadataLabel(selectedMetadata?.valueSize) }} B</Badge>
                   </template>
                   <template v-else>
                     <Badge variant="secondary">rev {{ metadataLabel(selectedMetadata?.modRevision) }}</Badge>
@@ -1525,8 +2086,9 @@ defineExpose({
               </div>
               <div class="flex shrink-0 gap-2">
                 <Button v-if="onWatchKey" size="sm" variant="outline" class="h-8 gap-1.5" @click="watchSelectedKey">
-                  <Activity class="h-3.5 w-3.5" />
-                  {{ labels.watch || "Watch" }}
+                  <Square v-if="isWatchingSelectedKey" class="h-3.5 w-3.5" />
+                  <Activity v-else class="h-3.5 w-3.5" />
+                  {{ isWatchingSelectedKey ? labels.stopWatching || "Stop" : labels.watch || "Watch" }}
                 </Button>
                 <Button v-if="api.history" size="sm" variant="outline" class="h-8 gap-1.5" @click="openHistory">
                   <Clock3 class="h-3.5 w-3.5" />
@@ -1535,7 +2097,7 @@ defineExpose({
                 <Button size="sm" variant="outline" class="h-8" :disabled="!canEditSelectedValue" @click="openEditDialog">
                   {{ labels.edit }}
                 </Button>
-                <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="readOnly" @click="showDeleteConfirm = true">
+                <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="!canDeleteSelectedValue" @click="showDeleteConfirm = true">
                   <Trash2 class="h-3.5 w-3.5" />
                   {{ labels.delete }}
                 </Button>
@@ -1550,9 +2112,64 @@ defineExpose({
               {{ labels.notFound }}
             </div>
             <div v-else class="flex min-h-0 flex-1 flex-col gap-4 p-4">
+              <div v-if="selectedKeyLocked" class="flex flex-col gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-200 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex min-w-0 items-start gap-2">
+                  <LockKeyhole class="mt-0.5 h-4 w-4 shrink-0" />
+                  <div class="min-w-0">
+                    <div class="text-sm font-medium">{{ labels.sessionProtected || "Session protected" }}</div>
+                    <div class="mt-0.5 text-xs text-amber-700 dark:text-amber-300">{{ labels.sessionProtectedHint || "Editing and deletion are disabled to protect this distributed lock." }}</div>
+                  </div>
+                </div>
+                <div class="min-w-0 rounded-md border border-amber-500/30 bg-background/60 px-2.5 py-1.5 text-xs text-foreground sm:max-w-[22rem]">
+                  <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ labels.sessionId || "Session ID" }}</div>
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    <code class="min-w-0 flex-1 truncate font-mono" :title="String(selectedMetadata?.session || '')">{{ selectedMetadata?.session }}</code>
+                    <Button size="icon" variant="ghost" class="h-6 w-6 shrink-0" :title="labels.copy || 'Copy'" @click="copyText(selectedMetadata?.session)"><Copy class="h-3.5 w-3.5" /></Button>
+                  </div>
+                </div>
+              </div>
               <div class="min-h-0">
-                <div v-if="metadataStyle === 'zookeeper'" class="mb-2 text-xs font-medium text-muted-foreground">{{ labels.value || "Value" }}</div>
-                <pre class="dbx-editor-font-family m-0 max-h-[40vh] min-h-32 overflow-auto rounded-md border bg-muted/20 whitespace-pre-wrap break-words p-3 text-sm">{{ displayedSelectedTextValue }}</pre>
+                <div v-if="metadataStyle === 'zookeeper' || showSelectedBase64Utf8Controls" class="mb-2 flex min-h-8 items-center justify-between gap-3">
+                  <div v-if="metadataStyle === 'zookeeper'" class="text-xs font-medium text-muted-foreground">{{ labels.value || "Value" }}</div>
+                  <div v-if="showSelectedBase64Utf8Controls" class="ml-auto inline-flex rounded-md border bg-muted/20 p-0.5" role="group" aria-label="Value encoding">
+                    <Button
+                      data-testid="kv-base64-utf8-view"
+                      size="sm"
+                      :variant="selectedBase64DisplayMode === 'utf8' ? 'secondary' : 'ghost'"
+                      class="h-7 rounded-sm px-2.5 text-xs"
+                      :aria-pressed="selectedBase64DisplayMode === 'utf8'"
+                      :disabled="selectedBase64Utf8PreviewUnavailable"
+                      @click="selectedBase64ViewMode = 'utf8'"
+                    >
+                      UTF-8
+                    </Button>
+                    <Button data-testid="kv-base64-raw-view" size="sm" :variant="selectedBase64DisplayMode === 'base64' ? 'secondary' : 'ghost'" class="h-7 rounded-sm px-2.5 text-xs" :aria-pressed="selectedBase64DisplayMode === 'base64'" @click="selectedBase64ViewMode = 'base64'"> Base64 </Button>
+                  </div>
+                </div>
+                <div class="relative">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    class="absolute right-2 top-2 z-10 h-8 w-8 border border-transparent bg-background/80 text-muted-foreground shadow-sm backdrop-blur-sm hover:border-border hover:bg-background hover:text-foreground"
+                    :title="selectedValueCopied ? labels.copied || 'Copied' : labels.copy || 'Copy'"
+                    :aria-label="selectedValueCopied ? labels.copied || 'Copied' : labels.copy || 'Copy'"
+                    @click="copySelectedValue"
+                  >
+                    <Check v-if="selectedValueCopied" class="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
+                    <Copy v-else class="h-4 w-4" />
+                  </Button>
+                  <pre
+                    data-native-clipboard
+                    class="dbx-editor-font-family m-0 max-h-[40vh] min-h-32 overflow-auto rounded-md border bg-muted/20 p-3 pr-12 text-sm"
+                    :class="settingsStore.editorSettings.wordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
+                  ><template v-for="(segment, index) in selectedValueHighlightSegments" :key="index"><mark v-if="segment.matched" class="rounded-sm bg-amber-300/80 px-0.5 text-foreground dark:bg-amber-500/40">{{ segment.text }}</mark><span v-else>{{ segment.text }}</span></template></pre>
+                </div>
+                <div v-if="selectedValueUsesUtf8Preview && selectedBase64Utf8PreviewIsLossy" class="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                  {{ labels.utf8PreviewLossy || "Invalid UTF-8 bytes are shown as replacement characters (�). The original Base64 value is unchanged." }}
+                </div>
+                <div v-else-if="showSelectedBase64Utf8Controls && selectedBase64Utf8PreviewUnavailable" class="mt-2 text-xs text-destructive">
+                  {{ labels.utf8PreviewUnavailable || "The Base64 value is invalid, so the original value is shown." }}
+                </div>
                 <div v-if="selectedValueCanPrettyJson" class="mt-2 flex justify-end">
                   <Button size="sm" variant="outline" class="h-8" @click="prettifySelectedJson">
                     {{ labels.prettyJson || "Pretty" }}
@@ -1568,6 +2185,17 @@ defineExpose({
                   </div>
                 </div>
               </div>
+              <div v-else-if="metadataStyle === 'consul'" class="border-t pt-4">
+                <div class="overflow-hidden rounded-lg border bg-muted/20">
+                  <div class="border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground">{{ labels.metadata || "Metadata" }}</div>
+                  <dl class="grid grid-cols-2 divide-x divide-y sm:grid-cols-3">
+                    <div v-for="row in consulMetadataRows" :key="row[0]" class="min-w-0 px-3 py-2.5">
+                      <dt class="text-[11px] font-medium text-muted-foreground">{{ row[0] }}</dt>
+                      <dd class="dbx-editor-font-family mt-1 truncate text-sm font-medium text-blue-600 dark:text-blue-400" :title="String(row[1])">{{ row[1] }}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1581,7 +2209,7 @@ defineExpose({
         </DialogHeader>
         <div class="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
           <div class="grid gap-2">
-            <Label for="kv-edit-key">Key</Label>
+            <Label for="kv-edit-key">{{ labels.keyLabel || "Key" }}</Label>
             <Input id="kv-edit-key" v-model="editKey" class="h-10 font-mono" :aria-invalid="editErrorKind === 'keyAlreadyExists'" :disabled="!isCreating" :placeholder="labels.keyPlaceholder" />
             <div v-if="editError && editErrorKind === 'keyAlreadyExists'" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
               {{ editError }}
@@ -1677,11 +2305,18 @@ defineExpose({
               </Button>
             </div>
           </section>
-          <div v-if="editError && editErrorKind !== 'keyAlreadyExists'" class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ editError }}</div>
+          <div v-if="editError && editErrorKind !== 'keyAlreadyExists'" class="flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            <span>{{ editError }}</span>
+            <Button v-if="editErrorKind === 'conflict' && !isCreating" size="sm" variant="outline" class="h-8 shrink-0 gap-1.5" :disabled="refreshingEditConflict" @click="refreshAfterMutationConflict">
+              <Loader2 v-if="refreshingEditConflict" class="h-3.5 w-3.5 animate-spin" />
+              <RefreshCw v-else class="h-3.5 w-3.5" />
+              {{ t("grid.refresh") }}
+            </Button>
+          </div>
         </div>
         <DialogFooter class="mx-0 mb-0 shrink-0 gap-3 border-t bg-muted/10 px-6 py-5">
           <Button variant="outline" class="h-10 min-w-20" @click="showEditDialog = false">{{ t("common.cancel") }}</Button>
-          <Button class="h-10 min-w-20" :disabled="saving || readOnly" @click="saveKey">
+          <Button class="h-10 min-w-20" :disabled="saving || !editKeyWritable" @click="saveKey">
             <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />
             {{ t("common.save") }}
           </Button>
@@ -1694,17 +2329,17 @@ defineExpose({
     <Dialog v-model:open="showRenameDialog">
       <DialogContent class="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{{ labels.rename || "Rename key" }}</DialogTitle>
+          <DialogTitle>{{ renameMode === "copy" ? labels.clone || "Clone key" : labels.rename || "Rename key" }}</DialogTitle>
         </DialogHeader>
         <div class="grid gap-2 py-2">
-          <Input v-model="renameValue" :placeholder="labels.keyPlaceholder" @keyup.enter="renameSelectedKey" />
+          <Input v-model="renameValue" :placeholder="labels.keyPlaceholder" @keyup.enter="moveOrCopySelectedKey" />
           <div v-if="renameError" class="text-sm text-destructive">{{ renameError }}</div>
         </div>
         <DialogFooter>
           <Button variant="outline" :disabled="renaming" @click="showRenameDialog = false">{{ t("common.cancel") }}</Button>
-          <Button :disabled="renaming || readOnly" @click="renameSelectedKey">
+          <Button :disabled="renaming || !renameTargetWritable" @click="moveOrCopySelectedKey">
             <Loader2 v-if="renaming" class="mr-2 h-4 w-4 animate-spin" />
-            {{ labels.rename || "Rename" }}
+            {{ renameMode === "copy" ? labels.clone || "Clone" : labels.rename || "Rename" }}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1759,7 +2394,7 @@ defineExpose({
       :before="selectedTextValue"
       :after="historyRestoreValue?.data || ''"
       :loading="restoring"
-      :show-confirm="!readOnly && !!historyRestoreValue"
+      :show-confirm="selectedKeyWritable && !!historyRestoreValue"
       :confirm-label="labels.restore || 'Restore'"
       @confirm="restoreHistory"
     />

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS, AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS, connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs, CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS } from "@/lib/connection/connectionAttemptTimeout";
+import {
+  ACCESS_AGENT_MIN_CONNECT_TIMEOUT_SECS,
+  AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS,
+  connectionAttemptOriginalErrorMessage,
+  connectionAttemptTimeoutMessage,
+  connectionAttemptTimeoutMs,
+  CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS,
+  MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS,
+  MONGO_OIDC_BROWSER_AUTH_TIMEOUT_MS,
+} from "@/lib/connection/connectionAttemptTimeout";
 
 describe("connectionAttemptTimeout", () => {
   it("uses a 10s default for regular database connections", () => {
@@ -18,12 +27,24 @@ describe("connectionAttemptTimeout", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "prestosql", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
   });
 
+  it("uses the startup floor for Impala agent connections", () => {
+    expect(connectionAttemptTimeoutMs({ db_type: "impala", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+  });
+
+  it("uses the startup floor for Kyuubi agent connections", () => {
+    expect(connectionAttemptTimeoutMs({ db_type: "kyuubi", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+  });
+
   it("uses the startup floor for generic JDBC plugin connections", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "jdbc", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
   });
 
   it("uses the startup floor for ZooKeeper agent connections", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "zookeeper", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
+  });
+
+  it("uses the startup floor for Cloud Spanner agent connections", () => {
+    expect(connectionAttemptTimeoutMs({ db_type: "spanner", connect_timeout_secs: 5, transport_layers: [] })).toBe(AGENT_DRIVER_MIN_CONNECT_TIMEOUT_SECS * 1000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS);
   });
 
   it("uses a 30s Access agent startup floor", () => {
@@ -34,7 +55,22 @@ describe("connectionAttemptTimeout", () => {
     expect(connectionAttemptTimeoutMs({ db_type: "access", connect_timeout_secs: 45, transport_layers: [] })).toBe(47_000);
   });
 
-  it("includes HTTP tunnel connection timeout values", () => {
+  it("keeps the legacy fallback buffer for regular MongoDB connections", () => {
+    expect(connectionAttemptTimeoutMs({ db_type: "mongodb", connect_timeout_secs: 5, transport_layers: [] })).toBe(5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + MONGO_LEGACY_FALLBACK_TIMEOUT_BUFFER_MS);
+  });
+
+  it("allows the MongoDB OIDC browser flow to use its full five-minute budget", () => {
+    expect(
+      connectionAttemptTimeoutMs({
+        db_type: "mongodb",
+        connect_timeout_secs: 5,
+        transport_layers: [],
+        connection_string: "mongodb+srv://cluster.example.com/app?authMechanism=MONGODB-OIDC&authSource=%24external",
+      }),
+    ).toBe(5_000 + CONNECTION_ATTEMPT_TIMEOUT_BUFFER_MS + MONGO_OIDC_BROWSER_AUTH_TIMEOUT_MS);
+  });
+
+  it("adds HTTP tunnel setup and tunneled endpoint probe budgets", () => {
     expect(
       connectionAttemptTimeoutMs({
         db_type: "mysql",
@@ -45,6 +81,25 @@ describe("connectionAttemptTimeout", () => {
             id: "http",
             url: "https://dbx.example.com/dbx_tunnel.php",
             connect_timeout_secs: 25,
+          },
+        ],
+      }),
+    ).toBe(37_000);
+  });
+
+  it("adds SSH setup and tunneled endpoint probe budgets", () => {
+    expect(
+      connectionAttemptTimeoutMs({
+        db_type: "postgres",
+        connect_timeout_secs: 10,
+        transport_layers: [
+          {
+            type: "ssh",
+            id: "ssh",
+            host: "bastion.example.com",
+            port: 22,
+            user: "dbx",
+            connect_timeout_secs: 5,
           },
         ],
       }),
@@ -81,7 +136,7 @@ describe("connectionAttemptTimeout", () => {
         },
         (profileId) => (profileId === profile.id ? profile : undefined),
       ),
-    ).toBe(42_000);
+    ).toBe(52_000);
   });
 
   it("keeps disabled shared layers outside the attempt deadline", () => {

@@ -3,22 +3,24 @@ import en from "./locales/en";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
-export type Locale = "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "zh-CN" | "zh-TW";
+export type Locale = "az" | "en" | "es" | "it" | "ja" | "ko" | "pt-BR" | "tr" | "zh-CN" | "zh-TW";
 type LocaleMessages = Record<string, unknown>;
 type I18nGlobal = {
   locale: { value: Locale };
   setLocaleMessage: (locale: Locale, messages: LocaleMessages) => void;
 };
 
-const supportedLocales: Locale[] = ["en", "es", "it", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"];
+const supportedLocales: Locale[] = ["az", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "zh-CN", "zh-TW"];
 const defaultLocale: Locale = "en";
 const loadedLocales = new Set<Locale>([defaultLocale]);
 const localeLoaders: Record<Exclude<Locale, "en">, () => Promise<{ default: LocaleMessages }>> = {
+  az: () => import("./locales/az"),
   es: () => import("./locales/es"),
   it: () => import("./locales/it"),
   ja: () => import("./locales/ja"),
   ko: () => import("./locales/ko"),
   "pt-BR": () => import("./locales/pt-BR"),
+  tr: () => import("./locales/tr"),
   "zh-CN": () => import("./locales/zh-CN"),
   "zh-TW": () => import("./locales/zh-TW"),
 };
@@ -39,12 +41,14 @@ export function localeFromLanguageTag(value: string | null | undefined): Locale 
     }
     return "zh-CN";
   }
+  if (normalized === "az" || normalized.startsWith("az-")) return "az";
   if (normalized === "en" || normalized.startsWith("en-")) return "en";
   if (normalized === "es" || normalized.startsWith("es-")) return "es";
   if (normalized === "it" || normalized.startsWith("it-")) return "it";
   if (normalized === "ja" || normalized.startsWith("ja-")) return "ja";
   if (normalized === "ko" || normalized.startsWith("ko-")) return "ko";
   if (normalized === "pt" || normalized.startsWith("pt-")) return "pt-BR";
+  if (normalized === "tr" || normalized.startsWith("tr-")) return "tr";
   return null;
 }
 
@@ -70,6 +74,8 @@ function detectUserLocale(): Locale {
 
 const savedLocale = normalizeLocale(safeLocalStorageGet("dbx-locale"));
 const initialLocale = savedLocale ?? detectUserLocale();
+let persistedLocale = initialLocale;
+let localeRequestId = 0;
 
 const i18n = createI18n({
   legacy: false,
@@ -105,11 +111,37 @@ export async function loadSavedLocale() {
   void syncLocaleToBackend(initialLocale);
 }
 
-export async function setLocale(locale: Locale) {
+async function applyTransientLocale(locale: Locale) {
+  const requestId = ++localeRequestId;
   await loadLocaleMessages(locale);
+  if (requestId !== localeRequestId) return;
   i18nGlobal.locale.value = locale;
+}
+
+// Temporary previews deliberately skip persistence and backend synchronization.
+// The request id makes a slow locale import unable to overwrite a newer hover,
+// a restore, or an explicitly selected locale.
+export async function previewLocale(locale: Locale) {
+  await applyTransientLocale(locale);
+}
+
+export async function restoreLocalePreview() {
+  await applyTransientLocale(persistedLocale);
+}
+
+export async function setLocale(locale: Locale) {
+  // Record a user selection before awaiting a lazy locale import. A following
+  // close/restore must use the selected locale rather than an older preview.
+  persistedLocale = locale;
+  ++localeRequestId;
+  // An explicit selection is durable immediately; only the visible locale
+  // waits for its lazy message bundle. Preview paths never reach this branch.
   safeLocalStorageSet("dbx-locale", locale);
   void syncLocaleToBackend(locale);
+  await loadLocaleMessages(locale);
+  // A later explicit selection wins; hover/restore requests must not undo it.
+  if (persistedLocale !== locale) return;
+  i18nGlobal.locale.value = locale;
 }
 
 export function currentLocale(): Locale {

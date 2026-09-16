@@ -35,7 +35,13 @@ class MetadataConstraintCoverageTest {
         Map<String, String> coverage = readCoverageMatrix(agentsRoot.resolve("metadata-constraint-coverage.tsv"));
         Set<String> discovered = discoverCustomMetadataDrivers(agentsRoot.resolve("drivers"));
 
-        assertEquals(discovered, coverage.keySet());
+        // One-directional on purpose: every driver with a custom metadata override must be
+        // documented, but the matrix may also document drivers that only customize other
+        // metadata surfaces (e.g. column/primary-key queries via INFORMATION_SCHEMA) without
+        // overriding the listing methods this test discovers.
+        Set<String> undocumented = new HashSet<>(discovered);
+        undocumented.removeAll(coverage.keySet());
+        assertTrue(undocumented.isEmpty(), "custom metadata drivers missing from coverage matrix: " + undocumented);
     }
 
     @Test
@@ -62,6 +68,8 @@ class MetadataConstraintCoverageTest {
                     result.add(driversRoot.relativize(file).getName(0).toString());
                 } else if ("main.go".equals(fileName) && hasGoMetadataDispatcher(file)) {
                     result.add(driversRoot.relativize(file).getName(0).toString());
+                } else if (fileName.endsWith(".rs") && hasRustMetadataDispatcher(file)) {
+                    result.add(driversRoot.relativize(file).getName(0).toString());
                 }
             });
         }
@@ -77,6 +85,15 @@ class MetadataConstraintCoverageTest {
     }
 
     private static boolean hasGoMetadataDispatcher(Path file) {
+        try {
+            String source = readUtf8(file);
+            return source.contains("\"list_tables\"") || source.contains("\"list_objects\"");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static boolean hasRustMetadataDispatcher(Path file) {
         try {
             String source = readUtf8(file);
             return source.contains("\"list_tables\"") || source.contains("\"list_objects\"");

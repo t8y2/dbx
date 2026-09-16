@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Meilisearch">
+  <defs>
+    <linearGradient id="m" x1="8" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF5CAA"/>
+      <stop offset="1" stop-color="#FFB03A"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#m)" d="M10 47.5 18.5 17a5 5 0 0 1 9.2-1.2L32 23l4.3-7.2a5 5 0 0 1 9.2 1.2L54 47.5a4.5 4.5 0 0 1-8.6 2.6L40.2 31l-4.3 7.1a4.5 4.5 0 0 1-7.8 0L23.8 31l-5.2 19.1a4.5 4.5 0 0 1-8.6-2.6Z"/>
+</svg>

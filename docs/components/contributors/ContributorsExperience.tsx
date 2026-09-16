@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Award, Download, ExternalLink, Github, LogOut, Search, ShieldCheck } from "lucide-react";
 import type { ContributorActivity, ContributorActivityData } from "@/lib/contributorActivity";
 import styles from "./ContributorsExperience.module.css";
+import type { DocsLang } from "@/lib/i18n";
 
-type Language = "en" | "cn";
+type Language = DocsLang;
 type AuthUser = { login: string; avatarUrl: string; profileUrl: string };
 type AuthState = { status: "loading" } | { status: "signed-out" } | { status: "signed-in"; user: AuthUser };
 
@@ -68,8 +69,10 @@ const copy = {
   },
 } as const;
 
+const NUMBER_LOCALE: Record<Language, string> = { en: "en-US", cn: "zh-CN" };
+
 function formatNumber(value: number, lang: Language) {
-  return new Intl.NumberFormat(lang === "cn" ? "zh-CN" : "en-US").format(value);
+  return new Intl.NumberFormat(NUMBER_LOCALE[lang]).format(value);
 }
 
 function initials(login: string) {
@@ -253,7 +256,7 @@ export function ContributorsExperience({ data, lang }: { data: ContributorActivi
 
         <div className={styles.heroCertificate}>
           <div className={styles.certificatePreview}>
-            <div className={styles.previewTop}><span><img src="/logo.png" alt="" aria-hidden="true" width={28} height={28} />DBX</span><ShieldCheck size={18} /></div>
+            <div className={styles.previewTop}><span><img src="/logo-64.png" alt="" aria-hidden="true" width={28} height={28} />DBX</span><ShieldCheck size={18} /></div>
             <small>{text.certificate}</small>
             <strong>@{verifiedContributor?.login ?? "YOUR_NAME"}</strong>
             <p>{text.certificateBody}</p>
@@ -297,7 +300,7 @@ export function ContributorsExperience({ data, lang }: { data: ContributorActivi
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCertificateOpen(false); }}>
           <section className={styles.modal} role="dialog" aria-modal="true" aria-label={text.certificate}>
             <div className={styles.fullCertificate}>
-              <div className={styles.previewTop}><span><img src="/logo.png" alt="" aria-hidden="true" width={30} height={30} />DBX · OPEN SOURCE DATABASE TOOL</span><ShieldCheck size={20} /></div>
+              <div className={styles.previewTop}><span><img src="/logo-64.png" alt="" aria-hidden="true" width={30} height={30} />DBX · OPEN SOURCE DATABASE TOOL</span><ShieldCheck size={20} /></div>
               <span className={styles.verifiedText}>{text.verified}</span>
               <small>{text.certificate}</small>
               <em>{text.awardedTo}</em>

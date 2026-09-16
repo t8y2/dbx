@@ -7,6 +7,8 @@ export interface ProductionConfirmationRequest {
   database?: string;
   productionDatabases?: string[];
   source?: string;
+  /** Identifies a cancellable execution batch without coupling this store to its orchestrator. */
+  scopeId?: string;
 }
 
 interface QueuedConfirmationRequest {
@@ -59,5 +61,19 @@ export const useProductionSafetyStore = defineStore("productionSafety", () => {
     settle(false);
   }
 
-  return { pending, requestConfirmation, confirm, cancel };
+  function cancelScope(scopeId: string) {
+    // Remove queued requests before settling the active one. `settle` promotes
+    // the next queue entry, so removing afterwards could promote a request from
+    // this same scope and leave its promise unresolved.
+    const retained: QueuedConfirmationRequest[] = [];
+    const cancelled: QueuedConfirmationRequest[] = [];
+    for (const entry of queue) {
+      (entry.request.scopeId === scopeId ? cancelled : retained).push(entry);
+    }
+    queue.splice(0, queue.length, ...retained);
+    cancelled.forEach((entry) => entry.resolve(false));
+    if (pending.value?.scopeId === scopeId) settle(false);
+  }
+
+  return { pending, requestConfirmation, confirm, cancel, cancelScope };
 });

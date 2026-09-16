@@ -10,7 +10,7 @@ const source = readFileSync(aiAssistantPath, "utf8");
 const zhCnLocaleSource = readFileSync(zhCnLocalePath, "utf8");
 
 test("AI composer keeps templates available without connections", () => {
-  const contextRowStart = source.indexOf('<div class="flex items-center gap-1 mb-1 text-xs text-foreground/80">');
+  const contextRowStart = source.indexOf("data-ai-composer-context-row");
   const contextRowEnd = source.indexOf('v-if="mentionOpen"', contextRowStart);
   const contextRow = source.slice(contextRowStart, contextRowEnd);
 
@@ -19,8 +19,10 @@ test("AI composer keeps templates available without connections", () => {
   assert.match(contextRow, /<template v-if="connectionStore\.connections\.length">/);
   assert.match(contextRow, /<Popover v-model:open="showTemplateSelector">/);
   assert.match(contextRow, /max-w-\[40%\]/);
-  assert.match(contextRow, /<span class="truncate">\{\{ templateSelectorTriggerLabel \}\}<\/span>/);
+  assert.match(contextRow, /<span class="ai-template-selector-label truncate">\{\{ templateSelectorTriggerLabel \}\}<\/span>/);
   assert.match(contextRow, /:aria-label="templateSelectorTriggerLabel"/);
+  assert.doesNotMatch(contextRow, /ai-prompt-context-break/);
+  assert.match(source, /\.ai-prompt-context-row--schema \.ai-template-selector-trigger \{[\s\S]*?flex: 0 0 1\.5rem;[\s\S]*?max-width: 1\.5rem;/);
 });
 
 test("AI composer labels an empty template selection explicitly", () => {
@@ -57,6 +59,18 @@ test("AI effort control opens as a hoverable side submenu", () => {
   assert.match(selector, /@mouseleave="scheduleEffortMenuClose"/);
   assert.match(selector, /<PopoverContent[\s\S]*?side="left"[\s\S]*?:side-offset="6"/);
   assert.doesNotMatch(selector, /v-if="effortPanelOpen"/);
+});
+
+test("AI model menu separates provider groups from model selections", () => {
+  const selectorStart = source.indexOf("<!-- Combined provider + model selector -->");
+  const selectorEnd = source.indexOf("</template>", source.indexOf("</Popover>", selectorStart));
+  const selector = source.slice(selectorStart, selectorEnd);
+
+  assert.match(selector, /<div v-for="\(config, configIndex\) in configuredProviders" :key="config\.id" class="relative">/);
+  assert.match(selector, /class="sticky top-0 z-10 flex w-full items-center gap-2 rounded-sm bg-popover/);
+  assert.match(selector, /class="ml-5 border-l border-border\/60 pl-1"/);
+  assert.match(selector, /v-if="configIndex < configuredProviders\.length - 1" class="my-1 border-t"/);
+  assert.doesNotMatch(selector, /bg-accent text-accent-foreground.*config\.id === settings\.activeModel/);
 });
 
 test("AI model and effort menu refreshes do not persist effort settings", () => {

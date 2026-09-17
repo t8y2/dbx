@@ -53,5 +53,17 @@ describe("uiTuning", () => {
     fs.readTextFile.mockResolvedValue(JSON.stringify({ panelResizeTrackEveryFrames: 2 }));
     const { uiTuning } = await loadFresh();
     expect(uiTuning.value.panelResizeTrackEveryFrames).toBe(2);
+    expect(fs.exists).toHaveBeenCalledWith("/home/tester/.dbx/ui-tuning.json");
+    expect(fs.readTextFile).toHaveBeenCalledWith("/home/tester/.dbx/ui-tuning.json");
+  });
+
+  it.each(["exists", "readTextFile"] as const)("keeps defaults when %s access is denied", async (command) => {
+    fs.exists.mockResolvedValue(true);
+    fs[command].mockRejectedValue(new Error("path not allowed"));
+    const { uiTuning, DEFAULT_UI_TUNING, loadUiTuning } = await loadFresh();
+    expect(uiTuning.value).toEqual(DEFAULT_UI_TUNING);
+    await loadUiTuning();
+    expect(fs.exists).toHaveBeenCalledTimes(1);
+    expect(fs.readTextFile).toHaveBeenCalledTimes(command === "exists" ? 0 : 1);
   });
 });

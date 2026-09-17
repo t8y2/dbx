@@ -24,7 +24,7 @@ describe("redis key browser toolbar layout (#9356)", () => {
 
   it("collapses the batch-expiry label to an icon in a 740px container tier", () => {
     const tierStart = source.indexOf("@container (max-width: 740px)");
-    const tierEnd = source.indexOf("@container (max-width: 320px)");
+    const tierEnd = source.indexOf("@container (max-width: 340px)");
     expect(tierStart).toBeGreaterThan(-1);
     expect(tierEnd).toBeGreaterThan(tierStart);
     const tierBody = source.slice(tierStart, tierEnd);
@@ -32,15 +32,15 @@ describe("redis key browser toolbar layout (#9356)", () => {
     expect(tierBody).toContain(".redis-expiry-icon");
   });
 
-  it("stacks the toolbar into full-width rows in the 320px container tier", () => {
-    const tierStart = source.indexOf("@container (max-width: 320px)");
+  it("switches to two toolbar rows in the 340px container tier", () => {
+    const tierStart = source.indexOf("@container (max-width: 340px)");
     const tierEnd = source.indexOf("@container (max-width: 240px)");
     expect(tierStart).toBeGreaterThan(-1);
     expect(tierEnd).toBeGreaterThan(tierStart);
     const tierBody = source.slice(tierStart, tierEnd);
-    expect(tierBody).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(tierBody).toContain("grid-template-columns: auto minmax(0, 1fr)");
     const actionsRule = tierBody.slice(tierBody.indexOf(".redis-key-toolbar-actions"));
-    expect(actionsRule).toContain("grid-row: 3");
+    expect(actionsRule).toContain("grid-row: 2");
     expect(actionsRule).toContain("justify-content: flex-start");
   });
 
@@ -48,5 +48,9 @@ describe("redis key browser toolbar layout (#9356)", () => {
     expect(source).toMatch(/class="[^"]*redis-expiry-icon[^"]*"/);
     expect(source).toMatch(/<span class="redis-expiry-label">/);
     expect(source).toContain(`:aria-label="t('redis.batchExpiry')"`);
+  });
+
+  it("keeps the key pane at a 360px minimum width", () => {
+    expect(source).toContain("min-width: min(360px, 64%)");
   });
 });

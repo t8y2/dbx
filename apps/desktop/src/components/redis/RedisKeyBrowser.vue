@@ -3873,11 +3873,11 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
   }
 }
 
-@container (max-width: 320px) {
-  /* Full-width rows: side-by-side icon rows read as scattered once the
-     actions wrap at the pane's 256px floor (#9356). */
+@container (max-width: 340px) {
+  /* Small-window fallback below the 360px pane floor: two rows —
+     [mode | count] and the action buttons (#9356). */
   .redis-key-toolbar-header {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .redis-search-mode-group {
@@ -3886,14 +3886,13 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
   }
 
   .redis-key-count {
-    grid-column: 1;
-    grid-row: 2;
-    text-align: left;
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .redis-key-toolbar-actions {
-    grid-column: 1;
-    grid-row: 3;
+    grid-column: 1 / -1;
+    grid-row: 2;
     justify-content: flex-start;
   }
 }
@@ -3918,7 +3917,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 }
 
 .redis-workspace-splitpanes > :deep(.splitpanes__pane:first-child) {
-  min-width: min(256px, 64%);
+  min-width: min(360px, 64%);
 }
 
 .redis-workspace-splitpanes :deep(.splitpanes--vertical > .splitpanes__splitter) {

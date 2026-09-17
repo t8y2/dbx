@@ -15,6 +15,32 @@ async function flushSearchDebounce() {
 }
 
 describe("useDataGridSearch", () => {
+  it("supports literal case-sensitive replacement searches without column-name matches", async () => {
+    vi.useFakeTimers();
+    const sensitive = ref(true);
+    const search = useDataGridSearch({
+      columns: ["HIT", "value"],
+      rows: [
+        ["HIT", "hit hit"],
+        [" hit ", "hit"],
+      ],
+      getCellSearchText: (row, col) => row[col].toLowerCase(),
+      getCellRawSearchText: (row, col) => row[col],
+      caseSensitive: sensitive,
+      literalQuery: true,
+      includeColumnMatches: false,
+      isCellSearchable: (_row, col) => col === 0,
+    });
+    search.searchText.value = "HIT";
+    await flushSearchDebounce();
+    expect(search.matches.value).toEqual([{ kind: "cell", displayRow: 0, col: 0 }]);
+    sensitive.value = false;
+    await flushSearchDebounce();
+    expect(search.matchCount.value).toBe(2);
+    search.searchText.value = " hit ";
+    await flushSearchDebounce();
+    expect(search.matches.value).toEqual([{ kind: "cell", displayRow: 1, col: 0 }]);
+  });
   it("debounces matching across columns and cells", async () => {
     vi.useFakeTimers();
     // getCellSearchText 契约：返回小写文本（调用方负责缓存小写副本）

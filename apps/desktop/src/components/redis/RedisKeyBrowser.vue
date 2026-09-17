@@ -3215,7 +3215,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   >{{ customGrouping.enabled ? t("redisGrouping.selectLoaded") : t("redis.selectAllLoaded") }}</Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
-                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" :aria-label="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"
                   ><Clock class="redis-expiry-icon w-3 h-3 mr-1" /><span class="redis-expiry-label">{{ t("redis.batchExpiry") }}</span></Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
@@ -3874,38 +3874,31 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 }
 
 @container (max-width: 320px) {
+  /* Full-width rows: side-by-side icon rows read as scattered once the
+     actions wrap at the pane's 256px floor (#9356). */
   .redis-key-toolbar-header {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .redis-key-count {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    text-align: left;
-  }
-
-  .redis-key-toolbar-actions {
-    grid-column: 2;
-    grid-row: 1;
-  }
-}
-
-@container (max-width: 240px) {
   .redis-search-mode-group {
-    grid-column: 1 / -1;
+    grid-column: 1;
     grid-row: 1;
   }
 
   .redis-key-count {
     grid-column: 1;
     grid-row: 2;
+    text-align: left;
   }
 
   .redis-key-toolbar-actions {
-    grid-column: 2;
-    grid-row: 2;
+    grid-column: 1;
+    grid-row: 3;
+    justify-content: flex-start;
   }
+}
 
+@container (max-width: 240px) {
   .redis-fuzzy-label {
     display: none;
   }

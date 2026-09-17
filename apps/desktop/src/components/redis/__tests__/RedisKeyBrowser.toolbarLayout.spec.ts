@@ -32,8 +32,21 @@ describe("redis key browser toolbar layout (#9356)", () => {
     expect(tierBody).toContain(".redis-expiry-icon");
   });
 
+  it("stacks the toolbar into full-width rows in the 320px container tier", () => {
+    const tierStart = source.indexOf("@container (max-width: 320px)");
+    const tierEnd = source.indexOf("@container (max-width: 240px)");
+    expect(tierStart).toBeGreaterThan(-1);
+    expect(tierEnd).toBeGreaterThan(tierStart);
+    const tierBody = source.slice(tierStart, tierEnd);
+    expect(tierBody).toContain("grid-template-columns: minmax(0, 1fr)");
+    const actionsRule = tierBody.slice(tierBody.indexOf(".redis-key-toolbar-actions"));
+    expect(actionsRule).toContain("grid-row: 3");
+    expect(actionsRule).toContain("justify-content: flex-start");
+  });
+
   it("marks the batch-expiry icon and label in the template", () => {
-    expect(source).toContain('class="redis-expiry-icon w-3 h-3 mr-1"');
-    expect(source).toContain('<span class="redis-expiry-label">');
+    expect(source).toMatch(/class="[^"]*redis-expiry-icon[^"]*"/);
+    expect(source).toMatch(/<span class="redis-expiry-label">/);
+    expect(source).toContain(`:aria-label="t('redis.batchExpiry')"`);
   });
 });

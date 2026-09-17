@@ -187,6 +187,7 @@ export default withEnglishFallback({
     permissionsCount: "{count} 項權限",
     unsupportedTarget: "暫不支援 {target}",
     installedVersion: "已安裝 v{version}",
+    installedVersionUpdatable: "已安裝 v{installed} · 可更新至 v{latest}",
     licenseUnknown: "未指定授權條款",
     sourceRepository: "原始碼倉庫",
     pluginHomepage: "主頁",

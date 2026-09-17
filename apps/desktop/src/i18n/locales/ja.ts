@@ -187,6 +187,7 @@ export default withEnglishFallback({
     permissionsCount: "権限 {count} 件",
     unsupportedTarget: "{target} では利用できません",
     installedVersion: "インストール済み v{version}",
+    installedVersionUpdatable: "インストール済み v{installed} · v{latest} に更新可能",
     licenseUnknown: "ライセンス未指定",
     sourceRepository: "ソースリポジトリ",
     pluginHomepage: "ホームページ",

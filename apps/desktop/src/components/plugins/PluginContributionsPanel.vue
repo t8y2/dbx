@@ -188,6 +188,10 @@ async function installMarketplaceListing(listing: MarketplacePluginListing) {
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
     toast(cause instanceof Error ? cause.message : String(cause), 8000);
+    // A failed install can still have mutated the store (a partially replaced version directory, for
+    // instance), so re-read the installed list instead of leaving the card on state it may no longer
+    // describe.
+    installedPlugins.value = await api.listPlugins().catch(() => installedPlugins.value);
   } finally {
     marketplaceInstallingKey.value = "";
   }
@@ -716,6 +720,9 @@ onBeforeUnmount(() => {
               <div class="mt-auto flex items-center justify-between gap-3 pt-4">
                 <div class="text-[11px] text-muted-foreground">
                   <span v-if="listing.status === 'unsupported'">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
+                  <!-- In the update state the left line states both versions: the badge above shows the
+                       catalog latest version, which otherwise reads as the installed one. -->
+                  <span v-else-if="listing.installed && listing.status === 'update'">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
                   <span v-else-if="listing.installed">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
                   <span v-else>{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}</span>
                 </div>

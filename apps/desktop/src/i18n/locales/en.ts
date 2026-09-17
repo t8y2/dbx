@@ -184,6 +184,7 @@ export default {
     permissionsCount: "{count} permissions",
     unsupportedTarget: "Not available for {target}",
     installedVersion: "Installed v{version}",
+    installedVersionUpdatable: "Installed v{installed} · Update to v{latest}",
     licenseUnknown: "License not specified",
     sourceRepository: "Source repository",
     pluginHomepage: "Homepage",

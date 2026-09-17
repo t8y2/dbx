@@ -109,6 +109,7 @@ export default withEnglishFallback({
     permissionsCount: "{count} 项权限",
     unsupportedTarget: "暂不支持 {target}",
     installedVersion: "已安装 v{version}",
+    installedVersionUpdatable: "已安装 v{installed} · 可更新至 v{latest}",
     licenseUnknown: "未声明许可证",
     sourceRepository: "源码仓库",
     pluginHomepage: "主页",

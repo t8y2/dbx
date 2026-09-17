@@ -186,6 +186,7 @@ export default withEnglishFallback({
     permissionsCount: "권한 {count}개",
     unsupportedTarget: "{target}에서는 사용할 수 없음",
     installedVersion: "설치된 버전 v{version}",
+    installedVersionUpdatable: "설치된 버전 v{installed} · v{latest}(으)로 업데이트 가능",
     licenseUnknown: "라이선스 미지정",
     sourceRepository: "소스 저장소",
     pluginHomepage: "홈페이지",

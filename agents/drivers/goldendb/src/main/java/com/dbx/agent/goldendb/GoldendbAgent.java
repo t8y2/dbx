@@ -248,7 +248,8 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
             try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(
                 """
                 SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT,
-                       NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH
+                       NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH,
+                       CHARACTER_SET_NAME, COLLATION_NAME
                 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
                 ORDER BY ORDINAL_POSITION
@@ -269,7 +270,9 @@ public final class GoldendbAgent extends AbstractJdbcAgent {
                             emptyToNull(rs.getString("COLUMN_COMMENT")),
                             integerOrNull(rs, "NUMERIC_PRECISION"),
                             integerOrNull(rs, "NUMERIC_SCALE"),
-                            numberToIntOrNull(rs, "CHARACTER_MAXIMUM_LENGTH")
+                            numberToIntOrNull(rs, "CHARACTER_MAXIMUM_LENGTH"),
+                            emptyToNull(rs.getString("CHARACTER_SET_NAME")),
+                            emptyToNull(rs.getString("COLLATION_NAME"))
                         ));
                     }
                 }

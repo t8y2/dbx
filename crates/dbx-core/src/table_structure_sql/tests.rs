@@ -6693,6 +6693,37 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
     );
 }
+
+#[test]
+fn goldendb_character_column_keeps_charset_collation_when_default_changes() {
+    let mut name = column("name");
+    name.data_type = "varchar(64)".to_string();
+    name.default_value = "guest".to_string();
+    name.character_set = "utf8mb4".to_string();
+    name.collation = "utf8mb4_bin".to_string();
+    name.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(64)".to_string(),
+        is_nullable: true,
+        column_default: Some("member".to_string()),
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_bin".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Goldendb,
+        Some("app"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(64) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_bin` DEFAULT 'guest';"]
+    );
+}
 #[test]
 fn mysql_inherited_column_charset_is_omitted_from_generated_ddl() {
     // MySQL reports the effective collation of every character column, so a column

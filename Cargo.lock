@@ -2182,8 +2182,10 @@ version = "0.4.89"
 dependencies = [
  "async-trait",
  "axum",
+ "csv",
  "dbx-core",
  "dirs",
+ "libc",
  "log",
  "reqwest 0.12.28",
  "rmcp",
@@ -2192,13 +2194,17 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "sysinfo",
  "tempfile",
+ "time",
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-util",
  "tower-http",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]

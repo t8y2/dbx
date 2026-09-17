@@ -1385,6 +1385,13 @@ fn is_postgres_compat_transfer(source_db: &DatabaseType, target_db: &DatabaseTyp
     is_postgres_transfer_dialect(source_db) && is_postgres_transfer_dialect(target_db)
 }
 
+/// Oracle-family transfer dialects that return `DBMS_METADATA`-style owner-qualified
+/// DDL. Dameng is deliberately excluded: its reuse path strips storage clauses as well,
+/// so it keeps its own branch above.
+fn is_oracle_family_transfer_target(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+}
+
 fn is_postgres_transfer_dialect(db_type: &DatabaseType) -> bool {
     // KingbaseES supports the PostgreSQL DDL, type, and ON CONFLICT paths used by transfer;
     // other PG-wire databases stay opt-in until their transfer behavior is verified.
@@ -4368,6 +4375,15 @@ fn rewrite_transfer_source_table_ddl(
         let source_schema = if source_schema.trim().is_empty() { "PUBLIC" } else { source_schema };
         let target_schema = if target_schema.trim().is_empty() { "PUBLIC" } else { target_schema };
         Some(rewrite_h2_schema_qualifier(sql, source_schema, target_schema))
+    } else if is_oracle_family_transfer_target(source_db_type) && is_oracle_family_transfer_target(target_db_type) {
+        // Oracle-family sources return `DBMS_METADATA`-style DDL whose CREATE TABLE head
+        // carries the owner schema (`"SALES"."T"`). Unlike the Oracle schema-object path
+        // this reuse path never rewrote it, so transferring into a differently named
+        // schema kept the source qualifier and the target rejected it with
+        // `ORA-00942`/`OBE-00600 ... Unknown database` (or silently created the table in
+        // the source schema when it existed there). Rewrite only the quoted qualifier so
+        // string literals and comments keep their original text.
+        Some(rewrite_double_quoted_schema_qualifier(sql, source_schema, target_schema))
     } else if is_mysql_family_target(source_db_type) && is_mysql_family_target(target_db_type) {
         // The reused SHOW CREATE TABLE DDL carries the source table name; rewrite the
         // CREATE TABLE header when the transfer renames the table (name case conversion).
@@ -13561,6 +13577,39 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             ),
             Some(storage_portable_ddl)
         );
+    }
+
+    #[test]
+    fn oracle_transfer_reused_table_ddl_rewrites_schema_qualifier() {
+        let ddl = concat!(
+            "CREATE TABLE \"SALES\".\"BASEDATA_T_BANKLOCATIONS\" (\n",
+            "\"ID\" NUMBER(19, 0) NOT NULL,\n",
+            "\"NOTE\" VARCHAR2(100) DEFAULT '\"SALES\".literal',\n",
+            "PRIMARY KEY (\"ID\"));\n",
+            "COMMENT ON TABLE \"SALES\".\"BASEDATA_T_BANKLOCATIONS\" IS 'keep \"SALES\".comment';\n",
+            "-- keep \"SALES\".line_comment\n",
+            "/* keep \"SALES\".block_comment */",
+        );
+
+        let rewritten = rewrite_transfer_source_table_ddl(
+            ddl,
+            "SALES",
+            "ANALYTICS",
+            &DatabaseType::OceanbaseOracle,
+            &DatabaseType::OceanbaseOracle,
+            "BASEDATA_T_BANKLOCATIONS",
+            "BASEDATA_T_BANKLOCATIONS",
+        )
+        .unwrap();
+
+        assert!(rewritten.contains("CREATE TABLE \"ANALYTICS\".\"BASEDATA_T_BANKLOCATIONS\""));
+        assert!(rewritten.contains("COMMENT ON TABLE \"ANALYTICS\".\"BASEDATA_T_BANKLOCATIONS\""));
+        assert!(!rewritten.contains("\"SALES\".\"BASEDATA_T_BANKLOCATIONS\""));
+        // Literals and comments keep the source qualifier untouched.
+        assert!(rewritten.contains("'\"SALES\".literal'"));
+        assert!(rewritten.contains("'keep \"SALES\".comment'"));
+        assert!(rewritten.contains("-- keep \"SALES\".line_comment"));
+        assert!(rewritten.contains("/* keep \"SALES\".block_comment */"));
     }
 
     #[test]

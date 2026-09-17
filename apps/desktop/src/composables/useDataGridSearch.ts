@@ -44,6 +44,11 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   const suggestionIndex = ref(-1);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
+  // Case-sensitive matching needs the raw (non-lowercased) cell text. Without a
+  // raw-text provider only the lowercase cache exists, so degrade to
+  // case-insensitive instead of never matching uppercase input.
+  const effectiveCaseSensitive = computed(() => !!toValue(options.caseSensitive) && (!!toValue(options.literalQuery) || !!options.getCellRawSearchText));
+
   const matchState = computed(() => {
     const query = deferredSearchText.value;
     const keys: number[] = [];
@@ -56,7 +61,7 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
       matchSet.add(key);
     };
     const columns = toValue(options.columns);
-    const sensitive = toValue(options.caseSensitive) === true;
+    const sensitive = effectiveCaseSensitive.value;
     const pattern = toValue(options.literalQuery) ? dataGridReplacementPattern(query, sensitive) : undefined;
     const includes = (value: string) => {
       if (!pattern) return (sensitive ? value : value.toLowerCase()).includes(query);
@@ -101,7 +106,7 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   watch([searchText, () => toValue(options.caseSensitive), () => toValue(options.literalQuery)], ([value]) => {
     clearTimer();
     const text = toValue(options.literalQuery) ? value : value.trim();
-    const query = toValue(options.literalQuery) || toValue(options.caseSensitive) ? text : text.toLowerCase();
+    const query = toValue(options.literalQuery) || effectiveCaseSensitive.value ? text : text.toLowerCase();
     const restoring = restoreToken !== null && restoreToken.searchText === value;
     if (!query) deferredSearchText.value = "";
     // Restoring is not typing: resolve the query now so the row set (and, in

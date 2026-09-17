@@ -41,6 +41,23 @@ describe("useDataGridSearch", () => {
     await flushSearchDebounce();
     expect(search.matches.value).toEqual([{ kind: "cell", displayRow: 1, col: 0 }]);
   });
+  it("degrades case-sensitive matching to case-insensitive without a raw-text provider", async () => {
+    vi.useFakeTimers();
+    const search = useDataGridSearch({
+      columns: ["name"],
+      rows: [["Alice"]],
+      // No getCellRawSearchText: only the lowercase cache exists, so an
+      // uppercase query must still match instead of never finding the cell.
+      getCellSearchText: (row, col) => row[col].toLowerCase(),
+      caseSensitive: true,
+      literalQuery: false,
+      includeColumnMatches: false,
+    });
+    search.searchText.value = "ALICE";
+    await flushSearchDebounce();
+    expect(search.matchCount.value).toBe(1);
+  });
+
   it("debounces matching across columns and cells", async () => {
     vi.useFakeTimers();
     // getCellSearchText 契约：返回小写文本（调用方负责缓存小写副本）

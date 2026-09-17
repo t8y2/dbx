@@ -4794,7 +4794,7 @@ const deleteRowDetails = computed(() => {
 });
 
 const hasVisibleRows = computed(() => displayRowCount.value > 0);
-const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
+const hasActiveFilter = computed(() => (dataGridSearchMode.value === "filter" && !replaceOpen.value && !!deferredClientSearchText.value) || rowStatusFilter.value !== "all" || hasLocalColumnFilters.value || hasServerColumnFilters.value);
 const emptyTitle = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRows") : t("grid.noRows")));
 const emptyDescription = computed(() => (hasActiveFilter.value ? t("grid.noFilteredRowsDescription") : t("grid.noRowsDescription")));
 watch(
@@ -8120,7 +8120,7 @@ const replacementMatches = computed(() => {
   const items = new Map(props.result.rows.map((_, rowId) => [rowId, replacementRowItem(rowId)!]));
   return findDataGridReplacementMatches({
     rows: [...items.values()].map((item) => ({ rowId: item.id, data: item.data })),
-    search: searchText.value,
+    search: deferredClientSearchText.value,
     caseSensitive: replaceCaseSensitive.value,
     includesCell: replacementCellInScope,
     canReplaceCell: (rowId, col) => canReplaceGridCell(items.get(rowId), col),
@@ -8155,7 +8155,7 @@ function replaceGridMatches(currentOnly = false) {
   const current = currentSearchMatch.value;
   const currentRowId = current?.kind === "cell" ? displayItemAt(current.displayRow)?.id : undefined;
   const matches = replacementMatches.value.filter((match) => !currentOnly || (match.rowId === currentRowId && match.col === current?.col));
-  const count = stageCellReplacements(matches.map((match) => ({ ...match, previousValue: match.value, value: replaceDataGridText(match.value, searchText.value, replacementText.value, replaceCaseSensitive.value) })));
+  const count = stageCellReplacements(matches.map((match) => ({ ...match, previousValue: match.value, value: replaceDataGridText(match.value, deferredClientSearchText.value, replacementText.value, replaceCaseSensitive.value) })));
   if (count > 0) toast(t("grid.replaceStagedCells", { count }), 5000);
 }
 

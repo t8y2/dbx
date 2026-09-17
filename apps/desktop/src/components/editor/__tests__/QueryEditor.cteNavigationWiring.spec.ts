@@ -26,6 +26,22 @@ function positionOf(fragment: string): number {
   return index;
 }
 
+/**
+ * 结构片段的归一化：去掉全部空白与"闭合前的尾逗号"。
+ * oxfmt（lint-staged 钩子会执行）会在单行与多行之间重排数组/对象字面量，
+ * 归一化后断言只对代码结构敏感，不会因为纯格式变动而误报。
+ */
+function normalizeCode(text: string): string {
+  return text.replace(/\s+/g, "").replace(/,(?=[)\]}])/g, "");
+}
+
+const normalizedSource = normalizeCode(source);
+
+/** 期望片段照常写成可读形式，比较时两侧一起归一化。 */
+function expectSourceToContain(fragment: string): void {
+  expect(normalizedSource).toContain(normalizeCode(fragment));
+}
+
 describe("QueryEditor hover 的语义模型缓存接线", () => {
   it("hover 复用 getEditorSemanticModel，而不是每次重新解析", () => {
     expect(source).toContain("semanticModel = getEditorSemanticModel(sql, pos, currentView.state);");
@@ -54,9 +70,7 @@ describe("QueryEditor hover 的 CTE 溯源接线", () => {
   });
 
   it("命中物理列后按 类型/来源/注释 生成悬浮内容，未命中则回退", () => {
-    expect(source).toContain('createHoverDom(cteColumn.name, cteColumn.dataType || "column", undefined, [');
-    expect(source).toContain("cteColumn.schema ? `${cteColumn.schema}.${cteColumn.table}` : cteColumn.table,");
-    expect(source).toContain("...(cteColumn.comment?.trim() ? [cteColumn.comment.trim()] : []),");
+    expectSourceToContain('createHoverDom(cteColumn.name, cteColumn.dataType || "column", undefined, [cteColumn.schema ? `${cteColumn.schema}.${cteColumn.table}` : cteColumn.table, ...(cteColumn.comment?.trim() ? [cteColumn.comment.trim()] : [])])');
     // 只有拿到列才提前返回，否则继续走原有表/列逻辑。
     expect(source).toContain("if (cteColumn) {");
   });
@@ -118,8 +132,8 @@ describe("QueryEditor Ctrl+点击的 CTE 跳转接线", () => {
   it("CTE 引用名命中时跳到定义名 token，并高亮整个 CTE 定义", () => {
     expect(source).toContain("const referenceHit = findCteReferenceAt(cteModel, pos);");
     expect(source).toContain("if (referenceHit?.definition.nameSpan) {");
-    expect(source).toContain("{ from: referenceHit.definition.nameSpan.start, to: referenceHit.definition.nameSpan.end },");
-    expect(source).toContain("{ from: referenceHit.definition.sourceSpan.start, to: referenceHit.definition.sourceSpan.end },");
+    expectSourceToContain("{ from: referenceHit.definition.nameSpan.start, to: referenceHit.definition.nameSpan.end }");
+    expectSourceToContain("{ from: referenceHit.definition.sourceSpan.start, to: referenceHit.definition.sourceSpan.end }");
   });
 
   it("CTE 列命中时跳到 output 的 jumpSpan 或 body 星号，限定符取倒数列段", () => {
@@ -127,7 +141,7 @@ describe("QueryEditor Ctrl+点击的 CTE 跳转接线", () => {
     expect(source).toContain("const columnHit = findCteColumnResolution(cteModel, identity.name, clickQualifier);");
     expect(source).toContain("const columnTargetSpan = columnHit?.output?.jumpSpan ?? columnHit?.stars?.[0]?.starSpan;");
     expect(source).toContain("if (columnHit && columnTargetSpan) {");
-    expect(source).toContain("{ from: columnTargetSpan.start, to: columnTargetSpan.end },");
+    expectSourceToContain("{ from: columnTargetSpan.start, to: columnTargetSpan.end }");
   });
 
   it("解析失败只告警，不阻断后续表/列跳转", () => {
@@ -157,9 +171,9 @@ describe("jumpToCteRange 的跳转范围处理", () => {
 
   it("空目标不动光标，命中时选中目标 token 并高亮整个定义块", () => {
     expect(body).toContain("if (targetFrom >= targetTo) return;");
-    expect(body).toContain("selection: { anchor: targetFrom, head: targetTo },");
-    expect(body).toContain("setResultSourceRangeEffect.of({ from: highlightFrom, to: highlightTo }),");
-    expect(body).toContain('editorViewModule.EditorView.scrollIntoView(targetFrom, { y: "center" }),');
+    expect(normalizeCode(body)).toContain(normalizeCode("selection: { anchor: targetFrom, head: targetTo }"));
+    expectSourceToContain("setResultSourceRangeEffect.of({ from: highlightFrom, to: highlightTo })");
+    expectSourceToContain('editorViewModule.EditorView.scrollIntoView(targetFrom, { y: "center" })');
     expect(body).toContain("currentView.focus();");
   });
 });

@@ -5,6 +5,7 @@ import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
   mongoAggregateWriteStage,
+  listChainedCalls,
   mongoBulkWriteToQueryResult,
   mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
@@ -445,6 +446,48 @@ test("parseMongoFindCommand validates UUID strings at parse time", () => {
   const command = parseMongoFindCommand('db.c.find({u: UUID("3B241101-E2BB-4255-8CAF-4136C566A962")})');
   assert.ok(command);
   assert.deepEqual(JSON.parse(command.filter), { u: { $uuid: "3B241101-E2BB-4255-8CAF-4136C566A962" } });
+});
+
+test("parseMongoFindCommand rejects chained methods it would otherwise silently drop", () => {
+  // Each of these used to parse as a plain find and run a different query than written.
+  for (const [source, expected] of [
+    ["db.c.find({}).hint({a: 1})", /find\(\)\.hint\(\) is not supported yet\. Supported after find\(\): sort, skip, limit, collation, count, toArray, pretty\./],
+    ["db.c.find({}).batchSize(10)", /batchSize\(\) is not supported yet/],
+    ["db.c.find({}).sort({a: 1}).maxTimeMS(100)", /maxTimeMS\(\) is not supported yet/],
+    ["db.c.find({}).explain('executionStats')", /find\(\)\.explain\(\) is not supported in the editor yet; aggregate\(\[\.\.\.\], \{ explain: true \}\) is/],
+    ["db.c.find({}).itcount()", /itcount\(\) is not supported; use find\(\)\.count\(\) or countDocuments\(\)/],
+    ["db.c.find({}).size()", /size\(\) is not supported; use find\(\)\.count\(\)/],
+    ["db.c.find({}).forEach(d => print(d))", /forEach\(\) runs JavaScript, which the editor does not execute/],
+    ["db.c.find({}).map(d => d.a)", /map\(\) runs JavaScript/],
+    ["db.c.find({}).toArray(1)", /toArray\(\) takes no arguments/],
+    ["db.c.find({}).count", /Unexpected text after find\(\.\.\.\): "\.count"/],
+  ] as const) {
+    assert.equal(parseMongoFindCommand(source), null, source);
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+
+  // Non-cursor methods explain why nothing can follow them.
+  assert.match(describeMongoCommandParseFailure("db.c.findOne({}).limit(1)"), /findOne\(\) returns a result, not a cursor/);
+  assert.match(describeMongoCommandParseFailure("db.c.countDocuments({}).limit(1)"), /countDocuments\(\) returns a result, not a cursor/);
+});
+
+test("parseMongoFindCommand still accepts the chain methods it executes", () => {
+  assert.equal(parseMongoFindCommand("db.c.find({a: 1}).sort({b: -1}).skip(2).limit(5)")?.limit, 5);
+  assert.ok(parseMongoFindCommand("db.c.find({}).collation({locale: 'en'}).limit(1)"));
+  assert.ok(parseMongoFindCommand("db.c.find({a: 1}).sort({b: 1}).toArray()"));
+  assert.ok(parseMongoFindCommand("db.c.find({a: 1}).pretty()"));
+  assert.ok(parseMongoFindCommand("db.c.find({a: 1})\n  .sort({b: 1})\n  .limit(10)"));
+  assert.equal(parseMongoCommand("db.c.find({a: 1}).count()")?.command.kind, "countDocuments");
+  assert.deepEqual(
+    listChainedCalls(".sort({b: 1}) . limit( 10 ).toArray()")?.map((call) => [call.name, call.args.trim()]),
+    [
+      ["sort", "{b: 1}"],
+      ["limit", "10"],
+      ["toArray", ""],
+    ],
+  );
+  assert.equal(listChainedCalls(".count"), null);
 });
 
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {

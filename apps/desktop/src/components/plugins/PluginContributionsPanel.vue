@@ -102,6 +102,7 @@ const batchMode = ref(false);
 const selectedListingKeys = ref<Set<string>>(new Set());
 const selectedInstalledIds = ref<Set<string>>(new Set());
 const batchRunning = ref(false);
+const mutationRunning = computed(() => batchRunning.value || !!marketplaceInstallingKey.value || installing.value || urlInstalling.value || operating.value);
 
 const registry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 const definitions = computed(() => registry.value.listPlugins());
@@ -194,7 +195,7 @@ async function installListing(listing: MarketplacePluginListing): Promise<Plugin
 }
 
 async function installMarketplaceListing(listing: MarketplacePluginListing) {
-  if (!listing.artifact || listing.status === "installed") return;
+  if (mutationRunning.value || !listing.artifact || !isBatchSelectableListing(listing.status)) return;
   marketplaceInstallingKey.value = listing.key;
   try {
     const result = await installListing(listing);
@@ -217,7 +218,16 @@ function reportBatchSummary(outcome: { succeeded: unknown[]; failed: { name: str
   toast(t(batchSummaryKey(outcome), { success: outcome.succeeded.length, failed: outcome.failed.length, names: failedNames }), outcome.failed.length ? 8000 : 4000);
 }
 
+async function refreshAfterBatch() {
+  try {
+    installedPlugins.value = await api.listPlugins();
+  } catch (cause) {
+    error.value = t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) });
+  }
+}
+
 function toggleBatchMode() {
+  if (batchRunning.value) return;
   batchMode.value = !batchMode.value;
   if (!batchMode.value) clearBatchSelection();
 }
@@ -232,7 +242,7 @@ function isListingSelected(listing: MarketplacePluginListing): boolean {
 }
 
 function toggleListingSelection(listing: MarketplacePluginListing) {
-  if (!isBatchSelectableListing(listing.status)) return;
+  if (batchRunning.value || !isBatchSelectableListing(listing.status)) return;
   const next = new Set(selectedListingKeys.value);
   if (next.has(listing.key)) next.delete(listing.key);
   else next.add(listing.key);
@@ -240,6 +250,7 @@ function toggleListingSelection(listing: MarketplacePluginListing) {
 }
 
 function selectAllUpdatable() {
+  if (batchRunning.value) return;
   const next = new Set(selectedListingKeys.value);
   for (const listing of batchUpdatableListings.value) next.add(listing.key);
   selectedListingKeys.value = next;
@@ -250,6 +261,7 @@ function isInstalledSelected(pluginId: string): boolean {
 }
 
 function toggleInstalledSelection(pluginId: string) {
+  if (batchRunning.value) return;
   const next = new Set(selectedInstalledIds.value);
   if (next.has(pluginId)) next.delete(pluginId);
   else next.add(pluginId);
@@ -258,8 +270,17 @@ function toggleInstalledSelection(pluginId: string) {
 
 async function runBatchInstallUpdate() {
   const targets = batchSelectedListings.value;
-  if (!targets.length || batchRunning.value) return;
+  if (!targets.length || mutationRunning.value) return;
+  const pluginIds = new Set<string>();
+  const duplicateIds = new Set<string>();
+  for (const listing of marketplaceListings.value) {
+    if (!selectedListingKeys.value.has(listing.key) || !isBatchSelectableListing(listing.status)) continue;
+    if (pluginIds.has(listing.plugin.id)) duplicateIds.add(listing.plugin.id);
+    pluginIds.add(listing.plugin.id);
+  }
+  if (duplicateIds.size) return toast(t("pluginPlatform.batchDuplicateSources", { names: [...duplicateIds].join("、") }), 8000);
   batchRunning.value = true;
+  error.value = "";
   try {
     const outcome = await runBatch(
       targets,
@@ -268,9 +289,9 @@ async function runBatchInstallUpdate() {
         await installListing(listing);
       },
     );
-    installedPlugins.value = await api.listPlugins();
     clearBatchSelection();
     reportBatchSummary(outcome);
+    await refreshAfterBatch();
   } finally {
     batchRunning.value = false;
   }
@@ -278,10 +299,11 @@ async function runBatchInstallUpdate() {
 
 async function runBatchUninstall() {
   const targets = batchSelectedInstalled.value;
-  if (!targets.length || batchRunning.value) return;
+  if (!targets.length || mutationRunning.value) return;
   const names = targets.map((definition) => definition.plugin.manifest.name).join("、");
   if (!window.confirm(t("pluginPlatform.batchUninstallConfirm", { count: targets.length, names }))) return;
   batchRunning.value = true;
+  error.value = "";
   try {
     const outcome = await runBatch(
       targets,
@@ -290,15 +312,16 @@ async function runBatchUninstall() {
         await api.uninstallPlugin(definition.plugin.manifest.id);
       },
     );
-    installedPlugins.value = await api.listPlugins();
     clearBatchSelection();
     reportBatchSummary(outcome);
+    await refreshAfterBatch();
   } finally {
     batchRunning.value = false;
   }
 }
 
 async function saveRepository() {
+  if (mutationRunning.value) return;
   const id = repositoryId.value.trim();
   const name = repositoryName.value.trim();
   const catalogUrl = repositoryCatalogUrl.value.trim();
@@ -319,7 +342,7 @@ async function saveRepository() {
 }
 
 async function toggleRepository(repository: PluginRepository) {
-  if (repository.managed) return;
+  if (mutationRunning.value || repository.managed) return;
   operating.value = true;
   try {
     repositories.value = await api.savePluginRepository({ ...repository, enabled: !repository.enabled });
@@ -332,7 +355,7 @@ async function toggleRepository(repository: PluginRepository) {
 }
 
 async function removeRepository(repository: PluginRepository) {
-  if (repository.managed || !window.confirm(t("pluginPlatform.removeRepositoryConfirm", { name: repository.name }))) return;
+  if (mutationRunning.value || repository.managed || !window.confirm(t("pluginPlatform.removeRepositoryConfirm", { name: repository.name }))) return;
   operating.value = true;
   try {
     repositories.value = await api.removePluginRepository(repository.id);
@@ -347,6 +370,7 @@ async function removeRepository(repository: PluginRepository) {
 }
 
 async function saveTrustedKey() {
+  if (mutationRunning.value) return;
   const keyId = trustedKeyId.value.trim();
   const publicKey = trustedPublicKey.value.trim();
   if (!keyId || !publicKey) return;
@@ -364,7 +388,7 @@ async function saveTrustedKey() {
 }
 
 async function removeTrustedKey(keyId: string) {
-  if (!window.confirm(t("pluginPlatform.removeRepositoryKeyConfirm", { keyId }))) return;
+  if (mutationRunning.value || !window.confirm(t("pluginPlatform.removeRepositoryKeyConfirm", { keyId }))) return;
   operating.value = true;
   try {
     trustedKeys.value = await api.removePluginTrustedKey(keyId);
@@ -447,6 +471,7 @@ function openWorkbench(pluginId: string, contributionId: string, label: string) 
 }
 
 async function choosePluginPackage() {
+  if (mutationRunning.value) return;
   if (!isTauriRuntime()) {
     webFileInput.value?.click();
     return;
@@ -489,6 +514,7 @@ async function finishInstall(result: PluginInstallResult) {
 }
 
 async function installPlugin(source: string | File) {
+  if (mutationRunning.value) return;
   installing.value = true;
   try {
     const result = await api.installPluginPackage(source, allowUnsigned.value);
@@ -511,7 +537,7 @@ function isHttpPackageUrl(value: string): boolean {
 
 async function installPluginFromUrl() {
   const url = installUrl.value.trim();
-  if (!url || installing.value || urlInstalling.value) return;
+  if (!url || mutationRunning.value) return;
   if (!isHttpPackageUrl(url)) return toast(t("pluginPlatform.invalidPackageUrl"));
   urlInstalling.value = true;
   urlDownloadProgress.value = { downloaded: 0, total: null };
@@ -588,7 +614,7 @@ function onWebDrop(event: DragEvent) {
   }
   event.preventDefault();
   event.stopPropagation();
-  if (installing.value || urlInstalling.value) return;
+  if (mutationRunning.value) return;
   void installPlugin(file);
 }
 
@@ -615,13 +641,13 @@ function onTauriPluginDrop(event: Event) {
   }
   draggingPackage.value = false;
   const path = payload.paths.find(isPluginPackagePath);
-  if (!inside || !path || installing.value || urlInstalling.value) return;
+  if (!inside || !path || mutationRunning.value) return;
   routedEvent.preventDefault();
   void installPlugin(path);
 }
 
 async function rollbackSelectedPlugin() {
-  if (!selectedPluginId.value || !window.confirm(t("pluginPlatform.rollbackConfirm"))) return;
+  if (mutationRunning.value || !selectedPluginId.value || !window.confirm(t("pluginPlatform.rollbackConfirm"))) return;
   operating.value = true;
   try {
     const result = await api.rollbackPlugin(selectedPluginId.value);
@@ -638,7 +664,7 @@ async function rollbackSelectedPlugin() {
 
 async function uninstallSelectedPlugin() {
   const definition = selectedDefinition.value;
-  if (!definition || !window.confirm(t("pluginPlatform.uninstallConfirm", { name: definition.plugin.manifest.name }))) return;
+  if (mutationRunning.value || !definition || !window.confirm(t("pluginPlatform.uninstallConfirm", { name: definition.plugin.manifest.name }))) return;
   operating.value = true;
   try {
     installedPlugins.value = await api.uninstallPlugin(definition.plugin.manifest.id);
@@ -754,7 +780,7 @@ onBeforeUnmount(() => {
                   <List class="size-3.5" />
                 </button>
               </div>
-              <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :pressed="batchMode" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
+              <Button variant="outline" size="sm" class="h-8 shrink-0 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
               <Button variant="ghost" size="icon-sm" class="shrink-0" :disabled="marketplaceLoading" :title="t('common.refresh')" :aria-label="t('common.refresh')" @click="refreshMarketplace"><RefreshCw class="size-3.5" :class="marketplaceLoading ? 'animate-spin' : ''" /></Button>
             </div>
           </div>
@@ -762,8 +788,8 @@ onBeforeUnmount(() => {
           <div v-if="batchMode" class="flex flex-wrap items-center gap-2 rounded-xl border bg-muted/20 px-3 py-2 text-xs">
             <span class="font-medium text-foreground">{{ t("pluginPlatform.batchSelected", { count: batchSelectedListings.length }) }}</span>
             <div class="ml-auto flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
-              <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || batchRunning" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
+              <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length || batchRunning" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
+              <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || mutationRunning" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
               <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="clearBatchSelection">{{ t("common.cancel") }}</Button>
             </div>
           </div>
@@ -791,6 +817,7 @@ onBeforeUnmount(() => {
                   :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
                   :aria-pressed="isListingSelected(listing)"
                   :aria-label="listing.name"
+                  :disabled="batchRunning"
                   @click.stop="toggleListingSelection(listing)"
                 >
                   <Check v-if="isListingSelected(listing)" class="size-3" />
@@ -849,7 +876,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
                   :class="marketplaceActionClass(listing)"
-                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || !!marketplaceInstallingKey"
+                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
                   @click="installMarketplaceListing(listing)"
                 >
                   <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -867,6 +894,7 @@ onBeforeUnmount(() => {
                 :class="isListingSelected(listing) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40 bg-background'"
                 :aria-pressed="isListingSelected(listing)"
                 :aria-label="listing.name"
+                :disabled="batchRunning"
                 @click.stop="toggleListingSelection(listing)"
               >
                 <Check v-if="isListingSelected(listing)" class="size-3" />
@@ -915,7 +943,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
                 :class="marketplaceActionClass(listing)"
-                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || !!marketplaceInstallingKey"
+                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
                 @click="installMarketplaceListing(listing)"
               >
                 <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
@@ -936,10 +964,10 @@ onBeforeUnmount(() => {
         </div>
         <div v-else class="flex min-h-[440px] flex-col gap-3">
           <div class="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" class="h-8 gap-1.5 text-xs" :pressed="batchMode" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
+            <Button variant="outline" size="sm" class="h-8 gap-1.5 text-xs" :pressed="batchMode" :disabled="batchRunning" @click="toggleBatchMode"> <Check class="size-3.5" />{{ batchMode ? t("pluginPlatform.batchDone") : t("pluginPlatform.batchManage") }} </Button>
             <template v-if="batchMode">
               <span class="text-xs font-medium text-foreground">{{ t("pluginPlatform.batchSelected", { count: batchSelectedInstalled.length }) }}</span>
-              <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || batchRunning" @click="runBatchUninstall">
+              <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || mutationRunning" @click="runBatchUninstall">
                 <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" /><Trash2 class="size-3.5" />{{ t("pluginPlatform.batchUninstall") }}
               </Button>
               <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="clearBatchSelection">{{ t("common.cancel") }}</Button>
@@ -953,6 +981,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-muted"
                 :class="batchMode ? (isInstalledSelected(definition.plugin.manifest.id) ? 'bg-muted ring-1 ring-primary/30' : '') : selectedPluginId === definition.plugin.manifest.id ? 'bg-muted ring-1 ring-primary/30' : ''"
+                :disabled="batchMode && batchRunning"
                 @click="batchMode ? toggleInstalledSelection(definition.plugin.manifest.id) : selectPlugin(definition.plugin.manifest.id)"
               >
                 <span
@@ -1007,8 +1036,8 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                   <div class="flex gap-2">
-                    <Button size="sm" variant="outline" class="gap-1.5" :disabled="operating" @click="rollbackSelectedPlugin"><RotateCcw class="size-3.5" />{{ t("pluginPlatform.rollback") }}</Button>
-                    <Button size="sm" variant="outline" class="gap-1.5 text-destructive" :disabled="operating" @click="uninstallSelectedPlugin"><Trash2 class="size-3.5" />{{ t("pluginPlatform.uninstall") }}</Button>
+                    <Button size="sm" variant="outline" class="gap-1.5" :disabled="mutationRunning" @click="rollbackSelectedPlugin"><RotateCcw class="size-3.5" />{{ t("pluginPlatform.rollback") }}</Button>
+                    <Button size="sm" variant="outline" class="gap-1.5 text-destructive" :disabled="mutationRunning" @click="uninstallSelectedPlugin"><Trash2 class="size-3.5" />{{ t("pluginPlatform.uninstall") }}</Button>
                   </div>
                 </div>
 
@@ -1080,7 +1109,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="flex flex-wrap items-center gap-3">
-              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="installing || urlInstalling" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><ShieldCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />{{ t("pluginPlatform.signedPackagesVerifiedAutomatically") }}</div>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><FileUp class="size-3.5" />{{ t("pluginPlatform.dropInstallHint") }}</div>
             </div>
@@ -1089,9 +1118,7 @@ onBeforeUnmount(() => {
                 <Link2 class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
                 <Input v-model="installUrl" class="h-8 pl-8 font-mono text-xs" type="url" :disabled="urlInstalling" :placeholder="t('pluginPlatform.installUrlPlaceholder')" @keyup.enter="installPluginFromUrl" />
               </div>
-              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="installing || urlInstalling || !installUrl.trim()" @click="installPluginFromUrl"
-                ><Loader2 v-if="urlInstalling" class="size-3.5 animate-spin" /><Download v-else class="size-3.5" />{{ t("pluginPlatform.installFromUrl") }}</Button
-              >
+              <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="mutationRunning || !installUrl.trim()" @click="installPluginFromUrl"><Loader2 v-if="urlInstalling" class="size-3.5 animate-spin" /><Download v-else class="size-3.5" />{{ t("pluginPlatform.installFromUrl") }}</Button>
             </div>
             <div v-if="urlInstalling" class="space-y-1.5">
               <div class="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -1119,15 +1146,15 @@ onBeforeUnmount(() => {
                   <div class="mt-1 truncate font-mono text-[10px] text-muted-foreground">{{ repository.catalogUrl || t("pluginPlatform.repositoryNotConfigured") }}</div>
                 </div>
                 <Badge :variant="repository.enabled ? 'secondary' : 'outline'" class="h-5 px-1.5 text-[10px]">{{ repository.enabled ? t("pluginPlatform.enabled") : t("pluginPlatform.disabled") }}</Badge>
-                <Button v-if="!repository.managed" size="sm" variant="ghost" class="h-7" :disabled="operating" @click="toggleRepository(repository)">{{ repository.enabled ? t("pluginPlatform.disable") : t("pluginPlatform.enable") }}</Button>
-                <Button v-if="!repository.managed" size="icon" variant="ghost" class="size-7 text-destructive" :disabled="operating" @click="removeRepository(repository)"><Trash2 class="size-3.5" /></Button>
+                <Button v-if="!repository.managed" size="sm" variant="ghost" class="h-7" :disabled="mutationRunning" @click="toggleRepository(repository)">{{ repository.enabled ? t("pluginPlatform.disable") : t("pluginPlatform.enable") }}</Button>
+                <Button v-if="!repository.managed" size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeRepository(repository)"><Trash2 class="size-3.5" /></Button>
               </div>
             </div>
             <div class="grid gap-2 lg:grid-cols-[180px_220px_minmax(260px,1fr)_auto]">
               <Input v-model="repositoryId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryIdPlaceholder')" />
               <Input v-model="repositoryName" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryNamePlaceholder')" />
               <Input v-model="repositoryCatalogUrl" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryCatalogUrlPlaceholder')" />
-              <Button size="sm" class="h-8 gap-1.5" :disabled="operating" @click="saveRepository"><Plus class="size-3.5" />{{ t("pluginPlatform.addRepository") }}</Button>
+              <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveRepository"><Plus class="size-3.5" />{{ t("pluginPlatform.addRepository") }}</Button>
             </div>
           </section>
 
@@ -1173,13 +1200,13 @@ onBeforeUnmount(() => {
                       <div class="text-xs font-medium">{{ key.keyId }}</div>
                       <div class="truncate font-mono text-[10px] text-muted-foreground" :title="key.publicKey">{{ abbreviatedPublicKey(key.publicKey) }}</div>
                     </div>
-                    <Button size="icon" variant="ghost" class="size-7 text-destructive" :disabled="operating" @click="removeTrustedKey(key.keyId)"><Trash2 class="size-3.5" /></Button>
+                    <Button size="icon" variant="ghost" class="size-7 text-destructive" :disabled="mutationRunning" @click="removeTrustedKey(key.keyId)"><Trash2 class="size-3.5" /></Button>
                   </div>
                 </div>
                 <div class="grid gap-2 md:grid-cols-[180px_minmax(260px,1fr)_auto]">
                   <Input v-model="trustedKeyId" class="h-8 text-xs" :placeholder="t('pluginPlatform.repositoryKeyIdPlaceholder')" />
                   <Input v-model="trustedPublicKey" class="h-8 font-mono text-xs" :placeholder="t('pluginPlatform.repositoryPublicKeyPlaceholder')" />
-                  <Button size="sm" class="h-8 gap-1.5" :disabled="operating" @click="saveTrustedKey"><ShieldCheck class="size-3.5" />{{ t("pluginPlatform.trustRepository") }}</Button>
+                  <Button size="sm" class="h-8 gap-1.5" :disabled="mutationRunning" @click="saveTrustedKey"><ShieldCheck class="size-3.5" />{{ t("pluginPlatform.trustRepository") }}</Button>
                 </div>
               </template>
             </div>

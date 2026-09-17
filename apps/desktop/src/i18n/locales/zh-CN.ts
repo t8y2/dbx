@@ -182,6 +182,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "确定卸载 {count} 个插件？\n{names}",
     batchSummary: "完成：成功 {success} 个",
     batchSummaryWithFailures: "完成：成功 {success} 个，失败 {failed} 个（{names}）",
+    batchDuplicateSources: "以下插件选择了多个来源：{names}。请为每个插件仅保留一个来源后继续。",
+    batchRefreshFailed: "批量操作已完成，但插件列表刷新失败：{error}",
     selectConnectionProvider: "请先选择连接提供者",
     connectionProvider: "连接提供者",
     newConnection: "新建",

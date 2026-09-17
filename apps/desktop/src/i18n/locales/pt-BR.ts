@@ -260,6 +260,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "Desinstalar {count} plugin(s)? {names}",
     batchSummary: "Concluído: {success} com sucesso",
     batchSummaryWithFailures: "Concluído: {success} com sucesso, {failed} com falha ({names})",
+    batchDuplicateSources: "Várias fontes selecionadas para: {names}. Mantenha apenas uma fonte selecionada por plugin antes de continuar.",
+    batchRefreshFailed: "O lote foi concluído, mas não foi possível atualizar a lista de plugins: {error}",
     selectConnectionProvider: "Selecione primeiro um provedor de conexão",
     connectionProvider: "Provedor de conexão",
     newConnection: "Nova",

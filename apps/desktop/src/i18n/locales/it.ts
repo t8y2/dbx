@@ -259,6 +259,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "Disinstallare {count} plug-in? {names}",
     batchSummary: "Completato: {success} riusciti",
     batchSummaryWithFailures: "Completato: {success} riusciti, {failed} falliti ({names})",
+    batchDuplicateSources: "Sono state selezionate più fonti per: {names}. Mantieni selezionata una sola fonte per plug-in prima di continuare.",
+    batchRefreshFailed: "Le operazioni in gruppo sono terminate, ma non è stato possibile aggiornare l'elenco dei plug-in: {error}",
     selectConnectionProvider: "Seleziona prima un provider di connessione",
     connectionProvider: "Provider di connessione",
     newConnection: "Nuova",

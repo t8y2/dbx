@@ -268,6 +268,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "{count}개 플러그인을 제거할까요? {names}",
     batchSummary: "완료: {success}개 성공",
     batchSummaryWithFailures: "완료: {success}개 성공, {failed}개 실패 ({names})",
+    batchDuplicateSources: "여러 소스가 선택되었습니다: {names}. 계속하기 전에 플러그인마다 하나의 소스만 선택해 주세요.",
+    batchRefreshFailed: "일괄 작업은 완료되었지만 플러그인 목록을 새로 고칠 수 없습니다: {error}",
     selectConnectionProvider: "먼저 연결 제공자를 선택하세요",
     connectionProvider: "연결 제공자",
     newConnection: "새 연결",

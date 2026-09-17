@@ -260,6 +260,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "¿Desinstalar {count} complemento(s)? {names}",
     batchSummary: "Listo: {success} con éxito",
     batchSummaryWithFailures: "Listo: {success} con éxito, {failed} con error ({names})",
+    batchDuplicateSources: "Se seleccionaron varias fuentes para: {names}. Mantén seleccionada solo una fuente por complemento antes de continuar.",
+    batchRefreshFailed: "El lote ha finalizado, pero no se pudo actualizar la lista de complementos: {error}",
     selectConnectionProvider: "Selecciona primero un proveedor de conexión",
     connectionProvider: "Proveedor de conexión",
     newConnection: "Nueva",

@@ -260,6 +260,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "確定解除安裝 {count} 個外掛？ {names}",
     batchSummary: "完成：成功 {success} 個",
     batchSummaryWithFailures: "完成：成功 {success} 個，失敗 {failed} 個（{names}）",
+    batchDuplicateSources: "以下外掛選取了多個來源：{names}。請為每個外掛僅保留一個來源後繼續。",
+    batchRefreshFailed: "批次操作已完成，但外掛清單重新整理失敗：{error}",
     selectConnectionProvider: "請先選擇連線提供者",
     connectionProvider: "連線提供者",
     newConnection: "新增",

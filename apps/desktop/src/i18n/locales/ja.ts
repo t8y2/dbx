@@ -260,6 +260,8 @@ export default withEnglishFallback({
     batchUninstallConfirm: "{count} 個のプラグインをアンインストールしますか？ {names}",
     batchSummary: "完了：{success} 件成功",
     batchSummaryWithFailures: "完了：{success} 件成功、{failed} 件失敗（{names}）",
+    batchDuplicateSources: "複数の配布元が選択されています：{names}。続行する前に、各プラグインの配布元を1つだけ選択してください。",
+    batchRefreshFailed: "一括処理は完了しましたが、プラグイン一覧を更新できませんでした：{error}",
     selectConnectionProvider: "先に接続プロバイダーを選択してください",
     connectionProvider: "接続プロバイダー",
     newConnection: "新規",

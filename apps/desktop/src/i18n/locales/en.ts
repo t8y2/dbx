@@ -266,6 +266,8 @@ export default {
     batchUninstallConfirm: "Uninstall {count} plugin(s)?\n{names}",
     batchSummary: "Done: {success} succeeded",
     batchSummaryWithFailures: "Done: {success} succeeded, {failed} failed ({names})",
+    batchDuplicateSources: "Multiple sources selected for: {names}. Keep only one source selected per plugin before continuing.",
+    batchRefreshFailed: "The batch has finished, but the plugin list could not be refreshed: {error}",
     selectConnectionProvider: "Select a connection provider first",
     connectionProvider: "Connection provider",
     newConnection: "New",

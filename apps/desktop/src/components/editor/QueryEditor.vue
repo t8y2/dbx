@@ -87,6 +87,8 @@ import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shoul
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
+import { findCteColumnResolution, findCteReferenceAt, resolveCteColumnOrigins, type CteColumnOrigin } from "@/lib/sql/semantic/cteNavigation";
+import type { SqlSemanticModel, SqlSemanticRowSource } from "@/lib/sql/semantic/types";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
 import {
   buildElasticsearchCompletionItemsFromContext,
@@ -920,6 +922,43 @@ function getEditorSqlCompletionContext(sql: string, position: number, editorStat
   return context;
 }
 
+// CTE definition metadata is cursor-independent, but hover/ctrl-click models still carry the
+// position; memoize per (Text node, position, dialect, state) so hover and click at the same
+// position share one parse. Any edit swaps the Text node, invalidating the cache for free.
+let editorSemanticModelCache: {
+  doc: Text;
+  editorState: EditorState | undefined;
+  position: number;
+  databaseType: DatabaseType | undefined;
+  dialect: string | undefined;
+  model: SqlSemanticModel;
+} | null = null;
+
+function getEditorSemanticModel(sql: string, position: number, editorState = view.value?.state): SqlSemanticModel | null {
+  if (!SEMANTIC_SQL_COMPLETION_ENABLED) return null;
+  const dialect = sqlBehaviorDialect();
+  const doc = editorState?.doc;
+  if (doc && editorSemanticModelCache?.doc === doc && editorSemanticModelCache.editorState === editorState && editorSemanticModelCache.position === position && editorSemanticModelCache.databaseType === props.databaseType && editorSemanticModelCache.dialect === dialect) {
+    return editorSemanticModelCache.model;
+  }
+  const model = buildSqlSemanticModel(sql, position, {
+    databaseType: props.databaseType,
+    dialect,
+    editorState,
+  });
+  if (doc) {
+    editorSemanticModelCache = {
+      doc,
+      editorState,
+      position,
+      databaseType: props.databaseType,
+      dialect,
+      model,
+    };
+  }
+  return model;
+}
+
 function usesOracleSessionCompletionColumns(schema?: string | null): boolean {
   return shouldUseOracleSessionCompletionColumns({
     databaseType: props.databaseType,
@@ -1297,6 +1336,23 @@ function focusErrorPosition(offset: number) {
   currentView.dispatch({
     selection: { anchor: errorPos },
     effects: [editorViewModule.EditorView.scrollIntoView(errorPos, { y: "center" })],
+  });
+  currentView.focus();
+}
+
+/** CTE Ctrl/Cmd+click: select a small target (name/column/star token) while highlighting the whole CTE definition. */
+function jumpToCteRange(target: { from: number; to: number }, highlight: { from: number; to: number }) {
+  const currentView = view.value;
+  if (!currentView || !editorViewModule || !setResultSourceRangeEffect) return;
+  const docLength = currentView.state.doc.length;
+  const targetFrom = Math.max(0, Math.min(target.from, docLength));
+  const targetTo = Math.max(targetFrom, Math.min(target.to, docLength));
+  const highlightFrom = Math.max(0, Math.min(highlight.from, docLength));
+  const highlightTo = Math.max(highlightFrom, Math.min(highlight.to, docLength));
+  if (targetFrom >= targetTo) return;
+  currentView.dispatch({
+    selection: { anchor: targetFrom, head: targetTo },
+    effects: [setResultSourceRangeEffect.of({ from: highlightFrom, to: highlightTo }), editorViewModule.EditorView.scrollIntoView(targetFrom, { y: "center" })],
   });
   currentView.focus();
 }
@@ -3264,6 +3320,43 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   };
 }
 
+/** Maps a semantic row source (from a CTE body) to the shape ensureColumnsForTable accepts. */
+function referencedTableLikeFromSemanticSource(source: SqlSemanticRowSource) {
+  const identifierParts = source.qualifiedName?.parts ?? [];
+  return {
+    name: source.name,
+    nameQuoted: !!identifierParts[identifierParts.length - 1]?.quote,
+    database: source.metadataTarget?.database,
+    schema: source.qualifierParts[source.qualifierParts.length - 1],
+    schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+  };
+}
+
+/**
+ * Hovers a column that the outer query receives from a CTE: trace the CTE lineage to its
+ * physical table column and reuse the shared column cache (and comment/type metadata).
+ * Returns null for expressions, untraceable bodies or metadata misses so callers fall back.
+ */
+async function resolveCteColumnHoverColumn(semanticModel: SqlSemanticModel, columnName: string, qualifier?: string): Promise<SqlCompletionColumn | null> {
+  try {
+    const hit = findCteColumnResolution(semanticModel, columnName, qualifier);
+    if (!hit) return null;
+    const origins: CteColumnOrigin[] = resolveCteColumnOrigins(semanticModel, hit, columnName);
+    if (origins.length === 0) return null;
+    const matched: SqlCompletionColumn[] = [];
+    for (const origin of origins) {
+      const reference = referencedTableLikeFromSemanticSource(origin.source);
+      await ensureColumnsForTable(reference, reference);
+      const columns = cachedColumnsByTable.get(completionCacheKey(reference));
+      const column = columns?.find((candidate) => candidate.name.toLowerCase() === origin.column.toLowerCase());
+      if (column) matched.push(column);
+    }
+    return matched[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) {
   if (!props.connectionId || props.database == null || contextMenuOpen.value) return null;
 
@@ -3278,7 +3371,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   let semanticModel: ReturnType<typeof buildSqlSemanticModel> | null = null;
   if (SEMANTIC_SQL_COMPLETION_ENABLED) {
     try {
-      semanticModel = buildSqlSemanticModel(sql, pos, sqlCompletionDialectOptions());
+      semanticModel = getEditorSemanticModel(sql, pos, currentView.state);
     } catch (error) {
       semanticModel = null;
       console.warn(`[DBX] Failed to build semantic model for hover tooltip:`, error);
@@ -3288,6 +3381,19 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   const semanticQualifierIsRowSource = !!qualifier && !!semanticTarget && (semanticTarget.alias?.toLowerCase() === qualifier.toLowerCase() || semanticTarget.source.name.toLowerCase() === qualifier.toLowerCase());
   const tableLookupName = semanticTarget && !semanticQualifierIsRowSource ? semanticTarget.name : name;
   const qualifiedTableLookup = semanticTarget?.schema ? `${semanticTarget.schema}.${semanticTarget.name}` : identifier;
+
+  // CTE-derived columns: trace to the physical column and show its type/source/comment before
+  // the generic table/column fallback (which cannot see inside a CTE body).
+  if (semanticModel) {
+    const cteColumn = await resolveCteColumnHoverColumn(semanticModel, name, qualifier);
+    if (cteColumn) {
+      return {
+        pos: range.from,
+        end: range.to,
+        create: () => createHoverDom(cteColumn.name, cteColumn.dataType || "column", undefined, [cteColumn.schema ? `${cteColumn.schema}.${cteColumn.table}` : cteColumn.table, ...(cteColumn.comment?.trim() ? [cteColumn.comment.trim()] : [])]),
+      };
+    }
+  }
 
   const lookup = resolveHoverTableLookupTarget({
     database: props.database,
@@ -7051,6 +7157,30 @@ onMounted(async () => {
                   },
                   target,
                 );
+
+              // 0. CTE (WITH ... AS) in-editor navigation — jump within the editor instead of
+              //    opening metadata for a name that does not exist as a physical table.
+              if (SEMANTIC_SQL_COMPLETION_ENABLED) {
+                try {
+                  const cteModel = getEditorSemanticModel(doc, pos, currentView.state);
+                  if (cteModel) {
+                    const referenceHit = findCteReferenceAt(cteModel, pos);
+                    if (referenceHit?.definition.nameSpan) {
+                      jumpToCteRange({ from: referenceHit.definition.nameSpan.start, to: referenceHit.definition.nameSpan.end }, { from: referenceHit.definition.sourceSpan.start, to: referenceHit.definition.sourceSpan.end });
+                      return;
+                    }
+                    const clickQualifier = identity.parts.length >= 2 ? identity.parts[identity.parts.length - 2]?.value : undefined;
+                    const columnHit = findCteColumnResolution(cteModel, identity.name, clickQualifier);
+                    const columnTargetSpan = columnHit?.output?.jumpSpan ?? columnHit?.stars?.[0]?.starSpan;
+                    if (columnHit && columnTargetSpan) {
+                      jumpToCteRange({ from: columnTargetSpan.start, to: columnTargetSpan.end }, { from: columnHit.definition.sourceSpan.start, to: columnHit.definition.sourceSpan.end });
+                      return;
+                    }
+                  }
+                } catch (error) {
+                  console.warn("[DBX] CTE ctrl+click resolution failed:", error);
+                }
+              }
 
               // 1. Local table lookup with the resolved scope (do not trust stale editor cache alone —
               // completion/hover may have filled cachedTables with the current schema only).

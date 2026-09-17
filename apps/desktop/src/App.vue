@@ -26,6 +26,9 @@ import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
+import { useComponentUpdates, type ComponentUpdateCategory } from "@/composables/useComponentUpdates";
+import { driverStoreUpdateBadgeCount, showMcpUpdateBadge } from "@/lib/updates/updateBadges";
+import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
 import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
@@ -251,6 +254,7 @@ const { setupFileDrop } = useFileDrop();
 const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
 
 const isDesktop = isTauriRuntime();
+const componentUpdates = useComponentUpdates({ isDesktop: isDesktop || isUpdatePreviewMockEnabled() });
 const windowContext = resolveWindowContext();
 const isDetachedWindowContext = windowContext.kind === "detached-tab";
 const detachedContextTabId = windowContext.kind === "detached-tab" ? windowContext.tabId : undefined;
@@ -310,7 +314,9 @@ const activeAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().lengt
 const awaitingAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().filter((run) => run.status === "awaiting_write_confirmation").length : 0));
 const { mcpUpdateAvailable, refreshMcpUpdateStatus, handleMcpStatusChanged } = useMcpUpdateBadge({
   isDesktop,
-  updateNotificationsEnabled: () => settingsStore.editorSettings.updateNotificationsEnabled,
+  // Update availability remains visible when every auto-update switch is off;
+  // the switches control installation, not whether the user can be reminded.
+  updateNotificationsEnabled: () => true,
 });
 const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop, isWindows());
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -747,18 +753,13 @@ const activeConnection = computed(() => {
 // without inferring Oracle from the raw transport type.
 
 function updateAgentDriverUpdateCount(count: number) {
-  if (!settingsStore.editorSettings.updateNotificationsEnabled) {
-    agentDriverUpdateCount.value = 0;
-    return;
-  }
   agentDriverUpdateCount.value = count;
 }
 
 async function refreshAgentDriverUpdateCount() {
-  if (!isDesktop || !settingsStore.editorSettings.updateNotificationsEnabled) return;
+  if (!isDesktop) return;
   try {
     const drivers = await api.listInstalledAgents();
-    if (!settingsStore.editorSettings.updateNotificationsEnabled) return;
     updateAgentDriverUpdateCount(countAvailableAgentDriverUpdates(drivers));
   } catch {
     // Driver update availability is only a badge hint; keep the existing count if the registry cannot be reached.
@@ -879,6 +880,18 @@ function requestActiveEditorExecuteInNewResultTab() {
   void tryExecuteInNewResultTab();
 }
 
+const toolbarAgentDriverUpdateCount = computed(() => Math.max(agentDriverUpdateCount.value, componentUpdates.driverUpdateCount.value));
+const toolbarDriverUpdateCount = computed(() => toolbarAgentDriverUpdateCount.value);
+const toolbarJdbcUpdateAvailable = computed(() => componentUpdates.jdbcUpdateAvailable.value);
+const toolbarMcpUpdateAvailable = computed(() => mcpUpdateAvailable.value || componentUpdates.mcpUpdateAvailable.value);
+const toolbarPluginUpdateAvailable = computed(() => componentUpdates.pluginUpdateCount.value > 0);
+const toolbarHasUpdateAvailable = computed(() => hasUpdateAvailable.value || toolbarDriverUpdateCount.value > 0 || toolbarJdbcUpdateAvailable.value || toolbarMcpUpdateAvailable.value || toolbarPluginUpdateAvailable.value);
+const showDriverStoreUpdateBadge = computed(() => driverStoreUpdateBadgeCount(settingsStore.editorSettings.autoUpdateDrivers, settingsStore.editorSettings.autoUpdateJdbc, toolbarDriverUpdateCount.value, toolbarJdbcUpdateAvailable.value));
+const showMcpSettingsUpdateBadge = computed(() => showMcpUpdateBadge(settingsStore.editorSettings.autoUpdateMcp, toolbarMcpUpdateAvailable.value));
+const manualCheckingAllUpdates = ref(false);
+const checkingAllUpdates = computed(() => manualCheckingAllUpdates.value || checkingUpdates.value || componentUpdates.loading.value);
+const updatingAllUpdates = ref(false);
+
 // Per-group editor toolbars call back into this App-owned orchestration. The
 // group focuses itself on pointerdown/focusin before any toolbar event, so the
 // acting tab is passed explicitly instead of relying on the focused group.
@@ -891,7 +904,7 @@ const specialPageTabs = computed(() => ({
   pluginCenterActive: pluginCenterActive.value,
   driverStoreOpen: driverStoreTabOpen.value,
   driverStoreActive: driverStoreActive.value,
-  driverUpdateCount: toolbarAgentDriverUpdateCount.value,
+  driverUpdateCount: showDriverStoreUpdateBadge.value,
 }));
 provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(computed(() => !isDetachedWindowContext && (driverStoreActive.value || pluginCenterActive.value || settingsStore.settingsPageActive))));
 provide(EDITOR_TOOLBAR_ACTIONS, {
@@ -1033,8 +1046,6 @@ function toggleTabBarCollapsed() {
   setTabBarCollapsed(!tabBarCollapsed.value);
 }
 
-const updateNotificationsEnabled = computed(() => settingsStore.editorSettings.updateNotificationsEnabled);
-
 function openSettings(initialTab = "appearance", initialSection?: string) {
   settingsInitialTab.value = initialTab;
   settingsInitialSection.value = initialSection;
@@ -1175,9 +1186,54 @@ function openPluginConnectionDialog(pluginId: string, providerId: string) {
   connectionPluginProvider.value = { pluginId, providerId };
   showConnectionDialog.value = true;
 }
-const toolbarAgentDriverUpdateCount = computed(() => (updateNotificationsEnabled.value ? agentDriverUpdateCount.value : 0));
-const toolbarHasUpdateAvailable = computed(() => updateNotificationsEnabled.value && hasUpdateAvailable.value);
-const toolbarMcpUpdateAvailable = computed(() => updateNotificationsEnabled.value && mcpUpdateAvailable.value);
+async function checkAllUpdates() {
+  if (manualCheckingAllUpdates.value) return;
+  manualCheckingAllUpdates.value = true;
+  const startedAt = Date.now();
+  try {
+    await Promise.allSettled([checkUpdates({ silent: true }), componentUpdates.refresh()]);
+    const remaining = 500 - (Date.now() - startedAt);
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
+  } finally {
+    manualCheckingAllUpdates.value = false;
+  }
+}
+
+function openDriverStoreFromUpdate(target?: DriverStoreTab) {
+  closeSettingsPage();
+  openDriverStorePage(target);
+}
+
+function handleToolbarUpdateClick() {
+  showUpdateDialog.value = true;
+  if (!toolbarHasUpdateAvailable.value && !checkingAllUpdates.value) void checkAllUpdates();
+}
+
+async function installComponentUpdates(category: ComponentUpdateCategory) {
+  const result = await componentUpdates.installCategory(category);
+  const updatedComponents = [result.drivers > 0 ? t("settings.updateDrivers") : "", result.jdbc ? t("settings.updateJdbc") : "", result.mcp ? t("settings.updateMcp") : "", result.plugins > 0 ? t("settings.updatePlugins") : ""].filter(Boolean);
+  if (updatedComponents.length) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
+  if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
+  if (result.failed.length) toast(t("updates.componentsAutoUpdateFailed", { count: result.failed.length }), 6000);
+}
+
+async function updateAllAvailable() {
+  if (updatingAllUpdates.value) return;
+  updatingAllUpdates.value = true;
+  showUpdateDialog.value = true;
+  const appUpdate = hasUpdateAvailable.value && isDesktop ? downloadUpdateInBackground() : Promise.resolve();
+  try {
+    const categories: ComponentUpdateCategory[] = [];
+    if (toolbarDriverUpdateCount.value > 0) categories.push("drivers");
+    if (toolbarJdbcUpdateAvailable.value) categories.push("jdbc");
+    if (toolbarMcpUpdateAvailable.value) categories.push("mcp");
+    if (componentUpdates.pluginUpdateCount.value > 0) categories.push("plugins");
+    for (const category of categories) await installComponentUpdates(category);
+    await appUpdate;
+  } finally {
+    updatingAllUpdates.value = false;
+  }
+}
 const hasSqlFileConnections = computed(() => connectionStore.connections.some((c) => supportsSqlFileExecution(c.db_type)));
 const queryEditorDdlDatabaseType = computed(() => {
   if (!queryEditorDdlTarget.value?.connectionId) return undefined;
@@ -3530,6 +3586,14 @@ async function initApp() {
       updateWindowReady = true;
       await initializeUpdatePreparation();
       await initializeUpdater();
+      if (!isDetachedWindowContext) {
+        void componentUpdates.autoUpdateEnabledComponents().then((result) => {
+          const updatedComponents = [result.drivers > 0 ? t("settings.updateDrivers") : "", result.jdbc ? t("settings.updateJdbc") : "", result.plugins > 0 ? t("settings.updatePlugins") : "", result.mcp ? t("settings.updateMcp") : ""].filter(Boolean);
+          if (updatedComponents.length > 0) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
+          if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
+          if (result.failed.length > 0) toast(t("updates.componentsAutoUpdateFailed", { count: result.failed.length }), 6000);
+        });
+      }
     }
 
     void promptTemplateStore.init();
@@ -3595,26 +3659,10 @@ function openDriverStoreFromEvent(event: Event) {
 }
 
 function runUpdateNotificationChecks() {
-  if (!updateNotificationsEnabled.value) return;
   void refreshAgentDriverUpdateCount();
   void refreshMcpUpdateStatus();
+  void componentUpdates.refresh();
 }
-
-watch(updateNotificationsEnabled, (enabled) => {
-  if (!enabled) {
-    agentDriverUpdateCount.value = 0;
-    mcpUpdateAvailable.value = false;
-    if (updateCheckTimer) {
-      clearInterval(updateCheckTimer);
-      updateCheckTimer = undefined;
-    }
-    return;
-  }
-  runUpdateNotificationChecks();
-  if (!updateCheckTimer) {
-    updateCheckTimer = setInterval(runUpdateNotificationChecks, UPDATE_CHECK_INTERVAL_MS);
-  }
-});
 
 onMounted(async () => {
   console.log("[STARTUP] onMounted begin");
@@ -3690,7 +3738,7 @@ onMounted(async () => {
   setupFileDrop().catch(() => {});
   setTimeout(() => {
     runUpdateNotificationChecks();
-    if (updateNotificationsEnabled.value && !updateCheckTimer) {
+    if (!updateCheckTimer) {
       updateCheckTimer = setInterval(runUpdateNotificationChecks, UPDATE_CHECK_INTERVAL_MS);
     }
   }, 10_000);
@@ -3762,15 +3810,15 @@ onUnmounted(() => {
           :show-driver-store="showDriverStore"
           :show-plugin-center="showPluginCenter"
           :show-settings-page="showSettingsPage"
-          :checking-updates="checkingUpdates"
+          :checking-updates="checkingAllUpdates"
           :has-update-available="toolbarHasUpdateAvailable"
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
           :update-version="updateInfo?.latest_version"
           :update-ready-to-install="updateDownloaded"
           :update-ready="updateReady"
-          :agent-driver-update-count="toolbarAgentDriverUpdateCount"
-          :has-mcp-update-available="toolbarMcpUpdateAvailable"
+          :agent-driver-update-count="showDriverStoreUpdateBadge"
+          :has-mcp-update-available="showMcpSettingsUpdateBadge"
           :has-connections="connectionStore.connections.length > 0"
           :has-sql-file-connections="hasSqlFileConnections"
           @new-connection="showConnectionDialog = true"
@@ -3782,10 +3830,10 @@ onUnmounted(() => {
           @toggle-sql-library="toggleRightSidebarPanel('sqlLibrary')"
           @toggle-sql-file-panel="toggleRightSidebarPanel('sqlFile')"
           @open-github="openGitHub"
-          @open-settings="openSettings(toolbarMcpUpdateAvailable ? 'mcp' : 'appearance')"
+          @open-settings="openSettings(showMcpSettingsUpdateBadge ? 'mcp' : 'appearance')"
           @open-driver-store="openDriverStorePage"
           @open-plugin-center="openPluginCenterPage()"
-          @check-updates="checkUpdates()"
+          @check-updates="handleToolbarUpdateClick"
           @open-transfer="dialogs.showTransferDialog.value = true"
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"
@@ -3838,7 +3886,15 @@ onUnmounted(() => {
                 @cancel-tab-close="cancelPendingAppClose"
                 @detach-tab="detachTab"
               >
-                <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" :focus-target="driverStoreFocus" @update-count-change="updateAgentDriverUpdateCount" />
+                <DriverStorePage
+                  v-if="driverStoreTabOpen"
+                  v-show="driverStoreActive"
+                  v-model:active-tab="driverStoreActiveTab"
+                  class="flex-1 min-h-0"
+                  :update-notifications-enabled="settingsStore.editorSettings.autoUpdateDrivers"
+                  :focus-target="driverStoreFocus"
+                  @update-count-change="updateAgentDriverUpdateCount"
+                />
                 <PluginCenterPage v-if="pluginCenterTabOpen" v-show="pluginCenterActive" class="flex-1 min-h-0" :focus-target="pluginCenterFocus" :install-url-request="pluginCenterInstallRequest" @new-connection="openPluginConnectionDialog" />
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"
@@ -3851,10 +3907,25 @@ onUnmounted(() => {
                   :ai-config-draft="settingsAiConfigDraft"
                   :ai-config-request-id="settingsAiConfigRequestId"
                   :app-version="appVersion"
-                  :checking-updates="checkingUpdates"
+                  :checking-updates="checkingAllUpdates"
+                  :updating-all-updates="updatingAllUpdates"
+                  :app-update-available="hasUpdateAvailable"
+                  :app-update-version="updateInfo?.latest_version"
+                  :driver-update-count="toolbarDriverUpdateCount"
+                  :jdbc-update-available="toolbarJdbcUpdateAvailable"
+                  :mcp-update-available="toolbarMcpUpdateAvailable"
+                  :plugin-update-count="componentUpdates.pluginUpdateCount.value"
                   class="flex-1 min-h-0"
                   @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
-                  @check-updates="checkUpdates()"
+                  @check-updates="checkAllUpdates"
+                  @update-all="updateAllAvailable"
+                  @open-update-center="handleToolbarUpdateClick"
+                  @open-driver-store="openDriverStoreFromUpdate"
+                  @open-plugin-center="
+                    closeSettingsPage();
+                    openPluginCenterPage();
+                  "
+                  @open-mcp-settings="openSettings('mcp')"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
                 />
               </AppTabBar>
@@ -4192,6 +4263,14 @@ onUnmounted(() => {
           :update-ready="updateReady"
           :is-ignoring-update="isIgnoringUpdate"
           :active-task-count="activeUpdateTaskCount"
+          :driver-updates="componentUpdates.driverUpdates.value"
+          :jdbc-update="componentUpdates.jdbcPluginStatus.value"
+          :mcp-update="componentUpdates.mcpStatus.value"
+          :plugin-updates="componentUpdates.pluginUpdates.value"
+          :component-updates-loading="componentUpdates.loading.value"
+          :component-updates-error="componentUpdates.lastError.value"
+          :updating-component="componentUpdates.updatingCategory.value"
+          :is-updating-all="updatingAllUpdates"
           @open-latest-release="openLatestRelease"
           @change-download-source="changeUpdateDownloadSource"
           @download-in-background="downloadUpdateInBackground"
@@ -4199,6 +4278,8 @@ onUnmounted(() => {
           @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
           @ignore-version="ignoreCurrentVersion"
+          @install-component-updates="installComponentUpdates"
+          @update-all="updateAllAvailable"
         />
         <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

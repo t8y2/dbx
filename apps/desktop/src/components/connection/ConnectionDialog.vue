@@ -6173,7 +6173,6 @@ async function loadSshConfigHosts() {
 async function loadAgentDrivers() {
   try {
     agentDrivers.value = await api.listInstalledAgentsLocal();
-    if (!settingsStore.editorSettings.updateNotificationsEnabled) return;
     api
       .listInstalledAgents()
       .then((drivers) => {

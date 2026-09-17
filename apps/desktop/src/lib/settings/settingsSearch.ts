@@ -1,6 +1,6 @@
-export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "security" | "about";
+export type SettingsCategory = "editor" | "formatter" | "appearance" | "navigation" | "data" | "backups" | "tunnels" | "shortcuts" | "snippets" | "sync" | "ai" | "mcp" | "updates" | "security" | "about";
 
-const SETTINGS_CATEGORIES: readonly SettingsCategory[] = ["editor", "formatter", "appearance", "navigation", "data", "backups", "tunnels", "shortcuts", "snippets", "sync", "ai", "mcp", "security", "about"];
+const SETTINGS_CATEGORIES: readonly SettingsCategory[] = ["editor", "formatter", "appearance", "navigation", "data", "backups", "tunnels", "shortcuts", "snippets", "sync", "ai", "mcp", "updates", "security", "about"];
 
 /**
  * Maps retired settings tabs to their current home so saved links and external
@@ -267,9 +267,12 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "security-password", category: "security", titleKey: "auth.changePassword", targetId: "security", visible: webOnly },
   { id: "about-support", category: "about", titleKey: "settings.supportInfoTitle", descriptionKey: "settings.supportInfoDescription", targetId: "about" },
   { id: "about-transfer", category: "about", titleKey: "settings.settingsTransferTitle", descriptionKey: "settings.settingsTransferDescription", targetId: "about" },
-  { id: "about-update-notifications", category: "about", titleKey: "settings.updateNotificationsEnabled", descriptionKey: "settings.updateNotificationsEnabledDescription", targetId: "about" },
-  { id: "about-auto-download-updates", category: "about", titleKey: "settings.autoDownloadUpdates", descriptionKey: "settings.autoDownloadUpdatesDescription", targetId: "about" },
-  { id: "about-update", category: "about", titleKey: "settings.updateDownloadSource", descriptionKey: "settings.updateDownloadSourceDescription", targetId: "about" },
+  { id: "updates-app", category: "updates", titleKey: "settings.autoUpdateApp", descriptionKey: "settings.autoUpdateAppDescription", targetId: "updates" },
+  { id: "updates-drivers", category: "updates", titleKey: "settings.autoUpdateDrivers", descriptionKey: "settings.autoUpdateDriversDescription", targetId: "updates" },
+  { id: "updates-jdbc", category: "updates", titleKey: "settings.autoUpdateJdbc", descriptionKey: "settings.autoUpdateJdbcDescription", targetId: "updates" },
+  { id: "updates-mcp", category: "updates", titleKey: "settings.autoUpdateMcp", descriptionKey: "settings.autoUpdateMcpDescription", targetId: "updates" },
+  { id: "updates-plugins", category: "updates", titleKey: "settings.autoUpdatePlugins", descriptionKey: "settings.autoUpdatePluginsDescription", targetId: "updates" },
+  { id: "updates-source", category: "updates", titleKey: "settings.updateDownloadSource", descriptionKey: "settings.updateDownloadSourceDescription", targetId: "updates" },
 ];
 
 export function resolveSettingsSearchEntries(definitions: readonly SettingsSearchDefinition[], context: SettingsSearchContext, translate: Translate, categoryLabels: Readonly<Record<SettingsCategory, string>>): SettingsSearchEntry[] {

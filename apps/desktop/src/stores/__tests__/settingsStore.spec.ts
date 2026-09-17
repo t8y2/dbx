@@ -273,11 +273,11 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({}).updateDownloadSource).toBe("official");
   });
 
-  it("requires opting into automatic update downloads and preserves the preference", () => {
-    expect(normalizeEditorSettings({}).autoDownloadUpdates).toBe(false);
+  it("defaults automatic update downloads to enabled and preserves explicit opt-out", () => {
+    expect(normalizeEditorSettings({}).autoDownloadUpdates).toBe(true);
     expect(normalizeEditorSettings({ autoDownloadUpdates: true }).autoDownloadUpdates).toBe(true);
-    expect(normalizeEditorSettings({ autoDownloadUpdates: false }).autoDownloadUpdates).toBe(false);
-    expect(normalizeEditorSettings({ autoDownloadUpdates: "true" } as any).autoDownloadUpdates).toBe(false);
+    expect(normalizeEditorSettings({ autoDownloadUpdates: false }).autoDownloadUpdates).toBe(true);
+    expect(normalizeEditorSettings({ autoUpdateApp: false }).autoDownloadUpdates).toBe(false);
   });
 
   it("preserves explicit editor themes from saved settings", () => {
@@ -971,7 +971,7 @@ describe("settingsStore persisted settings initialization", () => {
       theme: "xcode-dark",
       executeMode: "all",
       executeModeDefaultVersion: 1,
-      updateNotificationsEnabled: false,
+      updateNotificationsEnabled: true,
     });
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
     vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
@@ -989,7 +989,7 @@ describe("settingsStore persisted settings initialization", () => {
       fontSize: 17,
       theme: "xcode-dark",
       executeMode: "all",
-      updateNotificationsEnabled: false,
+      updateNotificationsEnabled: true,
       appLayout: "separated",
     });
     expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ fontSize: 17, theme: "xcode-dark", appLayout: "separated" }));

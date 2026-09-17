@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   getConnectionConfig: vi.fn(),
   mongoFindDocuments: vi.fn(),
+  mongoExplainFind: vi.fn(),
+  cancelQuery: vi.fn(),
   mongoParseShellCommand: vi.fn(),
 }));
 
@@ -14,6 +16,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   return {
     ...actual,
     mongoFindDocuments: mocks.mongoFindDocuments,
+    mongoExplainFind: mocks.mongoExplainFind,
+    cancelQuery: mocks.cancelQuery,
     mongoParseShellCommand: mocks.mongoParseShellCommand,
   };
 });
@@ -117,5 +121,36 @@ describe("queryStore MongoDB execution summary", () => {
         { status: "success", statementIndex: 1 },
       ],
     });
+  });
+
+  it("forwards the active execution ID to a pending explain and its cancellation", async () => {
+    let rejectExplain!: (reason: Error) => void;
+    mocks.mongoExplainFind.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectExplain = reject;
+        }),
+    );
+    mocks.cancelQuery.mockImplementation(async () => {
+      rejectExplain(new Error("Query canceled"));
+      return true;
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mongo-1", "app", "Query");
+    const execution = store.executeTabSql(tabId, 'db.users.find({}).explain("executionStats")');
+
+    await vi.waitFor(() => expect(mocks.mongoExplainFind).toHaveBeenCalledOnce());
+    const executionId = store.tabs.find((tab) => tab.id === tabId)!.executionId;
+    try {
+      expect(executionId).toEqual(expect.any(String));
+      expect(mocks.mongoExplainFind).toHaveBeenCalledWith("mongo-1", "app", "users", expect.objectContaining({ verbosity: "executionStats" }), executionId);
+      await expect(store.cancelTabExecution(tabId)).resolves.toBe(true);
+      expect(mocks.cancelQuery).toHaveBeenCalledWith(executionId);
+    } finally {
+      rejectExplain(new Error("Query canceled"));
+      await execution;
+    }
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({ isExecuting: false, executionId: undefined });
   });
 });

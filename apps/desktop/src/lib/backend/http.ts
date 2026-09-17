@@ -4676,7 +4676,7 @@ export async function documentUpdateDocument(connectionId: string, database: str
   });
 }
 
-export async function mongoExplainFind(connectionId: string, database: string, collection: string, options: { skip: number; limit: number; filter?: string; projection?: string; sort?: string; collation?: string; verbosity?: string }): Promise<unknown> {
+export async function mongoExplainFind(connectionId: string, database: string, collection: string, options: { skip: number; limit: number; filter?: string; projection?: string; sort?: string; collation?: string; verbosity?: string }, executionId?: string): Promise<unknown> {
   return post("/api/mongo/explain-find", {
     connectionId,
     database,
@@ -4688,6 +4688,7 @@ export async function mongoExplainFind(connectionId: string, database: string, c
     sort: options.sort,
     collation: options.collation,
     verbosity: options.verbosity,
+    executionId,
   });
 }
 

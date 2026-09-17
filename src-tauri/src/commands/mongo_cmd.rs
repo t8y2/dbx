@@ -158,23 +158,29 @@ pub async fn mongo_explain_find(
     sort: Option<String>,
     collation: Option<String>,
     verbosity: Option<String>,
+    execution_id: Option<String>,
     mcp_request: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    let app = state.inner().clone();
     if mcp_request == Some(true) {
-        crate::commands::mcp_bridge::ensure_mcp_read_allowed_by_id(state.inner(), &connection_id, &database).await?;
+        crate::commands::mcp_bridge::ensure_mcp_read_allowed_by_id(&app, &connection_id, &database).await?;
     }
-    dbx_core::mongo_ops::mongo_explain_find_core(
-        &state,
-        &connection_id,
-        &database,
-        &collection,
-        skip,
-        limit,
-        filter.as_deref(),
-        projection.as_deref(),
-        sort.as_deref(),
-        collation.as_deref(),
-        verbosity.as_deref().unwrap_or("queryPlanner"),
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_explain_find_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            skip,
+            limit,
+            filter.as_deref(),
+            projection.as_deref(),
+            sort.as_deref(),
+            collation.as_deref(),
+            verbosity.as_deref().unwrap_or("queryPlanner"),
+        ),
     )
     .await
 }

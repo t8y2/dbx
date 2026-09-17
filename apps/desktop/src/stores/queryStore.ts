@@ -6597,15 +6597,21 @@ export const useQueryStore = defineStore("query", () => {
               }
               case "findExplain": {
                 queryExecutionLog("info", "mongo-explain:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
-                const plan = await api.mongoExplainFind(executionConnectionId, currentDatabase, mongoCommand.collection, {
-                  skip: mongoCommand.skip,
-                  limit: mongoCommand.limit,
-                  filter: mongoCommand.filter,
-                  projection: mongoCommand.projection,
-                  sort: mongoCommand.sort,
-                  collation: mongoCommand.collation,
-                  verbosity: mongoCommand.verbosity,
-                });
+                const plan = await api.mongoExplainFind(
+                  executionConnectionId,
+                  currentDatabase,
+                  mongoCommand.collection,
+                  {
+                    skip: mongoCommand.skip,
+                    limit: mongoCommand.limit,
+                    filter: mongoCommand.filter,
+                    projection: mongoCommand.projection,
+                    sort: mongoCommand.sort,
+                    collation: mongoCommand.collation,
+                    verbosity: mongoCommand.verbosity,
+                  },
+                  executionId,
+                );
                 allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult([plan], performance.now() - commandStartedAt, 1))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-explain:done", { traceId, collection: mongoCommand.collection, database: currentDatabase, elapsed: elapsed() });

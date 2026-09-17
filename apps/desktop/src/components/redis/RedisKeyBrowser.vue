@@ -3215,7 +3215,9 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   >{{ customGrouping.enabled ? t("redisGrouping.selectLoaded") : t("redis.selectAllLoaded") }}</Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
-                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"><Clock class="w-3 h-3 mr-1" />{{ t("redis.batchExpiry") }}</Button>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"
+                  ><Clock class="redis-expiry-icon w-3 h-3 mr-1" /><span class="redis-expiry-label">{{ t("redis.batchExpiry") }}</span></Button
+                >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="mutatingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
@@ -3828,14 +3830,17 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
   gap: 0.375rem;
 }
 
-.redis-search-mode-group,
-.redis-key-toolbar-actions {
+.redis-search-mode-group {
   flex-wrap: nowrap;
   min-width: 0;
+  justify-self: start;
 }
 
-.redis-search-mode-group {
-  justify-self: start;
+/* Wrapping can never overlap; with nowrap + justify-end an overflowing row
+   spills left and paints over the search-mode segmented control (#9356). */
+.redis-key-toolbar-actions {
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .redis-search-mode-button {
@@ -3854,6 +3859,18 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.375rem;
+}
+
+/* Toolbar max-content is ~730px; collapse the widest label to icon-only before
+   the row reaches the overflow band (covers ~320px..740px, see #9356). */
+@container (max-width: 740px) {
+  .redis-expiry-label {
+    display: none;
+  }
+
+  .redis-expiry-icon {
+    margin-right: 0;
+  }
 }
 
 @container (max-width: 320px) {

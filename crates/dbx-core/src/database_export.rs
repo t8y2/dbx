@@ -1205,7 +1205,20 @@ pub fn build_export_insert_statements_excluding(
         })
         .collect::<Vec<_>>();
     if insert_columns.is_empty() {
-        if !exclude_columns.is_empty() {
+        // Only fail when the exclusion itself removed the last insertable column;
+        // emptiness caused by other omission rules (e.g. generated columns) keeps
+        // the silent empty result.
+        let had_insertable_without_exclusion = options.columns.iter().enumerate().any(|(index, column)| {
+            let column_type =
+                export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
+            is_export_insert_column(
+                options.database_type,
+                column,
+                column_type,
+                options.column_extras.get(index).and_then(|value| value.as_deref()),
+            )
+        });
+        if had_insertable_without_exclusion {
             return Err("No insertable columns remain after excluding columns from the export.".to_string());
         }
         return Ok(Vec::new());

@@ -505,13 +505,28 @@ impl PluginPackageInstaller {
     }
 }
 
+/// `migrate_legacy_container` stores a migrated flat container under a synthetic
+/// `0.0.0-legacy.<hash>` directory name while the manifest inside keeps its original version string, so
+/// for those directories the name carries no version identity to compare against. Treating them as
+/// unusable would drop them from `previous_version` and let `prune_plugin_history` delete the only copy
+/// of that version. The plugin id check still applies to them: only the version identity is synthetic.
+const LEGACY_STORAGE_VERSION_PREFIX: &str = "0.0.0-legacy.";
+
+fn is_legacy_storage_version(version: &str) -> bool {
+    version
+        .strip_prefix(LEGACY_STORAGE_VERSION_PREFIX)
+        .is_some_and(|suffix| suffix.len() == 12 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// True when `versions/<version>` has the manifest identity that this store location advertises.
 /// `rollback_locked` rejects a parsed manifest whose id or version differs, so the installer must
-/// not retain it as an active install or as a rollback target either.
+/// not retain it as an active install or as a rollback target either. Legacy containers are the one
+/// exception: their directory name is synthetic, so only the plugin id is checked against them.
 fn version_dir_is_usable(version_dir: &Path, plugin_id: &str, version: &str) -> bool {
     std::fs::read(version_dir.join("manifest.json")).is_ok_and(|raw| {
-        serde_json::from_slice::<PluginManifest>(&raw)
-            .is_ok_and(|manifest| manifest.id == plugin_id && manifest.version == version)
+        serde_json::from_slice::<PluginManifest>(&raw).is_ok_and(|manifest| {
+            manifest.id == plugin_id && (manifest.version == version || is_legacy_storage_version(version))
+        })
     })
 }
 
@@ -1117,6 +1132,48 @@ mod tests {
         let legacy_plugin = registry.find_plugin("sample.hello").unwrap().unwrap();
         assert_eq!(legacy_plugin.manifest.version, "0.9.0");
         assert_eq!(std::fs::read(legacy_plugin.path.join("bin/plugin")).unwrap(), b"legacy");
+    }
+
+    #[test]
+    fn retains_a_legacy_version_directory_when_the_legacy_version_is_not_semver() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("sample.hello");
+        std::fs::create_dir_all(legacy.join("bin")).unwrap();
+        std::fs::write(legacy.join("bin/plugin"), b"legacy").unwrap();
+        std::fs::write(
+            legacy.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": "sample.hello",
+                "name": "Hello legacy",
+                "version": "0.9",
+                "protocol_version": 1,
+                "executable": "bin/plugin",
+                "drivers": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let installer =
+            PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", PluginTrustStore::default());
+        let installed =
+            installer.install_bytes(&package("1.0.0", None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
+
+        // A non-semver legacy version is migrated under a synthetic `0.0.0-legacy.<hash>` directory that
+        // the manifest inside does not repeat, so the retained copy must still be recognised as the
+        // rollback target instead of being pruned away as an unknown version.
+        assert!(
+            installed.previous_version.is_some(),
+            "the migrated legacy version must be retained as the rollback target"
+        );
+        let container = root.path().join("sample.hello");
+        let versions = sorted_version_dirs(&container);
+        let legacy_storage_version = versions.iter().find(|version| version.as_str() != "1.0.0").unwrap();
+        assert_eq!(installed.previous_version.as_deref(), Some(legacy_storage_version.as_str()));
+        let mut expected = vec!["1.0.0".to_string(), legacy_storage_version.clone()];
+        expected.sort();
+        assert_eq!(versions, expected);
+        assert!(container.join(VERSIONS_DIR).join(legacy_storage_version).join("manifest.json").is_file());
     }
 
     #[test]

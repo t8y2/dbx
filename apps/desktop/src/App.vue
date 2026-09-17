@@ -53,6 +53,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 import { connectionRedactedNameLabel } from "@/lib/connection/connectionPresentation";
 import { quickConnectionOpenTarget } from "@/lib/connection/connectionOpenTarget";
+import { OBJECT_BROWSER_SEARCH_FOCUS_EVENT, objectBrowserSearchFocusTabId } from "@/lib/tabs/objectBrowserSearchFocus";
 import { parseRecentConnectionIds, rankRecentConnections, RECENT_CONNECTION_IDS_STORAGE_KEY, recordRecentConnection } from "@/lib/connection/recentConnections";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
@@ -1066,6 +1067,19 @@ function activateSettingsPage() {
 
 function activateQuerySurface() {
   activateMainContentSurface("query");
+}
+
+async function focusRequestedObjectBrowserSearch(event: Event) {
+  const tabId = objectBrowserSearchFocusTabId(event);
+  if (!tabId) return;
+  await nextTick();
+  let remainingFrames = 8;
+  const focusWhenReady = () => {
+    if (queryStore.activeTabId !== tabId || contentAreaRef.value?.focusSearch()) return;
+    remainingFrames -= 1;
+    if (remainingFrames > 0) window.requestAnimationFrame(focusWhenReady);
+  };
+  focusWhenReady();
 }
 
 function activateOpenSpecialPageFallback() {
@@ -3625,6 +3639,7 @@ onMounted(async () => {
   document.addEventListener("visibilitychange", handleTabSwitcherVisibilityChange);
   window.addEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.addEventListener("dbx:activate-query-surface", activateQuerySurface);
+  window.addEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequestedObjectBrowserSearch);
   window.addEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   window.addEventListener("dbx:ai-run-notify", handleAiRunNotify);
   if (isDesktop) {
@@ -3708,6 +3723,7 @@ onUnmounted(() => {
   tabSwitcherKeyboard.reset();
   window.removeEventListener("dbx-open-driver-store", openDriverStoreFromEvent);
   window.removeEventListener("dbx:activate-query-surface", activateQuerySurface);
+  window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequestedObjectBrowserSearch);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   window.removeEventListener("dbx:ai-run-notify", handleAiRunNotify);
   document.removeEventListener("contextmenu", handleContextMenu);

@@ -5365,6 +5365,8 @@ export interface TableExportRequest {
   columnTypes?: Array<string | null | undefined>;
   columnComments?: Array<string | null> | null;
   primaryKeys?: string[];
+  /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
+  excludePrimaryKeys?: boolean;
   whereInput?: string;
   orderBy?: string;
   skipCount?: boolean;
@@ -5427,6 +5429,10 @@ export interface QueryResultExportRequest {
   columnComments?: Array<string | null> | null;
   autoFilter?: boolean;
   identifierQuote?: string;
+  /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
+  excludePrimaryKeys?: boolean;
+  /** 结果集对应的原表主键列名，由前端从表元数据带入。 */
+  primaryKeys?: string[];
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {

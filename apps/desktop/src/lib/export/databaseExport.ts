@@ -47,6 +47,8 @@ export interface BuildExportInsertStatementsOptions {
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
   rows: QueryResult["rows"];
+  /** 生成 INSERT 时需要排除的列名（例如导出时不带主键），忽略大小写匹配。 */
+  excludeColumns?: string[];
   batchSize?: number;
 }
 

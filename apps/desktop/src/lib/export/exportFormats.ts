@@ -40,6 +40,7 @@ export interface FormatSqlInsertOptions {
   spatialValues?: QueryResult["spatial_values"];
   rows: ExportCellValue[][];
   insertMode?: SqlInsertMode;
+  excludeColumns?: string[];
 }
 
 export function formatSqlInsert({ insertMode = "batch", ...options }: FormatSqlInsertOptions): Promise<string> {

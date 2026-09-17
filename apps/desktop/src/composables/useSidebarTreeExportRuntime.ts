@@ -445,6 +445,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         columnComments,
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
+        excludePrimaryKeys: settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === true,
         batchSize: target.batchSize,
         skipCount: format === "sql",
         rowLimit: target.rowLimit,

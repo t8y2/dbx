@@ -35,6 +35,7 @@ vi.mock("vue-i18n", () => ({
 }));
 
 import { useSidebarTreeExportRuntime } from "@/composables/useSidebarTreeExportRuntime";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { showStructurePreviewDialog, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
 
 function functionBody(name: string): string {
@@ -78,6 +79,7 @@ function exportSettings() {
       exportBatchSize: 128,
       exportRowLimit: 500,
       exportRowLimitEnabled: true,
+      dataGridExtractorOptions: DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
     },
   };
 }

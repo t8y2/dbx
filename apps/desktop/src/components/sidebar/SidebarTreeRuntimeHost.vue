@@ -5569,6 +5569,11 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       shortcut: shortcutDelete,
       variant: "destructive" as const,
     });
+    // Plugin-contributed entries must be appended before this branch returns.
+    // treeItemMenuItems() stops at the first factory that reports the node as
+    // handled, so a call placed after the factory loop never runs for a
+    // connection node.
+    appendPluginConnectionMenuItems(items, node);
     return true;
   }
 
@@ -6447,8 +6452,6 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
   }
-
-  appendPluginConnectionMenuItems(items, node);
 
   return items;
 }

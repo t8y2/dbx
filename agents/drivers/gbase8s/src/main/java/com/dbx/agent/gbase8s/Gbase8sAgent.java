@@ -51,6 +51,12 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     private static final Pattern CREATE_DATABASE_LOCALE_DIRECTIVE = Pattern.compile(
         "^\\s*--\\s*DBX_DB_LOCALE\\s*=\\s*(\\S+)\\s*\\r?\\n(.*)$", Pattern.DOTALL);
 
+    // A bare `DROP DATABASE <name>` (unquoted identifier, optional trailing semicolon). The target
+    // database's own locale is resolvable (it exists in sysdbslocale), so the drop is routed here
+    // without a directive.
+    private static final Pattern DROP_DATABASE_STATEMENT = Pattern.compile(
+        "^\\s*DROP\\s+DATABASE\\s+([A-Za-z0-9_]+)\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
+
     public static final JdbcAgentProfile GBASE8S_PROFILE = new JdbcAgentProfile(
         "com.gbasedbt.jdbc.Driver",
         "jdbc:gbasedbt-sqli://{host}:{port}/{database}:GBASEDBTSERVER=gbase8s",
@@ -180,9 +186,13 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         return localized;
     }
 
-    private String resolveCollate(ConnectParams params, String database) {
-        String key = params.getHost() + "|" + params.getPort() + "|" + getGbaseServer(params)
+    private static String collateCacheKey(ConnectParams params, String database) {
+        return params.getHost() + "|" + params.getPort() + "|" + getGbaseServer(params)
             + "|" + database.toLowerCase(Locale.ROOT);
+    }
+
+    private String resolveCollate(ConnectParams params, String database) {
+        String key = collateCacheKey(params, database);
         String cached = collateByDatabase.get(key);
         if (cached != null) {
             return cached;
@@ -269,7 +279,17 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
         CreateDatabaseLocaleDirective directive = parseCreateDatabaseLocaleDirective(sql);
         if (directive != null) {
-            runCreateDatabaseWithLocale(directive.statement(), directive.locale());
+            runDdlOnSysmasterWithLocale(directive.statement(), directive.locale());
+            clearMetadataCache();
+            return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
+        }
+        String dropTarget = parseDropDatabaseName(sql);
+        if (dropTarget != null && databaseListParams != null) {
+            // Informix cannot drop a database from a session whose DB_LOCALE differs, nor the
+            // current database; run it from sysmaster pinned to the target database's own locale.
+            String collate = resolveCollate(databaseListParams, dropTarget);
+            runDdlOnSysmasterWithLocale("DROP DATABASE " + dropTarget, collate);
+            invalidateCollateCache(dropTarget);
             clearMetadataCache();
             return new QueryResult(Collections.emptyList(), Collections.emptyList(), 0, 0);
         }
@@ -278,6 +298,27 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             clearMetadataCache();
         }
         return result;
+    }
+
+    /**
+     * Parse {@code sql} as a bare {@code DROP DATABASE <name>} statement, returning the (unquoted)
+     * target database name or {@code null} for anything else. Package visible so the routing
+     * decision is testable without a live connection.
+     */
+    static String parseDropDatabaseName(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        Matcher drop = DROP_DATABASE_STATEMENT.matcher(sql);
+        return drop.matches() ? drop.group(1) : null;
+    }
+
+    private void invalidateCollateCache(String database) {
+        ConnectParams base = databaseListParams;
+        if (base == null) {
+            return;
+        }
+        collateByDatabase.remove(collateCacheKey(base, database));
     }
 
     /**
@@ -306,12 +347,14 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
     }
 
     /**
-     * Run a {@code CREATE DATABASE} statement on a sysmaster session whose {@code DB_LOCALE} is
-     * pinned to {@code locale}, so the freshly created database inherits that codeset (Informix has
-     * no charset clause in {@code CREATE DATABASE}). Falls back to the configured locale when
+     * Run a DDL statement (e.g. {@code CREATE DATABASE} / {@code DROP DATABASE}) on a sysmaster
+     * session whose {@code DB_LOCALE} is pinned to {@code locale}. Informix has no charset clause
+     * in {@code CREATE DATABASE} (the new database inherits the creating session's DB_LOCALE) and
+     * cannot drop a database from a session whose locale differs, or drop the current database —
+     * so both run from sysmaster with the relevant locale. Falls back to the configured locale when
      * {@code locale} is blank or unsafe.
      */
-    private void runCreateDatabaseWithLocale(String statement, String locale) {
+    private void runDdlOnSysmasterWithLocale(String statement, String locale) {
         ConnectParams base = databaseListParams;
         if (base == null) {
             throw new IllegalStateException("Not connected");

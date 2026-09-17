@@ -258,6 +258,17 @@ class Gbase8sAgentTest {
     }
 
     @Test
+    void parseDropDatabaseNameRecognizesBareDrop() {
+        Assertions.assertEquals("app_db", Gbase8sAgent.parseDropDatabaseName("DROP DATABASE app_db;"));
+        Assertions.assertEquals("app_db", Gbase8sAgent.parseDropDatabaseName("  drop database app_db  "));
+        Assertions.assertEquals("app_db", Gbase8sAgent.parseDropDatabaseName("Drop Database app_db"));
+        Assertions.assertNull(Gbase8sAgent.parseDropDatabaseName("SELECT * FROM t;"));
+        Assertions.assertNull(Gbase8sAgent.parseDropDatabaseName("CREATE DATABASE app_db;"));
+        Assertions.assertNull(Gbase8sAgent.parseDropDatabaseName("DROP DATABASE \"app db\";"));
+        Assertions.assertNull(Gbase8sAgent.parseDropDatabaseName(null));
+    }
+
+    @Test
     void omitsOwnerSchemasWhenTheDatabaseCannotUseThemInDml() {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();

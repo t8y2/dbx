@@ -1342,13 +1342,13 @@ function parseMethodArgs(source: string, methodCallIndex: number): string[] | nu
   return splitTopLevel(source.slice(openIndex + 1, closeIndex));
 }
 
-interface MongoTextRange {
+export interface MongoTextRange {
   from: number;
   to: number;
   text: string;
 }
 
-function splitMongoCommandTextRanges(input: string): MongoTextRange[] {
+export function splitMongoCommandTextRanges(input: string): MongoTextRange[] {
   const commands: MongoTextRange[] = [];
   for (const segment of splitMongoSemicolonSeparatedSegments(input)) {
     const parsed = parseMongoCommand(segment.text);
@@ -1856,7 +1856,7 @@ export function validateBulkWriteOptions(optionsJson: string): string | null {
 }
 
 /** Filters of every non-insert operation, for the safety checks. */
-function bulkWriteFilters(operationsJson: string): string[] {
+export function bulkWriteFilters(operationsJson: string): string[] {
   try {
     const entries = JSON.parse(operationsJson) as Array<Record<string, { filter?: unknown }>>;
     return entries.flatMap((entry) => Object.values(entry)).flatMap((spec) => (isDocument(spec?.filter) ? [JSON.stringify(spec.filter)] : []));
@@ -1879,7 +1879,7 @@ function mongoWriteFilter(command: MongoWriteCommand): string | null {
   }
 }
 
-function mongoFilterIsEffectivelyUnbounded(json: string): boolean {
+export function mongoFilterIsEffectivelyUnbounded(json: string): boolean {
   const parsed = parseNormalizedJson(json);
   return !isRecord(parsed) || mongoFilterContainsOpaqueLogic(parsed) || mongoFilterObjectIsUnbounded(parsed);
 }

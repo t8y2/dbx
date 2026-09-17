@@ -380,19 +380,36 @@ impl PluginPackageInstaller {
         let activations_dir = container_dir.join(ACTIVATIONS_DIR);
         std::fs::create_dir_all(&versions_dir).map_err(|error| error.to_string())?;
         std::fs::create_dir_all(&activations_dir).map_err(|error| error.to_string())?;
-        let version_dir = versions_dir.join(version.to_string());
-        if version_dir.exists() && !matches!(policy, PluginInstallPolicy::LocalDevelopment) {
+        let version_string = version.to_string();
+        let version_dir = versions_dir.join(&version_string);
+        let current = read_latest_activation(&container_dir)?;
+        // Only the version the newest activation record resolves to *and* that is still a usable
+        // install counts as "already installed". Directory existence alone is not enough: rollback
+        // deliberately retains the version it replaces as the next rollback target, so an
+        // installed-but-inactive directory has to stay replaceable, and a broken active directory
+        // (missing or unparsable manifest) has to stay replaceable so Update can repair it.
+        if !matches!(policy, PluginInstallPolicy::LocalDevelopment)
+            && version_dir.exists()
+            && current.as_ref().is_some_and(|record| record.version == version_string)
+            && version_dir_is_usable(&version_dir, &manifest.id, &version_string)
+        {
             return Err(format!("Plugin '{}' version {} is already installed", manifest.id, version));
         }
-        let current = read_latest_activation(&container_dir)?;
-        let version_string = version.to_string();
-        let previous_version = current.as_ref().and_then(|record| {
-            if record.version == version_string {
-                record.previous_version.clone()
-            } else {
-                Some(record.version.clone())
-            }
-        });
+        let previous_version = current
+            .as_ref()
+            .and_then(|record| {
+                if record.version == version_string {
+                    record.previous_version.clone()
+                } else {
+                    Some(record.version.clone())
+                }
+            })
+            // Never record a rollback target that cannot be rolled back to: `rollback_locked`
+            // requires versions/<version>/manifest.json to have the matching identity.
+            .filter(|previous| {
+                previous != &version_string
+                    && version_dir_is_usable(&versions_dir.join(previous), &manifest.id, previous)
+            });
         let replaced_version_dir = if version_dir.exists() {
             let mut backup = versions_dir.join(format!(".{version_string}.replaced"));
             let mut suffix = 0u32;
@@ -408,10 +425,13 @@ impl PluginPackageInstaller {
             None
         };
         if let Err(error) = std::fs::rename(&package_dir, &version_dir) {
+            let mut message = format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version);
             if let Some(backup) = &replaced_version_dir {
-                let _ = std::fs::rename(backup, &version_dir);
+                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                    message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
+                }
             }
-            return Err(format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version));
+            return Err(message);
         }
 
         let activation = PluginActivationRecord {
@@ -423,10 +443,13 @@ impl PluginPackageInstaller {
         };
         if let Err(error) = write_activation_record(&container_dir, &activation) {
             let _ = std::fs::remove_dir_all(&version_dir);
+            let mut message = error;
             if let Some(backup) = &replaced_version_dir {
-                let _ = std::fs::rename(backup, &version_dir);
+                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                    message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
+                }
             }
-            return Err(error);
+            return Err(message);
         }
         if let Some(backup) = replaced_version_dir {
             if let Err(error) = std::fs::remove_dir_all(backup) {
@@ -480,6 +503,16 @@ impl PluginPackageInstaller {
         }
         Ok(PluginRollbackResult { plugin, previous_version })
     }
+}
+
+/// True when `versions/<version>` has the manifest identity that this store location advertises.
+/// `rollback_locked` rejects a parsed manifest whose id or version differs, so the installer must
+/// not retain it as an active install or as a rollback target either.
+fn version_dir_is_usable(version_dir: &Path, plugin_id: &str, version: &str) -> bool {
+    std::fs::read(version_dir.join("manifest.json")).is_ok_and(|raw| {
+        serde_json::from_slice::<PluginManifest>(&raw)
+            .is_ok_and(|manifest| manifest.id == plugin_id && manifest.version == version)
+    })
 }
 
 pub(super) fn resolve_active_plugin_dir(container_dir: &Path) -> Result<Option<PathBuf>, String> {
@@ -958,6 +991,7 @@ fn sync_directory(_path: &Path) -> Result<(), String> {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Cursor, Write};
+    use std::path::Path;
 
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
@@ -1187,6 +1221,170 @@ mod tests {
             zip.finish().unwrap();
         }
         assert!(installer.install_bytes(output.get_ref(), PluginInstallPolicy::LocalDevelopment).is_err());
+    }
+
+    fn signed_installer(root: &Path, seed: [u8; 32]) -> (PluginPackageInstaller, SigningKey) {
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "sample-key".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        );
+        let installer = PluginPackageInstaller::with_trust_store(
+            root.to_path_buf(),
+            "0.5.67",
+            PluginTrustStore::from_base64_keys(keys).unwrap(),
+        );
+        (installer, signing_key)
+    }
+
+    fn activation_record_count(container: &Path) -> usize {
+        std::fs::read_dir(container.join(ACTIVATIONS_DIR))
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| is_activation_record_file(&entry.path())))
+            .count()
+    }
+
+    fn sorted_version_dirs(container: &Path) -> Vec<String> {
+        let mut versions = std::fs::read_dir(container.join(VERSIONS_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions
+    }
+
+    #[test]
+    fn reinstalls_retained_rollback_version_after_rollback_under_signed_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [13u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+        let expectation = |version: &str| PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: version.to_string(),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "sample-key".to_string(),
+        };
+
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("1.0.0")).unwrap();
+        installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0")).unwrap();
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+
+        // 1.1.0 is installed but inactive after the rollback: reinstalling it has to replace the
+        // retained directory instead of failing with "already installed".
+        let reinstalled = installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0")).unwrap();
+
+        assert_eq!(reinstalled.previous_version.as_deref(), Some("1.0.0"));
+        let container = root.path().join("sample.hello");
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0", "1.1.0"]);
+        assert_eq!(activation_record_count(&container), 2);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+    }
+
+    #[test]
+    fn rejects_reinstall_of_active_version_without_touching_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [19u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let error = installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap_err();
+
+        assert!(error.contains("is already installed"), "{error}");
+        let container = root.path().join("sample.hello");
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0"]);
+        assert_eq!(activation_record_count(&container), 1);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn reinstalls_active_version_whose_manifest_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [23u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let container = root.path().join("sample.hello");
+        let version_dir = container.join(VERSIONS_DIR).join("1.0.0");
+        std::fs::remove_file(version_dir.join("manifest.json")).unwrap();
+
+        let repaired = installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(repaired.previous_version, None);
+        assert!(version_dir.join("manifest.json").is_file());
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0"]);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn reinstalls_active_version_whose_manifest_identity_is_wrong() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [27u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let container = root.path().join("sample.hello");
+        let version_dir = container.join(VERSIONS_DIR).join("1.0.0");
+        let manifest_path = version_dir.join("manifest.json");
+        let mismatched_manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("\"version\": \"1.0.0\"", "\"version\": \"1.0.1\"");
+        std::fs::write(&manifest_path, mismatched_manifest).unwrap();
+
+        // A parseable manifest with the wrong identity cannot be activated or rolled back to, so
+        // it must be repaired rather than satisfying the already-installed guard.
+        let repaired = installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(repaired.previous_version, None);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn does_not_record_a_rollback_target_whose_directory_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [29u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        installer.install_bytes(&signed("1.1.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+
+        let container = root.path().join("sample.hello");
+        std::fs::remove_dir_all(container.join(VERSIONS_DIR).join("1.0.0")).unwrap();
+
+        let recovered = installer.install_bytes(&signed("1.1.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(recovered.previous_version, None);
+        assert_eq!(sorted_version_dirs(&container), ["1.1.0"]);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
+        assert!(installer.rollback("sample.hello").unwrap_err().contains("does not have a rollback version"));
+    }
+
+    #[test]
+    fn reinstalls_orphan_version_directory_without_activation_record() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [31u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let container = root.path().join("sample.hello");
+        let orphan = container.join(VERSIONS_DIR).join("1.1.0");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("stale.txt"), b"interrupted").unwrap();
+
+        let installed = installer.install_bytes(&signed("1.1.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(installed.previous_version.as_deref(), Some("1.0.0"));
+        assert!(!orphan.join("stale.txt").exists());
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0", "1.1.0"]);
+        assert_eq!(activation_record_count(&container), 2);
     }
 
     fn package(version: &str, signer: Option<(&SigningKey, &str)>, tamper: bool) -> Vec<u8> {

@@ -4,7 +4,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
 import { Decoration, EditorView } from "@codemirror/view";
-import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
+import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, ReplaceAll, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -19,6 +19,7 @@ import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue"
 import NacosConfigHistoryDialog from "@/components/nacos/NacosConfigHistoryDialog.vue";
 import NacosConfigBatchDialog, { type NacosBatchDialogMode, type NacosConfigTransferDialogPayload, type NacosConfigTransferTarget } from "@/components/nacos/NacosConfigBatchDialog.vue";
 import NacosContentSearchDialog from "@/components/nacos/NacosContentSearchDialog.vue";
+import NacosContentReplaceDialog from "@/components/nacos/NacosContentReplaceDialog.vue";
 import { useToast } from "@/composables/useToast";
 import { useNacosConfigListColumnResize, type ToggleableNacosConfigListColumnKey } from "@/composables/useNacosConfigListColumnResize";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -218,6 +219,7 @@ const configEditorWheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
 const knownConfigFormats = ref<Record<string, string>>({});
 const selectedConfigKeys = ref<string[]>([]);
 const searchOpen = ref(false);
+const contentReplaceOpen = ref(false);
 const searchLoading = ref(false);
 const searchError = ref("");
 const searchResult = ref<NacosContentSearchResult | null>(null);
@@ -1427,6 +1429,11 @@ function handleNacosNamespacesChanged(detail: NacosNamespacesChangedDetail) {
 async function openSearchDialog() {
   searchOpen.value = true;
   await loadBatchNamespaces();
+}
+
+async function refreshAfterContentReplace() {
+  await loadConfigsWithRetry(configPageNo.value);
+  if (selectedConfig.value) await selectConfig(selectedConfig.value);
 }
 
 async function openBatchDialog(mode: NacosBatchDialogMode) {
@@ -2767,6 +2774,10 @@ useUpdateBlocker(() =>
             <X class="h-3.5 w-3.5" />
           </Button>
         </div>
+        <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" :title="t('nacos.contentReplace')" @click="contentReplaceOpen = true">
+          <ReplaceAll class="h-3.5 w-3.5" />
+          {{ t("nacos.contentReplace") }}
+        </Button>
         <Button size="sm" variant="outline" class="h-8 gap-1.5" @click="openBatchDialog('export')">
           <Archive class="h-3.5 w-3.5" />
           {{ t("nacos.batchExport") }}
@@ -3403,6 +3414,8 @@ useUpdateBlocker(() =>
       @export="exportContentSearchResults"
       @clear="clearContentSearchSession"
     />
+
+    <NacosContentReplaceDialog v-model:open="contentReplaceOpen" :connection-id="connectionId" :current-namespace="namespace" :read-only="readOnly" @changed="refreshAfterContentReplace" />
 
     <NacosConfigBatchDialog
       v-model:open="batchOpen"

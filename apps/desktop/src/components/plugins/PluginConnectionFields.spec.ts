@@ -4,9 +4,19 @@ import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import PluginConnectionFields from "./PluginConnectionFields.vue";
-import type { PluginConnectionProviderContribution, PluginFormFieldBinding, PluginFormFieldValue } from "@/types/database";
+import type { PluginConnectionProviderContribution, PluginFormField, PluginFormFieldBinding, PluginFormFieldValue } from "@/types/database";
 
 const invokePluginMock = vi.fn();
+const { pickPluginFieldFileMock, tauriRuntime } = vi.hoisted(() => ({
+  pickPluginFieldFileMock: vi.fn(),
+  tauriRuntime: { value: false },
+}));
+
+vi.mock("@/lib/plugins/pluginFieldPicker", () => ({
+  PLUGIN_PICKER_MAX_BYTES: 1_048_576,
+  pickPluginFieldFile: (...args: unknown[]) => pickPluginFieldFileMock(...args),
+}));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => tauriRuntime.value }));
 
 vi.mock("@/lib/backend/api", () => ({
   listLocalSshKeys: vi.fn(async () => [
@@ -55,6 +65,72 @@ async function mountFields(initialValues: Record<string, PluginFormFieldValue> =
   await nextTick();
   return state;
 }
+
+describe("PluginConnectionFields file picker", () => {
+  const pickerContribution = (picker: PluginFormField["picker"], contentField = true): PluginConnectionProviderContribution => ({
+    type: "connection-provider",
+    id: "ssh.connection",
+    label: "SSH",
+    database_type: "ssh",
+    fields: [{ key: "private_key_path", label: "Private key path", type: "text", picker }, ...(contentField ? [{ key: "private_key", label: "Private key", type: "textarea" as const, binding: "secret" as const }] : [])],
+  });
+
+  it("stores the chosen client path on desktop and drops a stale uploaded copy", async () => {
+    tauriRuntime.value = true;
+    pickPluginFieldFileMock.mockReset().mockResolvedValue({ path: "/Users/dev/.ssh/id_rsa", name: "id_rsa" });
+    const provider = pickerContribution({ kind: "file", accept: [".pem"], content_field: "private_key" });
+    const state = await mountContribution(provider, { private_key: "OLD-UPLOADED-KEY" });
+
+    const browse = document.querySelector<HTMLButtonElement>("#ssh-connection-private_key_path-picker");
+    expect(browse?.textContent).toContain("Choose file");
+    browse?.click();
+
+    await vi.waitFor(() => expect(state.values.private_key_path).toBe("/Users/dev/.ssh/id_rsa"));
+    // The plugin prefers content over a path, so picking a path must clear the
+    // previously uploaded key or the stale one would keep winning.
+    expect(state.values.private_key).toBeUndefined();
+  });
+
+  it("uploads the file content into the paired field on browser hosts", async () => {
+    tauriRuntime.value = false;
+    pickPluginFieldFileMock.mockReset().mockResolvedValue({ content: "UPLOADED-KEY", name: "id_rsa" });
+    const provider = pickerContribution({ kind: "file", accept: [".pem"], content_field: "private_key" });
+    const state = await mountContribution(provider, { private_key_path: "/Users/dev/.ssh/id_rsa" });
+
+    const upload = document.querySelector<HTMLButtonElement>("#ssh-connection-private_key_path-picker");
+    expect(upload?.textContent).toContain("Upload file");
+    upload?.click();
+
+    await vi.waitFor(() => expect(state.values.private_key).toBe("UPLOADED-KEY"));
+    // A browser path would point at the user's machine, not the host's.
+    expect(state.values.private_key_path).toBeUndefined();
+  });
+
+  it("hides a browser-unsupported picker and keeps the desktop one available", async () => {
+    const provider = pickerContribution({ kind: "file" }, false);
+
+    tauriRuntime.value = false;
+    await mountContribution(provider, {});
+    expect(document.querySelector("#ssh-connection-private_key_path-picker")).toBeNull();
+
+    tauriRuntime.value = true;
+    await mountContribution(provider, {});
+    expect(document.querySelector("#ssh-connection-private_key_path-picker")).not.toBeNull();
+  });
+
+  it("surfaces a picker failure without touching the form", async () => {
+    tauriRuntime.value = false;
+    pickPluginFieldFileMock.mockReset().mockRejectedValue(new Error("File is larger than 1024 KiB"));
+    const provider = pickerContribution({ kind: "file", content_field: "private_key" });
+    const state = await mountContribution(provider, { private_key: "KEEP-ME" });
+
+    document.querySelector<HTMLButtonElement>("#ssh-connection-private_key_path-picker")?.click();
+
+    await vi.waitFor(() => expect(pickPluginFieldFileMock).toHaveBeenCalled());
+    await nextTick();
+    expect(state.values).toEqual({ private_key: "KEEP-ME" });
+  });
+});
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();

@@ -170,6 +170,20 @@ Fields can also be conditional. `visible_when` and `required_when` take a clause
 
 Conditions cascade: while the field a clause reads is hidden, the clause does not count, so a hidden option's stored default never surfaces a grandchild field. DBX evaluates the same expression for the dialog and for save/test/connect validation, an unset or empty value never matches, and composite trees are capped at 8 levels and 64 nodes.
 
+Text, password, and textarea fields can offer a **local file action** — for example an SSH private key or a keystore — with `picker`:
+
+```json
+{
+  "key": "private_key_path",
+  "label": "Private key path",
+  "type": "text",
+  "binding": "config",
+  "picker": { "kind": "file", "accept": [".pem", ".key"], "content_field": "private_key" }
+}
+```
+
+The desktop app opens a native picker and stores the chosen absolute path, which the plugin backend (same machine) can read. The browser build cannot resolve a client path, so the action becomes an upload: DBX reads the file and stores its content in the declared `content_field` sibling, and clears the path field — picking a path clears the uploaded content and vice versa, so the two alternatives never disagree. `kind` also accepts `directory` (desktop only), `accept` takes up to 16 extension or MIME filters, and uploads are capped at 1 MiB.
+
 When a plugin needs the user mid-flight — a bastion's keyboard-interactive MFA code, a host-key confirmation, a choice of account — it can call the Host API method `host/requestUserInput` (Host API 1.1) and receive the typed answer. The request goes through the same blocking dialog DBX uses for its own prompts, including during `connection/test` and `connection/connect`:
 
 ```json

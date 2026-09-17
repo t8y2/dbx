@@ -224,6 +224,27 @@ Password fields default to `secret` when `binding` is omitted. DBX validates req
 
 Absent optional fields stay absent: when DBX hands the manifest to its own UI it omits `description`, `placeholder`, `default`, and `binding` for fields that do not declare them, and `"default": null` means "no default" exactly like omitting the key. Treat a missing value as unset — never as an empty string, and never as the literal text `null`, which is not a storable plugin value.
 
+#### Local file fields
+
+A `text`, `password`, or `textarea` field may declare `picker` when the user should choose a local file (private keys, keystores, credential files):
+
+```json
+{
+  "key": "private_key_path",
+  "label": "Private key path",
+  "type": "text",
+  "binding": "config",
+  "picker": { "kind": "file", "accept": [".pem", ".key", ".ppk"], "content_field": "private_key" }
+}
+```
+
+- **Desktop hosts** open a native picker and store the chosen **absolute path** in the declaring field. The plugin backend runs on the same machine, so it can read the file itself.
+- **Browser hosts** cannot resolve a path on the user's machine, so the same action becomes an **upload**: DBX reads the selected file and stores its **content** in `content_field` (which must be a declared `text` / `password` / `textarea` sibling), and clears the declaring field. A picker without `content_field` is therefore desktop-only and stays hidden in the browser.
+- Switching source clears the other one: choosing a path removes the uploaded content and vice versa. This matters for fields that are alternatives — a plugin that prefers `private_key` content over `private_key_path` must not keep serving a stale upload after the user re-picked a path.
+- `kind` is `file` (default use case) or `directory` (desktop-only: a browser cannot hand a folder to the plugin). `accept` lists up to 16 filters as extensions (`.pem`) or MIME types (`text/plain`) and is passed to the native dialog and the browser file input unchanged. Uploads are capped at 1 MiB.
+
+`picker` is additive; hosts older than the release that ships it reject the manifest, so keep `engines.dbx` at or above that release when the form relies on it.
+
 #### Conditional fields
 
 A field may declare `visible_when` and `required_when`. A leaf clause matches when the referenced sibling field holds a non-empty value listed in `one_of`; listed values may be strings, numbers, or booleans and are compared by canonical string form, so `false` and `"false"` both match a boolean `false`. Clauses compose with `all_of`, `any_of`, and `not`:

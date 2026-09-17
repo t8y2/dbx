@@ -28,6 +28,9 @@ pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
 /// manifest cannot make the host or the dialog evaluator do unbounded work.
 pub const MAX_PLUGIN_FIELD_CONDITION_DEPTH: usize = 8;
 pub const MAX_PLUGIN_FIELD_CONDITION_NODES: usize = 64;
+/// Cap the file filters a picker may declare so one manifest cannot bloat the
+/// native dialog or the browser `accept` attribute.
+pub const MAX_PLUGIN_PICKER_FILTERS: usize = 16;
 const HOST_NETWORK_PERMISSION_PREFIX: &str = "host.network:";
 
 /// Parse a `host.network:https://host[:port]` permission into the origin that
@@ -260,6 +263,15 @@ pub struct PluginFormFieldDefinition {
     pub options: Vec<PluginFormFieldOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<PluginFormFieldBinding>,
+    /// Optional local-file action on a text/password/textarea field.
+    ///
+    /// Desktop (client-side) hosts open a native picker and store the chosen
+    /// **absolute path** in this field. Browser hosts cannot read a client
+    /// path, so the same action becomes an **upload**: the host reads the file
+    /// and stores its content in `content_field` instead. Contract documented
+    /// in `plugins/README.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<PluginFormFieldPicker>,
     /// Plugin method returning `{ options: [{ value, label }] }`; the host
     /// connection form fetches it and renders the field as a dynamic select.
     /// Optional and forward/backward compatible: older hosts reject the
@@ -497,6 +509,34 @@ pub enum PluginFormFieldBinding {
 pub struct PluginFormFieldOption {
     pub label: String,
     pub value: String,
+}
+
+/// A file action on a plugin connection field (see
+/// [`PluginFormFieldDefinition::picker`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFormFieldPicker {
+    pub kind: PluginFormFieldPickerKind,
+    /// File filters offered by the picker, e.g. `[".pem", ".key"]`. Entries are
+    /// extensions (`.ext`) or MIME types (`text/plain`); non-empty entries only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept: Vec<String>,
+    /// Field that receives the file **content** on hosts without a client
+    /// filesystem (the browser build), which cannot produce a usable path.
+    /// Required for the picker to appear in the browser; on desktop the chosen
+    /// path goes into the declaring field and this field is cleared so the two
+    /// sources cannot disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginFormFieldPickerKind {
+    /// Pick one existing file.
+    File,
+    /// Pick one existing directory (desktop only; no browser equivalent).
+    Directory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1169,6 +1209,78 @@ fn validate_connection_actions(
     }
 }
 
+/// A picker action only makes sense on a field the user can type into, and the
+/// field that receives uploaded content must be a declared sibling.
+fn validate_form_field_picker(
+    field: &PluginFormFieldDefinition,
+    fields: &[PluginFormFieldDefinition],
+    contribution_index: usize,
+    field_index: usize,
+    errors: &mut Vec<String>,
+) {
+    let Some(picker) = &field.picker else {
+        return;
+    };
+    let location = format!("Contribution at index {contribution_index} field {field_index} picker");
+    if !matches!(
+        field.field_type,
+        PluginFormFieldType::Text | PluginFormFieldType::Password | PluginFormFieldType::Textarea
+    ) {
+        errors.push(format!("{location} is only supported on text, password, or textarea fields"));
+    }
+    if picker.accept.len() > MAX_PLUGIN_PICKER_FILTERS {
+        errors.push(format!("{location} declares more than {MAX_PLUGIN_PICKER_FILTERS} filters"));
+    }
+    for filter in &picker.accept {
+        if !valid_picker_filter(filter) {
+            errors.push(format!("{location} filter '{filter}' must look like '.pem' or 'text/plain'"));
+        }
+    }
+    if picker.kind == PluginFormFieldPickerKind::Directory && picker.content_field.is_some() {
+        errors.push(format!("{location} cannot upload a directory into a content field"));
+    }
+    let Some(content_key) = &picker.content_field else {
+        return;
+    };
+    match fields.iter().find(|candidate| candidate.key == *content_key) {
+        None => errors.push(format!("{location} content_field references unknown field '{content_key}'")),
+        Some(content) => {
+            if content.key == field.key {
+                errors.push(format!("{location} content_field cannot be the declaring field"));
+            }
+            if !matches!(
+                content.field_type,
+                PluginFormFieldType::Text | PluginFormFieldType::Password | PluginFormFieldType::Textarea
+            ) {
+                errors.push(format!("{location} content_field '{content_key}' must be a text or textarea field"));
+            }
+        }
+    }
+}
+
+/// Accept entries are file extensions (`.pem`) or MIME types (`text/plain`), so
+/// the browser `<input accept>` attribute and the native dialog filters can use
+/// them directly. Anything else is rejected instead of silently ignored.
+fn valid_picker_filter(filter: &str) -> bool {
+    if let Some(extension) = filter.strip_prefix('.') {
+        return !extension.is_empty()
+            && extension.len() <= 16
+            && extension.chars().all(|character| character.is_ascii_alphanumeric());
+    }
+    let mut parts = filter.split('/');
+    let (Some(kind), Some(subtype), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 64
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.' | '_' | '*'))
+    };
+    valid_part(kind) && valid_part(subtype)
+}
+
 fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index: usize, errors: &mut Vec<String>) {
     let mut seen_keys = HashSet::new();
     let field_keys = fields.iter().map(|field| field.key.as_str()).collect::<HashSet<_>>();
@@ -1183,6 +1295,7 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             &format!("Contribution at index {contribution_index} field {field_index} label"),
             errors,
         );
+        validate_form_field_picker(field, fields, contribution_index, field_index, errors);
 
         for (name, condition) in
             [("visible_when", field.visible_when.as_ref()), ("required_when", field.required_when.as_ref())]
@@ -2165,6 +2278,109 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("required_when references unknown field 'ghost'")));
+    }
+
+    /// The SSH plugin asks the host for a key file: desktop hosts store the
+    /// client path, browser hosts upload the content into a paired field.
+    #[test]
+    fn parses_and_validates_file_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "ssh.connection",
+                "label": "SSH",
+                "database_type": "ssh",
+                "fields": [
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key path",
+                        "type": "text",
+                        "binding": "config",
+                        "picker": {
+                            "kind": "file",
+                            "accept": [".pem", ".key", "text/plain"],
+                            "content_field": "private_key"
+                        }
+                    },
+                    { "key": "private_key", "label": "Private key", "type": "textarea", "binding": "secret" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let provider = manifest.connection_provider("ssh.connection").unwrap().unwrap();
+        let picker = provider.fields[0].picker.as_ref().unwrap();
+        assert_eq!(picker.kind, super::PluginFormFieldPickerKind::File);
+        assert_eq!(picker.accept, vec![".pem", ".key", "text/plain"]);
+        assert_eq!(picker.content_field.as_deref(), Some("private_key"));
+        // The picker round-trips through the manifest the UI receives.
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(serialized["contributions"][0]["fields"][0]["picker"]["kind"], "file");
+    }
+
+    #[test]
+    fn rejects_invalid_file_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "ssh.connection",
+                "label": "SSH",
+                "database_type": "ssh",
+                "fields": [
+                    { "key": "port", "label": "Port", "type": "number", "picker": { "kind": "file" } },
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key path",
+                        "type": "text",
+                        "picker": {
+                            "kind": "file",
+                            "accept": ["pem", ".", "text/"],
+                            "content_field": "missing"
+                        }
+                    },
+                    {
+                        "key": "self_reference",
+                        "label": "Self",
+                        "type": "text",
+                        "picker": { "kind": "file", "content_field": "self_reference" }
+                    },
+                    {
+                        "key": "folder",
+                        "label": "Folder",
+                        "type": "text",
+                        "picker": { "kind": "directory", "content_field": "private_key_path" }
+                    },
+                    { "key": "private_key", "label": "Private key", "type": "textarea", "binding": "secret" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(!compatibility.compatible);
+        let errors = compatibility.errors.join("\n");
+        assert!(errors.contains("picker is only supported on text, password, or textarea fields"), "{errors}");
+        assert!(errors.contains("filter 'pem' must look like '.pem' or 'text/plain'"), "{errors}");
+        assert!(errors.contains("filter 'text/' must look like '.pem' or 'text/plain'"), "{errors}");
+        assert!(errors.contains("content_field references unknown field 'missing'"), "{errors}");
+        assert!(errors.contains("content_field cannot be the declaring field"), "{errors}");
+        assert!(errors.contains("cannot upload a directory into a content field"), "{errors}");
     }
 
     #[test]

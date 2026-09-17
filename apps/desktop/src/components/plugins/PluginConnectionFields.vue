@@ -1,14 +1,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { FolderOpen } from "@lucide/vue";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import PasswordTextarea from "@/components/ui/PasswordTextarea.vue";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { useToast } from "@/composables/useToast";
 import { pluginFieldIsRequired, pluginFieldIsVisible, type PluginFieldResolver } from "@/lib/plugins/pluginFieldConditions";
+import { pickPluginFieldFile } from "@/lib/plugins/pluginFieldPicker";
 import { invokePlugin, listLocalSshKeys } from "@/lib/backend/api";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { LocalSshKey, PluginConnectionProviderContribution, PluginFormField, PluginFormFieldBinding, PluginFormFieldOption, PluginFormFieldValue } from "@/types/database";
 
 const props = defineProps<{
@@ -24,6 +29,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const { toast } = useToast();
 
 const formValues = computed(() => props.modelValue);
 /** Value of any sibling field by key (condition evaluation reads current form values). */
@@ -185,7 +191,74 @@ function applyLocalSshKey(field: PluginFormField, event: Event) {
   const selected = localSshKeys.value.find((key) => key.path === select.value);
   select.value = "";
   if (!selected) return;
-  updateField(field, selected.path);
+  pickPluginFieldPath(field, selected.path);
+}
+
+// ---------------------------------------------------------------------------
+// Manifest-declared local file action (`picker`, Host API 1.1)
+// ---------------------------------------------------------------------------
+
+/** Fields whose picker acts on the working copy; the plugin reads the file. */
+function pickerField(field: PluginFormField) {
+  return field.picker;
+}
+
+/**
+ * Browser hosts cannot hand a path to the plugin, so the picker uploads the
+ * file content into the declared `content_field` instead. A picker without a
+ * `content_field` is desktop-only and stays hidden in the browser.
+ */
+function pickerVisible(field: PluginFormField): boolean {
+  const picker = pickerField(field);
+  if (!picker) return false;
+  if (isTauriRuntime()) return true;
+  return picker.kind === "file" && Boolean(picker.content_field);
+}
+
+const pickerBusyField = ref<string | null>(null);
+
+function pickerLabelKey(field: PluginFormField): string {
+  const picker = pickerField(field);
+  if (picker?.kind === "directory") return isTauriRuntime() ? "connection.pluginFieldSelectDirectory" : "connection.pluginFieldSelectFile";
+  return isTauriRuntime() ? "connection.pluginFieldSelectFile" : "connection.pluginFieldUploadFile";
+}
+
+/** Path selection (desktop) and the SSH key dropdown share this entry point. */
+function pickPluginFieldPath(field: PluginFormField, path: string) {
+  const picker = pickerField(field);
+  const next = { ...formValues.value, [field.key]: path };
+  // The plugin treats content as more specific than a path, so selecting a path
+  // must clear the uploaded copy — otherwise a stale upload keeps winning.
+  if (picker?.content_field) delete next[picker.content_field];
+  emit("update:modelValue", next);
+}
+
+/** Upload content into the paired field and clear the (meaningless) path. */
+function pickPluginFieldContent(field: PluginFormField, contentKey: string, content: string) {
+  const next = { ...formValues.value, [contentKey]: content };
+  delete next[field.key];
+  emit("update:modelValue", next);
+}
+
+async function runPluginFieldPicker(field: PluginFormField) {
+  const picker = pickerField(field);
+  if (!picker || pickerBusyField.value) return;
+  pickerBusyField.value = field.key;
+  try {
+    const picked = await pickPluginFieldFile(picker);
+    if (!picked) return;
+    if (picked.path !== undefined) {
+      pickPluginFieldPath(field, picked.path);
+      return;
+    }
+    if (picked.content !== undefined && picker.content_field) {
+      pickPluginFieldContent(field, picker.content_field, picked.content);
+    }
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error));
+  } finally {
+    pickerBusyField.value = null;
+  }
 }
 </script>
 
@@ -254,6 +327,12 @@ function applyLocalSshKey(field: PluginFormField, event: Event) {
         </Select>
         <div v-else-if="field.type === 'boolean'" class="flex h-9 items-center">
           <Switch :id="fieldId(field)" :model-value="Boolean(fieldValue(field))" size="sm" @update:model-value="updateBooleanField(field, $event)" />
+        </div>
+        <div v-if="pickerVisible(field)" class="flex items-center gap-2">
+          <Button :id="`${fieldId(field)}-picker`" variant="outline" size="sm" class="h-8 gap-1.5 text-xs" :disabled="pickerBusyField === field.key" @click="runPluginFieldPicker(field)">
+            <FolderOpen class="size-3.5" aria-hidden="true" />
+            {{ t(pickerLabelKey(field)) }}
+          </Button>
         </div>
         <div v-if="field.description" class="text-[11px] leading-5 text-muted-foreground">{{ field.description }}</div>
       </div>

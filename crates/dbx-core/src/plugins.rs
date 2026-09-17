@@ -42,11 +42,11 @@ pub use manifest::{
     PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution, PluginDriverManifest,
     PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause, PluginFieldConditionLiteral,
     PluginFilesystemCapability, PluginFilesystemProviderContribution, PluginFormFieldBinding,
-    PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldType, PluginManifest, PluginUiEntrypoint,
-    PluginWorkbenchContribution, PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD,
-    PLUGIN_CONNECTION_DISCONNECT_METHOD, PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION,
-    SUPPORTED_PLUGIN_HOST_FEATURES, SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
-    SUPPORTED_PLUGIN_PROTOCOL_VERSION,
+    PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker, PluginFormFieldPickerKind,
+    PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
+    PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
+    PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_HOST_FEATURES,
+    SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
 };
 pub use runtime::{
     PluginBinaryMessage, PluginEvent, PluginHandshake, PluginHandshakeIdentity, PluginSessionState,

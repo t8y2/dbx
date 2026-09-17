@@ -311,6 +311,20 @@ export interface PluginFieldConditionNot {
   not: PluginFieldCondition;
 }
 
+/** Host API 1.1: local-file action on a plugin connection field. */
+export interface PluginFormFieldPicker {
+  /** `directory` is desktop-only. */
+  kind: "file" | "directory";
+  /** Extensions (`.pem`) or MIME types (`text/plain`) offered by the picker. */
+  accept?: string[];
+  /**
+   * Declared sibling field that receives the file content on hosts without a
+   * client filesystem (the browser build). Desktop hosts store the chosen path
+   * in the declaring field and clear this one instead.
+   */
+  content_field?: string;
+}
+
 /**
  * `visible_when` / `required_when` expression. The legacy `{ field, one_of }`
  * clause keeps its exact meaning; `all_of` / `any_of` / `not` compose clauses
@@ -332,6 +346,8 @@ export interface PluginFormField {
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
    * select rendering; falls back to the declared type when unavailable. */
   options_action?: string;
+  /** Host API 1.1: offer a local-file action on this field. */
+  picker?: PluginFormFieldPicker;
   binding?: PluginFormFieldBinding;
   visible_when?: PluginFieldCondition;
   required_when?: PluginFieldCondition;

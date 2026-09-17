@@ -16,6 +16,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -454,6 +455,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             Connection conn = requireConnection();
             String owner = trim(schema);
             Set<Integer> primaryKeyColumns = getPrimaryKeyColumnNumbers(conn, owner, table);
+            Map<String, String> columnDefaults = loadColumnDefaults(conn, owner, table);
             List<Object> args = new ArrayList<>();
             args.add(table);
             StringBuilder sql = new StringBuilder("""
@@ -482,7 +484,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
                             name,
                             mapColType(baseType),
                             (coltype & 256) == 0,
-                            null,
+                            columnDefaults.get(name),
                             primaryKeyColumns.contains(rs.getInt("colno")),
                             null,
                             emptyToNull(trim(rs.getString("comments"))),
@@ -497,6 +499,38 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static Map<String, String> loadColumnDefaults(Connection conn, String owner, String table) {
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        StringBuilder sql = new StringBuilder("""
+            SELECT c.colname, e.`default` AS column_default
+            FROM systables t
+            JOIN syscolumns c ON t.tabid = c.tabid
+            JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
+            WHERE t.tabname = ? AND e.`type` = 'T'
+            """.stripIndent().trim());
+        if (!owner.isEmpty()) {
+            sql.append(" AND t.owner = ?");
+            args.add(owner);
+        }
+
+        Map<String, String> defaults = new LinkedHashMap<>();
+        try (PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            bind(stmt, args);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String value = rs.getString("column_default");
+                    if (value != null) {
+                        defaults.put(trim(rs.getString("colname")), value);
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            return Collections.emptyMap();
+        }
+        return defaults;
     }
 
     @Override
@@ -1028,7 +1062,7 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         sql.append(" AND tabtype IN (").append(String.join(", ", tabTypes)).append(")");
     }
 
-    private static void bind(PreparedStatement stmt, List<Object> args) throws Exception {
+    private static void bind(PreparedStatement stmt, List<Object> args) throws SQLException {
         for (int index = 0; index < args.size(); index += 1) {
             stmt.setString(index + 1, String.valueOf(args.get(index)));
         }

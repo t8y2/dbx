@@ -17,6 +17,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -344,6 +345,7 @@ class Gbase8sAgentTest {
                     {1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null}
                 }
             ),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
             resultSet(
                 new String[]{"colname", "coltype", "colno", "collength", "comments"},
                 new Object[][]{
@@ -356,11 +358,12 @@ class Gbase8sAgentTest {
 
         List<ColumnInfo> columns = agent.getColumns("root", "products");
 
-        Assertions.assertEquals(2, sql.size());
+        Assertions.assertEquals(3, sql.size());
         Assertions.assertTrue(sql.get(0).contains("FROM sysconstraints"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
-        Assertions.assertTrue(sql.get(1).contains("FROM syscolumns"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("t.owner = ?"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("FROM syscolumns"), sql.get(2));
+        Assertions.assertTrue(sql.get(2).contains("t.owner = ?"), sql.get(2));
         Assertions.assertEquals(3, columns.size());
         Assertions.assertEquals("product_id", columns.get(0).getName());
         Assertions.assertEquals("INTEGER", columns.get(0).getData_type());
@@ -373,7 +376,68 @@ class Gbase8sAgentTest {
         Assertions.assertEquals(2, columns.get(2).getNumeric_scale());
         Assertions.assertEquals("Product identifier", columns.get(0).getComment());
         Assertions.assertEquals("Unit price", columns.get(2).getComment());
-        Assertions.assertTrue(sql.get(1).contains("LEFT JOIN syscolcomms"), sql.get(1));
+        Assertions.assertTrue(sql.get(2).contains("LEFT JOIN syscolcomms"), sql.get(2));
+    }
+
+    @Test
+    void getColumnsLoadsDefaultsFromDefaultExpressionCatalog() throws Exception {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{{1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null}}
+            ),
+            resultSet(
+                new String[]{"colname", "column_default"},
+                new Object[][]{{"op_id", "'0'"}, {"created_at", "current_timestamp"}}
+            ),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{
+                    {"id", 258, 1, 4, null},
+                    {"op_id", 2, 2, 4, null},
+                    {"created_at", 10, 3, 8, null}
+                }
+            )
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("root", "system_user");
+
+        Assertions.assertEquals(3, sql.size());
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("e.`type` = 'T'"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("e.`default` AS column_default"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("t.owner = ?"), sql.get(1));
+        Assertions.assertNull(columns.get(0).getColumn_default());
+        Assertions.assertEquals("'0'", columns.get(1).getColumn_default());
+        Assertions.assertEquals("current_timestamp", columns.get(2).getColumn_default());
+    }
+
+    @Test
+    void getColumnsFallsBackWhenDefaultCatalogQueryFails() {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        TestSupport.setPrivateConnection(agent, defaultQueryFailureConnection(
+            sql,
+            resultSet(
+                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{{1, 0, null, null, null, null, null, null, null, null, null, null, null, null, null, null}}
+            ),
+            resultSet(
+                new String[]{"colname", "coltype", "colno", "collength", "comments"},
+                new Object[][]{{"id", 258, 1, 4, null}, {"name", 13, 2, 64, null}}
+            )
+        ));
+
+        List<ColumnInfo> columns = agent.getColumns("root", "system_user");
+
+        Assertions.assertEquals(3, sql.size());
+        Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
+        Assertions.assertEquals(2, columns.size());
+        Assertions.assertNull(columns.get(0).getColumn_default());
+        Assertions.assertNull(columns.get(1).getColumn_default());
     }
 
     @Test
@@ -528,6 +592,32 @@ class Gbase8sAgentTest {
             if ("prepareStatement".equals(method.getName())) {
                 sql.add(String.valueOf(args[0]));
                 return statement;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection defaultQueryFailureConnection(List<String> sql, ResultSet... resultSets) {
+        int[] resultIndex = {0};
+        return proxy(Connection.class, (method, args) -> {
+            if ("getCatalog".equals(method.getName())) {
+                return "appdb";
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                String query = String.valueOf(args[0]);
+                sql.add(query);
+                return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                    if ("executeQuery".equals(statementMethod.getName())) {
+                        if (query.contains("sysdefaultsexpr")) {
+                            throw new SQLException("Backtick identifiers are not supported");
+                        }
+                        return resultSets[resultIndex[0]++];
+                    }
+                    return defaultValue(statementMethod.getReturnType());
+                });
             }
             if ("isClosed".equals(method.getName())) {
                 return false;

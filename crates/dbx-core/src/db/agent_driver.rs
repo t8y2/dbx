@@ -1042,6 +1042,7 @@ pub enum AgentCapability {
     MongoRunCommand,
     MongoInsertDocuments,
     MongoReplaceDocument,
+    MongoBulkWrite,
     MongoFindCursor,
     MultiSession,
     StructuredErrorV1,
@@ -1125,7 +1126,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1149,6 +1150,7 @@ impl AgentCapability {
         Self::MongoRunCommand,
         Self::MongoInsertDocuments,
         Self::MongoReplaceDocument,
+        Self::MongoBulkWrite,
         Self::MongoFindCursor,
         Self::MultiSession,
         Self::StructuredErrorV1,
@@ -1179,6 +1181,7 @@ impl AgentCapability {
             Self::MongoRunCommand => "mongo_run_command",
             Self::MongoInsertDocuments => "mongo_insert_documents",
             Self::MongoReplaceDocument => "mongo_replace_document",
+            Self::MongoBulkWrite => "mongo_bulk_write",
             Self::MongoFindCursor => "mongo_find_cursor",
             Self::MultiSession => "multi_session",
             Self::StructuredErrorV1 => "structured_error_v1",
@@ -1383,6 +1386,7 @@ pub enum MongoAgentMethod {
     UpdateDocument,
     UpdateDocuments,
     ReplaceDocument,
+    BulkWrite,
     DeleteDocument,
     DeleteDocuments,
     RunCommand,
@@ -1392,7 +1396,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 27] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -1413,6 +1417,7 @@ impl MongoAgentMethod {
         Self::UpdateDocument,
         Self::UpdateDocuments,
         Self::ReplaceDocument,
+        Self::BulkWrite,
         Self::DeleteDocument,
         Self::DeleteDocuments,
         Self::RunCommand,
@@ -1443,6 +1448,7 @@ impl MongoAgentMethod {
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
             Self::ReplaceDocument => "replace_document",
+            Self::BulkWrite => "bulk_write",
             Self::DeleteDocument => "delete_document",
             Self::DeleteDocuments => "delete_documents",
             Self::RunCommand => "run_command",
@@ -2849,6 +2855,10 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::ReplaceDocument, params).await
     }
 
+    pub async fn mongo_bulk_write<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::BulkWrite, params).await
+    }
+
     pub async fn mongo_delete_document<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -3005,6 +3015,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::MongoRunCommand
             | AgentCapability::MongoInsertDocuments
             | AgentCapability::MongoReplaceDocument
+            | AgentCapability::MongoBulkWrite
             | AgentCapability::MongoFindCursor
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
@@ -5040,10 +5051,11 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::MongoRunCommand.as_str(), "mongo_run_command");
         assert_eq!(AgentCapability::MongoInsertDocuments.as_str(), "mongo_insert_documents");
         assert_eq!(AgentCapability::MongoReplaceDocument.as_str(), "mongo_replace_document");
+        assert_eq!(AgentCapability::MongoBulkWrite.as_str(), "mongo_bulk_write");
         assert_eq!(AgentCapability::MongoFindCursor.as_str(), "mongo_find_cursor");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
-        assert_eq!(AgentCapability::ALL.len(), 26);
+        assert_eq!(AgentCapability::ALL.len(), 27);
     }
 
     #[test]
@@ -5106,6 +5118,7 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
         assert_eq!(MongoAgentMethod::ReplaceDocument.as_str(), "replace_document");
+        assert_eq!(MongoAgentMethod::BulkWrite.as_str(), "bulk_write");
         assert_eq!(MongoAgentMethod::DeleteDocument.as_str(), "delete_document");
         assert_eq!(MongoAgentMethod::DeleteDocuments.as_str(), "delete_documents");
         assert_eq!(MongoAgentMethod::StartFindCursor.as_str(), "start_find_cursor");

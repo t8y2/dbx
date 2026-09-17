@@ -858,6 +858,58 @@ pub async fn mongo_replace_document_core(
     }
 }
 
+pub async fn mongo_bulk_write_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    operations_json: &str,
+    options_json: Option<&str>,
+) -> Result<mongo_driver::MongoBulkWriteResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::bulk_write(client, database, collection, operations_json, options_json).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoBulkWrite) {
+                return Err(
+                    "MongoDB Legacy Agent does not support bulkWrite; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            client
+                .mongo_bulk_write(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "operations_json": operations_json,
+                    "options_json": options_json,
+                }))
+                .await
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+/// One row of counts, the way the shell prints a `BulkWriteResult`.
+pub fn mongo_bulk_write_query_result(result: &mongo_driver::MongoBulkWriteResult) -> QueryResult {
+    let columns = ["insertedCount", "matchedCount", "modifiedCount", "deletedCount", "upsertedCount"];
+    let values = [
+        result.inserted_count,
+        result.matched_count,
+        result.modified_count,
+        result.deleted_count,
+        result.upserted_count,
+    ];
+    query_result(
+        columns.iter().map(ToString::to_string).collect(),
+        vec![values.iter().map(|value| serde_json::Value::from(*value)).collect()],
+        result.inserted_count + result.modified_count + result.deleted_count + result.upserted_count,
+    )
+}
+
 pub async fn mongo_delete_document_core(
     state: &AppState,
     connection_id: &str,
@@ -1084,6 +1136,12 @@ pub async fn execute_mongo_command_core(
         MongoCommand::Insert { collection, documents } => {
             let affected = mongo_insert_documents_core(state, connection_id, database, collection, documents).await?;
             Ok(affected_query_result(affected))
+        }
+        MongoCommand::BulkWrite { collection, operations, options } => {
+            let result =
+                mongo_bulk_write_core(state, connection_id, database, collection, operations, options.as_deref())
+                    .await?;
+            Ok(mongo_bulk_write_query_result(&result))
         }
         MongoCommand::Replace { collection, filter, replacement, options } => {
             let affected = mongo_replace_document_core(

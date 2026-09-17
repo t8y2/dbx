@@ -94,6 +94,7 @@ const COLLECTION_METHODS = [
   { label: "updateOne", detail: "Update one matching document", apply: "updateOne({}, { $set: {} })" },
   { label: "updateMany", detail: "Update all matching documents", apply: "updateMany({}, { $set: {} })" },
   { label: "replaceOne", detail: "Replace one matching document", apply: "replaceOne({}, {})" },
+  { label: "bulkWrite", detail: "Run several writes in one batch", apply: "bulkWrite([\n  { insertOne: { document: {} } }\n])" },
   { label: "deleteOne", detail: "Delete one matching document", apply: "deleteOne({})" },
   { label: "deleteMany", detail: "Delete all matching documents", apply: "deleteMany({})" },
   { label: "findOneAndUpdate", detail: "Atomically update and return a document", apply: "findOneAndUpdate({}, { $set: {} })" },
@@ -122,6 +123,7 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
   updateOne: 160,
   updateMany: 150,
   replaceOne: 145,
+  bulkWrite: 135,
   deleteOne: 140,
   deleteMany: 130,
   findOneAndUpdate: 120,
@@ -180,7 +182,7 @@ const ROOT_SNIPPET_BOOST: Record<(typeof ROOT_SNIPPETS)[number]["label"], number
 };
 
 /** Role of each positional argument, by collection helper. Drives cursor classification. */
-type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
+type MongoArgRole = "filter" | "update" | "replacement" | "document" | "documents" | "operations" | "pipeline" | "projection" | "keys" | "sortKeys" | "fieldName" | "options";
 
 const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   find: ["filter", "projection", "options"],
@@ -193,6 +195,7 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   updateOne: ["filter", "update", "options"],
   updateMany: ["filter", "update", "options"],
   replaceOne: ["filter", "replacement", "options"],
+  bulkWrite: ["operations", "options"],
   findOneAndUpdate: ["filter", "update", "options"],
   findOneAndReplace: ["filter", "replacement", "options"],
   insertOne: ["document", "options"],
@@ -538,6 +541,8 @@ function classifyCursorInCall(method: string, scan: MongoCallScan): MongoCursorC
       return { mode: scan.stack.length === 0 ? "fieldPath" : "none" };
     case "pipeline":
       return classifyPipeline(scan);
+    // bulkWrite operations are `{ <op>: { filter, update, … } }` entries; completing inside them is a follow-up.
+    case "operations":
     case "options":
       return { mode: "none" };
     default:

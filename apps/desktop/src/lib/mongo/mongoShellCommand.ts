@@ -49,6 +49,7 @@ const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   updateOne: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
   updateMany: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
   replaceOne: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
+  bulkWrite: { expects: "an array of operations and optional options", roles: ["operations", "options"] },
   deleteOne: { expects: "a filter", roles: ["filter"] },
   deleteMany: { expects: "a filter", roles: ["filter"] },
   findOneAndUpdate: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
@@ -78,6 +79,7 @@ const SUPPORTED_COLLECTION_METHODS = [
   "updateOne",
   "updateMany",
   "replaceOne",
+  "bulkWrite",
   "deleteOne",
   "deleteMany",
   "findOneAndUpdate",
@@ -159,6 +161,14 @@ function diagnoseMongoCommand(source: string): string | null {
 
   const tail = source.slice(closeIndex + 1).trim();
   if (tail) return `Unexpected text after ${method}(...): "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
+  if (method === "bulkWrite" && args[0]) {
+    const operations = normalizeJsonArgument(args[0]);
+    const problem = operations ? validateBulkWriteOperations(operations) : null;
+    if (problem) return problem;
+    const options = args[1]?.trim() ? parseMongoObjectArgument(args[1]) : null;
+    const optionProblem = options ? validateBulkWriteOptions(options) : null;
+    if (optionProblem) return optionProblem;
+  }
   if (method === "replaceOne" && args[1]) {
     const replacement = parseMongoObjectArgument(args[1]);
     const operator = replacement ? Object.keys(JSON.parse(replacement) as Record<string, unknown>).find((key) => key.startsWith("$")) : undefined;
@@ -263,7 +273,7 @@ export interface MongoDistinctCommand {
   filter?: string;
 }
 
-type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
+type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "bulkWrite" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
@@ -281,6 +291,7 @@ export type MongoCommand =
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean }
   | { kind: "replace"; collection: string; filter: string; replacement: string; options?: string }
+  | { kind: "bulkWrite"; collection: string; operations: string; options?: string }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
   | { kind: "createIndex"; collection: string; keys: string; options?: string }
   | { kind: "dropIndex"; collection: string; index: string }
@@ -752,6 +763,17 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return value !== null && typeof value === "object" ? { kind: "insert", collection: insert.collection, docsJson: docs } : null;
   }
 
+  const bulkWrite = parseCollectionMethodTarget(source, "bulkWrite");
+  if (bulkWrite) {
+    const args = parseMethodArgs(source, bulkWrite.methodCallIndex);
+    if (!args || args.length < 1 || args.length > 2) return null;
+    const operations = normalizeJsonArgument(args[0]);
+    if (!operations || validateBulkWriteOperations(operations) !== null) return null;
+    const options = args[1]?.trim() ? parseMongoObjectArgument(args[1]) : undefined;
+    if (args[1]?.trim() && (!options || validateBulkWriteOptions(options) !== null)) return null;
+    return { kind: "bulkWrite", collection: bulkWrite.collection, operations, ...(options ? { options } : {}) };
+  }
+
   const replaceOne = parseCollectionMethodTarget(source, "replaceOne");
   if (replaceOne) {
     const args = parseMethodArgs(source, replaceOne.methodCallIndex);
@@ -937,7 +959,7 @@ export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: Mo
     };
   }
   const filter = mongoWriteFilter(command);
-  const highRisk = filter !== null ? mongoFilterIsEffectivelyUnbounded(filter) : command.kind !== "insert";
+  const highRisk = command.kind === "bulkWrite" ? bulkWriteFilters(command.operations).some(mongoFilterIsEffectivelyUnbounded) : filter !== null ? mongoFilterIsEffectivelyUnbounded(filter) : command.kind !== "insert";
   if (!options.allowDangerous && highRisk) {
     return {
       allowed: false,
@@ -1054,6 +1076,24 @@ export function mongoWriteToQueryResult(affectedRows: number, executionTimeMs: n
     columns: [],
     rows: [],
     affected_rows: affectedRows,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
+export interface MongoBulkWriteResult {
+  inserted_count: number;
+  matched_count: number;
+  modified_count: number;
+  deleted_count: number;
+  upserted_count: number;
+}
+
+/** One row of counts, the way the shell prints a `BulkWriteResult`. */
+export function mongoBulkWriteToQueryResult(result: MongoBulkWriteResult, executionTimeMs: number): QueryResult {
+  return {
+    columns: ["insertedCount", "matchedCount", "modifiedCount", "deletedCount", "upsertedCount"],
+    rows: [[result.inserted_count, result.matched_count, result.modified_count, result.deleted_count, result.upserted_count]],
+    affected_rows: result.inserted_count + result.modified_count + result.deleted_count + result.upserted_count,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
   };
 }
@@ -1533,6 +1573,90 @@ function parseNormalizedJson(json: string): unknown {
 
 function isNonEmptyRecord(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && Object.keys(value).length > 0;
+}
+
+const BULK_WRITE_FIELDS: Record<string, readonly string[]> = {
+  insertOne: ["document"],
+  updateOne: ["filter", "update", "upsert", "arrayFilters"],
+  updateMany: ["filter", "update", "upsert", "arrayFilters"],
+  replaceOne: ["filter", "replacement", "upsert"],
+  deleteOne: ["filter"],
+  deleteMany: ["filter"],
+};
+
+const isDocument = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * Validate a `bulkWrite([...])` operations array the way the shell does, mirroring the
+ * Rust parser: each entry is one `{ <op>: { ... } }` with exactly the fields it takes.
+ * Returns the problem, or null when every operation is well-formed.
+ */
+export function validateBulkWriteOperations(operationsJson: string): string | null {
+  let entries: unknown;
+  try {
+    entries = JSON.parse(operationsJson);
+  } catch {
+    return "bulkWrite() requires an array of operations.";
+  }
+  if (!Array.isArray(entries)) return "bulkWrite() requires an array of operations.";
+  if (entries.length === 0) return "bulkWrite() requires at least one operation.";
+
+  for (const [index, entry] of entries.entries()) {
+    const position = index + 1;
+    if (!isDocument(entry)) return `bulkWrite() operation ${position} must be a document such as { insertOne: { document: { ... } } }.`;
+    const keys = Object.keys(entry);
+    if (keys.length !== 1) return `bulkWrite() operation ${position} must have exactly one operation key.`;
+    const kind = keys[0]!;
+    const spec = entry[kind];
+    const allowed = BULK_WRITE_FIELDS[kind];
+    if (!allowed) return `bulkWrite() operation ${position} uses unsupported operation ${kind}; supported: ${Object.keys(BULK_WRITE_FIELDS).join(", ")}.`;
+    if (!isDocument(spec)) return `bulkWrite() operation ${position} (${kind}) must be a document.`;
+    const unknown = Object.keys(spec).find((key) => !allowed.includes(key));
+    if (unknown) return `bulkWrite() operation ${position} (${kind}) has unsupported field ${unknown}.`;
+    if ("upsert" in spec && typeof spec.upsert !== "boolean") return `bulkWrite() operation ${position} (${kind}) upsert must be a boolean.`;
+
+    for (const field of allowed.filter((name) => name === "document" || name === "filter" || name === "replacement")) {
+      if (!(field in spec)) return `bulkWrite() operation ${position} (${kind}) requires a ${field} document.`;
+      if (!isDocument(spec[field])) return `bulkWrite() operation ${position} (${kind}) field ${field} must be a document.`;
+    }
+    if (kind === "updateOne" || kind === "updateMany") {
+      const update = spec.update;
+      if (isDocument(update)) {
+        const operatorKeys = Object.keys(update);
+        if (operatorKeys.length === 0 || !operatorKeys.every((key) => key.startsWith("$"))) {
+          return `bulkWrite() operation ${position} (${kind}) update must use operators such as $set; use replaceOne for a whole document.`;
+        }
+      } else if (!Array.isArray(update)) {
+        return update === undefined ? `bulkWrite() operation ${position} (${kind}) requires an update.` : `bulkWrite() operation ${position} (${kind}) update must be a document or pipeline.`;
+      }
+      if ("arrayFilters" in spec && !Array.isArray(spec.arrayFilters)) return `bulkWrite() operation ${position} (${kind}) arrayFilters must be an array.`;
+    }
+    if (kind === "replaceOne") {
+      const operator = Object.keys(spec.replacement as Record<string, unknown>).find((key) => key.startsWith("$"));
+      if (operator) return `bulkWrite() operation ${position} (replaceOne) replacement must not contain update operators such as ${operator}; use updateOne to modify fields.`;
+    }
+  }
+  return null;
+}
+
+/** Only `ordered` is honoured, so anything else is rejected rather than dropped. */
+export function validateBulkWriteOptions(optionsJson: string): string | null {
+  const options = JSON.parse(optionsJson) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(options)) {
+    if (key !== "ordered") return `Unsupported bulkWrite() option: ${key}.`;
+    if (typeof value !== "boolean") return "bulkWrite() ordered option must be a boolean.";
+  }
+  return null;
+}
+
+/** Filters of every non-insert operation, for the safety checks. */
+function bulkWriteFilters(operationsJson: string): string[] {
+  try {
+    const entries = JSON.parse(operationsJson) as Array<Record<string, { filter?: unknown }>>;
+    return entries.flatMap((entry) => Object.values(entry)).flatMap((spec) => (isDocument(spec?.filter) ? [JSON.stringify(spec.filter)] : []));
+  } catch {
+    return [];
+  }
 }
 
 function mongoWriteFilter(command: MongoWriteCommand): string | null {

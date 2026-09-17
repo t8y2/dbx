@@ -2120,6 +2120,153 @@ pub async fn update_documents(
     Ok(result.modified_count)
 }
 
+/// Counts reported by `bulkWrite`, mirroring the shell's `BulkWriteResult`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MongoBulkWriteResult {
+    pub inserted_count: u64,
+    pub matched_count: u64,
+    pub modified_count: u64,
+    pub deleted_count: u64,
+    pub upserted_count: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoBulkWriteOptions {
+    ordered: Option<bool>,
+}
+
+/// bulkWrite(operations[, { ordered }]).
+///
+/// The Rust driver's `bulk_write` is client-level and needs MongoDB 8.0, so the
+/// operations run here one at a time in order, which is what the shell's
+/// collection-level bulkWrite guarantees anyway (it is not transactional). With
+/// `ordered: true` (the default) the first failure stops the batch; with
+/// `ordered: false` every operation is attempted and the failures are reported together.
+pub async fn bulk_write(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    operations_json: &str,
+    options_json: Option<&str>,
+) -> Result<MongoBulkWriteResult, String> {
+    use crate::mongo_shell::BulkWriteOperation;
+
+    let operations = crate::mongo_shell::parse_bulk_write_operations(operations_json)?;
+    let ordered = match options_json.filter(|value| !value.trim().is_empty()) {
+        Some(raw) => {
+            let options: MongoBulkWriteOptions =
+                serde_json::from_str(raw).map_err(|e| format!("Invalid bulkWrite options: {e}"))?;
+            options.ordered.unwrap_or(true)
+        }
+        None => true,
+    };
+
+    let col = client.database(database).collection::<Document>(collection);
+    let mut result = MongoBulkWriteResult::default();
+    let mut failures = Vec::new();
+
+    for (index, operation) in operations.iter().enumerate() {
+        let outcome: Result<(), String> = async {
+            match operation {
+                BulkWriteOperation::InsertOne { document } => {
+                    let document = json_object_to_document(document).map_err(|e| format!("Invalid document: {e}"))?;
+                    col.insert_one(document).await.map_err(|e| e.to_string())?;
+                    result.inserted_count += 1;
+                }
+                BulkWriteOperation::UpdateOne { filter, update, upsert, array_filters }
+                | BulkWriteOperation::UpdateMany { filter, update, upsert, array_filters } => {
+                    let many = matches!(operation, BulkWriteOperation::UpdateMany { .. });
+                    let filter = json_filter_to_document(filter).map_err(|e| format!("Invalid filter: {e}"))?;
+                    let update = json_update_to_modifications(update).map_err(|e| format!("Invalid update: {e}"))?;
+                    let array_filters = array_filters
+                        .as_ref()
+                        .and_then(serde_json::Value::as_array)
+                        .map(|filters| filters.iter().map(json_filter_to_document).collect::<Result<Vec<_>, _>>())
+                        .transpose()
+                        .map_err(|e| format!("Invalid arrayFilters: {e}"))?;
+                    let update_result = if many {
+                        let mut action = col.update_many(filter, update);
+                        if let Some(upsert) = upsert {
+                            action = action.upsert(*upsert);
+                        }
+                        if let Some(filters) = array_filters {
+                            action = action.array_filters(filters);
+                        }
+                        action.await.map_err(|e| e.to_string())?
+                    } else {
+                        let mut action = col.update_one(filter, update);
+                        if let Some(upsert) = upsert {
+                            action = action.upsert(*upsert);
+                        }
+                        if let Some(filters) = array_filters {
+                            action = action.array_filters(filters);
+                        }
+                        action.await.map_err(|e| e.to_string())?
+                    };
+                    result.matched_count += update_result.matched_count;
+                    result.modified_count += update_result.modified_count;
+                    result.upserted_count += u64::from(update_result.upserted_id.is_some());
+                }
+                BulkWriteOperation::ReplaceOne { filter, replacement, upsert } => {
+                    let filter = json_filter_to_document(filter).map_err(|e| format!("Invalid filter: {e}"))?;
+                    let replacement =
+                        json_object_to_document(replacement).map_err(|e| format!("Invalid replacement: {e}"))?;
+                    let mut action = col.replace_one(filter, replacement);
+                    if let Some(upsert) = upsert {
+                        action = action.upsert(*upsert);
+                    }
+                    let replace_result = action.await.map_err(|e| e.to_string())?;
+                    result.matched_count += replace_result.matched_count;
+                    result.modified_count += replace_result.modified_count;
+                    result.upserted_count += u64::from(replace_result.upserted_id.is_some());
+                }
+                BulkWriteOperation::DeleteOne { filter } | BulkWriteOperation::DeleteMany { filter } => {
+                    let many = matches!(operation, BulkWriteOperation::DeleteMany { .. });
+                    let filter = json_filter_to_document(filter).map_err(|e| format!("Invalid filter: {e}"))?;
+                    let delete_result = if many {
+                        col.delete_many(filter).await.map_err(|e| e.to_string())?
+                    } else {
+                        col.delete_one(filter).await.map_err(|e| e.to_string())?
+                    };
+                    result.deleted_count += delete_result.deleted_count;
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        if let Err(error) = outcome {
+            let message = format!("operation {} ({}): {error}", index + 1, operation.kind());
+            if ordered {
+                return Err(format!(
+                    "bulkWrite stopped at {message}. Completed before it: {}",
+                    describe_bulk_counts(&result)
+                ));
+            }
+            failures.push(message);
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(result)
+    } else {
+        Err(format!(
+            "bulkWrite finished with {} failed operation(s): {}. Completed: {}",
+            failures.len(),
+            failures.join("; "),
+            describe_bulk_counts(&result)
+        ))
+    }
+}
+
+fn describe_bulk_counts(result: &MongoBulkWriteResult) -> String {
+    format!(
+        "inserted {}, matched {}, modified {}, deleted {}, upserted {}",
+        result.inserted_count, result.matched_count, result.modified_count, result.deleted_count, result.upserted_count
+    )
+}
+
 /// replaceOne(filter, replacement[, { upsert }]): the whole document is swapped, so
 /// unlike update there are no array filters to apply.
 pub async fn replace_document(

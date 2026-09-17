@@ -2342,6 +2342,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_update_document,
             commands::mongo_cmd::mongo_update_documents,
             commands::mongo_cmd::mongo_replace_document,
+            commands::mongo_cmd::mongo_bulk_write,
             commands::document_cmd::document_delete_document,
             commands::document_cmd::document_save_meilisearch_batch,
             commands::document_cmd::meilisearch_search_documents,

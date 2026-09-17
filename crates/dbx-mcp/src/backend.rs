@@ -1860,6 +1860,25 @@ impl DbxBackend for WebBackend {
                     .map_err(|error| format!("Invalid MongoDB insert response: {error}"))?;
                 Ok(affected_query_result(affected_rows_from_value(&value)))
             }
+            MongoCommand::BulkWrite { collection, operations, options } => {
+                let result: dbx_core::db::mongo_driver::MongoBulkWriteResult = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/bulk-write",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "operationsJson": operations,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB bulkWrite response: {error}"))?;
+                Ok(dbx_core::mongo_ops::mongo_bulk_write_query_result(&result))
+            }
             MongoCommand::Replace { collection, filter, replacement, options } => {
                 let value: Value = self
                     .request(

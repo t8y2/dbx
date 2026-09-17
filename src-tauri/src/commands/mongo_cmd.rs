@@ -576,6 +576,37 @@ pub async fn mongo_replace_document(
 }
 
 #[tauri::command]
+pub async fn mongo_bulk_write(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    operations_json: String,
+    options_json: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<dbx_core::db::mongo_driver::MongoBulkWriteResult, String> {
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_mongo_bulk_write_allowed_by_id(
+            state.inner(),
+            &connection_id,
+            &database,
+            &operations_json,
+        )
+        .await?;
+    }
+    ensure_connection_writable(&state, &connection_id, "BulkWrite").await?;
+    dbx_core::mongo_ops::mongo_bulk_write_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &operations_json,
+        options_json.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn mongo_delete_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

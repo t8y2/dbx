@@ -968,6 +968,7 @@ async fn main() {
         .route("/mongo/update-document", post(routes::mongo::update_document))
         .route("/mongo/update-documents", post(routes::mongo::update_documents))
         .route("/mongo/replace-document", post(routes::mongo::replace_document))
+        .route("/mongo/bulk-write", post(routes::mongo::bulk_write))
         .route("/mongo/delete-document", post(routes::mongo::delete_document))
         .route("/mongo/delete-documents", post(routes::mongo::delete_documents))
         .route("/mongo/find-one-and-update", post(routes::mongo::find_one_and_update))

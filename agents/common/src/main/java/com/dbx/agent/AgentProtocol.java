@@ -74,6 +74,7 @@ public final class AgentProtocol {
     public static final String MONGO_METHOD_UPDATE_DOCUMENT = "update_document";
     public static final String MONGO_METHOD_UPDATE_DOCUMENTS = "update_documents";
     public static final String MONGO_METHOD_REPLACE_DOCUMENT = "replace_document";
+    public static final String MONGO_METHOD_BULK_WRITE = "bulk_write";
     public static final String MONGO_METHOD_DELETE_DOCUMENT = "delete_document";
     public static final String MONGO_METHOD_DELETE_DOCUMENTS = "delete_documents";
     public static final String MONGO_METHOD_RUN_COMMAND = "run_command";
@@ -132,6 +133,7 @@ public final class AgentProtocol {
     public static final String CAPABILITY_MONGO_RUN_COMMAND = "mongo_run_command";
     public static final String CAPABILITY_MONGO_INSERT_DOCUMENTS = "mongo_insert_documents";
     public static final String CAPABILITY_MONGO_REPLACE_DOCUMENT = "mongo_replace_document";
+    public static final String CAPABILITY_MONGO_BULK_WRITE = "mongo_bulk_write";
     public static final String CAPABILITY_MONGO_FIND_CURSOR = "mongo_find_cursor";
     public static final String CAPABILITY_MULTI_SESSION = "multi_session";
     public static final String CAPABILITY_STRUCTURED_ERROR_V1 = "structured_error_v1";
@@ -170,6 +172,7 @@ public final class AgentProtocol {
         CAPABILITY_MONGO_RUN_COMMAND,
         CAPABILITY_MONGO_INSERT_DOCUMENTS,
         CAPABILITY_MONGO_REPLACE_DOCUMENT,
+        CAPABILITY_MONGO_BULK_WRITE,
         CAPABILITY_MONGO_FIND_CURSOR
     ));
 
@@ -235,6 +238,7 @@ public final class AgentProtocol {
         mongoCapabilities.add(CAPABILITY_MONGO_RUN_COMMAND);
         mongoCapabilities.add(CAPABILITY_MONGO_INSERT_DOCUMENTS);
         mongoCapabilities.add(CAPABILITY_MONGO_REPLACE_DOCUMENT);
+        mongoCapabilities.add(CAPABILITY_MONGO_BULK_WRITE);
         mongoCapabilities.add(CAPABILITY_MONGO_FIND_CURSOR);
         MONGO_LEGACY_CAPABILITIES = Collections.unmodifiableList(mongoCapabilities);
 
@@ -244,6 +248,7 @@ public final class AgentProtocol {
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_RUN_COMMAND);
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_INSERT_DOCUMENTS);
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_REPLACE_DOCUMENT);
+        mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_BULK_WRITE);
         mongoMultiSessionCapabilities.add(CAPABILITY_MONGO_FIND_CURSOR);
         MONGO_LEGACY_MULTI_SESSION_CAPABILITIES = Collections.unmodifiableList(mongoMultiSessionCapabilities);
 
@@ -287,6 +292,7 @@ public final class AgentProtocol {
         MONGO_METHOD_UPDATE_DOCUMENT,
         MONGO_METHOD_UPDATE_DOCUMENTS,
         MONGO_METHOD_REPLACE_DOCUMENT,
+        MONGO_METHOD_BULK_WRITE,
         MONGO_METHOD_DELETE_DOCUMENT,
         MONGO_METHOD_DELETE_DOCUMENTS,
         MONGO_METHOD_RUN_COMMAND,

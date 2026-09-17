@@ -82,11 +82,14 @@ const taggedAiCliErrorKeys: Record<string, string> = {
 };
 
 const exactMessageKeys: Record<string, string> = {
+  "Plugin update is in progress. Please try again after it finishes.": "pluginPlatform.updateInProgress",
+  "Plugin update blocked by active operations. Please wait for them to finish.": "pluginPlatform.updateBlockedByOperations",
   [PHOENIX_DRIVER_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
   [PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR]: "connection.phoenixDriverNotInstalled",
 };
 
 const patterns: [RegExp, string][] = [
+  [/^Plugin update blocked by active connections: ([\s\S]+)$/, "pluginPlatform.updateBlockedByConnections"],
   [/^(.+?) driver is not installed\. Please install it from the Driver Manager\.$/, "connection.driverNotInstalled"],
   [/^JRE (.+?) runtime is not installed\. Please install it from the Driver Manager\.$/, "connection.jreNotInstalled"],
   [/^System Java runtime was not found on PATH\. Please install Java or choose a custom Java executable\.$/, "connection.systemJavaNotFound"],
@@ -164,6 +167,7 @@ const patterns: [RegExp, string][] = [
 // Named placeholders for each pattern's capture groups, in capture order.
 // A bare string is shorthand for a single capture group.
 const paramNames: Record<string, string | string[]> = {
+  "pluginPlatform.updateBlockedByConnections": "labels",
   "connection.driverNotInstalled": "driver",
   "connection.jreNotInstalled": "jre",
   "ai.configNameExists": "name",

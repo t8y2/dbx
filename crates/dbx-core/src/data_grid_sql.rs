@@ -6072,6 +6072,60 @@ mod tests {
     }
 
     #[test]
+    fn prepares_oracle_number28_updates_from_serialized_query_results() {
+        let identifiers = ["2026081810175800100000000000", "2026081810175800100000000001"];
+        let rows: Vec<Vec<Value>> = identifiers
+            .iter()
+            .map(|identifier| vec![serde_json::from_str(identifier).unwrap(), json!("old")])
+            .collect();
+        let query_result: crate::types::QueryResult = serde_json::from_value(json!({
+            "columns": ["ID", "NAME"],
+            "column_types": ["NUMBER(28)", "VARCHAR2(20)"],
+            "rows": rows,
+            "affected_rows": 0,
+            "execution_time_ms": 0,
+        }))
+        .unwrap();
+        let wire = serde_json::to_string(&query_result).unwrap();
+        let deserialized: crate::types::QueryResult = serde_json::from_str(&wire).unwrap();
+
+        for (row, identifier) in deserialized.rows.iter().zip(identifiers) {
+            assert_eq!(row[0], json!(identifier));
+        }
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "ITEMS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER(28)", false, None),
+                    column("NAME", "VARCHAR2(20)", true, None),
+                ]),
+            },
+            columns: deserialized.columns,
+            source_columns: None,
+            rows: deserialized.rows,
+            dirty_rows: vec![(0, vec![(1, json!("new"))]), (1, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            identifiers
+                .iter()
+                .map(|identifier| format!("UPDATE \"APP\".\"ITEMS\" SET \"NAME\" = 'new' WHERE \"ID\" = {identifier};"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn prepares_sqlserver_bigint_update_from_numeric_string() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::SqlServer),

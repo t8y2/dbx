@@ -1560,7 +1560,7 @@ impl AppState {
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
         let env = self.external_driver_runtime_env(driver_id)?;
-        let session = self.plugins.start_driver_session_with_env(driver_id, env).await?;
+        let session = self.plugins.start_driver_session_for_connection(driver_id, env, &config.name).await?;
         let params = serde_json::json!({ "connection": config });
         session
             .invoke_with_timeout::<serde_json::Value>("connect", params, Some(external_driver_connect_timeout(config)))

@@ -15,9 +15,11 @@ npm install
 dbx-plugin dev --path . --port 5190
 ```
 
+Commit the generated `package-lock.json`. Release CI uses `npm ci` with the lockfile and caches npm downloads; it does not resolve a new dependency tree for every release.
+
 The UI is compiled from `src/` into `ui/`. The generated `window.dbxPlugin` bridge exposes DBX context, locale, theme and backend methods to the Svelte workbench. Use the real DBX host for final integration testing.
 
-Build an unsigned universal candidate with `dbx-plugin package .`.
+Build an unsigned universal candidate with `npm run build && dbx-plugin package .`.
 
 ## Release
 

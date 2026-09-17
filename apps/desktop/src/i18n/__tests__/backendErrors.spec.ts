@@ -61,6 +61,22 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
   {
+    name: "plugin update requires closing related connections",
+    message: "Plugin update blocked by active connections: Production S3, Local storage",
+    key: "pluginPlatform.updateBlockedByConnections",
+    params: { labels: "Production S3, Local storage" },
+  },
+  {
+    name: "plugin update waits for active operations",
+    message: "Plugin update blocked by active operations. Please wait for them to finish.",
+    key: "pluginPlatform.updateBlockedByOperations",
+  },
+  {
+    name: "connection admission waits for plugin update",
+    message: "Plugin update is in progress. Please try again after it finishes.",
+    key: "pluginPlatform.updateInProgress",
+  },
+  {
     name: "Nacos ordinary user must configure managed namespaces when namespace discovery is forbidden",
     message: "Failed to list Nacos namespaces: NACOS_ERROR[v3ManagedNamespacesRequired]: access denied",
     key: "nacos.nacosManagedNamespacesRequired",

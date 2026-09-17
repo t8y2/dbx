@@ -204,7 +204,11 @@ async function installMarketplaceListing(listing: MarketplacePluginListing) {
     installedPlugins.value = await api.listPlugins();
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
-    toast(cause instanceof Error ? cause.message : String(cause), 8000);
+    toast(translateBackendError(t, cause), 8000);
+    // A failed install can still have mutated the store (a partially replaced version directory, for
+    // instance), so re-read the installed list instead of leaving the card on state it may no longer
+    // describe.
+    installedPlugins.value = await api.listPlugins().catch(() => installedPlugins.value);
   } finally {
     marketplaceInstallingKey.value = "";
   }
@@ -214,8 +218,9 @@ function batchSummaryKey(outcome: { succeeded: unknown[]; failed: { name: string
   return outcome.failed.length ? "pluginPlatform.batchSummaryWithFailures" : "pluginPlatform.batchSummary";
 }
 
-function reportBatchSummary(outcome: { succeeded: unknown[]; failed: { name: string }[] }) {
+function reportBatchSummary(outcome: { succeeded: unknown[]; failed: { name: string; error: string }[] }) {
   const failedNames = outcome.failed.map((failure) => failure.name).join("、");
+  error.value = outcome.failed.map((failure) => `${failure.name}: ${translateBackendError(t, failure.error)}`).join("\n");
   toast(t(batchSummaryKey(outcome), { success: outcome.succeeded.length, failed: outcome.failed.length, names: failedNames }), outcome.failed.length ? 8000 : 4000);
 }
 
@@ -223,7 +228,7 @@ async function refreshAfterBatch() {
   try {
     installedPlugins.value = await api.listPlugins();
   } catch (cause) {
-    error.value = t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) });
+    error.value = [error.value, t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) })].filter(Boolean).join("\n");
   }
 }
 
@@ -657,7 +662,7 @@ async function rollbackSelectedPlugin() {
     installedPlugins.value = await api.listPlugins();
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
-    toast(cause instanceof Error ? cause.message : String(cause), 5000);
+    toast(translateBackendError(t, cause), 8000);
   } finally {
     operating.value = false;
   }
@@ -728,7 +733,7 @@ onBeforeUnmount(() => {
 <template>
   <div ref="panelRootRef" class="plugin-center-view relative mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-hidden px-6 py-6" @dragenter="onWebDragEnter" @dragover="onWebDragOver" @dragleave="onWebDragLeave" @drop="onWebDrop">
     <input ref="webFileInput" type="file" accept=".dbxp" class="hidden" @change="handleWebPackage" />
-    <div v-if="error" class="shrink-0 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{{ error }}</div>
+    <div v-if="error" class="shrink-0 whitespace-pre-wrap rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{{ error }}</div>
 
     <Tabs v-model="activeSection" class="min-h-0 flex-1 gap-3">
       <TabsList class="grid h-9 w-full grid-cols-3">
@@ -870,6 +875,9 @@ onBeforeUnmount(() => {
               <div class="mt-auto flex items-center justify-between gap-3 pt-4">
                 <div class="text-[11px] text-muted-foreground">
                   <span v-if="listing.status === 'unsupported'">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
+                  <!-- In the update state the left line states both versions: the badge above shows the
+                       catalog latest version, which otherwise reads as the installed one. -->
+                  <span v-else-if="listing.installed && listing.status === 'update'">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
                   <span v-else-if="listing.installed">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
                   <span v-else>{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}</span>
                 </div>

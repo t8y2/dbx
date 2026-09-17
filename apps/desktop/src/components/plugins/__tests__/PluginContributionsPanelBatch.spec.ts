@@ -366,6 +366,33 @@ describe("PluginContributionsPanel mutation exclusion", () => {
 });
 
 describe("PluginContributionsPanel completed batch outcomes", () => {
+  it.each(["marketplace", "package", "url", "rollback"] as const)("shows related connection names when %s is blocked", async (entry) => {
+    const blocked = new Error("Plugin update blocked by active connections: Production S3");
+    const mutations = {
+      marketplace: mocks.installMarketplacePlugin,
+      package: mocks.installPluginPackage,
+      url: mocks.installPluginPackageFromUrl,
+      rollback: mocks.rollbackPlugin,
+    };
+    mutations[entry].mockRejectedValueOnce(blocked);
+    if (entry === "marketplace") await state.installMarketplaceListing(state.marketplaceListings[0]);
+    else if (entry === "package") await state.installPlugin("plugin.dbxp");
+    else if (entry === "url") await state.installPluginFromUrl();
+    else await state.rollbackSelectedPlugin();
+    expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.updateBlockedByConnections:{"labels":"Production S3"}', 8000);
+    expect(mocks.listPlugins).toHaveBeenCalledTimes(entry === "marketplace" ? 1 : 0);
+  });
+
+  it("shows per-plugin blockers while continuing other batch updates", async () => {
+    state.selectAllUpdatable();
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("Plugin update blocked by active connections: Production S3"));
+    await state.runBatchInstallUpdate();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(3);
+    expect(state.error).toBe('a: pluginPlatform.updateBlockedByConnections:{"labels":"Production S3"}');
+    await nextTick();
+    expect(host.textContent).toContain("Production S3");
+  });
+
   it.each(batches.flatMap((batch) => [0, 1, 3].map((failures) => ({ batch, failures }))))("preserves batch $batch outcomes with $failures failures when refresh rejects", async ({ batch, failures }) => {
     state.selectAllUpdatable();
     state.selectedInstalledIds = new Set(["a", "b", "c"]);
@@ -390,7 +417,7 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mutation).toHaveBeenCalledTimes(3);
     expect(mocks.toast).toHaveBeenCalledTimes(1);
     expect(mocks.toast).toHaveBeenLastCalledWith(summary, failures ? 8000 : 4000);
-    expect(state.error).toBe('pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}');
+    expect(state.error).toBe([...["a", "b", "c"].slice(0, failures).map((name) => `${name}: denied`), 'pluginPlatform.batchRefreshFailed:{"error":"refresh offline"}'].join("\n"));
     await nextTick();
     expect(host.textContent).toContain(state.error);
     expect(state.batchRunning).toBe(false);
@@ -414,7 +441,7 @@ describe("PluginContributionsPanel completed batch outcomes", () => {
     expect(mutation.mock.calls.map(([request]) => (batch === "install" ? request.pluginId : request))).toEqual(["a", "b", "c"]);
     expect(mocks.listPlugins).toHaveBeenCalledTimes(1);
     expect(mocks.toast).toHaveBeenLastCalledWith('pluginPlatform.batchSummaryWithFailures:{"success":2,"failed":1,"names":"b"}', 8000);
-    expect(state.error).toBe("");
+    expect(state.error).toBe("b: denied");
     expect(state.batchRunning).toBe(false);
     expect(state.selectedListingKeys.size).toBe(0);
     expect(state.selectedInstalledIds.size).toBe(0);

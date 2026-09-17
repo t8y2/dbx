@@ -45,6 +45,7 @@ pub struct PluginConnectionHandle {
     session: Option<Arc<PluginSidecarSession>>,
     disconnect: bool,
     params: serde_json::Value,
+    _activity: super::lifecycle::PluginUsageGuard,
 }
 
 impl PluginConnectionHandle {
@@ -115,6 +116,7 @@ impl PluginHost {
         plugin_id: &str,
         env: PluginRuntimeEnv,
     ) -> Result<Arc<PluginSidecarSession>, String> {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         if let Some(session) = self.running_session(plugin_id).await {
             return Ok(session);
         }
@@ -151,6 +153,7 @@ impl PluginHost {
     where
         T: DeserializeOwned,
     {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.invoke_with_timeout(method, params, None, timeout).await
@@ -163,6 +166,7 @@ impl PluginHost {
         params: serde_json::Value,
         required_permission: Option<&str>,
     ) -> Result<(), String> {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.notify(method, params, None).await
@@ -175,6 +179,7 @@ impl PluginHost {
         data: &[u8],
         required_permission: Option<&str>,
     ) -> Result<(), String> {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.send_binary(channel, data).await
@@ -195,6 +200,11 @@ impl PluginHost {
         runtime_host: &str,
         runtime_port: u16,
     ) -> Result<ConnectionTestResult, String> {
+        let _activity = self
+            .inner
+            .registry
+            .lifecycle
+            .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (plugin, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
         let provider_label = provider.label.as_deref().unwrap_or(&plugin.manifest.name);
@@ -219,6 +229,11 @@ impl PluginHost {
         runtime_host: &str,
         runtime_port: u16,
     ) -> Result<PluginConnectionHandle, String> {
+        let activity = self
+            .inner
+            .registry
+            .lifecycle
+            .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (_, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
         let params = plugin_connection_params(config, &provider, runtime_host, runtime_port)?;
@@ -250,6 +265,7 @@ impl PluginHost {
             session,
             disconnect,
             params,
+            _activity: activity,
         })
     }
 
@@ -260,6 +276,11 @@ impl PluginHost {
         runtime_host: &str,
         runtime_port: u16,
     ) -> Result<PluginConnectionActionResult, String> {
+        let _activity = self
+            .inner
+            .registry
+            .lifecycle
+            .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (_, provider) = self.resolve_connection_provider(config)?;
         let action = plugin_invoke_connection_action(&provider, action_id)?;
         validate_plugin_connection_values_for_action(config, &provider, action.requires_valid_form)?;
@@ -737,6 +758,57 @@ mod tests {
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
+
+    #[tokio::test]
+    async fn ui_only_connections_hold_update_guards_but_saved_configs_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin_dir = root.path().join("sample.ui");
+        std::fs::create_dir(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.ui",
+                "name": "Sample UI",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.5.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "entry": "index.html" } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "saved-connection",
+            "name": "Saved UI connection",
+            "db_type": "plugin",
+            "host": "localhost",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "plugin_id": "sample.ui",
+            "plugin_connection_provider": "sample.connection",
+            "plugin_connection_type": "sample"
+        }))
+        .unwrap();
+        let registry = crate::plugins::PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        let lifecycle = registry.lifecycle();
+        let host = super::PluginHost::new(registry);
+        let update = lifecycle.begin_update("sample.ui").unwrap();
+        assert!(host.connect_connection(&config, "localhost", 0).await.is_err());
+        drop(update);
+        let connection = host.connect_connection(&config, "localhost", 0).await.unwrap();
+        assert!(lifecycle.begin_update("sample.ui").unwrap_err().contains("Saved UI connection"));
+        connection.disconnect().await.unwrap();
+        drop(connection);
+        assert!(lifecycle.begin_update("sample.ui").is_ok());
+    }
 
     #[test]
     fn rejects_zero_port_for_port_bound_connection_field() {

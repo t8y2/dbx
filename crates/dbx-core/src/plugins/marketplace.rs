@@ -284,6 +284,7 @@ pub struct PluginMarketplace {
     app_version: String,
     repositories: PluginRepositoryStore,
     client: Client,
+    lifecycle: Option<super::PluginLifecycle>,
 }
 
 impl PluginMarketplace {
@@ -300,11 +301,24 @@ impl PluginMarketplace {
             root_dir,
             app_version: app_version.into(),
             client,
+            lifecycle: None,
         })
     }
 
     pub fn repositories(&self) -> &PluginRepositoryStore {
         &self.repositories
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: super::PluginLifecycle) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    fn guard_installer(&self, installer: PluginPackageInstaller) -> PluginPackageInstaller {
+        match &self.lifecycle {
+            Some(lifecycle) => installer.with_lifecycle(lifecycle.clone()),
+            None => installer,
+        }
     }
 
     pub async fn fetch_catalogs(&self) -> Vec<PluginRepositoryCatalogResult> {
@@ -372,6 +386,9 @@ impl PluginMarketplace {
     }
 
     pub async fn install(&self, request: PluginMarketplaceInstallRequest) -> Result<PluginInstallResult, String> {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.check_update(&request.plugin_id)?;
+        }
         let repository = self.repositories.find(&request.repository_id)?;
         if !repository.enabled {
             return Err(format!("Plugin repository '{}' is disabled", repository.id));
@@ -403,8 +420,12 @@ impl PluginMarketplace {
             permissions: plugin.permissions.iter().cloned().collect(),
             signing_key_id: artifact.signing_key_id.clone(),
         };
-        PluginPackageInstaller::with_trust_store(self.root_dir.clone(), self.app_version.clone(), trust_store)
-            .install_marketplace_bytes(&package, &expectation)
+        self.guard_installer(PluginPackageInstaller::with_trust_store(
+            self.root_dir.clone(),
+            self.app_version.clone(),
+            trust_store,
+        ))
+        .install_marketplace_bytes(&package, &expectation)
     }
 
     /// Downloads a .dbxp package from a direct http(s) URL and installs it with
@@ -445,7 +466,8 @@ impl PluginMarketplace {
             bytes.extend_from_slice(&chunk);
             on_progress(bytes.len() as u64, total);
         }
-        PluginPackageInstaller::new(self.root_dir.clone(), self.app_version.clone())?.install_bytes(&bytes, policy)
+        self.guard_installer(PluginPackageInstaller::new(self.root_dir.clone(), self.app_version.clone())?)
+            .install_bytes(&bytes, policy)
     }
 
     async fn download_limited(&self, url: Url, max_bytes: usize, label: &str) -> Result<Vec<u8>, String> {
@@ -1267,6 +1289,57 @@ mod tests {
         assert_eq!(result.plugin.manifest.version, "1.0.0");
         assert_eq!(result.signature, crate::plugins::PluginSignatureStatus::Trusted { key_id: key_id.to_string() });
         assert_eq!(last_progress, (package.len() as u64, Some(package.len() as u64)));
+    }
+
+    #[tokio::test]
+    async fn direct_url_rechecks_runtime_usage_after_download() {
+        let root = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        let key_id = "direct-url-release";
+        PluginTrustStore::save_base64_key(
+            root.path(),
+            key_id,
+            &base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        )
+        .unwrap();
+        let registry = crate::plugins::PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.68");
+        let lifecycle = registry.lifecycle();
+        let marketplace =
+            PluginMarketplace::new(root.path().to_path_buf(), "0.5.68").unwrap().with_lifecycle(lifecycle.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = serve_package_once(listener, signed_package(&signing_key, key_id));
+        let mut connection = None;
+        let result = marketplace
+            .install_url_package(&format!("http://{address}/plugin.dbxp"), PluginInstallPolicy::LocalSigned, |_, _| {
+                connection.get_or_insert_with(|| {
+                    lifecycle.begin_connection("marketplace.install", "Started during download").unwrap()
+                });
+            })
+            .await;
+        server.await.unwrap();
+        assert!(result.unwrap_err().contains("Started during download"));
+        assert!(registry.find_plugin("marketplace.install").unwrap().is_none());
+        drop(connection);
+        assert!(lifecycle.begin_update("marketplace.install").is_ok());
+    }
+
+    #[tokio::test]
+    async fn marketplace_reports_active_connections_before_fetching_catalogs() {
+        let root = tempfile::tempdir().unwrap();
+        let lifecycle = crate::plugins::PluginLifecycle::default();
+        let marketplace =
+            PluginMarketplace::new(root.path().to_path_buf(), "0.5.68").unwrap().with_lifecycle(lifecycle.clone());
+        let _connection = lifecycle.begin_connection("marketplace.install", "Production").unwrap();
+        let error = marketplace
+            .install(super::PluginMarketplaceInstallRequest {
+                repository_id: "not-configured".to_string(),
+                plugin_id: "marketplace.install".to_string(),
+                version: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.contains("Production"));
     }
 
     #[tokio::test]

@@ -4,6 +4,8 @@ import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonit
 import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { useToast } from "@/composables/useToast";
+import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, ObjectSource, ObjectSourceKind, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
@@ -4945,17 +4947,43 @@ export const useQueryStore = defineStore("query", () => {
     return true;
   }
 
+  const savedSqlTargetRequests = new WeakMap<QueryTab, number>();
+  let savedSqlTargetPersistenceActive = true;
+  onScopeDispose(() => {
+    savedSqlTargetPersistenceActive = false;
+  });
+
+  function createExecutionTargetGuard(id: string): () => boolean {
+    const tab = tabs.value.find((candidate) => candidate.id === id);
+    const target = savedSqlExecutionTargetFromTab(tab);
+    if (!tab || !target) return () => false;
+    const revision = savedSqlTargetRequests.get(tab);
+    const savedSqlId = tab.savedSqlId;
+    return () =>
+      savedSqlTargetPersistenceActive && tabs.value.includes(tab) && savedSqlTargetRequests.get(tab) === revision && tab.savedSqlId === savedSqlId && tab.connectionId === target.connectionId && tab.database === target.database && tab.catalog === target.catalog && tab.schema === target.schema;
+  }
+
   function persistSavedSqlExecutionTarget(tab: QueryTab, options: UpdateExecutionTargetOptions) {
+    const revision = (savedSqlTargetRequests.get(tab) ?? 0) + 1;
+    savedSqlTargetRequests.set(tab, revision);
     if (options.persistSavedSqlTarget === false || tab.mode !== "query" || !tab.savedSqlId) return;
     const savedSqlStore = useSavedSqlStore();
+    const savedSqlId = tab.savedSqlId;
     void savedSqlStore
-      .updateFileExecutionTarget(tab.savedSqlId, {
+      .updateFileExecutionTarget(savedSqlId, {
         connectionId: tab.connectionId,
         database: tab.database,
         catalog: tab.catalog,
         schema: tab.schema,
       })
-      .catch((error) => console.warn("[DBX][saved-sql:target:error]", error));
+      .catch((error) => {
+        console.warn("[DBX][saved-sql:target:error]", error);
+        // A failed older request must not undo a newer target selection.
+        if (!savedSqlTargetPersistenceActive || savedSqlTargetRequests.get(tab) !== revision || tab.savedSqlId !== savedSqlId || !tabs.value.includes(tab)) return;
+        const saved = savedSqlStore.getFile(savedSqlId);
+        if (saved) applySavedSqlExecutionTarget(tab, saved);
+        useToast().toast(i18n.global.t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, i18n.global.t) }), 5000);
+      });
   }
 
   function updateDatabase(id: string, database: string, options: UpdateExecutionTargetOptions = {}) {
@@ -8711,6 +8739,7 @@ export const useQueryStore = defineStore("query", () => {
     hydrateSavedSqlTabs,
     togglePinnedTab,
     reorderTab,
+    createExecutionTargetGuard,
     updateDatabase,
     updateCatalog,
     updateSchema,

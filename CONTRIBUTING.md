@@ -11,6 +11,8 @@ Thanks for taking a look at DBX. Whether you fix a typo, improve docs, or tackle
 
 If you are not sure what to pick, choose an issue with clear reproduction steps, a small scope, or a database you can verify against a real instance. Follow the [complete website tutorial](https://dbxio.com/en/docs/contributing).
 
+`user-priority/*` reflects the reporter's urgency; `ai-priority/*` is an automated repair/implementation suggestion, not a verified diagnosis or release promise. Maintainer decisions take precedence. See the [priority rubric and automation safeguards](.github/scripts/README.md).
+
 ## Development Setup
 
 ### Prerequisites

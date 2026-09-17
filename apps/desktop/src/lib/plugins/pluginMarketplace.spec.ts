@@ -65,6 +65,16 @@ describe("plugin marketplace listings", () => {
     expect(buildMarketplacePluginListings([unsupported], [], "en")[0].status).toBe("unsupported");
   });
 
+  it("keeps a newer installed version installed instead of offering a downgrade", () => {
+    const listings = buildMarketplacePluginListings([result], [installed("1.2.0")], "en");
+
+    // The catalog lags behind the installed build: the card must stay on the installed state.
+    expect(listings[0]).toMatchObject({ status: "installed", installed: { manifest: { version: "1.2.0" } } });
+    // Only "update" swaps the card's bottom-left line to the two-version text, so this state renders the
+    // plain installed line for 1.2.0 rather than the catalog's older 1.1.0.
+    expect(listings[0].plugin.latestVersion).toBe("1.1.0");
+  });
+
   it("uses a universal artifact when the current target has no exact artifact", () => {
     const universal = structuredClone(result);
     universal.target = "linux-x64";

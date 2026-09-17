@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, test, vi } from "vitest";
 import type { SavedSqlFile, SavedSqlFolder, SavedSqlLibrary } from "../../apps/desktop/src/types/database.ts";
-import { useSavedSqlStore } from "../../apps/desktop/src/stores/savedSqlStore.ts";
+import { SavedSqlNameConflictError, useSavedSqlStore } from "../../apps/desktop/src/stores/savedSqlStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
+
+const toastMock = vi.hoisted(() => vi.fn());
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: toastMock }) }));
 
 const apiMock = vi.hoisted(() => ({
   loadSavedSqlLibrary: vi.fn<() => Promise<SavedSqlLibrary>>(),
@@ -631,7 +634,7 @@ test("renaming a saved SQL file allows the same name in another folder of the da
   assert.equal(store.getFile("sql-1")?.name, "revenue.sql");
 });
 
-test("renaming a saved SQL file rejects the same name in its folder across catalogs", async () => {
+test("renaming a saved SQL file allows the same name in its folder across catalogs", async () => {
   const files: SavedSqlFile[] = [
     {
       id: "sql-hive",
@@ -660,10 +663,10 @@ test("renaming a saved SQL file rejects the same name in its folder across catal
 
   const store = useSavedSqlStore();
   await store.initFromStorage();
-  await assert.rejects(store.renameFile("sql-hive", "REPORT"), /already exists/);
+  await store.renameFile("sql-hive", "REPORT");
 
-  assert.equal(store.getFile("sql-hive")?.name, "draft.sql");
-  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 0);
+  assert.equal(store.getFile("sql-hive")?.name, "REPORT.sql");
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
 });
 
 test("failed saved SQL rename releases the requested name for retry", async () => {
@@ -761,7 +764,7 @@ test("hydrates saved SQL before copying it to another database", async () => {
   assert.equal(apiMock.loadSavedSqlFile.mock.calls.length, 1);
 });
 
-test("concurrent saved SQL pastes reserve different copy names in the same folder across databases", async () => {
+test("concurrent saved SQL pastes can reuse copy names in different databases", async () => {
   const source: SavedSqlFile = {
     id: "sql-1",
     connectionId: "conn-1",
@@ -778,7 +781,7 @@ test("concurrent saved SQL pastes reserve different copy names in the same folde
   await store.initFromStorage();
   const [first, second] = await Promise.all([store.copyFilesToDatabase([source.id], { connectionId: "conn-1", catalog: "hive", database: "analytics" }), store.copyFilesToDatabase([source.id], { connectionId: "conn-1", catalog: "hive", database: "other" })]);
 
-  assert.deepEqual([first[0]?.name, second[0]?.name].sort(), ["report_copy1.sql", "report_copy2.sql"]);
+  assert.deepEqual([first[0]?.name, second[0]?.name].sort(), ["report_copy1.sql", "report_copy1.sql"]);
   assert.equal(first[0]?.catalog, "hive");
   assert.equal(second[0]?.catalog, "hive");
 });
@@ -989,14 +992,16 @@ test.each([
   assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
 });
 
-test.each(["", "other"])("creating a SQL file rejects the same folder name despite database %j", async (database) => {
+test("creating a SQL file scopes names by connection, catalog, database, and folder", async () => {
   const store = useSavedSqlStore();
-  await store.saveFile({ connectionId: "conn-1", folderId: "folder-1", name: "report.sql", database: "analytics", sql: "SELECT 1;" });
+  await store.saveFile({ connectionId: "conn-1", catalog: "hive", folderId: "folder-1", name: "report.sql", database: "analytics", sql: "SELECT 1;" });
+  await store.saveFile({ connectionId: "conn-1", catalog: "hive", folderId: "folder-1", name: "REPORT", database: "reporting", sql: "SELECT 2;" });
+  await store.saveFile({ connectionId: "conn-1", catalog: "iceberg", folderId: "folder-1", name: "report", database: "analytics", sql: "SELECT 3;" });
 
-  await assert.rejects(store.saveFile({ connectionId: "conn-1", folderId: "folder-1", name: "REPORT", database, sql: "SELECT 2;" }), /already exists/);
+  await assert.rejects(store.saveFile({ connectionId: "conn-1", catalog: "hive", folderId: "folder-1", name: "REPORT", database: "analytics", sql: "SELECT 4;" }), /already exists/);
 
-  assert.equal(store.files.length, 1);
-  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1);
+  assert.equal(store.files.length, 3);
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 3);
 });
 
 test("same SQL names remain independent across connections in the root folder", async () => {
@@ -1033,4 +1038,342 @@ test("SQL copy names ignore files in other folders of the same database", async 
 
   assert.equal(copy?.name, "report_copy1.sql");
   assert.equal(copy?.folderId, "folder-1");
+});
+
+
+test.each(["database", "catalog"])("a conflicting saved SQL %s switch restores the tab and permits saving again", async (change) => {
+  const savedSqlStore = useSavedSqlStore();
+  const original = await savedSqlStore.saveFile({ connectionId: "conn-1", catalog: "hive", database: "analytics", name: "report.sql", schema: "public", sql: "SELECT 1;" });
+  await savedSqlStore.saveFile({ connectionId: "conn-1", catalog: change === "catalog" ? "iceberg" : "hive", database: change === "database" ? "other" : "analytics", name: "report.sql", sql: "SELECT 2;" });
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(original, { targetMode: "saved" });
+  if (change === "database") queryStore.updateDatabase(tabId, "other");
+  else queryStore.updateCatalog(tabId, "iceberg", "analytics");
+
+  await vi.waitFor(() => assert.equal(toastMock.mock.calls.length, 1));
+  const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+  assert.deepEqual([tab.database, tab.catalog, tab.schema], ["analytics", "hive", "public"]);
+  assert.equal(savedSqlStore.getFile(original.id)?.database, tab.database);
+  assert.equal(savedSqlStore.getFile(original.id)?.catalog, tab.catalog);
+  assert.ok(toastMock.mock.calls[0]?.[0].includes("report.sql"));
+  await savedSqlStore.saveFile({ ...original, database: tab.database, catalog: tab.catalog, schema: tab.schema, sql: "SELECT 3;" });
+  assert.equal(savedSqlStore.getFile(original.id)?.sql, "SELECT 3;");
+});
+
+test("an older failed target save does not roll back a newer database selection", async () => {
+  const savedSqlStore = useSavedSqlStore();
+  const original = await savedSqlStore.saveFile({ connectionId: "conn-1", database: "first", name: "report.sql", sql: "SELECT 1;" });
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(original, { targetMode: "saved" });
+  let rejectSave: (error: Error) => void = () => { throw new Error("save has not started"); };
+  apiMock.saveSavedSqlFile.mockImplementationOnce(() => new Promise((_, reject) => { rejectSave = reject; }));
+  queryStore.updateDatabase(tabId, "second");
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 2));
+  queryStore.updateDatabase(tabId, "third");
+  rejectSave(new Error("disk full"));
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.at(-1)?.[0].database, "third"));
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.database, "third");
+  assert.equal(savedSqlStore.getFile(original.id)?.database, "third");
+  assert.equal(toastMock.mock.calls.length, 0);
+});
+
+
+test("a target save failure after query store disposal does not restore tabs or notify", async () => {
+  const savedSqlStore = useSavedSqlStore();
+  const original = await savedSqlStore.saveFile({ connectionId: "conn-1", database: "first", name: "report.sql", sql: "SELECT 1;" });
+  const queryStore = useQueryStore();
+  const tabId = queryStore.openSavedSql(original, { targetMode: "saved" });
+  let rejectSave: (error: Error) => void = () => { throw new Error("save has not started"); };
+  apiMock.saveSavedSqlFile.mockImplementationOnce(() => new Promise((_, reject) => { rejectSave = reject; }));
+  queryStore.updateDatabase(tabId, "second");
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 2));
+  queryStore.$dispose();
+  rejectSave(new Error("disk full"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(queryStore.tabs.find((item) => item.id === tabId)?.database, "second");
+  assert.equal(toastMock.mock.calls.length, 0);
+});
+
+function deferredSavedSqlFile() {
+  let resolve!: (file: SavedSqlFile) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<SavedSqlFile>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function targetReservationFile(overrides: Partial<SavedSqlFile> = {}): SavedSqlFile {
+  return {
+    id: "source",
+    connectionId: "conn-1",
+    catalog: "hive",
+    database: "first",
+    folderId: "folder-1",
+    name: "report.sql",
+    sql: "SELECT 1;",
+    sqlLoaded: true,
+    createdAt: "2026-09-17T00:00:00.000Z",
+    updatedAt: "2026-09-17T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function targetReservationTarget(database: string) {
+  return { connectionId: "conn-1", catalog: "hive", database };
+}
+
+test.each([
+  { change: "database", target: { connectionId: "conn-1", catalog: "hive", database: "second" } },
+  { change: "catalog", target: { connectionId: "conn-1", catalog: "iceberg", database: "first" } },
+  { change: "connection", target: { connectionId: "conn-2", catalog: "hive", database: "first" } },
+].flatMap((scenario) => [true, false].map((succeeds) => ({ ...scenario, succeeds }))))(
+  "target source reservation protects the original $change scope until completion (success=$succeeds)",
+  async ({ target, succeeds }) => {
+    const original = targetReservationFile();
+    apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [original] });
+    const pending = deferredSavedSqlFile();
+    apiMock.saveSavedSqlFile.mockImplementation((file) => file.id === original.id ? pending.promise : Promise.resolve(file));
+    const store = useSavedSqlStore();
+    await store.initFromStorage();
+
+    const move = store.updateFileExecutionTarget(original.id, target).catch((error) => error);
+    const immediateCreate = store.saveFile({ ...original, id: undefined, name: "REPORT" }).catch((error) => error);
+    await vi.waitFor(() => assert.ok(apiMock.saveSavedSqlFile.mock.calls.some(([file]) => file.id === original.id)));
+    const pendingCreate = await store.saveFile({ ...original, id: undefined }).catch((error) => error);
+    await assert.rejects(store.saveFile({ ...original, ...target, id: undefined }), SavedSqlNameConflictError);
+    await store.saveFile({ ...original, id: undefined, folderId: "other-folder" });
+
+    if (succeeds) pending.resolve({ ...original, ...target });
+    else pending.reject(new Error("disk full"));
+    const result = await move;
+
+    assert.ok(await immediateCreate instanceof SavedSqlNameConflictError);
+    assert.ok(pendingCreate instanceof SavedSqlNameConflictError);
+    assert.equal(result instanceof Error, !succeeds);
+    assert.deepEqual(
+      [store.getFile(original.id)?.connectionId, store.getFile(original.id)?.catalog, store.getFile(original.id)?.database],
+      succeeds ? [target.connectionId, target.catalog, target.database] : [original.connectionId, original.catalog, original.database],
+    );
+
+    apiMock.saveSavedSqlFile.mockImplementation(async (file) => file);
+    if (!succeeds) {
+      await assert.rejects(store.saveFile({ ...original, id: undefined }), SavedSqlNameConflictError);
+      await store.saveFile({ ...original, ...target, id: undefined });
+      await store.updateFileExecutionTarget(original.id, { ...target, database: "final" });
+    }
+    await store.saveFile({ ...original, id: undefined });
+  },
+);
+
+test("target source reservation transfers to B when A to B succeeds and queued C fails", async () => {
+  const original = targetReservationFile();
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [original] });
+  const middle = deferredSavedSqlFile();
+  const latest = deferredSavedSqlFile();
+  apiMock.saveSavedSqlFile.mockImplementation((file) => {
+    if (file.id !== original.id) return Promise.resolve(file);
+    return file.database === "second" ? middle.promise : latest.promise;
+  });
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  const firstMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("second"));
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1));
+  const lastMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("third")).catch((error) => error);
+  await assert.rejects(store.saveFile({ ...original, id: undefined, database: "second" }), SavedSqlNameConflictError);
+  middle.resolve({ ...original, database: "second" });
+  await firstMove;
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 2));
+  await store.saveFile({ ...original, id: undefined });
+  const middleCreate = await store.saveFile({ ...original, id: undefined, database: "second" }).catch((error) => error);
+  await assert.rejects(store.saveFile({ ...original, id: undefined, database: "third" }), SavedSqlNameConflictError);
+
+  latest.reject(new Error("latest save failed"));
+  assert.match((await lastMove).message, /latest save failed/);
+  assert.ok(middleCreate instanceof SavedSqlNameConflictError);
+  assert.equal(store.getFile(original.id)?.database, "second");
+  await assert.rejects(store.saveFile({ ...original, id: undefined, database: "second" }), SavedSqlNameConflictError);
+  await store.saveFile({ ...original, id: undefined, database: "third" });
+  apiMock.saveSavedSqlFile.mockImplementation(async (file) => file);
+  await store.updateFileExecutionTarget(original.id, targetReservationTarget("final"));
+  await store.saveFile({ ...original, id: undefined, database: "second" });
+});
+
+test.each([true, false])("target source reservation survives a superseded failed save (latest success=%s)", async (succeeds) => {
+  const original = targetReservationFile();
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [original] });
+  const middle = deferredSavedSqlFile();
+  const latest = deferredSavedSqlFile();
+  apiMock.saveSavedSqlFile.mockImplementation((file) => {
+    if (file.id !== original.id) return Promise.resolve(file);
+    return file.database === "second" ? middle.promise : latest.promise;
+  });
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  const firstMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("second")).catch((error) => error);
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 1));
+  const lastMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("third")).catch((error) => error);
+  middle.reject(new Error("superseded save failed"));
+  assert.match((await firstMove).message, /superseded save failed/);
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 2));
+  assert.equal(store.getFile(original.id)?.database, "third");
+  await store.saveFile({ ...original, id: undefined, database: "second" });
+  const sourceCreate = await store.saveFile({ ...original, id: undefined }).catch((error) => error);
+
+  if (succeeds) latest.resolve({ ...original, database: "third" });
+  else latest.reject(new Error("latest save failed"));
+  assert.equal((await lastMove) instanceof Error, !succeeds);
+  assert.ok(sourceCreate instanceof SavedSqlNameConflictError);
+  assert.equal(store.getFile(original.id)?.database, succeeds ? "third" : "first");
+  apiMock.saveSavedSqlFile.mockImplementation(async (file) => file);
+  if (!succeeds) {
+    await assert.rejects(store.saveFile({ ...original, id: undefined }), SavedSqlNameConflictError);
+    await store.saveFile({ ...original, id: undefined, database: "third" });
+    await store.updateFileExecutionTarget(original.id, targetReservationTarget("final"));
+  }
+  await store.saveFile({ ...original, id: undefined });
+});
+
+test.each([true, false])("target source reservation survives skipped coalesced revisions (success=%s)", async (succeeds) => {
+  const original = targetReservationFile();
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [original] });
+  const pending = deferredSavedSqlFile();
+  apiMock.saveSavedSqlFile.mockImplementation((file) => file.id === original.id ? pending.promise : Promise.resolve(file));
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  const firstMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("second"));
+  const skippedMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("third"));
+  const lastMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("fourth")).catch((error) => error);
+  const immediateCreate = store.saveFile({ ...original, id: undefined }).catch((error) => error);
+  await Promise.all([firstMove, skippedMove]);
+  await vi.waitFor(() => assert.ok(apiMock.saveSavedSqlFile.mock.calls.some(([file]) => file.id === original.id)));
+  await store.saveFile({ ...original, id: undefined, database: "second" });
+  await store.saveFile({ ...original, id: undefined, database: "third" });
+  if (succeeds) pending.resolve({ ...original, database: "fourth" });
+  else pending.reject(new Error("disk full"));
+  assert.equal((await lastMove) instanceof Error, !succeeds);
+
+  assert.ok(await immediateCreate instanceof SavedSqlNameConflictError);
+  assert.deepEqual(apiMock.saveSavedSqlFile.mock.calls.filter(([file]) => file.id === original.id).map(([file]) => file.database), ["fourth"]);
+  apiMock.saveSavedSqlFile.mockImplementation(async (file) => file);
+  if (!succeeds) {
+    assert.equal(store.getFile(original.id)?.database, "first");
+    await assert.rejects(store.saveFile({ ...original, id: undefined }), SavedSqlNameConflictError);
+    await store.saveFile({ ...original, id: undefined, database: "fourth" });
+    await store.updateFileExecutionTarget(original.id, targetReservationTarget("final"));
+  }
+  await store.saveFile({ ...original, id: undefined });
+});
+
+test.each([true, false].flatMap((superseded) => [true, false].map((succeeds) => ({ superseded, succeeds }))))(
+  "target source reservation covers lazy hydration (superseded=$superseded, success=$succeeds)",
+  async ({ superseded, succeeds }) => {
+    const original = targetReservationFile();
+    apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [{ ...original, sql: "", sqlLoaded: false }] });
+    const hydration = deferredSavedSqlFile();
+    const pending = deferredSavedSqlFile();
+    apiMock.loadSavedSqlFile.mockReturnValueOnce(hydration.promise);
+    apiMock.saveSavedSqlFile.mockImplementation((file) => file.id === original.id ? pending.promise : Promise.resolve(file));
+    const store = useSavedSqlStore();
+    await store.initFromStorage();
+
+    const firstMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("second")).catch((error) => error);
+    await vi.waitFor(() => assert.equal(apiMock.loadSavedSqlFile.mock.calls.length, 1));
+    const sourceDuringLoad = await store.saveFile({ ...original, id: undefined }).catch((error) => error);
+    const database = superseded ? "third" : "second";
+    const lastMove = superseded ? store.updateFileExecutionTarget(original.id, targetReservationTarget(database)).catch((error) => error) : firstMove;
+    hydration.resolve(original);
+    await vi.waitFor(() => assert.ok(apiMock.saveSavedSqlFile.mock.calls.some(([file]) => file.id === original.id)));
+    const sourceDuringSave = await store.saveFile({ ...original, id: undefined }).catch((error) => error);
+    if (succeeds) pending.resolve({ ...original, database });
+    else pending.reject(new Error("disk full"));
+    await firstMove;
+    assert.equal((await lastMove) instanceof Error, !succeeds);
+
+    assert.ok(sourceDuringLoad instanceof SavedSqlNameConflictError);
+    assert.ok(sourceDuringSave instanceof SavedSqlNameConflictError);
+    assert.deepEqual(apiMock.saveSavedSqlFile.mock.calls.filter(([file]) => file.id === original.id).map(([file]) => [file.database, file.sql]), [[database, original.sql]]);
+    assert.equal(store.getFile(original.id)?.database, succeeds ? database : "first");
+    assert.equal(store.getFile(original.id)?.sql, original.sql);
+    apiMock.saveSavedSqlFile.mockImplementation(async (file) => file);
+    if (!succeeds) {
+      await assert.rejects(store.saveFile({ ...original, id: undefined }), SavedSqlNameConflictError);
+      await store.saveFile({ ...original, id: undefined, database });
+      await store.updateFileExecutionTarget(original.id, targetReservationTarget("final"));
+    }
+    await store.saveFile({ ...original, id: undefined });
+  },
+);
+
+test("target source reservation rolls back and cleans up when lazy hydration fails", async () => {
+  const original = targetReservationFile();
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [{ ...original, sql: "", sqlLoaded: false }] });
+  const hydration = deferredSavedSqlFile();
+  apiMock.loadSavedSqlFile.mockReturnValueOnce(hydration.promise);
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  const move = store.updateFileExecutionTarget(original.id, targetReservationTarget("second")).catch((error) => error);
+  await vi.waitFor(() => assert.equal(apiMock.loadSavedSqlFile.mock.calls.length, 1));
+  hydration.reject(new Error("content unavailable"));
+  assert.match((await move).message, /content unavailable/);
+  assert.equal(store.getFile(original.id)?.database, "first");
+  assert.equal(store.getFile(original.id)?.sqlLoaded, false);
+  assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 0);
+  await assert.rejects(store.saveFile({ ...original, id: undefined }), SavedSqlNameConflictError);
+  await store.saveFile({ ...original, id: undefined, database: "second" });
+  apiMock.loadSavedSqlFile.mockResolvedValueOnce(original);
+  await store.updateFileExecutionTarget(original.id, targetReservationTarget("final"));
+  await store.saveFile({ ...original, id: undefined });
+});
+
+test("target source reservation permits schema and content updates to legacy duplicate names", async () => {
+  const original = targetReservationFile();
+  const duplicate = { ...original, id: "legacy-duplicate", name: "REPORT.SQL" };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [original, duplicate] });
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  await Promise.all([
+    store.updateFileExecutionTarget(original.id, { ...targetReservationTarget("first"), schema: "public" }),
+    store.updateFileExecutionTarget(duplicate.id, { ...targetReservationTarget("first"), schema: "app" }),
+  ]);
+  await store.saveFile({ ...original, schema: "public", sql: "SELECT 2;" });
+  assert.equal(store.getFile(original.id)?.schema, "public");
+  assert.equal(store.getFile(duplicate.id)?.schema, "app");
+  assert.equal(store.getFile(original.id)?.sql, "SELECT 2;");
+  await assert.rejects(store.saveFile({ ...original, id: undefined }), SavedSqlNameConflictError);
+});
+
+test("target source reservation retains each legacy duplicate owner until its move completes", async () => {
+  const original = targetReservationFile();
+  const duplicate = { ...original, id: "legacy-duplicate", name: "REPORT.SQL" };
+  apiMock.loadSavedSqlLibrary.mockResolvedValue({ folders: [], files: [original, duplicate] });
+  const firstPending = deferredSavedSqlFile();
+  const secondPending = deferredSavedSqlFile();
+  apiMock.saveSavedSqlFile.mockImplementation((file) => {
+    if (file.id === original.id) return firstPending.promise;
+    if (file.id === duplicate.id) return secondPending.promise;
+    return Promise.resolve(file);
+  });
+  const store = useSavedSqlStore();
+  await store.initFromStorage();
+
+  const firstMove = store.updateFileExecutionTarget(original.id, targetReservationTarget("second"));
+  const secondMove = store.updateFileExecutionTarget(duplicate.id, targetReservationTarget("third")).catch((error) => error);
+  await vi.waitFor(() => assert.equal(apiMock.saveSavedSqlFile.mock.calls.length, 2));
+  firstPending.resolve({ ...original, database: "second" });
+  await firstMove;
+  const sourceCreate = await store.saveFile({ ...original, id: undefined }).catch((error) => error);
+  secondPending.reject(new Error("second owner failed"));
+  assert.match((await secondMove).message, /second owner failed/);
+  assert.ok(sourceCreate instanceof SavedSqlNameConflictError);
+  assert.equal(store.getFile(duplicate.id)?.database, "first");
+  apiMock.saveSavedSqlFile.mockImplementation(async (file) => file);
+  await store.updateFileExecutionTarget(duplicate.id, targetReservationTarget("final"));
+  await store.saveFile({ ...original, id: undefined });
 });

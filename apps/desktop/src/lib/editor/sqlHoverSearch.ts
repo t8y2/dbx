@@ -15,6 +15,7 @@
  */
 
 const MATCH_ATTRIBUTE = "data-sql-hover-search-match";
+const MATCH_INDEX_ATTRIBUTE = "data-sql-hover-search-match-index";
 const ACTIVE_ATTRIBUTE = "data-sql-hover-search-active";
 
 export interface HoverSearchMatch {
@@ -53,8 +54,8 @@ export function findHoverSearchMatches(text: string, query: string): HoverSearch
  * container's `textContent`); call {@link clearHoverSearchHighlights} (or
  * restore the original HTML) before re-applying.
  *
- * Returns the created `<mark>` elements in document order; the first is tagged
- * as the active match so callers can scroll it into view.
+ * Returns the created `<mark>` elements in document order, grouped by match
+ * index. Every fragment of the first match is tagged active.
  */
 export function applyHoverSearchHighlights(container: HTMLElement, matches: HoverSearchMatch[]): HTMLElement[] {
   if (matches.length === 0) return [];
@@ -71,19 +72,26 @@ export function applyHoverSearchHighlights(container: HTMLElement, matches: Hove
   }
 
   const marks: HTMLElement[] = [];
+  let firstMatchIndex = 0;
   for (const { node, start, end } of textNodes) {
-    // Ranges (clamped to this node) that overlap the node, in node-local coords.
-    const segments = matches.filter((match) => match.start < end && match.end > start).map((match) => ({ from: Math.max(match.start, start) - start, to: Math.min(match.end, end) - start }));
-    if (segments.length === 0) continue;
+    while (firstMatchIndex < matches.length && matches[firstMatchIndex].end <= start) firstMatchIndex++;
+    if (firstMatchIndex === matches.length) break;
+    if (start === end || matches[firstMatchIndex].start >= end) continue;
 
     const data = node.data;
     const fragment = document.createDocumentFragment();
     let cursor = 0;
-    for (const { from, to } of segments) {
+    for (let matchIndex = firstMatchIndex; matchIndex < matches.length && matches[matchIndex].start < end; matchIndex++) {
+      const match = matches[matchIndex];
+      const from = Math.max(match.start, start) - start;
+      const to = Math.min(match.end, end) - start;
       if (from > cursor) fragment.appendChild(document.createTextNode(data.slice(cursor, from)));
       const mark = document.createElement("mark");
       mark.setAttribute(MATCH_ATTRIBUTE, "true");
-      mark.className = "rounded-[2px] bg-yellow-300/70 px-px text-inherit dark:bg-yellow-500/40";
+      mark.setAttribute(MATCH_INDEX_ATTRIBUTE, String(matchIndex));
+      if (matchIndex === 0) mark.setAttribute(ACTIVE_ATTRIBUTE, "true");
+      mark.className =
+        "rounded-[2px] bg-yellow-300/70 px-px text-inherit dark:bg-yellow-500/40 data-[sql-hover-search-active=true]:bg-yellow-400/90 data-[sql-hover-search-active=true]:outline data-[sql-hover-search-active=true]:outline-1 data-[sql-hover-search-active=true]:outline-yellow-600 dark:data-[sql-hover-search-active=true]:bg-yellow-500/70 dark:data-[sql-hover-search-active=true]:outline-yellow-400";
       mark.textContent = data.slice(from, to);
       fragment.appendChild(mark);
       marks.push(mark);
@@ -93,7 +101,6 @@ export function applyHoverSearchHighlights(container: HTMLElement, matches: Hove
     node.replaceWith(fragment);
   }
 
-  marks[0]?.setAttribute(ACTIVE_ATTRIBUTE, "true");
   return marks;
 }
 
@@ -140,7 +147,7 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
 
   const element = document.createElement("div");
   element.dataset.sqlHoverSearch = "true";
-  element.className = "mt-2 flex-none";
+  element.className = "mt-2 flex flex-none items-center gap-2";
 
   const input = document.createElement("input");
   input.type = "text";
@@ -149,8 +156,17 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   input.setAttribute("aria-label", placeholder);
   input.spellcheck = false;
   input.autocomplete = "off";
-  input.className = "w-full rounded border border-border/60 bg-background px-2 py-1 text-[11px] leading-none text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+  input.className = "min-w-0 flex-1 rounded border border-border/60 bg-background px-2 py-1 text-[11px] leading-none text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
   element.appendChild(input);
+
+  const matchCount = document.createElement("span");
+  matchCount.dataset.sqlHoverSearchCount = "true";
+  matchCount.className = "shrink-0 text-[11px] tabular-nums text-muted-foreground";
+  matchCount.setAttribute("role", "status");
+  matchCount.setAttribute("aria-live", "polite");
+  matchCount.setAttribute("aria-atomic", "true");
+  matchCount.hidden = true;
+  element.appendChild(matchCount);
 
   const status = document.createElement("div");
   status.dataset.sqlHoverSearchEmpty = "true";
@@ -158,9 +174,23 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   status.textContent = noResultLabel;
   status.hidden = true;
 
+  let matchGroups: HTMLElement[][] = [];
+  let activeMatchIndex = -1;
+  let isComposing = false;
+
+  const activateMatch = (index: number) => {
+    for (const mark of matchGroups[activeMatchIndex] ?? []) mark.removeAttribute(ACTIVE_ATTRIBUTE);
+    activeMatchIndex = index;
+    for (const mark of matchGroups[index]) mark.setAttribute(ACTIVE_ATTRIBUTE, "true");
+    matchCount.textContent = `${index + 1} / ${matchGroups.length}`;
+    matchGroups[index][0]?.scrollIntoView({ block: "nearest" });
+  };
+
   const runSearch = () => {
     // Restore the pristine highlighted DDL, then re-apply match highlights.
     target.innerHTML = originalHtml;
+    matchGroups = [];
+    activeMatchIndex = -1;
     const query = input.value;
     // Search the rendered text, not the raw DDL string: the highlighter emits
     // `<br>` for line breaks, so `textContent` differs from the raw DDL by the
@@ -168,23 +198,27 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
     // `textContent` domain. Using any other corpus shifts every match after
     // the first line.
     const matches = findHoverSearchMatches(target.textContent ?? "", query);
-    if (!query.trim()) {
-      status.hidden = true;
-      return;
-    }
-    if (matches.length === 0) {
-      status.hidden = false;
-      return;
-    }
-    status.hidden = true;
+    const hasQuery = query.trim().length > 0;
+    matchCount.hidden = !hasQuery;
+    matchCount.textContent = hasQuery ? "0 / 0" : "";
+    status.hidden = !hasQuery || matches.length > 0;
+    if (matches.length === 0) return;
+
     const marks = applyHoverSearchHighlights(target, matches);
-    marks[0]?.scrollIntoView({ block: "nearest" });
+    matchGroups = Array.from({ length: matches.length }, () => []);
+    for (const mark of marks) matchGroups[Number(mark.getAttribute(MATCH_INDEX_ATTRIBUTE))].push(mark);
+    activateMatch(0);
   };
 
   const stopKeyboard = (event: KeyboardEvent) => {
     // Keep editor keymap shortcuts and IME Enter/Escape from leaking out of the
     // input; Escape clears the search but keeps the tooltip open.
     event.stopPropagation();
+    if (event.type !== "keydown" || isComposing || event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      if (matchGroups.length > 0) activateMatch((activeMatchIndex + (event.shiftKey ? -1 : 1) + matchGroups.length) % matchGroups.length);
+    }
     if (event.key === "Escape" && input.value) {
       event.preventDefault();
       input.value = "";
@@ -194,10 +228,18 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
   const stopPointer = (event: Event) => {
     event.stopPropagation();
   };
+  const startComposition = () => {
+    isComposing = true;
+  };
+  const endComposition = () => {
+    isComposing = false;
+  };
 
   input.addEventListener("input", runSearch);
   input.addEventListener("keydown", stopKeyboard);
   input.addEventListener("keyup", stopKeyboard);
+  input.addEventListener("compositionstart", startComposition);
+  input.addEventListener("compositionend", endComposition);
   input.addEventListener("pointerdown", stopPointer);
   input.addEventListener("mousedown", stopPointer);
 
@@ -211,6 +253,8 @@ export function createHoverSearch(options: HoverSearchOptions): HoverSearchContr
       input.removeEventListener("input", runSearch);
       input.removeEventListener("keydown", stopKeyboard);
       input.removeEventListener("keyup", stopKeyboard);
+      input.removeEventListener("compositionstart", startComposition);
+      input.removeEventListener("compositionend", endComposition);
       input.removeEventListener("pointerdown", stopPointer);
       input.removeEventListener("mousedown", stopPointer);
     },

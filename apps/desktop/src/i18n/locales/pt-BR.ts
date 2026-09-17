@@ -187,6 +187,7 @@ export default withEnglishFallback({
     permissionsCount: "{count} permissões",
     unsupportedTarget: "Indisponível para {target}",
     installedVersion: "Instalado v{version}",
+    installedVersionUpdatable: "Instalado v{installed} · Atualizar para v{latest}",
     licenseUnknown: "Licença não informada",
     sourceRepository: "Repositório do código-fonte",
     pluginHomepage: "Página inicial",

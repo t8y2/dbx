@@ -160,7 +160,8 @@ watch(
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent
-      class="flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0 sm:max-w-[760px]"
+      class="sm:max-w-[700px]"
+      :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
       :show-close-button="!isCloseBlocked"
       @interact-outside="
         (e: Event) => {

@@ -97,7 +97,6 @@ const SUPPORTED_COLLECTION_METHODS = [
 
 /** Database-level methods with a supported equivalent worth pointing at. */
 const DATABASE_METHOD_HINTS: Record<string, string> = {
-  getSiblingDB: "switch databases with `use <database>` and then run the command against db.<collection>",
   adminCommand: "use db.runCommand({ ... })",
   getCollectionNames: "collections are listed in the sidebar",
 };
@@ -112,7 +111,7 @@ const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   runCommand: { expects: "one command document", roles: ["command"] },
 };
 
-const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createCollection", "dropDatabase", "createUser", "runCommand", "getCollection"];
+const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createCollection", "dropDatabase", "createUser", "runCommand", "getCollection", "getSiblingDB"];
 
 const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
 
@@ -126,6 +125,17 @@ export function describeMongoCommandParseFailure(input: string): string {
 }
 
 function diagnoseMongoCommand(source: string): string | null {
+  if (SIBLING_DB_PREFIX.test(source)) {
+    const sibling = splitSiblingDbPrefix(source);
+    if (!sibling) return 'getSiblingDB() requires a database name string followed by a command, for example db.getSiblingDB("app").orders.find({}).';
+    if (SIBLING_DB_PREFIX.test(`db${sibling.rest}`)) return "getSiblingDB() cannot be chained.";
+    const inner = `db${sibling.rest}`;
+    const parsedInner = parseMongoCommand(inner);
+    if (parsedInner) {
+      return parsedInner.command.kind === "use" || parsedInner.command.kind === "showDatabases" ? "getSiblingDB() must be followed by a collection or database method." : null;
+    }
+    return diagnoseMongoCommand(inner) ?? describeMongoCommandParseFailureBasic(inner);
+  }
   if (/^show\s+(collections|tables)\b/i.test(source)) {
     return "show collections is not supported here; collections are listed in the sidebar. Only show dbs is supported.";
   }
@@ -299,6 +309,7 @@ export interface MongoDistinctCommand {
 type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "bulkWrite" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "renameCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
+  | { kind: "inDatabase"; database: string; command: MongoCommand }
   | ({ kind: "find" } & MongoFindCommand)
   | ({ kind: "findExplain" } & MongoFindExplainCommand)
   | ({ kind: "findOne" } & MongoFindOneCommand)
@@ -1021,12 +1032,38 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
     },
   ];
 
+  // `db.getSiblingDB("name").<command>` runs the wrapped command against that
+  // database for this command only, unlike `use`.
+  const sibling = splitSiblingDbPrefix(text);
+  if (sibling) {
+    const inner = parseMongoCommand(`db${sibling.rest}`);
+    if (!inner || inner.command.kind === "use" || inner.command.kind === "showDatabases" || inner.command.kind === "inDatabase") return null;
+    return { text, command: { kind: "inDatabase", database: sibling.database, command: inner.command } };
+  }
+
   for (const parse of parsers) {
     const command = parse(text);
     if (command) return { text, command };
   }
 
   return null;
+}
+
+const SIBLING_DB_PREFIX = /^db\s*\.\s*getSiblingDB\s*\(/;
+
+/** The database named by a leading `db.getSiblingDB("…")`, and the text after the call, which must continue with `.`. */
+export function splitSiblingDbPrefix(source: string): { database: string; rest: string } | null {
+  const match = SIBLING_DB_PREFIX.exec(source);
+  if (!match) return null;
+  const openIndex = match[0].length - 1;
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0) return null;
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  const database = args.length === 1 ? /^(["'])([^"']+)\1$/.exec(args[0]!.trim())?.[2] : undefined;
+  if (!database) return null;
+  const rest = source.slice(closeIndex + 1);
+  if (!rest.trimStart().startsWith(".")) return null;
+  return { database, rest: rest.trimStart() };
 }
 
 export function parseMongoShowDatabasesCommand(input: string): MongoShowDatabasesCommand | null {

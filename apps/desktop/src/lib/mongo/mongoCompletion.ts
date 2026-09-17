@@ -147,6 +147,7 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
 const DATABASE_METHODS = [
   { label: "getCollection", detail: "Reference a collection by name", apply: 'getCollection("${}")' },
   { label: "version", detail: "Show the MongoDB server version", apply: "version()" },
+  { label: "getSiblingDB", detail: "Run the next command against another database", apply: 'getSiblingDB("${database}")' },
   { label: "stats", detail: "Show database statistics", apply: "stats()" },
   { label: "serverStatus", detail: "Show server status", apply: "serverStatus()" },
   { label: "createCollection", detail: "Create a collection", apply: 'createCollection("${name}")' },

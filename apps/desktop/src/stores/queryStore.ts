@@ -6494,6 +6494,13 @@ export const useQueryStore = defineStore("query", () => {
 
         for (const parsedCommand of mongoCommands) {
           let mongoCommand = parsedCommand.command;
+          // db.getSiblingDB("x").<command>: target that database for this command only.
+          const sessionDatabase = currentDatabase;
+          const targetsSiblingDatabase = mongoCommand.kind === "inDatabase";
+          if (mongoCommand.kind === "inDatabase") {
+            currentDatabase = mongoCommand.database;
+            mongoCommand = mongoCommand.command;
+          }
           const sourceStatement = parsedCommand.text;
           const sourceRange = options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset + parsedCommand.from, to: options.sourceOffset + parsedCommand.to };
           const commandStartedAt = performance.now();
@@ -6820,6 +6827,9 @@ export const useQueryStore = defineStore("query", () => {
             // for the rest of the batch, matching the grouped-result UX.
             allResults.push(annotateMongoResult(toErrorResult(error)));
             mongoEditTarget = undefined;
+          } finally {
+            // A sibling-database command does not change the session database the way `use` does.
+            if (targetsSiblingDatabase) currentDatabase = sessionDatabase;
           }
         }
 

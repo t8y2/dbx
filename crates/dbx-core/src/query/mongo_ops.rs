@@ -1049,6 +1049,9 @@ pub async fn execute_mongo_command_core(
             .await
             .map(|version| scalar_query_result("version", Value::String(version))),
         MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+        MongoCommand::InDatabase { database, command } => {
+            Box::pin(execute_mongo_command_core(state, connection_id, database, command, max_rows)).await
+        }
         MongoCommand::ShowDatabases => {
             let result = mongo_show_databases_core(state, connection_id).await?;
             mongo_show_databases_query_result(result.documents, max_rows)

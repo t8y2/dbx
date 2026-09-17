@@ -90,6 +90,10 @@ pub enum MongoCommand {
     FindOneAndReplace { collection: String, filter: String, replacement: String, options: Option<String> },
     #[serde(rename = "findOneAndDelete")]
     FindOneAndDelete { collection: String, filter: String, options: Option<String> },
+    /// `db.getSiblingDB("name").<command>`: the wrapped command, run against `database`
+    /// instead of the session's current database, for this command only.
+    #[serde(rename = "inDatabase")]
+    InDatabase { database: String, command: Box<MongoCommand> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +105,18 @@ pub enum MongoSafetyError {
 }
 
 impl MongoCommand {
+    /// The database this command explicitly targets, when it does not use the current one.
+    pub fn target_database(&self) -> Option<&str> {
+        match self {
+            Self::InDatabase { database, .. } => Some(database),
+            _ => None,
+        }
+    }
+
     pub fn is_mutating(&self) -> bool {
+        if let Self::InDatabase { command, .. } = self {
+            return command.is_mutating();
+        }
         matches!(
             self,
             Self::RunCommand { .. }
@@ -122,6 +137,9 @@ impl MongoCommand {
     }
 
     pub fn is_dangerous(&self) -> bool {
+        if let Self::InDatabase { command, .. } = self {
+            return command.is_dangerous();
+        }
         matches!(self, Self::RunCommand { .. } | Self::CreateUser { .. } | Self::DropCollection { .. })
             || matches!(self, Self::DropIndexes { indexes: None, single: false, .. })
             || matches!(self, Self::Aggregate { pipeline, .. } if aggregate_writes(pipeline))
@@ -129,6 +147,7 @@ impl MongoCommand {
 
     pub fn has_empty_filter(&self) -> bool {
         match self {
+            Self::InDatabase { command, .. } => command.has_empty_filter(),
             Self::Update { filter, .. }
             | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
@@ -144,6 +163,7 @@ impl MongoCommand {
 
     pub fn has_effectively_unbounded_filter(&self) -> bool {
         match self {
+            Self::InDatabase { command, .. } => command.has_effectively_unbounded_filter(),
             Self::Update { filter, .. }
             | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
@@ -537,6 +557,23 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
+    }
+    if source.starts_with("db")
+        && source[2..].trim_start().starts_with('.')
+        && source[2..].trim_start()[1..].trim_start().starts_with("getSiblingDB")
+        && split_sibling_db_prefix(source).is_none()
+    {
+        return Err("MongoDB getSiblingDB() requires a database name string followed by a command, for example db.getSiblingDB(\"app\").orders.find({}).".to_string());
+    }
+    if let Some((database, rest)) = split_sibling_db_prefix(source) {
+        let command = parse(&format!("db{rest}"))?;
+        return match command {
+            MongoCommand::InDatabase { .. } => Err("MongoDB getSiblingDB() cannot be chained.".to_string()),
+            MongoCommand::Use { .. } | MongoCommand::ShowDatabases => {
+                Err("MongoDB getSiblingDB() must be followed by a collection or database method.".to_string())
+            }
+            command => Ok(MongoCommand::InDatabase { database, command: Box::new(command) }),
+        };
     }
     // `db.stats()` and `db.serverStatus()` are the shell's shorthand for the
     // matching runCommand, so they execute through the same supported path.
@@ -1581,6 +1618,30 @@ fn legacy_update_options(value: Option<&String>) -> Result<(Option<String>, bool
     Ok((options, many))
 }
 
+/// `db.getSiblingDB("name")` prefix: the database name and the text after the call,
+/// which must continue with `.` so the rest reads as a normal `db.` command.
+fn split_sibling_db_prefix(source: &str) -> Option<(String, &str)> {
+    let rest = source.strip_prefix("db")?.trim_start().strip_prefix('.')?.trim_start().strip_prefix("getSiblingDB")?;
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let close = matching_paren(rest, 0)?;
+    let args = split_top_level(&rest[1..close]);
+    if args.len() != 1 {
+        return None;
+    }
+    let database = parse_string_arg(&args[0]).ok()?;
+    if database.is_empty() {
+        return None;
+    }
+    let after = &rest[close + 1..];
+    if !after.trim_start().starts_with('.') {
+        return None;
+    }
+    Some((database, after))
+}
+
 fn parse_use_database(source: &str) -> Option<String> {
     let mut parts = source.split_whitespace();
     if !parts.next()?.eq_ignore_ascii_case("use") {
@@ -2333,6 +2394,49 @@ mod tests {
             (r#"db.createCollection("a", [])"#, "options must be a document"),
             (r#"db.createCollection("a", {create: "b"})"#, "must not contain create"),
             (r#"db.createCollection("a").x()"#, "collection name and optional options"),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
+    }
+
+    #[test]
+    fn parses_get_sibling_db_as_a_database_override() {
+        // The exact command from #3936.
+        let command = parse(
+            r#"db.getSiblingDB("iam_account").getCollection("user").find({_id: NumberLong('144115205316939462')}).sort({phone: 1}).limit(21);"#,
+        )
+        .unwrap();
+        let MongoCommand::InDatabase { database, command: inner } = &command else {
+            panic!("expected an InDatabase wrapper");
+        };
+        assert_eq!(database, "iam_account");
+        assert!(matches!(**inner, MongoCommand::Find { limit: 21, .. }));
+        assert_eq!(command.target_database(), Some("iam_account"));
+        assert!(!command.is_mutating());
+
+        // Database-level commands and odd spacing work too; safety delegates to the wrapped command.
+        assert!(matches!(parse(r#"db . getSiblingDB( "x" ) . stats()"#).unwrap(), MongoCommand::InDatabase { .. }));
+        let delete = parse(r#"db.getSiblingDB('x').c.deleteMany({})"#).unwrap();
+        assert!(delete.is_mutating());
+        assert!(delete.has_empty_filter() && delete.has_effectively_unbounded_filter());
+        assert_eq!(validate_safety(&delete, true, false, false), Err(MongoSafetyError::EmptyFilter));
+
+        let serialized = serde_json::to_value(parse(r#"db.getSiblingDB("x").c.find({})"#).unwrap()).unwrap();
+        assert_eq!(serialized["kind"], "inDatabase");
+        assert_eq!(serialized["database"], "x");
+        assert_eq!(serialized["command"]["kind"], "find");
+    }
+
+    #[test]
+    fn rejects_malformed_get_sibling_db() {
+        for (source, expected) in [
+            (r#"db.getSiblingDB("x")"#, "followed by a command"),
+            (r#"db.getSiblingDB("x").getSiblingDB("y").c.find({})"#, "cannot be chained"),
+            (r#"db.getSiblingDB("").c.find({})"#, "requires a database name string"),
+            (r#"db.getSiblingDB(1).c.find({})"#, "requires a database name string"),
+            (r#"db.getSiblingDB("x", "y").c.find({})"#, "requires a database name string"),
+            (r#"db.getSiblingDB("x").use y"#, "collection method is required"),
         ] {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");

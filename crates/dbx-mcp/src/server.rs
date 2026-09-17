@@ -2202,11 +2202,13 @@ fn validate_mongo_command_with_groups(
     }
     let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, database);
     let permissions = mcp_permissions(connection, &effective_policy);
+    // getSiblingDB() targets another database for this command only; judge that one.
+    let target_database = command.target_database().unwrap_or(database);
     let production_database = match &command {
         MongoCommand::Aggregate { pipeline, .. } => {
-            mongo_pipeline_targets_production_database(connection, database, pipeline)
+            mongo_pipeline_targets_production_database(connection, target_database, pipeline)
         }
-        _ => is_production_database(connection, database),
+        _ => is_production_database(connection, target_database),
     };
     if let Err(error) =
         mongo::validate_safety(&command, permissions.allow_writes, permissions.allow_dangerous, production_database)

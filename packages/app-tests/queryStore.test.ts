@@ -9088,7 +9088,7 @@ test("query results keep readable table source labels with active database conte
   }
 });
 
-test("cursor execution uses the preceding comment from the full query draft", async () => {
+test("cursor execution uses only the immediately preceding comment from the full query draft", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -9123,6 +9123,10 @@ test("cursor execution uses the preceding comment from the full query draft", as
     await store.executeTabSql(tabId, selectedSql, { sourceOffset: tab.sql.indexOf(selectedSql) });
     assert.equal(currentSql, selectedSql);
     assert.equal(tab.result?.sourceLabel, "Orders report");
+
+    tab.sql = "-- Users report\nSELECT 1;\n\n-- Orders report\n\nSELECT 2;";
+    await store.executeTabSql(tabId, selectedSql, { sourceOffset: tab.sql.indexOf(selectedSql) });
+    assert.equal(tab.result?.sourceLabel, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

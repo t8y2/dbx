@@ -10,21 +10,19 @@ export interface QueryResultSourceLabelOptions {
 const HASH_COMMENT_DATABASE_TYPES = new Set<DatabaseType>(["mysql"]);
 
 export function queryResultNameFromPreamble(preamble: string, options: Pick<QueryResultSourceLabelOptions, "databaseType"> = {}): string | undefined {
-  let name: string | undefined;
-  let fallback: string | undefined;
-  const withoutBlockComments = preamble.replace(/\/\*[\s\S]*?\*\//g, "");
-  for (const line of withoutBlockComments.split(/\r?\n/)) {
-    const commentMatch = line.match(/^\s*(--|#)\s*(.*)$/);
-    if (commentMatch?.[1] === "#" && !HASH_COMMENT_DATABASE_TYPES.has(options.databaseType!)) continue;
-    const comment = commentMatch?.[2]?.trim();
-    if (!comment) continue;
+  const beforeStatementLine = preamble.replace(/[ \t]*$/, "");
+  const previousLine =
+    beforeStatementLine
+      .replace(/\r?\n$/, "")
+      .split(/\r?\n/)
+      .pop() ?? "";
+  const commentMatch = previousLine.match(/^\s*(--|#)\s*(.*)$/);
+  if (commentMatch?.[1] === "#" && !HASH_COMMENT_DATABASE_TYPES.has(options.databaseType!)) return undefined;
+  const comment = commentMatch?.[2]?.trim();
+  if (!comment) return undefined;
 
-    const nameMatch = comment.match(/^name\s*:\s*(.*)$/i);
-    const candidate = nameMatch?.[1]?.trim();
-    if (candidate) name = candidate;
-    else if (!nameMatch) fallback = comment;
-  }
-  return name ?? fallback;
+  const nameMatch = comment.match(/^name\s*:\s*(.*)$/i);
+  return nameMatch ? nameMatch[1]?.trim() || undefined : comment;
 }
 
 function firstSourceOfKind(sources: SqlSemanticRowSource[], kind: SqlSemanticRowSource["kind"]): SqlSemanticRowSource | undefined {

@@ -295,6 +295,8 @@ import { useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeade
 import { createColumnReferencePayload, createTableReferenceDragEndEvent, createTableReferenceDropEvent, createTableReferenceHoverEvent } from "@/lib/editor/queryEditorTableDrop";
 import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { dataGridCanvasDevicePixelSize, useDataGridCanvasRuntime, type DataGridCanvasRuntime } from "@/composables/useDataGridCanvasRuntime";
+import { deferUntilPanelResizeEnd, isPanelResizing } from "@/lib/app/panelResizeState";
+import { uiTuning } from "@/lib/app/uiTuning";
 import { useDataGridScrollbars, type DataGridScrollbarsRuntime } from "@/composables/useDataGridScrollbars";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 import { dataGridNavigationOrigin, dataGridPageScrollTop, dataGridRowScrollTop, moveDataGridCell, navigateDataGridCell, type DataGridNavigationDirection, type DataGridScrollAlignment } from "@/lib/dataGrid/dataGridNavigation";
@@ -2590,43 +2592,56 @@ function observeGridHorizontalScrollbarScroller() {
   gridScrollbarsRuntime.observeScroller();
 }
 
+let dataGridTopbarRafId: number | null = null;
+
 function updateDataGridTopbarWidth() {
   const topbar = dataGridTopbarRef.value;
-  const previousActionCount = compactDataGridToolbarActionCount.value;
-  dataGridTopbarWidth.value = topbar?.clientWidth ?? 0;
-  dataGridViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
-
   if (!topbar) return;
 
-  if (compactDataGridToolbarActionCount.value !== previousActionCount) {
-    scheduleDataGridTopbarRecheck();
-    return;
-  }
+  // Reading scrollWidth/clientWidth here forces a document-wide synchronous
+  // relayout; while a divider drag is in flight that stacks on top of
+  // CodeMirror's measurement. Defer to a single re-measure when the drag ends.
+  if (deferUntilPanelResizeEnd(updateDataGridTopbarWidth)) return;
 
-  if (dataGridTopbarOverflowCompact.value || dataGridTopbarOverflowActionCount.value > 0) {
-    if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
-      dataGridTopbarOverflowCompact.value = false;
-      dataGridTopbarOverflowActionCount.value = 0;
-      dataGridTopbarExpandedRequiredWidth.value = 0;
+  const performMeasure = () => {
+    dataGridTopbarRafId = null;
+    const currentTopbar = dataGridTopbarRef.value;
+    if (!currentTopbar) return;
+
+    const previousActionCount = compactDataGridToolbarActionCount.value;
+    dataGridTopbarWidth.value = currentTopbar.clientWidth ?? 0;
+    dataGridViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
+
+    if (compactDataGridToolbarActionCount.value !== previousActionCount) {
       scheduleDataGridTopbarRecheck();
       return;
     }
-  }
 
-  // The action list gains preview/save/rollback controls in editable grids. The
-  // responsive breakpoint cannot see that extra width, so progressively
-  // compact the leftmost controls before overflow-clip hides a trailing action.
-  if (topbar.scrollWidth > topbar.clientWidth + 1) {
-    dataGridTopbarExpandedRequiredWidth.value = Math.max(dataGridTopbarExpandedRequiredWidth.value, topbar.scrollWidth + DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX);
-    if (!compactDataGridToolbar.value) {
-      dataGridTopbarOverflowCompact.value = true;
-    } else if (compactDataGridToolbarActionCount.value < DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length) {
-      dataGridTopbarOverflowActionCount.value = compactDataGridToolbarActionCount.value + 1;
-    } else {
-      return;
+    if (dataGridTopbarOverflowCompact.value || dataGridTopbarOverflowActionCount.value > 0) {
+      if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
+        dataGridTopbarOverflowCompact.value = false;
+        dataGridTopbarOverflowActionCount.value = 0;
+        dataGridTopbarExpandedRequiredWidth.value = 0;
+        scheduleDataGridTopbarRecheck();
+        return;
+      }
     }
-    scheduleDataGridTopbarRecheck();
-  }
+
+    if (currentTopbar.scrollWidth > currentTopbar.clientWidth + 1) {
+      dataGridTopbarExpandedRequiredWidth.value = Math.max(dataGridTopbarExpandedRequiredWidth.value, currentTopbar.scrollWidth + DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX);
+      if (!compactDataGridToolbar.value) {
+        dataGridTopbarOverflowCompact.value = true;
+      } else if (compactDataGridToolbarActionCount.value < DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length) {
+        dataGridTopbarOverflowActionCount.value = compactDataGridToolbarActionCount.value + 1;
+      } else {
+        return;
+      }
+      scheduleDataGridTopbarRecheck();
+    }
+  };
+
+  if (dataGridTopbarRafId !== null) cancelAnimationFrame(dataGridTopbarRafId);
+  dataGridTopbarRafId = requestAnimationFrame(performMeasure);
 }
 
 function resetDataGridTopbarOverflowCompact() {
@@ -6575,7 +6590,7 @@ function dataGridRowFromClientPoint(_clientX: number, clientY: number): number |
   return Number.isInteger(rowIndex) ? rowIndex : null;
 }
 
-function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
+function syncCanvasViewportRaw(entries?: readonly ResizeObserverEntry[]) {
   if (!dataGridIsActive) return;
   const scroller = canvasScrollerElement();
   if (!scroller) return;
@@ -6589,6 +6604,45 @@ function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
   updateGridHorizontalViewport(scroller);
   canvasRuntime?.drawNow();
 }
+
+// Public entry: ResizeObserver / imperative callers. During divider drags the
+// step tracker owns refreshes, so plain notifications are dropped here.
+function syncCanvasViewport(entries?: readonly ResizeObserverEntry[]) {
+  if (!dataGridIsActive) return;
+  if (isPanelResizing.value) return;
+  syncCanvasViewportRaw(entries);
+}
+
+// During divider drags the ResizeObserver would fire every frame; re-measure
+// and redraw the canvas on a fixed step instead (same cadence as the SQL
+// editor's pinned-box tracking, tunable via ~/.dbx/ui-tuning.json) so the
+// grid follows the drag at reduced cost.
+let canvasTrackFrameId = 0;
+let canvasTrackFrameCount = 0;
+
+function canvasTrackStep() {
+  canvasTrackFrameId = requestAnimationFrame(canvasTrackStep);
+  if (++canvasTrackFrameCount < uiTuning.value.panelResizeTrackEveryFrames) return;
+  canvasTrackFrameCount = 0;
+  syncCanvasViewportRaw();
+}
+
+function stopCanvasResizeTracking() {
+  if (canvasTrackFrameId) {
+    cancelAnimationFrame(canvasTrackFrameId);
+    canvasTrackFrameId = 0;
+  }
+  canvasTrackFrameCount = 0;
+}
+
+watch(isPanelResizing, (resizing) => {
+  if (resizing) {
+    if (!canvasTrackFrameId) canvasTrackFrameId = requestAnimationFrame(canvasTrackStep);
+  } else {
+    stopCanvasResizeTracking();
+    syncCanvasViewportRaw();
+  }
+});
 
 function currentCanvasDevicePixelRatio(): number {
   return typeof window === "undefined" ? 1 : Math.max(1, window.devicePixelRatio || 1);
@@ -7265,6 +7319,7 @@ function pauseCanvasGridWork() {
   gridRef.value?.setAttribute("data-grid-active", "false");
   if (gridSurfaceBusy.value) finishDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.pause();
+  stopCanvasResizeTracking();
   gridScrollbarsRuntime.pause();
   disconnectCellEditResizeObserver();
   dataGridTopbarResizeObserver?.disconnect();

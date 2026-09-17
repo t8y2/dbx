@@ -9,6 +9,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import { hasQueryOutput } from "@/lib/query/queryOutput";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { Button } from "@/components/ui/button";
 import EditorGroup from "./EditorGroup.vue";
 import QueryResultSurface from "./QueryResultSurface.vue";
@@ -198,7 +199,25 @@ function paneEnterClass(groupId: string): string | undefined {
   }
   return queryStore.orientation === "horizontal" ? "workspace-pane-enter workspace-pane-enter--from-top" : "workspace-pane-enter workspace-pane-enter--from-left";
 }
+let splitterDragTimeout: ReturnType<typeof setTimeout> | null = null;
+function onWorkspaceSplitterResize() {
+  beginPanelResize();
+  if (splitterDragTimeout) clearTimeout(splitterDragTimeout);
+  // Safety net: a drag torn down without emitting `resized` (pointer lost,
+  // tab switch) must not leave the workspace permanently in resize mode.
+  splitterDragTimeout = setTimeout(endPanelResize, 1500);
+}
+
+function onWorkspaceSplitterResized() {
+  if (splitterDragTimeout) {
+    clearTimeout(splitterDragTimeout);
+    splitterDragTimeout = null;
+  }
+  endPanelResize();
+}
+
 function onSharedResultResized(payload: { panes: { size: number }[] }) {
+  onWorkspaceSplitterResized();
   const resultPane = payload.panes[1];
   if (resultPane?.size != null && resultPane.size >= SHARED_RESULT_PANE_MIN_SIZE && resultPane.size <= SHARED_RESULT_PANE_MAX_SIZE) {
     resultPaneSize.value = resultPane.size;
@@ -302,13 +321,15 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           @detach-tab="emit('detach-tab', $event)"
         />
       </template>
-      <Splitpanes v-else horizontal class="sql-editor-workspace-split flex-1 min-h-0" :class="{ 'result-pane-collapsed': resultPaneTargetSize === 0 }" @resized="onSharedResultResized">
+      <Splitpanes v-else horizontal class="sql-editor-workspace-split flex-1 min-h-0" :class="{ 'result-pane-collapsed': resultPaneTargetSize === 0 }" @resize="onWorkspaceSplitterResize" @resized="onSharedResultResized">
         <Pane class="min-h-0 min-w-0" :size="editorPaneSize" :min-size="100 - SHARED_RESULT_PANE_MAX_SIZE">
           <Splitpanes
             :horizontal="queryStore.orientation === 'horizontal'"
             class="sql-editor-groups h-full min-h-0"
+            @resize="onWorkspaceSplitterResize"
             @resized="
               (event: { panes: Array<{ size: number }> }) => {
+                onWorkspaceSplitterResized();
                 queryStore.sizes = event.panes.map((pane) => pane.size);
               }
             "

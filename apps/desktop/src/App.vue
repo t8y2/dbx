@@ -30,6 +30,7 @@ import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
 import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
 import { usePanelResize } from "@/composables/usePanelResize";
+import { loadUiTuning } from "@/lib/app/uiTuning";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSqlExecution } from "@/composables/useSqlExecution";
 import MultiDbExecuteDialog from "@/components/editor/MultiDbExecuteDialog.vue";
@@ -364,6 +365,7 @@ const rightSidebarPanelStorageKeys: Partial<Record<RightSidebarPanelId, string>>
 let lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => rightSidebarPanelRefs[panelId].value);
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
 const aiPanelReady = ref(false);
+void loadUiTuning();
 const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, tabBarWidth, tabBarCollapsed, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize, startLeftTabBarResize, startRightTabBarResize, setTabBarCollapsed } =
   usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);

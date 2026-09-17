@@ -155,6 +155,7 @@ import {
   tabularResultItems,
   type ExecutionSummaryItem,
 } from "@/lib/tabs/tabPresentation";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
@@ -708,7 +709,11 @@ function handleHideResultsPane() {
   }
 }
 
+function onResultsSplitResize() {
+  beginPanelResize();
+}
 function onResultsResized(payload: { panes: { size: number }[] }) {
+  endPanelResize();
   const resultsPane = payload.panes[1];
   if (resultsPane?.size != null && resultsPane.size >= 20 && resultsPane.size <= 85) {
     resultsPaneSize.value = resultsPane.size;
@@ -1428,7 +1433,7 @@ defineExpose({
     </div>
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
-      <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resized="onResultsResized">
+      <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
             <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">

@@ -1209,8 +1209,7 @@ pub fn build_export_insert_statements_excluding(
         // emptiness caused by other omission rules (e.g. generated columns) keeps
         // the silent empty result.
         let had_insertable_without_exclusion = options.columns.iter().enumerate().any(|(index, column)| {
-            let column_type =
-                export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
+            let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
             is_export_insert_column(
                 options.database_type,
                 column,
@@ -3873,11 +3872,11 @@ mod tests {
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
         build_export_insert_statements_excluding, build_export_sql_insert, create_database_export_writer,
-        database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
-        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
-        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
-        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
+        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
+        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
+        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_extension_ddl,
+        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,

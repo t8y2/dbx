@@ -2056,6 +2056,8 @@ mod tests {
             column_comments: None,
             auto_filter: None,
             identifier_quote: None,
+            insert_mode: Default::default(),
+            csv_quote_mode: Default::default(),
             exclude_primary_keys: true,
             primary_keys: vec!["id".to_string()],
         };

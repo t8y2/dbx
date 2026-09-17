@@ -1218,6 +1218,8 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {

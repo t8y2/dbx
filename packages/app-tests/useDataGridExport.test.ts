@@ -652,7 +652,14 @@ test("table data SQL export passes primary key exclusion to the backend", async 
   dialogMock.save.mockResolvedValue("/tmp/users.sql");
   const { composable } = buildExportHarness({
     context: "table-data",
-    tableMeta: { tableName: "users", primaryKeys: ["id"] },
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "text", is_nullable: true },
+      ],
+    },
     extractorOptions: sqlExclusionOptions(),
   });
 
@@ -666,7 +673,14 @@ test("query result SQL export passes primary key exclusion and keys to the backe
   dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
   const { composable } = buildExportHarness({
     context: "results",
-    tableMeta: { tableName: "users", primaryKeys: ["id"] },
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "integer", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+        { name: "name", data_type: "text", is_nullable: true },
+      ],
+    },
     extractorOptions: sqlExclusionOptions(),
   });
 
@@ -674,6 +688,24 @@ test("query result SQL export passes primary key exclusion and keys to the backe
 
   assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].excludePrimaryKeys, true);
   assert.deepEqual(apiMock.startQueryResultExport.mock.calls[0][0].primaryKeys, ["id"]);
+});
+
+test("table data SQL export keeps manually-assigned primary keys", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users-manual-pk.sql");
+  const { composable } = buildExportHarness({
+    context: "table-data",
+    tableMeta: {
+      tableName: "users",
+      primaryKeys: ["user_code"],
+      columns: [{ name: "user_code", data_type: "varchar", is_nullable: false, is_primary_key: true }],
+    },
+    extractorOptions: sqlExclusionOptions(),
+  });
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].excludePrimaryKeys, undefined);
 });
 
 test("local SQL export asks the backend to drop primary key columns", async () => {
@@ -694,7 +726,14 @@ test("local SQL export asks the backend to drop primary key columns", async () =
       columns: completeLocalResult.columns,
       rows: completeLocalResult.rows,
       completeLocalResult,
-      tableMeta: { tableName: "users", primaryKeys: ["id"] },
+      tableMeta: {
+        tableName: "users",
+        primaryKeys: ["id"],
+        columns: [
+          { name: "id", data_type: "int4", is_nullable: false, is_primary_key: true, extra: "auto_increment" },
+          { name: "name", data_type: "text", is_nullable: true },
+        ],
+      },
       extractorOptions: sqlExclusionOptions(),
     });
 

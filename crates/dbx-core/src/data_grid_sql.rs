@@ -3250,14 +3250,15 @@ pub(crate) fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Opt
     database_type == Some(DatabaseType::Neo4j) && name == Some(DBX_NEO4J_ELEMENT_ID_COLUMN)
 }
 
-pub(crate) fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
-    column
-        .extra
-        .as_deref()
-        .unwrap_or("")
+pub(crate) fn extra_is_auto_generated(extra: &str) -> bool {
+    extra
         .to_ascii_lowercase()
         .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
         .any(|part| matches!(part, "auto_increment" | "autoincrement" | "identity"))
+}
+
+pub(crate) fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
+    extra_is_auto_generated(column.extra.as_deref().unwrap_or(""))
 }
 
 fn grid_value_is_empty(value: &Value) -> bool {

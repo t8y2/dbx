@@ -18,6 +18,7 @@ use crate::csv_export::{
     format_csv_with_quote_mode, format_tsv, push_table_csv_row, push_table_csv_row_with_quote_mode, push_tsv_row,
     CsvQuoteMode,
 };
+use crate::data_grid_sql::extra_is_auto_generated;
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements_excluding, is_export_cancelled, is_internal_export_column,
@@ -42,14 +43,29 @@ pub fn table_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("table-export", export_id)
 }
 
-/// SQL 导出时需要排除的列名：只有用户选择了“不含主键”才排除主键。
-/// 返回值借用入参，避免在每次写批次时重复分配。
-fn sql_export_excluded_columns<'a>(request: &TableExportRequest, primary_keys: &'a [String]) -> &'a [String] {
-    if request.exclude_primary_keys {
-        primary_keys
-    } else {
-        &[]
+/// SQL 导出时需要排除的列名：用户选择了“不含主键”时，与 copy-as-INSERT
+/// 一致只剔除自增/identity 主键；手动赋值的主键保留，否则回放 INSERT 缺值。
+fn sql_export_excluded_columns(
+    request: &TableExportRequest,
+    primary_keys: &[String],
+    col_names: &[String],
+    column_extras: &[Option<String>],
+) -> Vec<String> {
+    if !request.exclude_primary_keys {
+        return Vec::new();
     }
+    primary_keys
+        .iter()
+        .filter(|pk| {
+            col_names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case(pk))
+                .and_then(|index| column_extras.get(index))
+                .and_then(|extra| extra.as_deref())
+                .is_some_and(extra_is_auto_generated)
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1342,7 +1358,7 @@ async fn try_export_native_table_stream(
                             rows: std::mem::take(pending_rows),
                             batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
                         },
-                        sql_export_excluded_columns(request, primary_keys),
+                        &sql_export_excluded_columns(request, primary_keys, col_names, column_extras),
                     )?;
                     if !statements.is_empty() {
                         if wrote_statements {
@@ -2183,7 +2199,7 @@ async fn export_table_data_core_inner(
                         rows: result.rows.clone(),
                         batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
                     },
-                    sql_export_excluded_columns(request, &primary_keys),
+                    &sql_export_excluded_columns(request, &primary_keys, &col_names, &column_extras),
                 )?;
                 if !statements.is_empty() {
                     if wrote_statements {
@@ -2532,6 +2548,7 @@ mod tests {
             format: "csv".to_string(),
             insert_mode: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            exclude_primary_keys: false,
             columns: None,
             column_types: None,
             primary_keys: None,

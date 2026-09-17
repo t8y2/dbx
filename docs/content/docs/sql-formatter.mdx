@@ -26,6 +26,10 @@ DBX currently uses dedicated formatter grammars for:
 
 The MongoDB query editor uses a separate Mongo Shell formatter rather than this SQL dialect mapping.
 
+## Default Style
+
+The default layout keeps a statement that fits the width on one line, puts each clause of a longer one on its own line, and aligns a clause's remaining elements under its first element. Conditions keep their logical operators at the start of the continuation line, and `CREATE TABLE` definitions are aligned on a column grid. The settings below change those rules; **Restore Defaults** returns to this style.
+
 ## Configure Formatting Options
 
 Open **Settings → SQL Formatter**. Form mode exposes:
@@ -36,9 +40,11 @@ Open **Settings → SQL Formatter**. Form mode exposes:
 | Indent style | `standard`, `tabularLeft`, or `tabularRight` |
 | Indentation | Spaces or tabs |
 | Tab width | `2` or `4` |
-| Logical operator newline | Before or after the operator |
+| Logical operator newline | `before`, `after`, or `none` to keep them on the same line |
+| FROM clause layout | `sameLine` keeps the first table on the `FROM` line, `newLine` moves it below |
 | Expression width | `50`, `80`, or `120` |
 | Lines between queries | `0`, `1`, or `2` |
+| Preserve empty lines | Keeps blank lines between statements |
 | Dense operators | Reduces spaces around operators |
 | Newline before semicolon | Places a statement-ending semicolon on a new line |
 | Parameter types | Recognizes positional, numbered, named, quoted, or custom-regex parameters |
@@ -62,8 +68,10 @@ JSON mode is useful for exact editing, copying, or moving formatter settings. Th
     "useTabs": false,
     "tabWidth": 2,
     "logicalOperatorNewline": "before",
-    "expressionWidth": 50,
+    "fromClauseLayout": "sameLine",
+    "expressionWidth": 120,
     "linesBetweenQueries": 1,
+    "preserveEmptyLines": false,
     "denseOperators": false,
     "newlineBeforeSemicolon": false,
     "paramTypes": null

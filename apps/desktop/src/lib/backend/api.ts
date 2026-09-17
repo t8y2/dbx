@@ -516,6 +516,7 @@ export const exportQueryResultXlsx = forward("exportQueryResultXlsx");
 export const exportQueryResultsXlsx = forward("exportQueryResultsXlsx");
 export const exportQueryResultJson = forward("exportQueryResultJson");
 export const exportQueryResultMarkdown = forward("exportQueryResultMarkdown");
+export const exportQueryResultHtml = forward("exportQueryResultHtml");
 export const startTableExport = forward("startTableExport");
 export const cancelTableExport = forward("cancelTableExport");
 export const startQueryResultExport = forward("startQueryResultExport");

@@ -24,6 +24,7 @@ import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTab
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { canonicalSqlShortcutSql, DEFAULT_SQL_SHORTCUTS, deriveSqlShortcutDatabaseTypes, mergeDefaultSqlShortcuts, normalizeSqlShortcutDatabaseTypes, normalizeSqlShortcutKind, normalizeSqlShortcutLimit, normalizeSqlShortcutSqlByDatabaseType } from "@/lib/sql/sqlShortcutActions";
 import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } from "@/lib/sql/sqlVariableSyntax";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
@@ -1121,7 +1122,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   globalDateTimeExportFormat: "",
   globalDateTimeImportFormat: "",
   snippets: DEFAULT_SQL_SNIPPETS,
-  sqlShortcuts: [],
+  sqlShortcuts: DEFAULT_SQL_SHORTCUTS,
   tableColumnTemplateFields: [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS],
   exportBatchSize: 2000,
   csvQuoteMode: DEFAULT_CSV_QUOTE_MODE,
@@ -1367,15 +1368,30 @@ function normalizeSqlShortcuts(value: unknown, existing?: SqlShortcutAction[]): 
     // 与普通动作一样会重新劫持 macOS 的 ⌘H。此处直接丢弃保留组合——SQL 快捷键
     // 没有“平台默认值”这一概念（它是用户自定义模板的专属触发键），清空即视为未绑定。
     const normalizedShortcut = isReservedShortcut(shortcut) ? "" : shortcut;
-    valid.push({
+    const kind = normalizeSqlShortcutKind(item.kind);
+    let databaseTypes = normalizeSqlShortcutDatabaseTypes(item.databaseTypes);
+    const entry: SqlShortcutAction = {
       id: item.id,
       label: item.label,
       shortcut: normalizedShortcut,
       sql: item.sql,
       enabled: item.enabled !== false,
-    });
+    };
+    const sqlByDatabaseType = normalizeSqlShortcutSqlByDatabaseType(item.sqlByDatabaseType);
+    if (sqlByDatabaseType && kind !== "select-limit") entry.sqlByDatabaseType = sqlByDatabaseType;
+    databaseTypes = deriveSqlShortcutDatabaseTypes(databaseTypes, entry.sqlByDatabaseType);
+    if (databaseTypes) entry.databaseTypes = databaseTypes;
+    if (kind === "select-limit") {
+      entry.kind = "select-limit";
+      entry.limit = normalizeSqlShortcutLimit(item.limit);
+      entry.sql = canonicalSqlShortcutSql(entry);
+      delete entry.databaseTypes;
+      delete entry.sqlByDatabaseType;
+    }
+    valid.push(entry);
   }
-  return valid;
+  if (valid.length === 0) return DEFAULT_SQL_SHORTCUTS.map((action) => ({ ...action }));
+  return mergeDefaultSqlShortcuts(valid);
 }
 
 function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): ToolbarItems {

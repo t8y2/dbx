@@ -189,7 +189,7 @@ importers:
         specifier: ^4.1.2
         version: 4.1.2(vue@3.5.35(typescript@6.0.3))
       sql-formatter:
-        specifier: ^15.8.0
+        specifier: 15.8.0
         version: 15.8.0
       tailwind-merge:
         specifier: ^3.6.0
@@ -603,78 +603,6 @@ packages:
 
   '@codemirror/view@6.43.0':
     resolution: {integrity: sha512-V7ZCLQO3Jus9hzh2jVCCPW3mO4IBMr43O37PqSUYautJSnnJF41YlgLw21x0fLJTYvJ+Vkm6Gp+qKGH9pltgXA==}
-
-  '@dbx-app/cli-darwin-arm64@0.4.58':
-    resolution: {integrity: sha512-wFOyHD/ZYLbZsCPHnZgiyf8l1YRtIAl6KwBckJJV4Mo1Gk4e7ihrznd3whwcDZP1TXe+bBa16VCaEKitTFZIkw==}
-    cpu: [arm64]
-    os: [darwin]
-    hasBin: true
-
-  '@dbx-app/cli-darwin-x64@0.4.58':
-    resolution: {integrity: sha512-+5ZffZtbsm9HimNkL8NcD30rtYxhyRsSuR+mvE6/0ztDM8sZq2XzgsVIx7ve32+o2CmiSBR3pWRAG7vyDvhkqw==}
-    cpu: [x64]
-    os: [darwin]
-    hasBin: true
-
-  '@dbx-app/cli-linux-arm64-gnu@0.4.58':
-    resolution: {integrity: sha512-3t7PghU8VAttSIjdBtH8VRTNZq2InKlc1i7LzZD48lv1N4lUQjL1jtgw6M7QWesjT7zlWUjmjlR1pBZej+7HCg==}
-    cpu: [arm64]
-    os: [linux]
-    hasBin: true
-
-  '@dbx-app/cli-linux-x64-gnu@0.4.58':
-    resolution: {integrity: sha512-9KKweZhj4hxjaHJBloc5OQw4/o+ouJTPucQGKz+82fIj2kHmIPPGGUAqGPYv2D3xj0k+sV2qCwd7cz6nga5GfQ==}
-    cpu: [x64]
-    os: [linux]
-    hasBin: true
-
-  '@dbx-app/cli-win32-arm64@0.4.58':
-    resolution: {integrity: sha512-bcqrVynvUqg+sCKc2pyN8s6tdZDZEjXGYO6y9V8SdY42K1iGpzCIcyvO+PNtHRgi5ICt6j9sw6AoGgPT8OoThA==}
-    cpu: [arm64]
-    os: [win32]
-    hasBin: true
-
-  '@dbx-app/cli-win32-x64@0.4.58':
-    resolution: {integrity: sha512-o3qlOay55BR4eiSku2oGVNc6+Q77fWV6I3Ch8pULvXIS836mmnZ1OSJYCvHOc5mqyHNQ91ddtrQixmCYpGQRiQ==}
-    cpu: [x64]
-    os: [win32]
-    hasBin: true
-
-  '@dbx-app/mcp-darwin-arm64@0.4.58':
-    resolution: {integrity: sha512-msvgntUBKclbi1VwDTq4WVnMuk58BUB9JfevIKSqcC20w4dl0BiOo+J3utu15aU6ZJBlvp/M4I4hc5OmrgDIPA==}
-    cpu: [arm64]
-    os: [darwin]
-    hasBin: true
-
-  '@dbx-app/mcp-darwin-x64@0.4.58':
-    resolution: {integrity: sha512-U1hWBUxejENDteENrrbs2QYcdr6UEeU42IJiiXHnERIR4nhdcXOiAG3eOMLoWN07+vUrMNzo3K4eZjX0xIeiwA==}
-    cpu: [x64]
-    os: [darwin]
-    hasBin: true
-
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.58':
-    resolution: {integrity: sha512-IRPH7GzIR86Vy+LtvIEL/V/XjsSaybyOec7IbR7LXBhAxd8WyC8TXHOKtLwLKrkY8dTFI1/orJXD0ils9euxcg==}
-    cpu: [arm64]
-    os: [linux]
-    hasBin: true
-
-  '@dbx-app/mcp-linux-x64-gnu@0.4.58':
-    resolution: {integrity: sha512-G42Wkh1i7XZxwAJQD0+FPDx42GHOpLr4m8FC9SGoR4g8aa+JFUw0UVYrWzQDjKcKhGsgM0TRhTRgW45rp8tymA==}
-    cpu: [x64]
-    os: [linux]
-    hasBin: true
-
-  '@dbx-app/mcp-win32-arm64@0.4.58':
-    resolution: {integrity: sha512-5Aj8DwPuj9N7ui/tplFeoYWwpczw23g8kNF46K+OsLVCJVcuNeolmbH242UUpooIKDGrhz5uvS673MEeMBlUZg==}
-    cpu: [arm64]
-    os: [win32]
-    hasBin: true
-
-  '@dbx-app/mcp-win32-x64@0.4.58':
-    resolution: {integrity: sha512-bZonwNVxcePJYgpZo/X2uO+RqSIPVchIWKJ7HjEnNmd1AcLylAoHyIvh52LGXC2GvfGBVRrRC9OsHVOG/o/qSg==}
-    cpu: [x64]
-    os: [win32]
-    hasBin: true
 
   '@dotenvx/dotenvx@1.75.1':
     resolution: {integrity: sha512-/BITOC9dmS/edY2zQwZNicQ059O6RKabtQfyEafV0nGtfYRNHYy1DIPiYVcov40+tob9hfmBnbR963dS+EQ1DQ==}
@@ -4458,42 +4386,6 @@ snapshots:
       crelt: 1.0.6
       style-mod: 4.1.3
       w3c-keyname: 2.2.8
-
-  '@dbx-app/cli-darwin-arm64@0.4.58':
-    optional: true
-
-  '@dbx-app/cli-darwin-x64@0.4.58':
-    optional: true
-
-  '@dbx-app/cli-linux-arm64-gnu@0.4.58':
-    optional: true
-
-  '@dbx-app/cli-linux-x64-gnu@0.4.58':
-    optional: true
-
-  '@dbx-app/cli-win32-arm64@0.4.58':
-    optional: true
-
-  '@dbx-app/cli-win32-x64@0.4.58':
-    optional: true
-
-  '@dbx-app/mcp-darwin-arm64@0.4.58':
-    optional: true
-
-  '@dbx-app/mcp-darwin-x64@0.4.58':
-    optional: true
-
-  '@dbx-app/mcp-linux-arm64-gnu@0.4.58':
-    optional: true
-
-  '@dbx-app/mcp-linux-x64-gnu@0.4.58':
-    optional: true
-
-  '@dbx-app/mcp-win32-arm64@0.4.58':
-    optional: true
-
-  '@dbx-app/mcp-win32-x64@0.4.58':
-    optional: true
 
   '@dotenvx/dotenvx@1.75.1':
     dependencies:

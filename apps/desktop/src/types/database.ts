@@ -21,12 +21,22 @@ export interface SqlSnippet {
   enabled?: boolean;
 }
 
+export type SqlShortcutKind = "template" | "select-limit";
+
 export interface SqlShortcutAction {
   id: string;
   label: string;
   shortcut: string;
   sql: string;
   enabled?: boolean;
+  /** Empty / omitted = all databases. Non-empty = only these DatabaseType values. */
+  databaseTypes?: DatabaseType[];
+  /** Per-database SQL overrides for custom templates; missing keys fall back to `sql`. */
+  sqlByDatabaseType?: Partial<Record<DatabaseType, string>>;
+  /** `select-limit` builds dialect-aware SELECT * … LIMIT/TOP/ROWNUM at run time (built-in only). */
+  kind?: SqlShortcutKind;
+  /** Row count for `select-limit` (default 10). Ignored for plain templates. */
+  limit?: number;
 }
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";

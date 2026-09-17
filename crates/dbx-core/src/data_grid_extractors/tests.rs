@@ -984,6 +984,44 @@ fn sql_insert_honors_primary_key_exclusion_and_row_by_row_mode() {
 }
 
 #[test]
+fn sql_insert_primary_key_exclusion_omits_postgres_serial_key() {
+    let mut request = request(DataGridExtractorId::SqlInserts);
+    request.database_type = Some(DatabaseType::Postgres);
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: Some("public".to_string()),
+        table_name: "users".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: Some(vec![
+            DataGridColumnInfo {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                column_default: None,
+                extra: Some("serial".to_string()),
+            },
+            DataGridColumnInfo {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                column_default: None,
+                extra: None,
+            },
+        ]),
+    });
+    request.rows = vec![vec![json!(1), json!("Ada")]];
+    request.options.sql.exclude_primary_keys_from_insert = true;
+
+    let result = extract_data_grid_selection(request).expect("PostgreSQL SQL INSERT extraction");
+
+    assert_eq!(result.text, "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');");
+    assert_eq!(result.omitted_columns, vec!["id"]);
+}
+
+#[test]
 fn sql_insert_primary_key_exclusion_keeps_manual_composite_key_members() {
     let mut request = request(DataGridExtractorId::SqlInserts);
     request.table_meta = Some(DataGridTableMeta {

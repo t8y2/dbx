@@ -5650,6 +5650,17 @@ export async function exportQueryResultMarkdown(filePath: string, columns: strin
   });
 }
 
+export async function exportQueryResultHtml(filePath: string, title: string | undefined, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+  return invoke("export_query_result_html", {
+    request: {
+      filePath,
+      title,
+      columns,
+      rows,
+    },
+  });
+}
+
 export * from "@/lib/backend/mq-tauri";
 export * from "@/lib/backend/mqtt-tauri";
 export * from "@/lib/backend/nacos-tauri";

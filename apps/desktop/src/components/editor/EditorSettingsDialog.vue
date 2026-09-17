@@ -208,7 +208,23 @@ import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOption
 import { useToast } from "@/composables/useToast";
 import type { DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
-import { findSqlShortcutConflicts, hasSqlShortcutConflicts as sqlShortcutsHaveConflicts, SQL_SHORTCUT_TABLE_TOKEN } from "@/lib/sql/sqlShortcutActions";
+import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
+import {
+  BUILTIN_SQL_SHORTCUT_COUNT_ID,
+  BUILTIN_SQL_SHORTCUT_SELECT_LIMIT_ID,
+  canonicalSqlShortcutSql,
+  DEFAULT_SQL_SHORTCUTS,
+  findSqlShortcutConflicts,
+  hasSqlShortcutConflicts as sqlShortcutsHaveConflicts,
+  isBuiltinSqlShortcut,
+  mergeDefaultSqlShortcuts,
+  normalizeSqlShortcutLimit,
+  resolveSqlShortcutBody,
+  SQL_SHORTCUT_TABLE_TOKEN,
+  sqlShortcutDisplaySql,
+  deriveSqlShortcutDatabaseTypes,
+} from "@/lib/sql/sqlShortcutActions";
+import { applySqlShortcutBodyToAllSelected, buildSqlShortcutBodiesForSave, clearSqlShortcutFormDatabaseTypes as clearSqlShortcutFormBodies, switchSqlShortcutEditingDatabaseType, toggleSqlShortcutFormDatabaseType, type SqlShortcutFormBodies } from "@/lib/sql/sqlShortcutFormBodies";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
@@ -738,10 +754,79 @@ function editableSnippet(snippet: SqlSnippet): SqlSnippet {
 const editSnippets = ref<SqlSnippet[]>(settingsStore.editorSettings.snippets.map(editableSnippet));
 
 function editableSqlShortcut(action: SqlShortcutAction): SqlShortcutAction {
-  return { ...action, enabled: action.enabled !== false };
+  const next: SqlShortcutAction = { ...action, enabled: action.enabled !== false };
+  if (action.kind === "select-limit" || action.id === BUILTIN_SQL_SHORTCUT_SELECT_LIMIT_ID) {
+    next.kind = "select-limit";
+    next.limit = normalizeSqlShortcutLimit(action.limit);
+    next.sql = canonicalSqlShortcutSql(next);
+    delete next.databaseTypes;
+    delete next.sqlByDatabaseType;
+  } else {
+    delete next.kind;
+    delete next.limit;
+    if (action.sqlByDatabaseType && Object.keys(action.sqlByDatabaseType).length > 0) {
+      next.sqlByDatabaseType = { ...action.sqlByDatabaseType };
+    } else {
+      delete next.sqlByDatabaseType;
+    }
+    const databaseTypes = deriveSqlShortcutDatabaseTypes(action.databaseTypes?.length ? [...action.databaseTypes] : undefined, next.sqlByDatabaseType);
+    if (databaseTypes) next.databaseTypes = databaseTypes;
+    else delete next.databaseTypes;
+  }
+  return next;
 }
 
-const editSqlShortcuts = ref<SqlShortcutAction[]>(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
+const editSqlShortcuts = ref<SqlShortcutAction[]>(mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut)));
+
+type SqlShortcutFormState = {
+  label: string;
+  shortcut: string;
+  /** Default fallback template (payload.sql). */
+  sql: string;
+  /** Textarea content for the current editing context. */
+  body: string;
+  kind: "template" | "select-limit";
+  limit: number;
+  databaseTypes: DatabaseType[];
+  sqlByDatabaseType: Partial<Record<DatabaseType, string>>;
+  editingDatabaseType: DatabaseType | "";
+};
+
+function emptySqlShortcutForm(): SqlShortcutFormState {
+  const sql = `SELECT * FROM ${SQL_SHORTCUT_TABLE_TOKEN}`;
+  return {
+    label: "",
+    shortcut: "",
+    sql,
+    body: sql,
+    kind: "template",
+    limit: DEFAULT_SQL_SHORTCUT_SELECT_LIMIT,
+    databaseTypes: [],
+    sqlByDatabaseType: {},
+    editingDatabaseType: "",
+  };
+}
+
+function sqlShortcutFormBodies(form: SqlShortcutFormState): SqlShortcutFormBodies {
+  return {
+    sql: form.sql,
+    body: form.body,
+    databaseTypes: form.databaseTypes,
+    sqlByDatabaseType: form.sqlByDatabaseType,
+    editingDatabaseType: form.editingDatabaseType,
+  };
+}
+
+function patchSqlShortcutFormBodies(next: SqlShortcutFormBodies) {
+  sqlShortcutForm.value = {
+    ...sqlShortcutForm.value,
+    sql: next.sql,
+    body: next.body,
+    databaseTypes: next.databaseTypes,
+    sqlByDatabaseType: next.sqlByDatabaseType,
+    editingDatabaseType: next.editingDatabaseType,
+  };
+}
 
 function currentEditorSettingsDraft(): EditorSettingsDraft {
   return {
@@ -963,8 +1048,10 @@ const snippetFormPrefixError = ref("");
 
 const sqlShortcutDialogOpen = ref(false);
 const sqlShortcutEditingId = ref<string | null>(null);
-const sqlShortcutForm = ref({ label: "", shortcut: "", sql: "" });
+const sqlShortcutForm = ref<SqlShortcutFormState>(emptySqlShortcutForm());
 const sqlShortcutFormLabelError = ref("");
+const sqlShortcutPreviewDatabaseType = ref<DatabaseType>("mysql");
+const sqlShortcutDatabaseTypesOpen = ref(false);
 const editingSqlShortcutInputId = ref<string | null>(null);
 const iconThemeBlackDescriptionText = computed(() => (isMacOS() ? t("settings.iconThemeBlackDescriptionMac") : t("settings.iconThemeBlackDescription")));
 const layoutDescTruncated = {
@@ -1095,54 +1182,161 @@ function confirmDeleteSnippet(snippet: SqlSnippet) {
 
 function openAddSqlShortcutDialog() {
   sqlShortcutEditingId.value = null;
-  sqlShortcutForm.value = { label: "", shortcut: "", sql: `SELECT * FROM ${SQL_SHORTCUT_TABLE_TOKEN}` };
+  sqlShortcutForm.value = emptySqlShortcutForm();
   sqlShortcutFormLabelError.value = "";
+  sqlShortcutPreviewDatabaseType.value = "mysql";
+  sqlShortcutDatabaseTypesOpen.value = false;
   editingSqlShortcutInputId.value = null;
   sqlShortcutDialogOpen.value = true;
 }
 
 function openEditSqlShortcutDialog(action: SqlShortcutAction) {
   sqlShortcutEditingId.value = action.id;
+  const databaseTypes = action.databaseTypes ? [...action.databaseTypes] : [];
+  const sqlByDatabaseType = action.sqlByDatabaseType ? { ...action.sqlByDatabaseType } : {};
+  const editingDatabaseType = databaseTypes[0] ?? "";
+  const fallbackSql = action.sql;
   sqlShortcutForm.value = {
     label: action.label,
     shortcut: action.shortcut,
-    sql: action.sql,
+    sql: fallbackSql,
+    body: editingDatabaseType ? resolveSqlShortcutBody(action, editingDatabaseType) : fallbackSql,
+    kind: action.kind === "select-limit" || action.id === BUILTIN_SQL_SHORTCUT_SELECT_LIMIT_ID ? "select-limit" : "template",
+    limit: normalizeSqlShortcutLimit(action.limit),
+    databaseTypes,
+    sqlByDatabaseType,
+    editingDatabaseType,
   };
   sqlShortcutFormLabelError.value = "";
+  sqlShortcutPreviewDatabaseType.value = databaseTypes[0] ?? "mysql";
+  sqlShortcutDatabaseTypesOpen.value = false;
   editingSqlShortcutInputId.value = null;
   sqlShortcutDialogOpen.value = true;
 }
 
+const sqlShortcutFormIsBuiltin = computed(() => !!sqlShortcutEditingId.value && isBuiltinSqlShortcut(sqlShortcutEditingId.value));
+
+const sqlShortcutFormBuiltinLabel = computed(() => {
+  if (!sqlShortcutEditingId.value) return "";
+  return sqlShortcutDisplayLabel({
+    id: sqlShortcutEditingId.value,
+    label: sqlShortcutForm.value.label,
+    shortcut: "",
+    sql: "",
+  });
+});
+
+function sqlShortcutDisplayLabel(action: SqlShortcutAction): string {
+  if (action.id === BUILTIN_SQL_SHORTCUT_SELECT_LIMIT_ID) return t("settings.sqlShortcutBuiltinSelectLimit");
+  if (action.id === BUILTIN_SQL_SHORTCUT_COUNT_ID) return t("settings.sqlShortcutBuiltinCount");
+  return action.label;
+}
+
+function onSqlShortcutEditingDatabaseTypeChange(next: DatabaseType | "") {
+  if (!next) return;
+  patchSqlShortcutFormBodies(switchSqlShortcutEditingDatabaseType(sqlShortcutFormBodies(sqlShortcutForm.value), next));
+}
+
+function toggleSqlShortcutDatabaseType(dbType: DatabaseType) {
+  patchSqlShortcutFormBodies(toggleSqlShortcutFormDatabaseType(sqlShortcutFormBodies(sqlShortcutForm.value), dbType));
+}
+
+function clearSqlShortcutDatabaseTypes() {
+  patchSqlShortcutFormBodies(clearSqlShortcutFormBodies(sqlShortcutFormBodies(sqlShortcutForm.value)));
+}
+
+function applySqlShortcutSqlToAllSelected() {
+  patchSqlShortcutFormBodies(applySqlShortcutBodyToAllSelected(sqlShortcutFormBodies(sqlShortcutForm.value)));
+  toast(t("settings.sqlShortcutsApplySqlToAllSelectedDone"), 2500);
+}
+
+const sqlShortcutFormPreviewSql = computed(() =>
+  sqlShortcutDisplaySql(
+    {
+      id: sqlShortcutEditingId.value ?? "preview",
+      label: "preview",
+      shortcut: "",
+      sql: sqlShortcutForm.value.sql,
+      kind: sqlShortcutForm.value.kind,
+      limit: sqlShortcutForm.value.limit,
+      sqlByDatabaseType: sqlShortcutForm.value.sqlByDatabaseType,
+    },
+    sqlShortcutForm.value.kind === "select-limit" ? sqlShortcutPreviewDatabaseType.value : sqlShortcutForm.value.editingDatabaseType || undefined,
+  ),
+);
+
+function sqlShortcutListSql(action: SqlShortcutAction): string {
+  return sqlShortcutDisplaySql(action);
+}
+
+function sqlShortcutDatabaseTypesLabel(action: SqlShortcutAction): string {
+  if (isBuiltinSqlShortcut(action.id) || !action.databaseTypes?.length) return t("settings.sqlShortcutsDatabaseTypesAll");
+  return action.databaseTypes.map((dbType) => dbTypeLabel(dbType)).join(", ");
+}
+
 function saveSqlShortcut() {
+  const editingId = sqlShortcutEditingId.value;
+  const existing = editingId ? editSqlShortcuts.value.find((item) => item.id === editingId) : undefined;
+  const isBuiltin = !!editingId && isBuiltinSqlShortcut(editingId);
+
+  if (isBuiltin && existing) {
+    const limit = normalizeSqlShortcutLimit(sqlShortcutForm.value.limit);
+    const payload: SqlShortcutAction = {
+      ...existing,
+      shortcut: sqlShortcutForm.value.shortcut.trim(),
+      enabled: existing.enabled !== false,
+    };
+    if (existing.id === BUILTIN_SQL_SHORTCUT_SELECT_LIMIT_ID || existing.kind === "select-limit") {
+      payload.kind = "select-limit";
+      payload.limit = limit;
+      payload.sql = canonicalSqlShortcutSql({ kind: "select-limit", limit, sql: "" });
+      delete payload.databaseTypes;
+      delete payload.sqlByDatabaseType;
+    }
+    const nextShortcuts = editSqlShortcuts.value.map((item) => (item.id === editingId ? payload : item));
+    if (sqlShortcutsHaveConflicts(nextShortcuts, editShortcuts.value)) {
+      toast(t("settings.shortcutConflict"), 3000);
+      return;
+    }
+    editSqlShortcuts.value = nextShortcuts.map(editableSqlShortcut);
+    sqlShortcutDialogOpen.value = false;
+    void commitSqlShortcuts();
+    return;
+  }
+
   const label = sqlShortcutForm.value.label.trim();
   if (!label) {
     sqlShortcutFormLabelError.value = t("settings.sqlShortcutsLabelRequired");
     return;
   }
+  const bodies = buildSqlShortcutBodiesForSave(sqlShortcutFormBodies(sqlShortcutForm.value));
   const payload: SqlShortcutAction = {
-    id: sqlShortcutEditingId.value ?? uuid(),
+    id: editingId ?? uuid(),
     label,
     shortcut: sqlShortcutForm.value.shortcut.trim(),
-    sql: sqlShortcutForm.value.sql,
-    enabled: true,
+    sql: bodies.sql,
+    enabled: existing?.enabled !== false,
   };
-  const nextShortcuts = sqlShortcutEditingId.value
-    ? editSqlShortcuts.value.map((item) =>
-        item.id === sqlShortcutEditingId.value
-          ? {
-              ...payload,
-              enabled: item.enabled !== false,
-            }
-          : item,
-      )
-    : [...editSqlShortcuts.value, payload];
+  if (bodies.databaseTypes) payload.databaseTypes = bodies.databaseTypes;
+  if (bodies.sqlByDatabaseType) payload.sqlByDatabaseType = bodies.sqlByDatabaseType;
+  const nextShortcuts = editingId ? editSqlShortcuts.value.map((item) => (item.id === editingId ? payload : item)) : [...editSqlShortcuts.value, payload];
   if (sqlShortcutsHaveConflicts(nextShortcuts, editShortcuts.value)) {
     toast(t("settings.shortcutConflict"), 3000);
     return;
   }
-  editSqlShortcuts.value = nextShortcuts;
+  editSqlShortcuts.value = nextShortcuts.map(editableSqlShortcut);
   sqlShortcutDialogOpen.value = false;
   void commitSqlShortcuts();
+}
+
+function confirmDeleteSqlShortcut(action: SqlShortcutAction) {
+  if (isBuiltinSqlShortcut(action.id)) {
+    toast(t("settings.sqlShortcutsBuiltinDeleteBlocked"), 3000);
+    return;
+  }
+  if (window.confirm(t("settings.sqlShortcutsDeleteConfirm", { name: sqlShortcutDisplayLabel(action) }))) {
+    deleteSqlShortcut(action.id);
+  }
 }
 
 function setSqlShortcutEnabled(id: string, enabled: boolean) {
@@ -1160,14 +1354,9 @@ function setSqlShortcutEnabled(id: string, enabled: boolean) {
 }
 
 function deleteSqlShortcut(id: string) {
+  if (isBuiltinSqlShortcut(id)) return;
   editSqlShortcuts.value = editSqlShortcuts.value.filter((item) => item.id !== id);
   void commitSqlShortcuts();
-}
-
-function confirmDeleteSqlShortcut(action: SqlShortcutAction) {
-  if (window.confirm(t("settings.sqlShortcutsDeleteConfirm", { name: action.label }))) {
-    deleteSqlShortcut(action.id);
-  }
 }
 
 function onSqlShortcutBindingKeydown(id: string, event: KeyboardEvent) {
@@ -1376,7 +1565,7 @@ function syncEditorSettingsDraftFromStore() {
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
-  editSqlShortcuts.value = settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut);
+  editSqlShortcuts.value = mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
   editSqlVariableSubstitutionEnabled.value = settingsStore.editorSettings.sqlVariableSubstitutionEnabled;
   editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(settingsStore.editorSettings.sqlVariableSyntaxOverrides);
   editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
@@ -1514,7 +1703,7 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
     redisKeyTemplates: (value) => normalizeRedisKeyTemplates(value as string[]).join("\n"),
     toolbarItems: (value) => ({ ...(value as EditorSettings["toolbarItems"]) }),
     snippets: (value) => (value as SqlSnippet[]).map(editableSnippet),
-    sqlShortcuts: (value) => (value as SqlShortcutAction[]).map(editableSqlShortcut),
+    sqlShortcuts: (value) => mergeDefaultSqlShortcuts((value as SqlShortcutAction[]).map(editableSqlShortcut)),
     sqlVariableSyntaxOverrides: (value) => normalizeSqlVariableSyntaxOverrides(value as EditorSettings["sqlVariableSyntaxOverrides"]),
     backgroundImage: (value) => cloneBackgroundImageDraft(value as BackgroundImageSettings),
   });
@@ -2071,7 +2260,7 @@ function resetAllDefaults() {
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
-  editSqlShortcuts.value = [];
+  editSqlShortcuts.value = DEFAULT_SQL_SHORTCUTS.map(editableSqlShortcut);
 }
 
 function addTableColumnTemplateRow() {
@@ -7857,11 +8046,13 @@ onUnmounted(() => {
                   {{ t("settings.sqlShortcutsEmpty") }}
                 </div>
                 <div v-else class="overflow-x-auto rounded-md border">
-                  <table class="w-full min-w-[720px] text-sm">
+                  <table class="w-full min-w-[900px] text-sm">
                     <thead>
                       <tr class="border-b bg-muted/50">
                         <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.sqlShortcutsLabel") }}</th>
+                        <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.sqlShortcutsSource") }}</th>
                         <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.shortcutPressShortcut") }}</th>
+                        <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.sqlShortcutsDatabaseTypes") }}</th>
                         <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.snippetsStatus") }}</th>
                         <th class="px-3 py-2 text-left font-medium whitespace-nowrap">{{ t("settings.sqlShortcutsSql") }}</th>
                         <th class="px-3 py-2 w-20"></th>
@@ -7869,11 +8060,19 @@ onUnmounted(() => {
                     </thead>
                     <tbody>
                       <tr v-for="action in editSqlShortcuts" :key="action.id" class="border-b last:border-b-0 hover:bg-muted/30" :class="action.enabled === false ? 'text-muted-foreground' : ''">
-                        <td class="px-3 py-2">{{ action.label }}</td>
+                        <td class="px-3 py-2">{{ sqlShortcutDisplayLabel(action) }}</td>
+                        <td class="px-3 py-2">
+                          <Badge variant="outline" class="h-5 rounded-md px-1.5 text-[11px]" :class="isBuiltinSqlShortcut(action.id) ? 'border-primary/40 text-primary' : 'text-muted-foreground'">
+                            {{ isBuiltinSqlShortcut(action.id) ? t("settings.sqlShortcutsSourceBuiltin") : t("settings.sqlShortcutsSourceCustom") }}
+                          </Badge>
+                        </td>
                         <td class="px-3 py-2">
                           <Badge variant="outline" class="h-5 rounded-md px-1.5 font-mono text-[11px] text-muted-foreground">
                             {{ action.shortcut ? formatShortcutPill(action.shortcut) : t("settings.sqlShortcutsUnbound") }}
                           </Badge>
+                        </td>
+                        <td class="max-w-[180px] truncate px-3 py-2 text-xs text-muted-foreground" :title="sqlShortcutDatabaseTypesLabel(action)">
+                          {{ sqlShortcutDatabaseTypesLabel(action) }}
                         </td>
                         <td class="px-3 py-2">
                           <div class="flex items-center gap-2">
@@ -7883,13 +8082,13 @@ onUnmounted(() => {
                             </Label>
                           </div>
                         </td>
-                        <td class="max-w-[300px] truncate px-3 py-2 font-mono text-xs text-muted-foreground">{{ action.sql }}</td>
+                        <td class="max-w-[300px] truncate px-3 py-2 font-mono text-xs text-muted-foreground" :title="sqlShortcutListSql(action)">{{ sqlShortcutListSql(action) }}</td>
                         <td class="px-3 py-2">
                           <div class="flex items-center gap-1">
                             <Button variant="ghost" size="icon-xs" @click="openEditSqlShortcutDialog(action)">
                               <Pencil class="size-3.5" />
                             </Button>
-                            <Button variant="ghost" size="icon-xs" @click="confirmDeleteSqlShortcut(action)">
+                            <Button v-if="!isBuiltinSqlShortcut(action.id)" variant="ghost" size="icon-xs" @click="confirmDeleteSqlShortcut(action)">
                               <Trash2 class="size-3.5" />
                             </Button>
                           </div>
@@ -9970,7 +10169,7 @@ LIMIT 100;</pre
 
     <!-- SQL Shortcut Add/Edit Dialog -->
     <Dialog :open="sqlShortcutDialogOpen" @update:open="sqlShortcutDialogOpen = $event">
-      <DialogContent class="sm:max-w-[560px]">
+      <DialogContent class="sm:max-w-[600px]">
         <DialogHeader>
           <DialogTitle>
             {{ sqlShortcutEditingId ? t("settings.sqlShortcutsEditTitle") : t("settings.sqlShortcutsAddTitle") }}
@@ -9979,7 +10178,8 @@ LIMIT 100;</pre
         <div class="flex flex-col gap-4 py-2">
           <div class="flex flex-col gap-1.5">
             <Label for="sql-shortcut-label">{{ t("settings.sqlShortcutsLabel") }}</Label>
-            <Input id="sql-shortcut-label" v-model="sqlShortcutForm.label" :placeholder="t('settings.sqlShortcutsLabelPlaceholder')" />
+            <Input v-if="!sqlShortcutFormIsBuiltin" id="sql-shortcut-label" v-model="sqlShortcutForm.label" :placeholder="t('settings.sqlShortcutsLabelPlaceholder')" />
+            <Input v-else id="sql-shortcut-label" :model-value="sqlShortcutFormBuiltinLabel" readonly class="bg-muted" />
             <p v-if="sqlShortcutFormLabelError" class="text-xs text-destructive">
               {{ sqlShortcutFormLabelError }}
             </p>
@@ -10009,19 +10209,104 @@ LIMIT 100;</pre
               </Button>
             </div>
           </div>
-          <div class="flex flex-col gap-1.5">
-            <Label for="sql-shortcut-sql">{{ t("settings.sqlShortcutsSql") }}</Label>
-            <textarea
-              id="sql-shortcut-sql"
-              v-model="sqlShortcutForm.sql"
-              :placeholder="t('settings.sqlShortcutsSqlPlaceholder')"
-              rows="6"
-              class="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            />
+
+          <!-- Built-in select-limit: row count + dialect preview -->
+          <template v-if="sqlShortcutFormIsBuiltin && sqlShortcutForm.kind === 'select-limit'">
+            <div class="flex flex-col gap-1.5">
+              <Label for="sql-shortcut-limit">{{ t("settings.sqlShortcutsLimit") }}</Label>
+              <Input id="sql-shortcut-limit" type="number" min="1" max="100000" v-model.number="sqlShortcutForm.limit" class="w-32" />
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <Label>{{ t("settings.sqlShortcutsPreview") }}</Label>
+                <Select v-model="sqlShortcutPreviewDatabaseType">
+                  <SelectTrigger class="h-8 w-[160px]">
+                    <SelectValue :placeholder="t('settings.sqlShortcutsPreviewDatabase')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="dbType in dbTypeOptions" :key="dbType" :value="dbType">
+                      {{ dbTypeLabel(dbType) }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <pre class="overflow-x-auto whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs leading-relaxed">{{ sqlShortcutFormPreviewSql }}</pre>
+              <p class="text-xs text-muted-foreground">{{ t("settings.sqlShortcutsSelectLimitHint") }}</p>
+            </div>
+          </template>
+
+          <!-- Built-in count: read-only SQL -->
+          <div v-else-if="sqlShortcutFormIsBuiltin" class="flex flex-col gap-1.5">
+            <Label>{{ t("settings.sqlShortcutsSql") }}</Label>
+            <pre class="overflow-x-auto whitespace-pre-wrap rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs leading-relaxed">{{ sqlShortcutForm.sql }}</pre>
             <p class="text-xs text-muted-foreground">
               {{ t("settings.sqlShortcutsVariableHint", { token: SQL_SHORTCUT_TABLE_TOKEN }) }}
             </p>
           </div>
+
+          <!-- Custom add/edit: databases + SQL (optional per-DB body) -->
+          <template v-else>
+            <div class="flex flex-col gap-1.5">
+              <Label>{{ t("settings.sqlShortcutsDatabaseTypes") }}</Label>
+              <div class="flex flex-wrap items-center gap-2">
+                <Popover :open="sqlShortcutDatabaseTypesOpen" @update:open="(open) => (sqlShortcutDatabaseTypesOpen = open)">
+                  <PopoverTrigger as-child>
+                    <Button type="button" variant="outline" size="sm" class="h-8">
+                      {{ sqlShortcutForm.databaseTypes.length === 0 ? t("settings.sqlShortcutsDatabaseTypesAll") : t("settings.sqlShortcutsDatabaseTypesSelected", { count: sqlShortcutForm.databaseTypes.length }) }}
+                      <ChevronDown class="ml-1 h-3.5 w-3.5 opacity-60" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" class="w-64 p-2">
+                    <button type="button" class="mb-1 flex w-full items-center gap-2 rounded-sm px-1 py-1 text-xs hover:bg-muted" @click="clearSqlShortcutDatabaseTypes">
+                      <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="sqlShortcutForm.databaseTypes.length === 0 ? 'border-primary bg-primary text-primary-foreground' : ''">
+                        <Check v-if="sqlShortcutForm.databaseTypes.length === 0" class="h-3 w-3" />
+                      </div>
+                      {{ t("settings.sqlShortcutsDatabaseTypesAll") }}
+                    </button>
+                    <div class="max-h-48 overflow-auto border-t border-border/60 pt-1">
+                      <button v-for="dbType in dbTypeOptions" :key="dbType" type="button" class="flex w-full items-center gap-2 rounded-sm px-1 py-1 text-xs hover:bg-muted" @click="toggleSqlShortcutDatabaseType(dbType)">
+                        <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="sqlShortcutForm.databaseTypes.includes(dbType) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                          <Check v-if="sqlShortcutForm.databaseTypes.includes(dbType)" class="h-3 w-3" />
+                        </div>
+                        {{ dbTypeLabel(dbType) }}
+                      </button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+              </div>
+              <p class="text-xs text-muted-foreground">{{ t("settings.sqlShortcutsDatabaseTypesHint") }}</p>
+            </div>
+            <div class="flex flex-col gap-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <Label for="sql-shortcut-sql">{{ t("settings.sqlShortcutsSql") }}</Label>
+                <div v-if="sqlShortcutForm.databaseTypes.length > 0" class="flex items-center gap-2">
+                  <Select :model-value="sqlShortcutForm.editingDatabaseType || sqlShortcutForm.databaseTypes[0]" @update:model-value="(value) => onSqlShortcutEditingDatabaseTypeChange((value as DatabaseType) || '')">
+                    <SelectTrigger class="h-8 w-[160px]">
+                      <SelectValue :placeholder="t('settings.sqlShortcutsSqlDatabase')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="dbType in sqlShortcutForm.databaseTypes" :key="dbType" :value="dbType">
+                        {{ dbTypeLabel(dbType) }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button type="button" variant="outline" size="sm" class="h-8 shrink-0" @click="applySqlShortcutSqlToAllSelected">
+                    {{ t("settings.sqlShortcutsApplySqlToAllSelected") }}
+                  </Button>
+                </div>
+              </div>
+              <textarea
+                id="sql-shortcut-sql"
+                v-model="sqlShortcutForm.body"
+                :placeholder="t('settings.sqlShortcutsSqlPlaceholder')"
+                rows="6"
+                class="flex min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+              <p class="text-xs text-muted-foreground">
+                {{ t("settings.sqlShortcutsVariableHint", { token: SQL_SHORTCUT_TABLE_TOKEN }) }}
+              </p>
+            </div>
+          </template>
         </div>
         <DialogFooter>
           <Button variant="outline" @click="sqlShortcutDialogOpen = false">{{ t("settings.cancel") }}</Button>

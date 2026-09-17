@@ -2580,6 +2580,7 @@ pub fn run() {
             commands::xlsx_export::export_query_results_xlsx,
             commands::text_export::export_query_result_json,
             commands::text_export::export_query_result_markdown,
+            commands::text_export::export_query_result_html,
             commands::agents::list_installed_agents,
             commands::agents::list_installed_agents_local,
             commands::agents::is_agent_installed,

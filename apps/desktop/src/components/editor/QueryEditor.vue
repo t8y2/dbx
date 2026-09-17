@@ -163,7 +163,8 @@ import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
-import { enabledSqlShortcutActions, resolveSqlShortcutTemplate } from "@/lib/sql/sqlShortcutActions";
+import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, resolveSqlShortcutForDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
+import { resolveSqlShortcutTableToken } from "@/lib/sql/sqlShortcutTableTarget";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
@@ -2302,13 +2303,21 @@ function handleSqlIntentionActions(currentView: EditorViewType): boolean {
 }
 
 function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutActions>[number], currentView: EditorViewType, event?: KeyboardEvent): boolean {
+  // Non-SQL editors (Redis / Mongo / ES / …) keep their own command languages; do not inject SELECT templates.
+  if (queryEditorSelectionLanguage() !== "sql") return false;
   if (shouldBlockExecutionShortcut(event, currentView)) return true;
   if (props.readOnly) return true;
-  const { from, to, empty } = currentView.state.selection.main;
-  if (empty) return false;
-  const selected = currentView.state.sliceDoc(from, to).trim();
+  const { from, to, empty, head } = currentView.state.selection.main;
+  let selected: string | null = null;
+  if (!empty) {
+    selected = currentView.state.sliceDoc(from, to).trim() || null;
+  } else {
+    const line = currentView.state.doc.lineAt(head);
+    const localHead = Math.min(Math.max(0, head - line.from), line.text.length);
+    selected = resolveSqlShortcutTableToken(line.text, { from: localHead, to: localHead, empty: true, head: localHead });
+  }
   if (!selected) return false;
-  const sql = resolveSqlShortcutTemplate(action.sql, selected);
+  const sql = buildSqlShortcutExecutionSql(action, selected, props.databaseType);
   emitExecutionRequest(sql);
   return true;
 }
@@ -2345,11 +2354,27 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
     isReadOnly: () => !!props.readOnly,
   });
   const sqlShortcutActions = enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts);
-  const sqlShortcutKeymapActions = sqlShortcutActions.filter((action) => !isCharacterProducingShortcut(action.shortcut));
-  const sqlShortcutBindings = sqlShortcutKeymapActions.flatMap((action) => binding(action.shortcut, (currentView) => runSqlShortcutAction(action, currentView)));
+  const sqlShortcutKeymapBindings = uniqueSqlShortcutBindings(sqlShortcutActions).filter((shortcut) => !isCharacterProducingShortcut(shortcut));
+  // Do not set preventDefault: true — when run returns false (wrong DB scope / no table token),
+  // CodeMirror must not swallow the browser default. Returning true still prevents default.
+  const sqlShortcutBindings = sqlShortcutKeymapBindings.flatMap((shortcut) =>
+    shortcut
+      ? [
+          {
+            key: shortcutToCodeMirrorKey(shortcut),
+            run: (currentView: EditorViewType) => {
+              const action = resolveSqlShortcutForDatabase(settingsStore.editorSettings.sqlShortcuts, shortcut, props.databaseType);
+              if (!action) return false;
+              return runSqlShortcutAction(action, currentView);
+            },
+          },
+        ]
+      : [],
+  );
   const sqlShortcutDomHandler = createQueryEditorSqlShortcutDomHandler(
     () => settingsStore.editorSettings.sqlShortcuts,
     (action, currentView, event) => runSqlShortcutAction(action, currentView, event),
+    () => props.databaseType,
   );
   const combinedDomKeydownHandler = (event: KeyboardEvent, view: EditorViewType) => {
     if (replaceShortcutHandler(event)) return true;

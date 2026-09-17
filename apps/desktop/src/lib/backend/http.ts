@@ -3212,6 +3212,11 @@ export async function exportQueryResultMarkdown(filePath: string, columns: strin
   downloadTextFile(filePath, "export.md", result.content, "text/markdown;charset=utf-8");
 }
 
+export async function exportQueryResultHtml(filePath: string, title: string | undefined, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+  const result = await post<{ content: string }>("/api/export/query-result-html", { title, columns, rows });
+  downloadTextFile(filePath, "export.html", result.content, "text/html;charset=utf-8");
+}
+
 // ---------------------------------------------------------------------------
 // Redis
 // ---------------------------------------------------------------------------

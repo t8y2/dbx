@@ -219,6 +219,13 @@ export interface MongoFindCommand {
   collation?: string;
 }
 
+export interface MongoFindExplainCommand extends MongoFindCommand {
+  verbosity: MongoExplainVerbosity;
+}
+
+export type MongoExplainVerbosity = "queryPlanner" | "executionStats" | "allPlansExecution";
+const EXPLAIN_VERBOSITIES: readonly MongoExplainVerbosity[] = ["queryPlanner", "executionStats", "allPlansExecution"];
+
 export interface MongoFindPaginationPlan {
   pageOffset: number;
   pageLimit: number;
@@ -284,6 +291,7 @@ type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "bulkWrit
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
+  | ({ kind: "findExplain" } & MongoFindExplainCommand)
   | ({ kind: "findOne" } & MongoFindOneCommand)
   | MongoVersionCommand
   | MongoShowDatabasesCommand
@@ -594,6 +602,35 @@ function parseCollectionCountCommand(source: string, method: "countDocuments" | 
   };
 }
 
+/**
+ * `find(...)…explain([verbosity])`: the query plan for a find, with explain as the
+ * final chain call. Everything before it is parsed exactly as the find would be.
+ */
+export function parseMongoFindExplainCommand(input: string): MongoFindExplainCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseFindTarget(source);
+  if (!target) return null;
+  const findOpenIndex = source.indexOf("(", target.findCallIndex);
+  const findCloseIndex = findMatchingParen(source, findOpenIndex);
+  if (findCloseIndex < 0) return null;
+
+  const chain = source.slice(findCloseIndex + 1).trim();
+  const calls = listChainedCalls(chain);
+  const last = calls?.[calls.length - 1];
+  if (!calls || last?.name !== "explain") return null;
+
+  const verbosityArg = last.args.trim();
+  let verbosity: MongoExplainVerbosity = "queryPlanner";
+  if (verbosityArg) {
+    const literal = /^(["'])([^"']*)\1$/.exec(verbosityArg)?.[2];
+    if (!literal || !EXPLAIN_VERBOSITIES.includes(literal as MongoExplainVerbosity)) return null;
+    verbosity = literal as MongoExplainVerbosity;
+  }
+
+  const find = parseMongoFindCommand(source.slice(0, findCloseIndex + 1) + chain.slice(0, last.index));
+  return find ? { ...find, verbosity } : null;
+}
+
 function parseFindCountCommand(source: string): MongoCountDocumentsCommand | null {
   const target = parseFindTarget(source);
   if (!target) return null;
@@ -887,6 +924,10 @@ export function parseMongoCommand(input: string): ParsedMongoCommand | null {
       // while mapping to DBX's countDocuments-compatible result path.
       const count = parseMongoCountDocumentsCommand(source);
       return count ? { kind: "countDocuments", ...count } : null;
+    },
+    (source) => {
+      const explain = parseMongoFindExplainCommand(source);
+      return explain ? { kind: "findExplain", ...explain } : null;
     },
     (source) => {
       const find = parseMongoFindCommand(source);
@@ -1606,10 +1647,13 @@ function describeUnsupportedFindChain(chain: string): string | null {
   if (!calls) return null;
   const offending = calls.find((call) => !FIND_CHAIN_METHODS.has(call.name) || (isNoopCursorMethod(call.name) && call.args.trim()));
   if (!offending) return null;
-  const supported = "Supported after find(): sort, skip, limit, collation, count, toArray, pretty.";
+  const supported = "Supported after find(): sort, skip, limit, collation, count, explain, toArray, pretty.";
   switch (offending.name) {
-    case "explain":
-      return `find().explain() is not supported in the editor yet; aggregate([...], { explain: true }) is. ${supported}`;
+    case "explain": {
+      const verbosity = offending.args.trim();
+      if (calls[calls.length - 1] !== offending) return "find().explain() must be the final chain method.";
+      return `find().explain() verbosity must be "queryPlanner", "executionStats" or "allPlansExecution"${verbosity ? `, got ${verbosity}` : ""}.`;
+    }
     case "itcount":
     case "size":
       return `find().${offending.name}() is not supported; use find().count() or countDocuments() to count results. ${supported}`;

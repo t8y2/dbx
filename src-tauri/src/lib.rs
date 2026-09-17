@@ -2325,6 +2325,7 @@ pub fn run() {
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_parse_shell_command,
             commands::mongo_cmd::mongo_find_one,
+            commands::mongo_cmd::mongo_explain_find,
             commands::mongo_cmd::mongo_count_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_collection_stats,

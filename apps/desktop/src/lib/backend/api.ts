@@ -825,6 +825,7 @@ export const mongoUpdateDocument = forward("mongoUpdateDocument");
 export const mongoUpdateDocuments = forward("mongoUpdateDocuments");
 export const mongoReplaceDocument = forward("mongoReplaceDocument");
 export const mongoBulkWrite = forward("mongoBulkWrite");
+export const mongoExplainFind = forward("mongoExplainFind");
 export const documentDeleteDocument = forward("documentDeleteDocument");
 export const documentSaveMeilisearchBatch = forward("documentSaveMeilisearchBatch");
 export const meilisearchSearchDocuments = forward("meilisearchSearchDocuments");

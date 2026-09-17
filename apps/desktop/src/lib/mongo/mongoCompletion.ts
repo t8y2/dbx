@@ -153,6 +153,7 @@ const CURSOR_METHODS = [
   { label: "sort", detail: "Sort cursor results", apply: "sort({ ${field}: 1 })" },
   { label: "limit", detail: "Limit cursor results", apply: "limit(100)" },
   { label: "skip", detail: "Skip cursor results", apply: "skip(0)" },
+  { label: "explain", detail: "Show the query plan instead of the results", apply: 'explain("executionStats")' },
 ] as const;
 
 /**

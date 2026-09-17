@@ -6,6 +6,7 @@ import {
   evaluateMongoWriteSafety,
   mongoAggregateWriteStage,
   listChainedCalls,
+  parseMongoFindExplainCommand,
   mongoBulkWriteToQueryResult,
   mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
@@ -448,13 +449,43 @@ test("parseMongoFindCommand validates UUID strings at parse time", () => {
   assert.deepEqual(JSON.parse(command.filter), { u: { $uuid: "3B241101-E2BB-4255-8CAF-4136C566A962" } });
 });
 
+test("parseMongoFindExplainCommand reads a final explain() with the find it wraps", () => {
+  assert.deepEqual(parseMongoFindExplainCommand('db.c.find({a: 1}, {b: 1}).sort({b: -1}).skip(2).limit(5).explain("allPlansExecution")'), {
+    collection: "c",
+    filter: '{"a": 1}',
+    projection: '{"b": 1}',
+    skip: 2,
+    limit: 5,
+    sort: '{"b": -1}',
+    verbosity: "allPlansExecution",
+  });
+  assert.equal(parseMongoFindExplainCommand("db.c.find({a: 1}).explain()")?.verbosity, "queryPlanner");
+  assert.equal(parseMongoFindExplainCommand("db.c.find({a: 1})\n  .sort({b: 1})\n  .explain('executionStats');")?.verbosity, "executionStats");
+  assert.equal(parseMongoFindExplainCommand('db["x-y"].find({}).explain()')?.collection, "x-y");
+  assert.equal(parseMongoCommand("db.c.find({}).explain()")?.command.kind, "findExplain");
+  // A plain find is not an explain, and vice versa.
+  assert.equal(parseMongoFindExplainCommand("db.c.find({a: 1}).limit(1)"), null);
+  assert.equal(parseMongoFindCommand("db.c.find({a: 1}).explain()"), null);
+});
+
+test("parseMongoFindExplainCommand rejects a misplaced explain or an unknown verbosity", () => {
+  for (const [source, expected] of [
+    ["db.c.find({}).explain('verbose')", /verbosity must be "queryPlanner", "executionStats" or "allPlansExecution", got 'verbose'/],
+    ["db.c.find({}).explain(1)", /verbosity must be .*, got 1/],
+    ["db.c.find({}).explain().limit(5)", /explain\(\) must be the final chain method/],
+    ["db.c.find({}).explain", /Unexpected text after find\(\.\.\.\): "\.explain"/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
 test("parseMongoFindCommand rejects chained methods it would otherwise silently drop", () => {
   // Each of these used to parse as a plain find and run a different query than written.
   for (const [source, expected] of [
-    ["db.c.find({}).hint({a: 1})", /find\(\)\.hint\(\) is not supported yet\. Supported after find\(\): sort, skip, limit, collation, count, toArray, pretty\./],
+    ["db.c.find({}).hint({a: 1})", /find\(\)\.hint\(\) is not supported yet\. Supported after find\(\): sort, skip, limit, collation, count, explain, toArray, pretty\./],
     ["db.c.find({}).batchSize(10)", /batchSize\(\) is not supported yet/],
     ["db.c.find({}).sort({a: 1}).maxTimeMS(100)", /maxTimeMS\(\) is not supported yet/],
-    ["db.c.find({}).explain('executionStats')", /find\(\)\.explain\(\) is not supported in the editor yet; aggregate\(\[\.\.\.\], \{ explain: true \}\) is/],
     ["db.c.find({}).itcount()", /itcount\(\) is not supported; use find\(\)\.count\(\) or countDocuments\(\)/],
     ["db.c.find({}).size()", /size\(\) is not supported; use find\(\)\.count\(\)/],
     ["db.c.find({}).forEach(d => print(d))", /forEach\(\) runs JavaScript, which the editor does not execute/],

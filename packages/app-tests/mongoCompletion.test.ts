@@ -137,7 +137,7 @@ test("prioritizes common read helpers and keeps destructive helpers last", () =>
   assert.deepEqual(methodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(getCollectionMethodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(methodLabels.slice(-3), ["dropIndex", "dropIndexes", "drop"]);
-  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count"]);
+  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count", "explain"]);
 });
 
 test("keeps dotted collection names ahead of methods until the collection is resolved", () => {
@@ -162,7 +162,7 @@ test("suggests cursor methods after find result chains", () => {
 
   assert.deepEqual(
     allItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count"],
+    ["limit", "sort", "skip", "count", "explain"],
   );
   assert.deepEqual(
     prefixedItems.map((item) => item.label),
@@ -170,7 +170,7 @@ test("suggests cursor methods after find result chains", () => {
   );
   assert.deepEqual(
     formattedChainItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count"],
+    ["limit", "sort", "skip", "count", "explain"],
   );
   assert.deepEqual(
     formattedPrefixedItems.map((item) => item.label),

@@ -3251,14 +3251,14 @@ pub(crate) fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Opt
 }
 
 pub(crate) fn extra_is_auto_generated(extra: &str) -> bool {
-    extra
-        .to_ascii_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-        .any(|part| matches!(part, "auto_increment" | "autoincrement" | "identity"))
+    extra.to_ascii_lowercase().split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|part| {
+        matches!(part, "auto_increment" | "autoincrement" | "identity" | "smallserial" | "serial" | "bigserial")
+    })
 }
 
 pub(crate) fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
     extra_is_auto_generated(column.extra.as_deref().unwrap_or(""))
+        || column.column_default.as_deref().is_some_and(|default| default.to_ascii_lowercase().contains("nextval("))
 }
 
 fn grid_value_is_empty(value: &Value) -> bool {
@@ -4026,6 +4026,55 @@ mod tests {
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
         );
+    }
+
+    #[test]
+    fn recognizes_postgres_serial_extras_as_auto_generated() {
+        for extra in ["serial", "smallserial", "bigserial"] {
+            assert!(extra_is_auto_generated(extra), "expected {extra} to be auto-generated");
+        }
+    }
+
+    #[test]
+    fn builds_postgres_copy_insert_without_serial_primary_key() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "name".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');"));
     }
 
     #[test]

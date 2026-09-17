@@ -197,7 +197,10 @@ test("embedded result toolbar progressively compacts when editing actions overfl
 
   assert.match(dataGrid, /dataGridTopbarMutationObserver = new MutationObserver\(updateDataGridTopbarWidth\)/);
   assert.match(dataGrid, /dataGridTopbarMutationObserver\.observe\(topbar, \{ childList: true, characterData: true, subtree: true \}\)/);
-  assert.match(dataGrid, /topbar\.scrollWidth > topbar\.clientWidth \+ 1/);
+  const measurementStart = dataGrid.indexOf("function updateDataGridTopbarWidth()");
+  const measurementEnd = dataGrid.indexOf("function resetDataGridTopbarOverflowCompact()", measurementStart);
+  assert.ok(measurementStart >= 0 && measurementEnd > measurementStart);
+  assert.match(dataGrid.slice(measurementStart, measurementEnd), /(\w+)\.scrollWidth > \1\.clientWidth \+ 1/);
   assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = true/);
   assert.match(dataGrid, /dataGridTopbarOverflowActionCount\.value = compactDataGridToolbarActionCount\.value \+ 1/);
   assert.match(dataGrid, /dataGridTopbarWidth\.value >= dataGridTopbarExpandedRequiredWidth\.value/);

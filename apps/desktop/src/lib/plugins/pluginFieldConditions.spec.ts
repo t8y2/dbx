@@ -197,6 +197,39 @@ describe("pluginFieldIsVisible", () => {
     expect(pluginFieldIsVisible(fields.msk_region, readOauth, resolve)).toBe(true);
   });
 
+  it.each([false, true])("keeps sibling branches path-local with reverse order %s", (reverse) => {
+    const fields: Record<string, PluginFormField> = {
+      mode: field({ key: "mode" }),
+      auth: field({ key: "auth", visible_when: { field: "mode", one_of: ["enabled"] } }),
+    };
+    const clause: PluginFieldCondition = { field: "auth", one_of: ["password"] };
+    const branches: PluginFieldCondition[] = [{ all_of: [clause, { field: "flag", one_of: [true] }] }, { all_of: [{ field: "flag", one_of: [false] }, clause] }];
+    if (reverse) branches.reverse();
+    const resolve = (key: string) => fields[key];
+    for (const flag of [false, true]) {
+      const hidden = reader({ mode: "disabled", auth: "password", flag });
+      const visible = reader({ mode: "enabled", auth: "password", flag });
+      for (const condition of [clause, { any_of: [clause, clause] }, { any_of: branches }, { all_of: [clause, clause] }] satisfies PluginFieldCondition[]) {
+        const target = field({ key: "target", visible_when: condition });
+        expect(pluginFieldIsVisible(target, hidden, resolve)).toBe(false);
+        expect(pluginFieldIsVisible(target, visible, resolve)).toBe(true);
+      }
+      const negated = field({ visible_when: { not: { any_of: [clause, clause] } } });
+      expect(pluginFieldIsVisible(negated, hidden, resolve)).toBe(false);
+      expect(pluginFieldIsVisible(negated, reader({ mode: "enabled", auth: "token", flag }), resolve)).toBe(true);
+    }
+  });
+
+  it("preserves true mutual-cycle compatibility without bypassing value checks", () => {
+    const fields: Record<string, PluginFormField> = {
+      first: field({ key: "first", visible_when: { field: "second", one_of: ["on"] } }),
+      second: field({ key: "second", visible_when: { field: "first", one_of: ["on"] } }),
+    };
+    const resolve = (key: string) => fields[key];
+    expect(pluginFieldIsVisible(fields.first, reader({ first: "on", second: "on" }), resolve)).toBe(true);
+    expect(pluginFieldIsVisible(fields.first, reader({ first: "off", second: "on" }), resolve)).toBe(false);
+  });
+
   it("ignores unknown condition fields and survives self-referencing cycles", () => {
     const unknown = field({ visible_when: { field: "missing", one_of: ["x"] } });
     expect(

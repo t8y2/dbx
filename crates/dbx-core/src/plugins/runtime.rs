@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, oneshot, watch, Mutex, RwLock};
+use tokio::time::Instant;
 
 use super::{
     InstalledPlugin, PluginBackendTransport, PluginRuntimeEnv, SUPPORTED_PLUGIN_HOST_API_VERSION,
@@ -166,50 +167,36 @@ pub struct PluginSidecarSession {
 
 /// Tracks whether this plugin session has a user prompt open, and wakes the
 /// requests that are waiting on a response so they can start or stop pausing
-/// their deadline. `notify_one` stores a permit when nobody is waiting, which is
-/// what makes the wakeup immune to the race between "check the counter" and
-/// "start waiting".
+/// their deadline.
 #[derive(Default)]
 struct PromptActivity {
-    open: AtomicUsize,
-    changed: tokio::sync::Notify,
-    shutdown: tokio::sync::Notify,
-    closed: std::sync::atomic::AtomicBool,
+    state: watch::Sender<PromptState>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct PromptState {
+    open: usize,
+    closed: bool,
 }
 
 impl PromptActivity {
     fn begin(&self) {
-        self.open.fetch_add(1, Ordering::SeqCst);
-        self.changed.notify_one();
+        self.state.send_modify(|state| state.open += 1);
     }
 
     fn end(&self) {
-        self.open.fetch_sub(1, Ordering::SeqCst);
-        self.changed.notify_one();
-    }
-
-    fn is_open(&self) -> bool {
-        self.open.load(Ordering::SeqCst) > 0
+        self.state.send_modify(|state| state.open -= 1);
     }
 
     /// Releases every open prompt when the session goes away, so the dialog
     /// does not linger in front of a plugin that can no longer answer.
     fn close(&self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.shutdown.notify_one();
-        }
+        self.state.send_modify(|state| state.closed = true);
     }
 
     async fn wait_close(&self) {
-        if self.closed.load(Ordering::SeqCst) {
-            return;
-        }
-        loop {
-            self.shutdown.notified().await;
-            if self.closed.load(Ordering::SeqCst) {
-                return;
-            }
-        }
+        let mut state = self.state.subscribe();
+        let _ = state.wait_for(|state| state.closed).await;
     }
 }
 
@@ -362,10 +349,10 @@ impl PluginSidecarSession {
 
     pub async fn shutdown(&self) {
         self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopping, None));
-        let kill_result = self.child.lock().await.kill().await;
-        let message = kill_result.err().map(|error| error.to_string());
         // Let any open user prompt resolve and close its dialog.
         self.prompts.close();
+        let kill_result = self.child.lock().await.kill().await;
+        let message = kill_result.err().map(|error| error.to_string());
         fail_pending(&self.pending, "Plugin session stopped").await;
         self.status.send_replace(PluginSessionStatus::new(PluginSessionState::Stopped, message));
     }
@@ -448,9 +435,14 @@ impl PluginSidecarSession {
         method: &str,
         duration: Duration,
     ) -> Result<serde_json::Value, String> {
+        let mut prompt_state = self.prompts.state.subscribe();
         let start = Instant::now();
         let mut paused_total = Duration::ZERO;
         loop {
+            let state = *prompt_state.borrow_and_update();
+            if state.closed {
+                return Err("Plugin session stopped".to_string());
+            }
             let active = start.elapsed().saturating_sub(paused_total);
             if active >= duration {
                 return Err(format!(
@@ -460,7 +452,7 @@ impl PluginSidecarSession {
                     duration.as_secs()
                 ));
             }
-            if self.prompts.is_open() {
+            if state.open > 0 {
                 // The user is answering: hold the deadline and re-measure when
                 // the prompt state changes.
                 let tick = Instant::now();
@@ -469,7 +461,7 @@ impl PluginSidecarSession {
                         return result
                             .map_err(|_| format!("Plugin '{}' response channel closed", self.plugin.manifest.id))?;
                     }
-                    _ = self.prompts.changed.notified() => {}
+                    _ = prompt_state.changed() => {}
                 }
                 paused_total += tick.elapsed();
                 if paused_total > MAX_PROMPT_PAUSE {
@@ -487,7 +479,7 @@ impl PluginSidecarSession {
                     return result
                         .map_err(|_| format!("Plugin '{}' response channel closed", self.plugin.manifest.id))?;
                 }
-                _ = self.prompts.changed.notified() => {}
+                _ = prompt_state.changed() => {}
                 _ = tokio::time::sleep(duration - active) => {
                     return Err(format!(
                         "Plugin '{}' request '{}' timed out after {} seconds",
@@ -710,7 +702,11 @@ impl PluginSidecarSession {
     /// UI it fails immediately so the plugin can fail closed instead of waiting.
     async fn request_user_input(&self, params: serde_json::Value) -> Result<serde_json::Value, PluginHostRequestError> {
         let spec = UserInputSpec::parse(params)?;
-        if self.prompts.open.load(Ordering::SeqCst) >= MAX_PLUGIN_PROMPTS_IN_FLIGHT {
+        let state = *self.prompts.state.borrow();
+        if state.closed {
+            return Ok(serde_json::json!({ "action": "cancel" }));
+        }
+        if state.open >= MAX_PLUGIN_PROMPTS_IN_FLIGHT {
             return Err(PluginHostRequestError::new(
                 -32002,
                 format!("Plugin already has {MAX_PLUGIN_PROMPTS_IN_FLIGHT} input prompts open"),
@@ -1083,11 +1079,67 @@ mod tests {
 
     use super::{
         decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PluginSessionState,
-        PluginSidecarSession, UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS,
+        PluginSidecarSession, PromptActivity, UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS,
         USER_INPUT_MAX_TIMEOUT, USER_INPUT_MIN_TIMEOUT,
     };
     use crate::plugins::{InstalledPlugin, PluginManifest, PluginRuntimeEnv};
     use tokio::io::BufReader;
+
+    async fn assert_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) {
+        std::future::poll_fn(|context| {
+            assert!(future.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn prompt_activity_closes_all_waiters_and_stays_closed() {
+        let prompts = PromptActivity::default();
+        let first = prompts.wait_close();
+        let second = prompts.wait_close();
+        tokio::pin!(first, second);
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+
+        prompts.close();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(first, second);
+        })
+        .await
+        .expect("every registered waiter must observe closure");
+        prompts.begin();
+        prompts.end();
+        prompts.close();
+        tokio::time::timeout(Duration::from_secs(1), prompts.wait_close())
+            .await
+            .expect("closure must persist for late subscribers after activity changes");
+    }
+
+    #[tokio::test]
+    async fn prompt_activity_preserves_changes_between_read_and_wait() {
+        let prompts = PromptActivity::default();
+        let mut first = prompts.state.subscribe();
+        let mut second = prompts.state.subscribe();
+        for receiver in [&mut first, &mut second] {
+            assert_eq!(receiver.borrow_and_update().open, 0);
+        }
+        prompts.begin();
+        for receiver in [&mut first, &mut second] {
+            tokio::time::timeout(Duration::from_secs(1), receiver.changed()).await.unwrap().unwrap();
+            assert_eq!(receiver.borrow_and_update().open, 1);
+        }
+        prompts.end();
+        for receiver in [&mut first, &mut second] {
+            tokio::time::timeout(Duration::from_secs(1), receiver.changed()).await.unwrap().unwrap();
+            assert_eq!(receiver.borrow_and_update().open, 0);
+        }
+        prompts.close();
+        for receiver in [&mut first, &mut second] {
+            tokio::time::timeout(Duration::from_secs(1), receiver.changed()).await.unwrap().unwrap();
+            assert!(receiver.borrow_and_update().closed);
+        }
+    }
 
     #[tokio::test]
     async fn rejects_oversized_json_lines_before_unbounded_growth() {
@@ -1362,6 +1414,117 @@ sleep 30
             .expect("stopping the session must not strand the caller");
         assert!(error.contains("stopped") || error.contains("closed"), "{error}");
         assert!(responder.is_closed(), "the prompt must be released when the session stops");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stopping_a_plugin_session_releases_all_open_prompts() {
+        use crate::db::ssh_prompt;
+
+        let _guard = ssh_prompt::prompt_gateway_test_lock().lock().await;
+        let mut prompts = install_silent_prompt_harness();
+        let dir = tempfile::tempdir().unwrap();
+        write_questioning_sidecar(dir.path());
+        let session = questioning_session(dir.path()).await;
+        let first = session.request_user_input(serde_json::json!({ "prompt": "First code" }));
+        let second = session.request_user_input(serde_json::json!({ "prompt": "Second code" }));
+        tokio::pin!(first, second);
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        let (_, first_responder) = prompts.recv().await.unwrap();
+        let (_, second_responder) = prompts.recv().await.unwrap();
+        assert!(!first_responder.is_closed());
+        assert!(!second_responder.is_closed());
+        assert_eq!(session.prompts.state.borrow().open, 2);
+
+        session.shutdown().await;
+        let (first_answer, second_answer) =
+            tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(first, second) })
+                .await
+                .expect("stopping the session must cancel all prompts without waiting for their deadlines");
+        assert_eq!(first_answer.unwrap(), serde_json::json!({ "action": "cancel" }));
+        assert_eq!(second_answer.unwrap(), serde_json::json!({ "action": "cancel" }));
+        assert!(first_responder.is_closed());
+        assert!(second_responder.is_closed());
+        assert_eq!(session.prompts.state.borrow().open, 0);
+        assert_eq!(
+            session.request_user_input(serde_json::json!({ "prompt": "Too late" })).await.unwrap(),
+            serde_json::json!({ "action": "cancel" })
+        );
+        assert!(prompts.try_recv().is_err());
+        ssh_prompt::clear_ssh_prompt_gateway();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_response_deadlines_pause_and_resume_together() {
+        let dir = tempfile::tempdir().unwrap();
+        write_questioning_sidecar(dir.path());
+        let session = questioning_session(dir.path()).await;
+        tokio::time::pause();
+        let (_first_sender, first_receiver) = tokio::sync::oneshot::channel();
+        let (_second_sender, second_receiver) = tokio::sync::oneshot::channel();
+        let first = session.await_response(first_receiver, "sample/first", Duration::from_secs(30));
+        let second = session.await_response(second_receiver, "sample/second", Duration::from_secs(30));
+        tokio::pin!(first, second);
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        session.prompts.begin();
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        session.prompts.begin();
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        session.prompts.end();
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        session.prompts.end();
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+
+        tokio::time::advance(Duration::from_secs(19)).await;
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (first_result, second_result) =
+            tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(first, second) })
+                .await
+                .expect("every response deadline must resume when the final prompt ends");
+        for result in [first_result, second_result] {
+            assert!(result.unwrap_err().contains("timed out after 30 seconds"));
+        }
+        tokio::time::resume();
+        session.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_paused_responses_still_accept_success_and_channel_closure() {
+        let dir = tempfile::tempdir().unwrap();
+        write_questioning_sidecar(dir.path());
+        let session = questioning_session(dir.path()).await;
+        let (first_sender, first_receiver) = tokio::sync::oneshot::channel();
+        let (second_sender, second_receiver) = tokio::sync::oneshot::channel();
+        session.prompts.begin();
+        let first = session.await_response(first_receiver, "sample/first", Duration::from_secs(30));
+        let second = session.await_response(second_receiver, "sample/second", Duration::from_secs(30));
+        tokio::pin!(first, second);
+        assert_pending(first.as_mut()).await;
+        assert_pending(second.as_mut()).await;
+        first_sender.send(Ok(serde_json::json!({ "ok": true }))).unwrap();
+        drop(second_sender);
+        assert_eq!(first.await.unwrap(), serde_json::json!({ "ok": true }));
+        assert!(second.await.unwrap_err().contains("response channel closed"));
+        session.prompts.end();
+        session.shutdown().await;
     }
 
     #[test]

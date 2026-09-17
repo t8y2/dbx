@@ -645,7 +645,9 @@ fn plugin_field_key_is_visible(
         return true;
     }
     seen.insert(sibling.key.clone());
-    plugin_field_is_visible_cached(sibling, config, provider, seen)
+    let visible = plugin_field_is_visible_cached(sibling, config, provider, seen);
+    seen.remove(&sibling.key);
+    visible
 }
 
 /// Effective required = static `required` OR a matching `required_when`
@@ -730,8 +732,8 @@ fn ensure_permission(plugin: &super::InstalledPlugin, required_permission: Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        plugin_connection_action_result, plugin_invoke_connection_action, validate_plugin_connection_values,
-        validate_plugin_connection_values_for_action,
+        plugin_connection_action_result, plugin_field_is_visible, plugin_invoke_connection_action,
+        validate_plugin_connection_values, validate_plugin_connection_values_for_action,
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
@@ -1151,6 +1153,97 @@ mod tests {
         .unwrap();
         let cyclic_config = config_for(serde_json::json!({ "a": "x", "b": "x" }));
         assert!(validate_plugin_connection_values(&cyclic_config, &cyclic).is_ok());
+    }
+
+    #[test]
+    fn condition_sibling_branches_keep_cycle_detection_path_local() {
+        let mut provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "test.connection",
+            "database_type": "test",
+            "fields": [
+                { "key": "mode", "label": "Mode", "type": "text" },
+                {
+                    "key": "auth", "label": "Auth", "type": "text",
+                    "visible_when": { "field": "mode", "one_of": ["enabled"] }
+                },
+                { "key": "flag", "label": "Flag", "type": "boolean" },
+                { "key": "target", "label": "Target", "type": "text", "required": true }
+            ]
+        }))
+        .unwrap();
+        let mut config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-connection", "name": "Test", "db_type": "plugin",
+            "host": "", "port": 0, "username": "", "password": ""
+        }))
+        .unwrap();
+        let clause = serde_json::json!({ "field": "auth", "one_of": ["password"] });
+        let branches = [
+            serde_json::json!({ "all_of": [clause, { "field": "flag", "one_of": [true] }] }),
+            serde_json::json!({ "all_of": [{ "field": "flag", "one_of": [false] }, clause] }),
+        ];
+        for condition in [
+            clause.clone(),
+            serde_json::json!({ "any_of": [clause, clause] }),
+            serde_json::json!({ "all_of": [clause, clause] }),
+            serde_json::json!({ "any_of": [branches[0], branches[1]] }),
+            serde_json::json!({ "any_of": [branches[1], branches[0]] }),
+        ] {
+            provider.fields[3].visible_when = Some(serde_json::from_value(condition.clone()).unwrap());
+            for flag in [false, true] {
+                for (mode, expected) in [("disabled", false), ("enabled", true)] {
+                    config.external_config =
+                        Some(serde_json::json!({ "mode": mode, "auth": "password", "flag": flag }));
+                    assert_eq!(
+                        plugin_field_is_visible(&provider.fields[3], &config, &provider),
+                        expected,
+                        "{condition}"
+                    );
+                    assert_eq!(validate_plugin_connection_values(&config, &provider).is_err(), expected, "{condition}");
+                }
+            }
+        }
+        provider.fields[3].visible_when = Some(
+            serde_json::from_value(serde_json::json!({
+                "not": { "any_of": [clause, clause] }
+            }))
+            .unwrap(),
+        );
+        for (mode, expected) in [("disabled", false), ("enabled", true)] {
+            config.external_config = Some(serde_json::json!({ "mode": mode, "auth": "token" }));
+            assert_eq!(plugin_field_is_visible(&provider.fields[3], &config, &provider), expected);
+        }
+    }
+
+    #[test]
+    fn condition_cycles_still_require_matching_values() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "test.connection",
+            "database_type": "test",
+            "fields": [
+                { "key": "first", "label": "First", "type": "text", "visible_when": { "field": "second", "one_of": ["on"] } },
+                { "key": "second", "label": "Second", "type": "text", "visible_when": { "field": "first", "one_of": ["on"] } },
+                { "key": "self", "label": "Self", "type": "text", "visible_when": { "field": "self", "one_of": ["on"] } },
+                { "key": "unknown", "label": "Unknown", "type": "text", "visible_when": { "field": "missing", "one_of": ["on"] } }
+            ]
+        }))
+        .unwrap();
+        let mut config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-connection", "name": "Test", "db_type": "plugin",
+            "host": "", "port": 0, "username": "", "password": ""
+        }))
+        .unwrap();
+        for (value, expected) in [("on", true), ("off", false)] {
+            config.external_config =
+                Some(serde_json::json!({ "first": value, "second": "on", "self": value, "missing": value }));
+            for field in &provider.fields {
+                assert_eq!(
+                    plugin_field_is_visible(field, &config, &provider),
+                    expected && field.key != "unknown",
+                    "{}",
+                    field.key
+                );
+            }
+        }
     }
 
     /// Mirrors the SSH plugin shape the composite contract was added for:

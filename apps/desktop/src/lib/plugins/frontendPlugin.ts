@@ -19,15 +19,6 @@ import { clonePluginData } from "./pluginData";
 
 const PLUGIN_CONNECTION_PROVIDER_OPTION_PREFIX = "plugin-provider:";
 
-/**
- * Placeholder hosts before the manifest serialization fix persisted for an
- * *unset* plugin secret: the manifest's absent `default` arrived as JSON `null`
- * and the save path stringified it. It is not a storable secret value — a user
- * cannot produce it from an empty input — so the form treats it as unset and
- * both the file and SQLite connection loaders drop it from the secret store.
- */
-const NULL_PLACEHOLDER_SECRET = "null";
-
 export interface FrontendPluginDefinition {
   plugin: InstalledPlugin;
   contributions: PluginContribution[];
@@ -142,8 +133,6 @@ export function pluginConnectionFormValues(contribution: PluginConnectionProvide
     // Port 0 is the stored representation of an optional, automatic port.
     // Keep that input empty on reopen so its protocol-default hint remains visible.
     if (binding === "port" && value === 0 && field.default === undefined) delete values[field.key];
-    // A legacy "null" placeholder is an unset secret, not a credential.
-    else if (binding === "secret" && secret === NULL_PLACEHOLDER_SECRET) delete values[field.key];
     else if (isPluginFormFieldValue(value)) values[field.key] = value;
   }
   return values;
@@ -193,7 +182,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
       // A plugin may migrate a formerly config-bound field to secret binding.
       // Load its legacy value above, then remove the plaintext copy on save.
       delete externalConfig[field.key];
-      if (value === undefined || value === "" || value === NULL_PLACEHOLDER_SECRET) delete connectionSecrets[field.key];
+      if (value === undefined || value === "") delete connectionSecrets[field.key];
       else connectionSecrets[field.key] = String(value);
     } else if (binding === "name") {
       config.name = String(value || contribution.label);

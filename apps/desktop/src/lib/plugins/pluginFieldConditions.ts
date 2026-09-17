@@ -112,7 +112,9 @@ function conditionOperandVisible(key: string, readValue: PluginFieldValueReader,
   const target = resolveField?.(key);
   if (!target || seen.has(target.key)) return true;
   seen.add(target.key);
-  return pluginFieldIsVisibleCached(target, readValue, resolveField, seen);
+  const visible = pluginFieldIsVisibleCached(target, readValue, resolveField, seen);
+  seen.delete(target.key);
+  return visible;
 }
 
 /** Effective required = static `required` OR a matching `required_when`. */

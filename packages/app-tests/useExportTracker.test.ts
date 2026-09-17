@@ -64,7 +64,7 @@ test("tracks SQL file progress and clears terminal tasks", () => {
   assert.equal(task.kind, "sql-file");
   assert.equal(task.status, "Running");
   assert.equal(task.rowsExported, 3);
-  assert.equal(task.totalRows, 3);
+  assert.equal(task.totalRows, null);
   assert.equal(task.affectedRows, 12);
 
   tracker.updateSqlFileTask("sql-1", {

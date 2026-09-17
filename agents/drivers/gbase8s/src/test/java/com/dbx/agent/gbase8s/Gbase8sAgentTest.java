@@ -407,8 +407,8 @@ class Gbase8sAgentTest {
 
         Assertions.assertEquals(3, sql.size());
         Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("e.`type` = 'T'"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("e.`default` AS column_default"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("e.type = 'T'"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("e.default AS column_default"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("t.owner = ?"), sql.get(1));
         Assertions.assertNull(columns.get(0).getColumn_default());
         Assertions.assertEquals("'0'", columns.get(1).getColumn_default());

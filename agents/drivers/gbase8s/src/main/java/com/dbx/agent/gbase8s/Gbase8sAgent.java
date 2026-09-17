@@ -505,11 +505,11 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
         List<Object> args = new ArrayList<>();
         args.add(table);
         StringBuilder sql = new StringBuilder("""
-            SELECT c.colname, e.`default` AS column_default
+            SELECT c.colname, e.default AS column_default
             FROM systables t
             JOIN syscolumns c ON t.tabid = c.tabid
             JOIN sysdefaultsexpr e ON c.tabid = e.tabid AND c.colno = e.colno
-            WHERE t.tabname = ? AND e.`type` = 'T'
+            WHERE t.tabname = ? AND e.type = 'T'
             """.stripIndent().trim());
         if (!owner.isEmpty()) {
             sql.append(" AND t.owner = ?");

@@ -202,7 +202,7 @@ import { savedSqlClipboardFileIds, savedSqlPasteTargetForNode } from "@/lib/save
 import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
-import { createDatabaseCollationOptionsForCharset, DEFAULT_GBASE8S_DATABASE_LOCALE, GBASE8S_DATABASE_LOCALES, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { createDatabaseCollationOptionsForCharset, DEFAULT_GBASE8S_DATABASE_LOCALE, defaultGbase8sDatabaseLocale, GBASE8S_DATABASE_LOCALES, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
@@ -3973,7 +3973,7 @@ async function loadGbase8sDatabaseLocales() {
     createDatabaseCharsetOptions.value = locales;
     createDatabaseCollationsByCharset.value = {};
     if (!locales.includes(createDatabaseCharset.value)) {
-      updateCreateDatabaseCharset(locales.find((locale) => /utf8/i.test(locale)) ?? locales[0]);
+      updateCreateDatabaseCharset(defaultGbase8sDatabaseLocale(locales));
     }
   } catch {
     createDatabaseCharsetOptions.value = [...GBASE8S_DATABASE_LOCALES];

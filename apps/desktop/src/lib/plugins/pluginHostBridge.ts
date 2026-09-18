@@ -38,8 +38,10 @@ export interface PluginHostBridgeApi {
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
-  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext): Promise<void> | void;
+  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
+  /** Explicit user-triggered reconnect of a plugin connection (full flow, interactive password prompt allowed). */
+  reopenConnection?(connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
@@ -63,6 +65,18 @@ export class PluginHostBridge {
   private locale: string;
   private theme?: PluginBridgeTheme;
 
+  /**
+   * Invoked on every plugin `ready` — first load and every reload alike,
+   * because realistic reload paths (webview reload, tab refresh) rebuild the
+   * bridge instance, so no per-bridge "already initialized" state survives to
+   * tell them apart. Awaited before the `init` message is posted, so handlers
+   * like a connection-config re-push land before the plugin acts on the new
+   * init. Handlers must be cheap no-ops when no healing is needed (the first
+   * load right after the sidebar open already pushed the config). Errors are
+   * logged and never block the init.
+   */
+  onReinit?: () => Promise<void> | void;
+
   constructor(
     private readonly plugin: InstalledPlugin,
     private readonly workbench: PluginWorkbenchContribution,
@@ -82,7 +96,7 @@ export class PluginHostBridge {
     if (!target || event.source !== target || !isRecord(event.data)) return false;
     if (event.data.source !== PLUGIN_MESSAGE_SOURCE || event.data.version !== BRIDGE_VERSION) return false;
     if (event.data.type === "ready") {
-      this.sendInit();
+      void this.handleReady();
       return true;
     }
     if (event.data.type === "shortcut" && event.data.shortcut === "closeTab") {
@@ -94,7 +108,46 @@ export class PluginHostBridge {
     return true;
   }
 
+  private handleReady(): void {
+    if (this.onReinit) {
+      // Serialize every init (including the frame-load fallback in the host
+      // component) behind the re-push so the plugin only acts on its fresh
+      // init after the sidecar registry has been repopulated.
+      this.reinitInFlight = (async () => {
+        try {
+          await this.onReinit?.();
+        } catch (error) {
+          console.warn("[DBX][plugin-bridge:reinit]", error);
+        }
+      })();
+      void this.reinitInFlight.finally(() => {
+        this.reinitInFlight = null;
+      });
+    }
+    this.sendInit();
+  }
+
   sendInit(): void {
+    const pending = this.reinitInFlight;
+    if (pending) {
+      void pending.then(() => {
+        // A rebuilt bridge supersedes this one; never post a stale init.
+        if (!this.disposed) this.postInit();
+      });
+      return;
+    }
+    this.postInit();
+  }
+
+  /** Stop future posts (queued inits after an async reinit) for a torn-down bridge. */
+  dispose(): void {
+    this.disposed = true;
+  }
+
+  private disposed = false;
+  private reinitInFlight: Promise<void> | null = null;
+
+  private postInit(): void {
     this.post({
       source: HOST_MESSAGE_SOURCE,
       version: BRIDGE_VERSION,
@@ -186,8 +239,14 @@ export class PluginHostBridge {
       this.requirePermission("host.workbench");
       if (!this.api.openWorkbench) throw new Error("Host workbench navigation is unavailable");
       const input = requireRecord(params, "host.openWorkbench params");
-      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined);
+      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true });
       return null;
+    }
+    if (method === "host.reopenConnection") {
+      if (!this.api.reopenConnection) throw new Error("Connection reopen is unavailable");
+      const input = requireRecord(params, "host.reopenConnection params");
+      await this.api.reopenConnection(requireProtocolName(input.connectionId, "connectionId"));
+      return { ok: true };
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
@@ -498,8 +557,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
-      openWorkbench: (contributionId, childContext) => request('host.openWorkbench', { contributionId, context: childContext }),
+      openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
+      reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });

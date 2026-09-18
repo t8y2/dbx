@@ -193,7 +193,6 @@ impl PluginHost {
         let (_, provider) = self.resolve_connection_provider(config)?;
         plugin_connection_params(config, &provider, &config.host, config.port)
     }
-
     pub async fn test_connection(
         &self,
         config: &ConnectionConfig,
@@ -217,7 +216,7 @@ impl PluginHost {
                 PLUGIN_CONNECTION_TEST_METHOD,
                 plugin_connection_params(config, &provider, runtime_host, runtime_port)?,
                 None,
-                Some(Duration::from_secs(config.effective_connect_timeout_secs())),
+                Some(plugin_connect_deadline(config, &provider)),
             )
             .await?;
         plugin_connection_test_result(result, provider_label)
@@ -251,7 +250,7 @@ impl PluginHost {
                         PLUGIN_CONNECTION_CONNECT_METHOD,
                         params.clone(),
                         None,
-                        Some(Duration::from_secs(config.effective_connect_timeout_secs())),
+                        Some(plugin_connect_deadline(config, &provider)),
                     )
                     .await?;
                 ensure_plugin_operation_succeeded(result)?;
@@ -404,6 +403,29 @@ fn required_plugin_binding<'a>(value: &'a Option<String>, field: &str) -> Result
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("Plugin connection is missing {field}"))
+}
+
+/// RPC deadline for connection/test and connection/connect. A config-bound
+/// `connect_timeout_secs` field is the plugin's own handshake timeout (the SSH
+/// plugin defaults it to 30 and lets advanced users tune it), so the host
+/// deadline must never fire first: the resolved plugin value wins — stored
+/// `external_config` first, then the manifest default for configs whose value
+/// was never materialized (imports, MCP, older hosts) — and only plugins that
+/// do not declare the field at all keep the generic built-in fallback.
+fn plugin_connect_deadline(config: &ConnectionConfig, provider: &PluginConnectionProviderContribution) -> Duration {
+    fn positive_timeout(value: &serde_json::Value) -> Option<u64> {
+        value.as_u64().or_else(|| value.as_f64().map(|n| n.max(0.0) as u64)).filter(|secs| *secs > 0)
+    }
+    let plugin_timeout = provider.fields.iter().find(|field| field.key == "connect_timeout_secs").and_then(|field| {
+        config
+            .external_config
+            .as_ref()
+            .and_then(|external| external.get("connect_timeout_secs"))
+            .and_then(positive_timeout)
+            .or_else(|| field.default.as_ref().and_then(positive_timeout))
+    });
+    let secs = plugin_timeout.unwrap_or_else(|| config.effective_connect_timeout_secs());
+    Duration::from_secs(secs.clamp(1, 300))
 }
 
 fn plugin_connection_params(
@@ -753,8 +775,9 @@ fn ensure_permission(plugin: &super::InstalledPlugin, required_permission: Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        plugin_connection_action_result, plugin_field_is_visible, plugin_invoke_connection_action,
-        validate_plugin_connection_values, validate_plugin_connection_values_for_action,
+        plugin_connect_deadline, plugin_connection_action_result, plugin_field_is_visible,
+        plugin_invoke_connection_action, validate_plugin_connection_values,
+        validate_plugin_connection_values_for_action,
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
@@ -808,6 +831,58 @@ mod tests {
         connection.disconnect().await.unwrap();
         drop(connection);
         assert!(lifecycle.begin_update("sample.ui").is_ok());
+    }
+
+    #[test]
+    fn connect_deadline_follows_the_provider_declared_timeout_field() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [{ "key": "connect_timeout_secs", "label": "Connect timeout", "type": "number", "default": 30 }]
+        }))
+        .unwrap();
+        let config_with = |timeout: u64, external: Option<u64>| {
+            serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "Plugin connection",
+                "db_type": "plugin",
+                "host": "localhost",
+                "port": 0,
+                "username": "",
+                "password": "",
+                "connect_timeout_secs": timeout,
+                "external_config": external.map_or(serde_json::json!({}), |secs| serde_json::json!({ "connect_timeout_secs": secs })),
+                "plugin_id": "sample",
+                "plugin_connection_provider": "sample.connection",
+                "plugin_connection_type": "sample"
+            }))
+            .unwrap()
+        };
+
+        // Unmaterialized typed value (0): the manifest default becomes the deadline.
+        assert_eq!(plugin_connect_deadline(&config_with(0, None), &provider), std::time::Duration::from_secs(30));
+        // A stored plugin-field value wins over the typed field: the plugin's own
+        // handshake timeout and the host deadline must never disagree.
+        assert_eq!(plugin_connect_deadline(&config_with(10, Some(60)), &provider), std::time::Duration::from_secs(60));
+        assert_eq!(plugin_connect_deadline(&config_with(5, None), &provider), std::time::Duration::from_secs(30));
+
+        // Providers without the well-known field keep the typed/generic behavior.
+        let provider_without_default: PluginConnectionProviderContribution =
+            serde_json::from_value(serde_json::json!({
+                "id": "sample.connection",
+                "label": "Sample",
+                "database_type": "sample"
+            }))
+            .unwrap();
+        assert_eq!(
+            plugin_connect_deadline(&config_with(0, Some(60)), &provider_without_default),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            plugin_connect_deadline(&config_with(5, None), &provider_without_default),
+            std::time::Duration::from_secs(5)
+        );
     }
 
     #[test]

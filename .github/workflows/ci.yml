@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -255,7 +255,9 @@ jobs:
           "$DRIVER" < /dev/null
 
   rust-fmt-clippy:
-    needs: changes
+    needs:
+      - changes
+      - fast-checks
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     env:
@@ -264,8 +266,6 @@ jobs:
       RUSTC_WRAPPER: sccache
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
-      RUST_FAST_FEATURES: dbx/duckdb-sidecar,dbx/dynamodb,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/duckdb-sidecar,dbx-core/dynamodb,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/duckdb-sidecar,dbx-web/dynamodb,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
-      RUST_FULL_FEATURES: dbx/duckdb-sidecar,dbx/dynamodb,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx/system-fonts,dbx-core/duckdb-sidecar,dbx-core/dynamodb,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-core/system-fonts,dbx-web/duckdb-sidecar,dbx-web/dynamodb,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher,dbx-web/system-fonts
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
@@ -324,19 +324,9 @@ jobs:
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Core architecture contracts
-        run: node --test scripts/core-architecture.test.mjs
-
-      - name: Cargo fmt check
-        run: cargo fmt --check
-
       - name: Cargo clippy
-        run: |
-          if [ "$RUST_FEATURE_MODE" = "fast" ]; then
-            cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FAST_FEATURES" -- -D warnings
-          else
-            cargo clippy --workspace --locked --all-targets --no-default-features --features "$RUST_FULL_FEATURES" -- -D warnings
-          fi
+        run: |-
+          node .github/scripts/ci-rust.mjs clippy workspace "$RUST_FEATURE_MODE"
 
       - name: Show sccache stats
         if: always()
@@ -344,7 +334,9 @@ jobs:
         run: ${SCCACHE_PATH} --show-stats
 
   rust-test:
-    needs: changes
+    needs:
+      - changes
+      - fast-checks
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     env:
@@ -355,10 +347,9 @@ jobs:
       RUSTC_WRAPPER: sccache
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
-      RUST_FAST_FEATURES: dbx/duckdb-sidecar,dbx/dynamodb,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx-core/duckdb-sidecar,dbx-core/dynamodb,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-web/duckdb-sidecar,dbx-web/dynamodb,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher
-      RUST_FULL_FEATURES: dbx/duckdb-sidecar,dbx/dynamodb,dbx/mq-admin,dbx/sqlite-sqlcipher,dbx/system-fonts,dbx-core/duckdb-sidecar,dbx-core/dynamodb,dbx-core/mq-admin,dbx-core/sqlite-sqlcipher,dbx-core/system-fonts,dbx-web/duckdb-sidecar,dbx-web/dynamodb,dbx-web/mq-admin,dbx-web/sqlite-sqlcipher,dbx-web/system-fonts
       # Fork PRs cannot read repository secrets, so retain the GHA backend for them.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
+      RUST_TEST_GROUP: ${{ matrix.group }}
     steps:
       - uses: actions/checkout@v5
 
@@ -366,6 +357,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+        if: matrix.group != 'foundation'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -416,33 +408,37 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cargo test
-        run: |
-          if [ "$RUST_FEATURE_MODE" = "fast" ]; then
-            cargo test --workspace --locked --no-default-features --features "$RUST_FAST_FEATURES"
-          else
-            cargo test --workspace --locked --no-default-features --features "$RUST_FULL_FEATURES"
-          fi
+        run: |-
+          node .github/scripts/ci-rust.mjs test "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
 
       - name: Show sccache stats
         if: always()
         continue-on-error: true
         run: ${SCCACHE_PATH} --show-stats
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.changes.outputs.rust_matrix) }}
+    name: rust-test (${{ matrix.group }})
 
   rust:
-    needs: [changes, rust-fmt-clippy, rust-test]
-    if: always() && needs.changes.outputs.rust == 'true'
+    needs:
+      - changes
+      - fast-checks
+      - rust-fmt-clippy
+      - rust-test
+    if: always()
     runs-on: ubuntu-22.04
     steps:
-      - name: Check Rust jobs
-        run: |
-          if [ "${{ needs.rust-fmt-clippy.result }}" != "success" ]; then
-            echo "rust-fmt-clippy result: ${{ needs.rust-fmt-clippy.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.rust-test.result }}" != "success" ]; then
-            echo "rust-test result: ${{ needs.rust-test.result }}"
-            exit 1
-          fi
+      - uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+      - name: Check selected rust jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node .github/scripts/ci-gate.mjs rust
 
   jdbc:
     needs: changes
@@ -531,15 +527,26 @@ jobs:
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       packages: ${{ steps.filter.outputs.packages }}
-      rust: ${{ steps.filter.outputs.rust }}
-      rust_full: ${{ steps.rust-mode.outputs.full }}
+      rust: ${{ steps.plan.outputs.rust }}
+      rust_full: ${{ steps.plan.outputs.rust_full }}
       jdbc: ${{ steps.filter.outputs.jdbc }}
       offline_jdbc: ${{ steps.filter.outputs.offline_jdbc }}
-      agents: ${{ steps.filter.outputs.agents }}
-      duckdb_windows: ${{ steps.filter.outputs.duckdb_windows }}
+      agents: ${{ steps.plan.outputs.agents }}
+      duckdb_windows: ${{ steps.filter.outputs.duckdb_windows == 'true' || steps.plan.outputs.duckdb_windows == 'true' }}
       nix: ${{ steps.filter.outputs.nix }}
       windows_win7_bundle: ${{ steps.filter.outputs.windows_win7_bundle }}
       github_scripts: ${{ steps.filter.outputs.github_scripts }}
+      fast: ${{ steps.plan.outputs.fast }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+      rust_groups_known: ${{ steps.plan.outputs.rust_groups_known }}
+      agent_java: ${{ steps.plan.outputs.agent_java }}
+      agent_go: ${{ steps.plan.outputs.agent_go }}
+      agent_rust: ${{ steps.plan.outputs.agent_rust }}
+      agent_integration: ${{ steps.plan.outputs.agent_integration }}
+      agent_go_changed: ${{ steps.plan.outputs.agent_go_changed }}
+      agent_rust_changed: ${{ steps.plan.outputs.agent_rust_changed }}
+      agent_integration_changed: ${{ steps.plan.outputs.agent_integration_changed }}
+      plan: ${{ steps.plan.outputs.plan }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -659,37 +666,79 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'apps/desktop/src/types/database.ts'
               - 'crates/dbx-core/assets/database-drivers.manifest.json'
-
-      - name: Select Rust feature coverage
-        id: rust-mode
-        shell: bash
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Plan dependency-aware CI jobs
+        id: plan
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           RUST_CHANGED: ${{ steps.filter.outputs.rust }}
-        run: |
-          full=false
-
-          if [ "$RUST_CHANGED" = "true" ] && [ "${{ github.event_name }}" = "push" ]; then
-            full=true
-          elif [ "$RUST_CHANGED" = "true" ]; then
-            if [ -z "$BASE_SHA" ] || echo "$BASE_SHA" | grep -Eq '^0+$'; then
-              BASE_SHA="HEAD~1"
-            fi
-
-            while IFS= read -r file; do
-              case "$file" in
-                Cargo.toml|Cargo.lock|rust-toolchain*|.github/workflows/ci.yml|*/Cargo.toml|vendor/*)
-                  full=true
-                  break
-                  ;;
-              esac
-
-            done < <(git diff --name-only "$BASE_SHA" HEAD -- Cargo.toml Cargo.lock 'rust-toolchain*' crates src-tauri vendor .github/workflows/ci.yml)
-          fi
-
-          echo "full=$full" >> "$GITHUB_OUTPUT"
+          AGENTS_CHANGED: ${{ steps.filter.outputs.agents }}
+        run: node .github/scripts/ci-plan.mjs
 
   agents:
+    needs:
+      - changes
+      - fast-checks
+      - agent-checks
+      - agent-java
+      - agent-rust
+      - agent-go
+      - agent-integration
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+      - name: Check selected agents jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node .github/scripts/ci-gate.mjs agents
+  fast-checks:
+    needs: changes
+    if: needs.changes.outputs.fast == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.agent_rust_changed == 'true'
+      - name: Cargo fmt check
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo fmt --check
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+      - name: CI planner and gate tests
+        run: node --test .github/scripts/ci-*.test.mjs
+      - name: Core architecture contracts
+        if: needs.changes.outputs.rust == 'true'
+        run: node --test scripts/core-architecture.test.mjs
+      - name: Setup pnpm
+        if: needs.changes.outputs.rust == 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
+      - name: Install generator dependencies
+        if: needs.changes.outputs.rust == 'true'
+        run: pnpm --filter dbx... install --frozen-lockfile --ignore-scripts
+      - name: Check generated connection types
+        if: needs.changes.outputs.rust == 'true'
+        run: node scripts/sync-connection-types.mjs --check
+      - name: Check workspace and standalone Cargo locks
+        env:
+          CI_PLAN: ${{ needs.changes.outputs.plan }}
+        run: node .github/scripts/ci-lockfiles.mjs
+      - name: Check grouped Rust feature coverage
+        if: needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_groups_known == 'true'
+        run: node .github/scripts/ci-rust-coverage.mjs
+  agent-checks:
     needs: changes
     if: needs.changes.outputs.agents == 'true'
     runs-on: ubuntu-22.04
@@ -698,357 +747,163 @@ jobs:
         working-directory: agents
     steps:
       - uses: actions/checkout@v5
-
-      - name: Setup Java
-        uses: actions/setup-java@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
         with:
-          distribution: temurin
-          java-version: |
-            8
-            21
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.x"
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-
+          node-version: 22.13.0
       - name: Install packaging tools
         run: |
           sudo apt-get update
           sudo apt-get install -y zstd
-
       - name: Agent script tests
         run: |
           python3 -m unittest discover -s scripts -p '*_test.py'
           node --test ../.github/scripts/bump-agent-versions.test.mjs
-
-      - name: DuckDB driver tests
-        run: cargo test --manifest-path drivers/duckdb/Cargo.toml --locked
-
-      - name: TDengine driver tests
-        run: cargo test --manifest-path drivers/tdengine/Cargo.toml --locked
-
       - name: Agent validation
         run: python3 scripts/validate_agents.py
-
-      - name: Oracle native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/oracle-go
-
-      - name: Xugu native agent tests
-        run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver go test ./...
-        working-directory: agents/drivers/xugu
-
-      - name: RabbitMQ native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/rabbitmq
-
-      - name: RocketMQ native agent tests
-        run: go test -race ./...
-        working-directory: agents/drivers/rocketmq
-
-      - name: ZooKeeper native agent tests
-        run: go test -race ./...
-        working-directory: agents/drivers/zookeeper
-
-      - name: Cassandra native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/cassandra-go
-
-      - name: Hive native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/hive-go
-
-      - name: Vastbase native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/vastbase-go
-
-      - name: Neo4j native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/neo4j-go
-
-      - name: IoTDB native agent tests
-        run: go test ./...
-        working-directory: agents/drivers/iotdb
-
-      - name: Oracle native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-oracle-linux-x64 .
-        working-directory: agents/drivers/oracle-go
-
-      - name: Xugu native agent build
-        run: GONOSUMDB=gitee.com/XuguDB/go-xugu-driver CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-xugu-linux-x64 .
-        working-directory: agents/drivers/xugu
-
-      - name: RabbitMQ native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rabbitmq-linux-x64 .
-        working-directory: agents/drivers/rabbitmq
-
-      - name: RocketMQ native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-rocketmq-linux-x64 .
-        working-directory: agents/drivers/rocketmq
-
-      - name: ZooKeeper native agent cross-builds
-        shell: bash
-        working-directory: agents/drivers/zookeeper
+  agent-java:
+    needs: [changes, fast-checks, agent-checks]
+    if: needs.changes.outputs.agent_java == 'true'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: |-
+            8
+            21
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Install packaging tools
         run: |
-          set -euo pipefail
-          for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64; do
-            IFS=/ read -r goos goarch <<< "$target"
-            output="/tmp/dbx-agent-zookeeper-${goos}-${goarch}"
-            [ "$goos" = windows ] && output="${output}.exe"
-            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
-          done
-
-      - name: ZooKeeper native agent integration tests
-        shell: bash
-        working-directory: agents/drivers/zookeeper
-        run: |
-          set -euo pipefail
-          for version in 3.4.14 3.5.5 3.7.0 3.9.5; do
-            name="dbx-zookeeper-${version//./-}"
-            docker rm -fv "$name" >/dev/null 2>&1 || true
-            docker run -d --name "$name" -p 2181:2181 "zookeeper:$version"
-            cleanup() {
-              docker rm -fv "$name" >/dev/null 2>&1 || true
-            }
-            trap cleanup EXIT
-            ready=false
-            for _ in $(seq 1 90); do
-              if timeout 1 bash -c '</dev/tcp/127.0.0.1/2181' >/dev/null 2>&1; then
-                ready=true
-                break
-              fi
-              sleep 2
-            done
-            if [ "$ready" != true ]; then
-              docker logs "$name"
-              exit 1
-            fi
-            DBX_ZOOKEEPER_TEST_CONNECT_STRING=127.0.0.1:2181 \
-              go test -run '^TestZooKeeperIntegration$' -count=1 ./...
-            if [ "$version" = "3.7.0" ]; then
-              DBX_ZOOKEEPER_TEST_CONNECT_STRING=127.0.0.1:2181 \
-                go test -run '^TestZooKeeperLargeChildrenIntegration$' -count=1 ./...
-            fi
-            cleanup
-            trap - EXIT
-          done
-
-      - name: ZooKeeper SASL DIGEST-MD5 integration test
-        shell: bash
-        working-directory: agents/drivers/zookeeper
-        run: |
-          set -euo pipefail
-          name="dbx-zookeeper-sasl-3-7-0"
-          jaas_file=$(mktemp)
-          cat > "$jaas_file" <<'EOF'
-          Server {
-            org.apache.zookeeper.server.auth.DigestLoginModule required
-            user_dbx="dbx-secret";
-          };
-          EOF
-          chmod 0644 "$jaas_file"
-          docker rm -fv "$name" >/dev/null 2>&1 || true
-          docker run -d --name "$name" -p 2181:2181 \
-            -v "$jaas_file:/conf/server-jaas.conf:ro" \
-            -e ZOO_CFG_EXTRA="authProvider.1=org.apache.zookeeper.server.auth.SASLAuthenticationProvider" \
-            -e JVMFLAGS="-Djava.security.auth.login.config=/conf/server-jaas.conf -Dzookeeper.sasl.serverconfig=Server -Dzookeeper.sessionRequireClientSASLAuth=true" \
-            zookeeper:3.7.0
-          cleanup() {
-            docker rm -fv "$name" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          ready=false
-          for _ in $(seq 1 90); do
-            if timeout 1 bash -c '</dev/tcp/127.0.0.1/2181' >/dev/null 2>&1; then
-              ready=true
-              break
-            fi
-            sleep 2
-          done
-          if [ "$ready" != true ]; then
-            docker logs "$name"
-            exit 1
-          fi
-          DBX_ZOOKEEPER_TEST_CONNECT_STRING=127.0.0.1:2181 \
-            DBX_ZOOKEEPER_TEST_AUTH_SCHEME=sasl_digest \
-            DBX_ZOOKEEPER_TEST_USERNAME=dbx \
-            DBX_ZOOKEEPER_TEST_PASSWORD=dbx-secret \
-            go test -run '^TestZooKeeperIntegration$' -count=1 ./...
-
-      - name: RocketMQ native agent integration tests
-        shell: bash
-        working-directory: agents/drivers/rocketmq
-        run: |
-          set -euo pipefail
-          for version in 4.9.8 5.3.1; do
-            ./scripts/run-integration.sh "$version"
-          done
-
-      - name: Cassandra native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-cassandra-linux-x64 .
-        working-directory: agents/drivers/cassandra-go
-
-      - name: Hive native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-hive-linux-x64 .
-        working-directory: agents/drivers/hive-go
-
-      - name: Vastbase native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-vastbase-linux-x64 .
-        working-directory: agents/drivers/vastbase-go
-
-      - name: Neo4j native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-neo4j-linux-x64 .
-        working-directory: agents/drivers/neo4j-go
-
-      - name: IoTDB native agent build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/dbx-agent-iotdb-linux-x64 .
-        working-directory: agents/drivers/iotdb
-
-      - name: TDengine native agent build
-        run: cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
-
-      - name: TDengine native agent integration tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          while IFS='|' read -r version image; do
-            name="dbx-tdengine-${version//./-}"
-            docker rm -fv "$name" >/dev/null 2>&1 || true
-            docker run -d --name "$name" \
-              --memory 4g \
-              --ulimit nofile=65535:65535 \
-              -p 6030:6030 \
-              -p 6041:6041 \
-              "$image"
-            cleanup() {
-              docker rm -fv "$name" >/dev/null 2>&1 || true
-            }
-            trap cleanup EXIT
-            ready=false
-            dnodes=""
-            for _ in $(seq 1 90); do
-              dnodes="$(docker exec "$name" taos -s 'SHOW DNODES' 2>/dev/null || true)"
-              if grep -Eq '\|[[:space:]]*ready[[:space:]]*\|' <<<"$dnodes"; then
-                ready=true
-                break
-              fi
-              sleep 2
-            done
-            if [ "$ready" != "true" ]; then
-              printf '%s\n' "$dnodes"
-              docker logs "$name"
-              exit 1
-            fi
-            TDENGINE_INTEGRATION=1 \
-              TDENGINE_TEST_HOST=127.0.0.1 \
-              TDENGINE_TEST_PORT=6041 \
-              cargo test --manifest-path drivers/tdengine/Cargo.toml --locked --test live -- --nocapture
-            cleanup
-            trap - EXIT
-          done <<'EOF'
-          2.4.0.14|tdengine/tdengine:2.4.0.14
-          2.6.0.34|tdengine/tdengine:2.6.0.34
-          3.0.7.1|tdengine/tdengine:3.0.7.1
-          3.3.6.13|tdengine/tdengine:3.3.6.13
-          3.4.2.2|tdengine/tsdb:3.4.2.2
-          EOF
-
-      - name: Cassandra native agent integration tests
-        shell: bash
-        working-directory: agents/drivers/cassandra-go
-        run: |
-          set -euo pipefail
-          for version in 3.11.19 5.0.6; do
-            name="dbx-cassandra-${version//./-}"
-            docker rm -fv "$name" >/dev/null 2>&1 || true
-            docker run -d --name "$name" \
-              -e CASSANDRA_CLUSTER_NAME="DBX Cassandra CI $version" \
-              -e CASSANDRA_DC=dc1 \
-              -e CASSANDRA_RACK=rack1 \
-              -e CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch \
-              -e CASSANDRA_NUM_TOKENS=16 \
-              -e MAX_HEAP_SIZE=512M \
-              -e HEAP_NEWSIZE=100M \
-              -p 9042:9042 \
-              "cassandra:$version"
-            cleanup() {
-              docker rm -fv "$name" >/dev/null 2>&1 || true
-            }
-            trap cleanup EXIT
-            ready=false
-            for _ in $(seq 1 100); do
-              if docker exec "$name" cqlsh -e 'SELECT release_version FROM system.local' >/dev/null 2>&1; then
-                ready=true
-                break
-              fi
-              sleep 3
-            done
-            if [ "$ready" != "true" ]; then
-              docker logs "$name"
-              exit 1
-            fi
-            CASSANDRA_TEST_HOST=127.0.0.1 \
-              CASSANDRA_TEST_PORT=9042 \
-              go test -run '^TestCassandraIntegration$' -count=1 ./...
-            cleanup
-            trap - EXIT
-          done
-
-      - name: RabbitMQ native agent integration tests
-        shell: bash
-        working-directory: agents/drivers/rabbitmq
-        run: |
-          set -euo pipefail
-          for version in 3.13 4.3; do
-            name="dbx-rabbitmq-${version//./-}"
-            cookie="dbx-ci-${GITHUB_RUN_ID:-local}-${version//./-}"
-            # RabbitMQ is disposable in CI. Keep its data on a fresh tmpfs
-            # owned by the image's rabbitmq user so .erlang.cookie is readable.
-            docker rm -fv "$name" >/dev/null 2>&1 || true
-            docker run -d --name "$name" \
-              --user 999:999 \
-              --tmpfs /var/lib/rabbitmq:rw,exec,uid=999,gid=999,mode=700 \
-              -e RABBITMQ_DEFAULT_USER=dbx \
-              -e RABBITMQ_DEFAULT_PASS=dbx-password \
-              -e RABBITMQ_ERLANG_COOKIE="$cookie" \
-              -p 5672:5672 -p 15672:15672 \
-              "rabbitmq:${version}-management"
-            cleanup() {
-              docker rm -fv "$name" >/dev/null 2>&1 || true
-            }
-            trap cleanup EXIT
-            ready=false
-            for _ in $(seq 1 60); do
-              if docker exec "$name" rabbitmq-diagnostics -q check_running >/dev/null 2>&1 \
-                && curl --fail --silent --noproxy '*' --user dbx:dbx-password \
-                  http://127.0.0.1:15672/api/overview >/dev/null; then
-                ready=true
-                break
-              fi
-              sleep 2
-            done
-            if [ "$ready" != "true" ]; then
-              docker inspect "$name" --format 'image={{.Config.Image}} user={{.Config.User}} status={{.State.Status}} exit={{.State.ExitCode}}' || true
-              docker logs "$name"
-              exit 1
-            fi
-            RABBITMQ_INTEGRATION=1 \
-              RABBITMQ_USERNAME=dbx \
-              RABBITMQ_PASSWORD=dbx-password \
-              go test -run '^TestRabbitMQIntegration$' -count=1 ./...
-            cleanup
-            trap - EXIT
-          done
-
+          sudo apt-get update
+          sudo apt-get install -y zstd
       - name: Java agent tests and packages
         run: ./gradlew test shadowJar --continue
-
       - name: Agent jar validation
         run: python3 scripts/validate_agent_jars.py
+  agent-rust:
+    needs: [changes, fast-checks, agent-checks]
+    if: needs.changes.outputs.agent_rust_changed == 'true'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: agents/drivers/${{ matrix.driver }} -> target
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Native Rust driver tests
+        env:
+          DRIVER: ${{ matrix.driver }}
+        run: cargo test --manifest-path "drivers/$DRIVER/Cargo.toml" --locked
+      - name: TDengine native agent build
+        if: matrix.driver == 'tdengine'
+        run: cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.changes.outputs.agent_rust) }}
+  agent-go:
+    needs: [changes, fast-checks, agent-checks]
+    if: needs.changes.outputs.agent_go_changed == 'true'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.x
+          cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
+      - name: Native Go tests and target builds
+        env:
+          DRIVER: ${{ matrix.driver }}
+          BINARY: ${{ matrix.binary }}
+          RACE: ${{ matrix.race }}
+        run: bash ../.github/scripts/ci-agent-go.sh "$DRIVER" "$BINARY" "$RACE"
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.changes.outputs.agent_go) }}
+  agent-integration:
+    needs: [changes, fast-checks, agent-checks]
+    if: needs.changes.outputs.agent_integration_changed == 'true'
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup RocketMQ server Java
+        if: matrix.scenario == 'rocketmq'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.x
+          cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
+        if: matrix.driver != 'tdengine'
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        if: matrix.driver == 'tdengine'
+      - name: TDengine Rust cache
+        if: matrix.driver == 'tdengine'
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: agents/drivers/tdengine -> target
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.version == '3.4.2.2' }}
+      - name: Run one live engine and version
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          VERSION: ${{ matrix.version }}
+          IMAGE: ${{ matrix.image || '' }}
+        run: bash ../.github/scripts/ci-agent-integration.sh "$SCENARIO" "$VERSION" "$IMAGE"
+    name: agent-integration (${{ matrix.scenario }}, ${{ matrix.version }})
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.changes.outputs.agent_integration) }}
+  ci:
+    needs:
+      - changes
+      - fast-checks
+      - rust
+      - agents
+      - frontend
+      - github-scripts
+      - packages
+      - windows-win7-bundle
+      - duckdb-windows-driver
+      - jdbc
+      - offline-jdbc-release
+      - nix-packaging
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+      - name: Check selected all jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node .github/scripts/ci-gate.mjs all

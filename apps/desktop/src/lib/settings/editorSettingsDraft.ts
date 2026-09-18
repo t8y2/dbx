@@ -106,6 +106,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarCopyTableNameSeparator",
   "sidebarCopyTableNameIncludeSchema",
   "redisKeyTemplates",
+  "redisDatabaseDisplayLimit",
   "exportBatchSize",
   "csvQuoteMode",
   "exportRowLimitEnabled",

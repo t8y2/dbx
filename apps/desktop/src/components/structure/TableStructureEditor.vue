@@ -30,10 +30,10 @@ import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
-import { formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { invalidateObjectDdl, loadObjectDdl } from "@/lib/metadata/objectDdlCache";
@@ -341,6 +341,17 @@ function scheduleDdlEditorInit() {
   });
 }
 
+/**
+ * Applies the DDL display preferences (database qualifier + identifier quoting)
+ * to DDL shown by the structure editor, whether loaded from the server or
+ * generated from the pending structure changes.
+ */
+function formatDdlForDisplay(sql: string, dialect: SqlFormatDialect, generated = false): string {
+  const unqualified = omitDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+  if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
+  return generated ? formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false) : omitDdlIdentifierQuotes(unqualified, dialect);
+}
+
 function ddlRequest() {
   return {
     connectionId: props.connectionId,
@@ -359,7 +370,7 @@ async function fetchDdl(force = false) {
     const { ddl } = await loadObjectDdl(ddlRequest(), { force });
     const dialect = sqlFormatDialectForDbType(databaseType.value);
     const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
-    rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
+    rawDdlContent.value = formatDdlForDisplay(formatted, dialect);
     ddlFetched.value = true;
   } catch (e: any) {
     rawDdlContent.value = `-- Error: ${e?.message || e}`;
@@ -1518,7 +1529,7 @@ async function hydrateRestoredDraftFromDatabase() {
         const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog });
         const dialect = sqlFormatDialectForDbType(databaseType.value);
         const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
-        rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
+        rawDdlContent.value = formatDdlForDisplay(formatted, dialect);
         ddlFetched.value = true;
         nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
       } catch {
@@ -1785,7 +1796,7 @@ async function refreshSqlPreview() {
     if (requestId !== sqlPreviewRequestId) return;
     const statements = [...result.statements, ...ownerResult.statements, ...(mysqlAutoIncrementStatement ? [mysqlAutoIncrementStatement] : [])];
     // SQLite type-change apply regenerates this revision-checked plan, so its preview must stay byte-for-byte aligned.
-    pendingStatements.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers !== false || hasSqliteTypeChange.value ? statements : statements.map((statement) => formatGeneratedDdlIdentifierQuotes(statement, sqlFormatDialectForDbType(databaseType.value), false));
+    pendingStatements.value = hasSqliteTypeChange.value ? statements : statements.map((statement) => formatDdlForDisplay(statement, sqlFormatDialectForDbType(databaseType.value), true));
     warnings.value = [...result.warnings, ...ownerResult.warnings];
     sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
@@ -2178,7 +2189,7 @@ async function loadStructure(
           const { ddl } = await loadObjectDdl({ connectionId, database, schema, tableName, catalog }, { force: options.forceDdl });
           const dialect = sqlFormatDialectForDbType(databaseType.value);
           const formatted = await formatSqlForDisplay(ddl, dialect, settingsStore.editorSettings.sqlFormatter);
-          rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, dialect);
+          rawDdlContent.value = formatDdlForDisplay(formatted, dialect);
           ddlFetched.value = true;
           nextColumns = applyManticoreDdlColumnExtras(nextColumns, ddl);
         } catch {

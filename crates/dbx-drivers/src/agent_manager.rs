@@ -103,6 +103,14 @@ fn is_valid_jar_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
+    // Unzipping the manifest goes through zlib's inflate, which reserves a large
+    // buffer on the stack. Run it on a dedicated thread so it gets a full, fresh
+    // stack instead of whatever headroom is left at the bottom of a deep async
+    // call chain (that chain can already consume most of a tokio worker stack).
+    std::thread::scope(|scope| scope.spawn(|| read_jar_manifest(path)).join().unwrap_or(false))
+}
+
+fn read_jar_manifest(path: &Path) -> bool {
     let Some(file) = File::open(path).ok() else {
         return false;
     };

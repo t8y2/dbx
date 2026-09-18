@@ -602,8 +602,8 @@ fn cell_xml(value: Option<&Value>, row_index: usize, col_index: usize, style: Op
             format!("<c r=\"{reference}\" t=\"b\"{style_attr}><v>{bool_v}</v></c>")
         }
         Some(Value::Number(n)) => {
-            if n.as_f64().is_some_and(|f| f.is_finite()) {
-                format!("<c r=\"{reference}\"{style_attr}><v>{}</v></c>", n)
+            if let Some(number) = excel_safe_number_text(n) {
+                format!("<c r=\"{reference}\"{style_attr}><v>{number}</v></c>")
             } else {
                 format!(
                     "<c r=\"{reference}\" t=\"inlineStr\"{style_attr}><is><t>{}</t></is></c>",
@@ -643,9 +643,9 @@ fn push_cell_xml(output: &mut String, value: Option<&Value>, row_index: usize, c
             write!(output, "><v>{bool_value}</v></c>").expect("writing XLSX booleans into a String cannot fail");
         }
         Some(Value::Number(value)) => {
-            if value.as_f64().is_some_and(|number| number.is_finite()) {
+            if let Some(number) = excel_safe_number_text(value) {
                 push_cell_style(output, style);
-                write!(output, "><v>{value}</v></c>").expect("writing XLSX numbers into a String cannot fail");
+                write!(output, "><v>{number}</v></c>").expect("writing XLSX numbers into a String cannot fail");
             } else {
                 output.push_str(" t=\"inlineStr\"");
                 push_cell_style(output, style);
@@ -752,22 +752,37 @@ fn numeric_column_style(column_type: Option<&String>, enabled: bool) -> Option<u
     }
 }
 
+/// Fractional trailing zeros preserve database scale but add no numeric
+/// precision. Excel's IEEE754 numbers keep ~15 significant digits.
+fn excel_significant_digits(value: &str) -> usize {
+    let trimmed = value.trim();
+    let significand = trimmed.split(['e', 'E']).next().unwrap_or(trimmed);
+    let (integer, fraction) = significand.split_once('.').unwrap_or((significand, ""));
+    integer
+        .chars()
+        .chain(fraction.trim_end_matches('0').chars())
+        .filter(|ch| ch.is_ascii_digit())
+        .skip_while(|ch| *ch == '0')
+        .count()
+}
+
 fn safe_excel_number(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.parse::<f64>().ok().is_none_or(|number| !number.is_finite()) {
         return None;
     }
-    // Fractional trailing zeros preserve database scale but add no numeric
-    // precision. Keep values with more than 15 actual digits as text.
-    let significand = trimmed.split(['e', 'E']).next().unwrap_or(trimmed);
-    let (integer, fraction) = significand.split_once('.').unwrap_or((significand, ""));
-    let significant_digits = integer
-        .chars()
-        .chain(fraction.trim_end_matches('0').chars())
-        .filter(|ch| ch.is_ascii_digit())
-        .skip_while(|ch| *ch == '0')
-        .count();
-    (significant_digits <= 15).then_some(trimmed)
+    (excel_significant_digits(trimmed) <= 15).then_some(trimmed)
+}
+
+/// JSON numbers must get the same 15-digit guard as numeric strings (#9382).
+/// 18+ digit bigint/decimal values lose precision inside Excel's General
+/// format, so they fall back to text cells instead of silent corruption.
+fn excel_safe_number_text(number: &serde_json::Number) -> Option<String> {
+    if number.as_f64().is_none_or(|value| !value.is_finite()) {
+        return None;
+    }
+    let text = number.to_string();
+    (excel_significant_digits(&text) <= 15).then_some(text)
 }
 
 fn push_typed_cell_xml(
@@ -1221,8 +1236,8 @@ fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
 mod tests {
     use super::{
         build_xlsx_workbook, build_xlsx_workbook_multi, build_xlsx_workbook_multi_with_auto_filter,
-        build_xlsx_workbook_multi_with_max_rows, build_xlsx_workbook_with_auto_filter, is_numeric_column_type,
-        start_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_max_rows,
+        build_xlsx_workbook_multi_with_max_rows, build_xlsx_workbook_with_auto_filter, finish_streaming_xlsx_workbook,
+        is_numeric_column_type, start_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_max_rows,
         start_streaming_xlsx_workbook_with_options, start_streaming_xlsx_workbook_with_trailing_sheets,
         write_worksheet_xml, WorksheetSegment, XlsxWorksheetData,
     };
@@ -1582,6 +1597,61 @@ mod tests {
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains("t=\"inlineStr\"") && sheet.contains("9223372036854775807"));
         assert!(sheet.contains("123456789012345.6789000000"));
+    }
+
+    #[test]
+    fn preserves_high_precision_json_numbers_as_text() {
+        // #9382: Value::Number used to skip the 15-digit guard that strings get.
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("PrecisionNumbers".to_string()),
+            columns: vec![
+                "snowflake_id".to_string(),
+                "negative_id".to_string(),
+                "safe_id".to_string(),
+                "amount".to_string(),
+            ],
+            column_types: vec![
+                "bigint".to_string(),
+                "bigint".to_string(),
+                "bigint".to_string(),
+                "decimal(20,2)".to_string(),
+            ],
+            column_comments: vec![],
+            rows: vec![vec![
+                json!(9223372036854775807_i64),
+                json!(-9223372036854775808_i64),
+                json!(123456789012345_i64),
+                json!(12345678901234567.89_f64),
+            ]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("t=\"inlineStr\"") && sheet.contains("9223372036854775807"), "sheet={sheet}");
+        assert!(sheet.contains("-9223372036854775808"), "sheet={sheet}");
+        assert!(sheet.contains("><v>123456789012345</v>"), "safe 15-digit number should stay numeric, sheet={sheet}");
+        assert!(
+            !sheet.contains("><v>9223372036854775807</v>"),
+            "19-digit number must not be a numeric cell, sheet={sheet}"
+        );
+    }
+
+    #[test]
+    fn streaming_xlsx_preserves_high_precision_json_numbers_as_text() {
+        let mut writer = start_streaming_xlsx_workbook(
+            Cursor::new(Vec::new()),
+            Some("StreamPrecision"),
+            &["snowflake_id".to_string()],
+            &["bigint".to_string()],
+        )
+        .expect("start streaming workbook");
+        writer.write_row(&[json!(9223372036854775807_u64)]).expect("write row");
+        let cursor = finish_streaming_xlsx_workbook(writer).expect("finish workbook");
+        let bytes = cursor.into_inner();
+        let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("t=\"inlineStr\"") && sheet.contains("9223372036854775807"), "sheet={sheet}");
+        assert!(!sheet.contains("><v>9223372036854775807</v>"), "sheet={sheet}");
     }
 
     #[test]

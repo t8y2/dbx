@@ -52,6 +52,14 @@ impl MySqlPool {
         Self { inner: mysql_async::Pool::new(opts), max_connections: max_connections.max(1) }
     }
 
+    /// Whether this is a tab-scoped client-session pool. These pools hold a
+    /// single connection and disable `COM_RESET_CONNECTION` on return so that
+    /// session state (temporary tables, user variables, selected catalog)
+    /// survives across executions in the same tab.
+    pub fn is_client_session_pool(&self) -> bool {
+        self.max_connections == 1
+    }
+
     pub async fn disconnect(self) -> Result<(), mysql_async::Error> {
         self.inner.disconnect().await
     }
@@ -137,6 +145,22 @@ impl MySqlPoolAccess for mysql_async::Pool {
         None
     }
 }
+
+/// Clears a transaction that is still open on a pooled MySQL connection.
+///
+/// Client-session pools keep their connection across executions, so a
+/// transaction left open by a statement (a user-typed `BEGIN` /
+/// `START TRANSACTION` without `COMMIT`, or a canceled statement) would pin the
+/// connection's REPEATABLE READ read view and make every later auto-commit
+/// query on that tab read a stale snapshot until the connection is closed.
+/// `ROLLBACK` is a server no-op when no transaction is open.
+///
+/// An error means the transaction state is unknown, so the caller must discard
+/// the connection instead of returning it to the pool.
+pub async fn rollback_open_transaction(conn: &mut mysql_async::Conn) -> Result<(), String> {
+    conn.query_drop("ROLLBACK").await.map_err(|error| error.to_string())
+}
+
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
 const MYSQL_SQL_PACKET_MARGIN_MAX_BYTES: usize = 64 * 1024;
 

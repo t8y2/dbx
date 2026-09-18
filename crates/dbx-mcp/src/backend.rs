@@ -10,6 +10,7 @@ use dbx_core::{
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
     connection::{connection_configs_pool_equivalent, AppState},
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
+    history::HistoryEntry,
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
     models::connection::{ConnectionConfig, DatabaseType},
     storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
@@ -180,6 +181,10 @@ pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+    async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
+        let _ = entry;
+        Err("Query history is not supported by this backend.".to_string())
+    }
     /// Return database names visible to the DBX connection itself. The MCP
     /// server applies its own database-scope policy before exposing these
     /// names to a client.
@@ -769,6 +774,10 @@ impl DbxBackend for LocalBackend {
         Ok(configs)
     }
 
+    async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
+        self.state.storage.save_history_entry(entry).await
+    }
+
     async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
         if connection.db_type == DatabaseType::MongoDb {
             if self.state.pool_handle(&connection.id).await.is_none() {
@@ -1103,6 +1112,11 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid connection list response: {error}"))
+    }
+
+    async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
+        self.request(reqwest::Method::POST, "/api/history/save", Some(json!({ "entry": entry }))).await?;
+        Ok(())
     }
 
     async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {

@@ -105,6 +105,22 @@ export function pluginConnectionProviderIcon(entry: PluginContributionEntry<Plug
   return entry.contribution.icon || entry.plugin.manifest.icon;
 }
 
+/**
+ * Well-known provider field key whose declared default seeds the typed
+ * `ConnectionConfig.connect_timeout_secs`. A plugin knows its own transport
+ * (SSH handshakes on slow links need far more than the generic 10s), so a
+ * declared default wins over the global timeout unless the user explicitly
+ * picks a per-connection value in the dialog's Advanced tab.
+ */
+export const PLUGIN_CONNECT_TIMEOUT_FIELD_KEY = "connect_timeout_secs";
+
+export function pluginConnectionConnectTimeoutDefault(contribution: PluginConnectionProviderContribution): number | undefined {
+  const field = contribution.fields.find((candidate) => candidate.key === PLUGIN_CONNECT_TIMEOUT_FIELD_KEY && effectiveFieldBinding(candidate) === "config");
+  const value = field?.default;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(300, Math.max(1, Math.trunc(value)));
+}
+
 export function pluginConnectionActionsForDialog(contribution: PluginConnectionProviderContribution, editing: boolean): PluginConnectionAction[] {
   const actions: PluginConnectionAction[] = [
     ...(contribution.actions || []).map((action) => ({ ...action, kind: "custom" as const })),
@@ -159,7 +175,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     plugin_connection_type: contribution.database_type,
     connection_secrets: connectionSecrets,
     transport_layers: existing?.transport_layers || [],
-    connect_timeout_secs: existing?.connect_timeout_secs || 10,
+    connect_timeout_secs: existing?.connect_timeout_secs || pluginConnectionConnectTimeoutDefault(contribution) || 10,
     query_timeout_secs: existing?.query_timeout_secs || 60,
     idle_timeout_secs: existing?.idle_timeout_secs || 60,
     keepalive_interval_secs: existing?.keepalive_interval_secs || 30,
@@ -196,6 +212,17 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
       config.password = String(value || "");
     } else if (binding === "database") {
       config.database = value === undefined || value === "" ? undefined : String(value);
+    }
+  }
+  // A config-bound connect_timeout_secs field is the plugin's own handshake
+  // timeout (the SSH plugin lets advanced users tune it). Mirror the resolved
+  // value into the typed field so the host RPC deadline never fires before the
+  // plugin's own timeout. Only applies while the provider declares the field —
+  // a stale external_config key from an older manifest must not leak through.
+  if (pluginConnectionConnectTimeoutDefault(contribution) !== undefined) {
+    const pluginConnectTimeout = externalConfig[PLUGIN_CONNECT_TIMEOUT_FIELD_KEY];
+    if (typeof pluginConnectTimeout === "number" && Number.isFinite(pluginConnectTimeout) && pluginConnectTimeout > 0) {
+      config.connect_timeout_secs = Math.min(300, Math.max(1, Math.trunc(pluginConnectTimeout)));
     }
   }
   return config;

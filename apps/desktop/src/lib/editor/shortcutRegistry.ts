@@ -626,7 +626,19 @@ function hasExplicitShortcut(settings: Partial<ShortcutSettings> | undefined, ac
 }
 
 function shortcutsUseSameKeys(first: string, second: string, platform = globalThis.navigator?.platform || ""): boolean {
-  return !!first && !!second && formatShortcut(first, platform).toLowerCase() === formatShortcut(second, platform).toLowerCase();
+  const comparisonKey = (shortcut: string) =>
+    formatShortcut(shortcut, platform)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((stroke) => {
+        const parts = stroke.split("+").filter(Boolean);
+        if (parts.length <= 1) return stroke.toLowerCase();
+        const key = parts.pop()!;
+        return [...parts.sort(), key].join("+").toLowerCase();
+      })
+      .join(" ");
+  return !!first && !!second && comparisonKey(first) === comparisonKey(second);
 }
 
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {

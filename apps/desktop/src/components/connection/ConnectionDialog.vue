@@ -56,7 +56,16 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import PluginConnectionFields from "@/components/plugins/PluginConnectionFields.vue";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
-import { buildPluginConnectionConfig, createFrontendPluginRegistry, parsePluginConnectionProviderOptionValue, pluginConnectionActionsForDialog, pluginConnectionFormValues, pluginConnectionProviderIcon, pluginConnectionProviderOptionValue } from "@/lib/plugins/frontendPlugin";
+import {
+  buildPluginConnectionConfig,
+  createFrontendPluginRegistry,
+  parsePluginConnectionProviderOptionValue,
+  pluginConnectionActionsForDialog,
+  pluginConnectionConnectTimeoutDefault,
+  pluginConnectionFormValues,
+  pluginConnectionProviderIcon,
+  pluginConnectionProviderOptionValue,
+} from "@/lib/plugins/frontendPlugin";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
@@ -4099,12 +4108,26 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     }
     const existing = props.editConfig?.db_type === "plugin" && props.editConfig.plugin_id === entry.plugin.manifest.id && props.editConfig.plugin_connection_provider === entry.contribution.id ? props.editConfig : undefined;
     config = buildPluginConnectionConfig(entry.plugin.manifest.id, entry.contribution, values, existing) as LegacyConnectionConfig;
+    // buildPluginConnectionConfig already mirrored the provider's resolved
+    // connect_timeout_secs (declared default or advanced-form value) into the
+    // typed field; capture it before the generic form overwrite below.
+    const resolvedPluginConnectTimeout = pluginConnectionConnectTimeoutDefault(entry.contribution) === undefined ? undefined : config.connect_timeout_secs;
     config.id = id;
     config.name = form.value.name.trim() || config.name;
     config.note = form.value.note;
     config.color = form.value.color;
     config.transport_layers = form.value.transport_layers || [];
     config.connect_timeout_secs = form.value.connect_timeout_secs;
+    if (resolvedPluginConnectTimeout !== undefined) {
+      // A provider declaring its own connect_timeout_secs field makes it the
+      // single source of truth (declared default or advanced-form value): the
+      // typed timeout mirrors it, and the generic global/per-connection DBX
+      // timeout radios do not apply. Otherwise the host RPC deadline and the
+      // plugin's own handshake timeout could disagree and the host would kill
+      // slow connects first.
+      config.connect_timeout_secs = resolvedPluginConnectTimeout;
+      config.connect_timeout_inherit = false;
+    }
     config.query_timeout_secs = form.value.query_timeout_secs;
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
@@ -6173,7 +6196,6 @@ async function loadSshConfigHosts() {
 async function loadAgentDrivers() {
   try {
     agentDrivers.value = await api.listInstalledAgentsLocal();
-    if (!settingsStore.editorSettings.updateNotificationsEnabled) return;
     api
       .listInstalledAgents()
       .then((drivers) => {

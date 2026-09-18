@@ -16,6 +16,7 @@ import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
 import { hasHistoryDateRange, historyDateRangeIsValid, type HistoryDateRange } from "@/lib/history/historyTimeRange";
 import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
 import { historyConnectionHasSelectedDatabase } from "@/lib/history/historySearch";
+import { historyEntrySource } from "@/lib/history/historyEntrySource";
 import type { HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -605,6 +606,9 @@ onBeforeUnmount(() => {
                   {{ kindShortLabel(entry) }}
                 </span>
                 <span class="truncate font-medium">{{ entryTitle(entry) }}</span>
+                <span v-if="historyEntrySource(entry)" class="inline-flex h-5 shrink-0 items-center rounded border border-primary/30 bg-primary/5 px-1 text-[10px] font-medium text-primary">
+                  {{ historyEntrySource(entry) }}
+                </span>
                 <span class="ml-auto shrink-0 text-muted-foreground">{{ formatTime(entry.executed_at) }}</span>
               </div>
               <div class="truncate font-mono text-muted-foreground">{{ entrySubtitle(entry) }}</div>

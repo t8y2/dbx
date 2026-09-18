@@ -264,10 +264,12 @@ test("source watching is opt-in and automatic restarts preserve saved connection
 });
 
 test("auto-reload preference persists across dev host restarts", async (t) => {
+  let second;
+  t.after(() => second?.close());
   const first = await fixture(t);
   assert.equal((await first.request("auto-reload", { enabled: true })).value.enabled, true);
   await first.host.close();
-  const second = await createMockHost({
+  second = await createMockHost({
     project: first.root,
     uiRoot: "ui",
     backend: process.execPath,
@@ -278,10 +280,6 @@ test("auto-reload preference persists across dev host restarts", async (t) => {
     port: 0,
     backendWatch: first.root,
     buildBackend: async () => {},
-  });
-  t.after(async () => {
-    await second.close();
-    await rm(first.root, { recursive: true, force: true });
   });
   const bootstrap = await (await fetch(`${second.origin}/api/bootstrap`)).json();
   assert.equal(bootstrap.autoReload, true);

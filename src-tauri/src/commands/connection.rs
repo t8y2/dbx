@@ -1687,7 +1687,16 @@ pub async fn connect_db(
     let mut connected_config = config.clone();
     let mut connected_db_config = db_config.clone();
 
-    state.remove_connection_pools_detached(&id).await;
+    // Plugin 连接的 connection/connect 是幂等 upsert：连接路径（首连、重推、
+    // 重连）只替换池条目，完全跳过旧池拆除——close 会向 sidecar 发
+    // connection/disconnect，其语义是"删注册表 + 杀掉该连接全部会话"，会把
+    // 同连接其他 tab 的活跃终端一起杀死。用户显式断开仍走 disconnect_db 的
+    // 完整关闭路径（会发 disconnect）。其他类型维持 detached 关闭不变。
+    if db_config.db_type == DatabaseType::Plugin {
+        state.drop_connection_pools_without_close(&id).await;
+    } else {
+        state.remove_connection_pools_detached(&id).await;
+    }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 

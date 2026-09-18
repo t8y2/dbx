@@ -548,6 +548,35 @@ describe("connectionStore plugin password prompt", () => {
     expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "ssh-1", external_config: expect.objectContaining({ authentication: "private-key" }) }), expect.any(Number));
   });
 
+  it("rejects reopening a connection owned by another plugin before prompting or connecting", async () => {
+    const connectDb = vi.fn().mockResolvedValue("ssh-1");
+    installApiMocks({ connectDb, listPlugins: vi.fn().mockResolvedValue([sshInstalledPlugin()]) });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: PROMPT_TYPED_PASSWORD, rememberPassword: false });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [pluginConnection({ external_config: { authentication: "password" } })];
+
+    await expect(store.reopenPluginConnection("ssh-1", "io.dbx.other")).rejects.toThrow("Connection is owned by another plugin");
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    expect(connectDb).not.toHaveBeenCalled();
+  });
+
+  it("allows the owning plugin to reopen its connection", async () => {
+    const connectDb = vi.fn().mockResolvedValue("ssh-1");
+    installApiMocks({ connectDb, listPlugins: vi.fn().mockResolvedValue([sshInstalledPlugin()]) });
+    installPasswordPromptMock();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [pluginConnection()];
+
+    await expect(store.reopenPluginConnection("ssh-1", "io.dbx.ssh")).resolves.toBeUndefined();
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "ssh-1" }), expect.any(Number));
+  });
+
   it("still prompts for a plugin connection whose manifest requires the login password", async () => {
     installApiMocks({ listPlugins: vi.fn().mockResolvedValue([sshInstalledPlugin()]) });
     installPasswordPromptMock();

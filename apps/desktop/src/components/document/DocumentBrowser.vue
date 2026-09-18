@@ -39,6 +39,8 @@ import {
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptionsFor,
+  documentFilterModeUsesList,
+  documentFilterModeUsesRange,
   documentFilterValueTypeOptions,
   documentStoreProviderFor,
   elasticsearchBoolClauseOptions,
@@ -893,6 +895,7 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
     } else {
       if (patch.fieldName !== undefined && patch.fieldName !== rule.fieldName) next.valueType = "auto";
       if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
+      if (!documentFilterModeUsesRange(next.mode)) next.rawEndValue = "";
     }
     return next;
   });
@@ -3092,8 +3095,39 @@ defineExpose({ focusSearch });
                         </SelectContent>
                       </Select>
 
+                      <div v-if="documentStoreProvider.kind !== 'elasticsearch' && documentFilterModeUsesRange(rule.mode)" class="flex min-w-0 items-center gap-1.5">
+                        <Input
+                          :model-value="rule.rawValue"
+                          class="h-8 min-w-0 flex-1 text-xs"
+                          :placeholder="t('grid.filterBuilderRangeStart')"
+                          @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawValue: String(value ?? '') })"
+                          @compositionend="endDocumentFilterImeComposition(`value-start:${rule.id}`)"
+                          @compositionstart="startDocumentFilterImeComposition(`value-start:${rule.id}`)"
+                          @keydown="handleDocumentFilterValueKeydown($event, rule.id)"
+                        />
+                        <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
+                        <Input
+                          :model-value="rule.rawEndValue"
+                          class="h-8 min-w-0 flex-1 text-xs"
+                          :placeholder="t('grid.filterBuilderRangeEnd')"
+                          @update:model-value="(value) => updateDocumentFilterRule(rule.id, { rawEndValue: String(value ?? '') })"
+                          @compositionend="endDocumentFilterImeComposition(`value-end:${rule.id}`)"
+                          @compositionstart="startDocumentFilterImeComposition(`value-end:${rule.id}`)"
+                          @keydown="handleDocumentFilterValueKeydown($event, rule.id)"
+                        />
+                      </div>
+                      <textarea
+                        v-else-if="documentStoreProvider.kind !== 'elasticsearch' && documentFilterModeUsesList(rule.mode)"
+                        :value="rule.rawValue"
+                        rows="2"
+                        class="min-h-8 w-full min-w-0 resize-y rounded-md border bg-background px-2 py-1 text-xs outline-none"
+                        :placeholder="t('grid.filterBuilderValues')"
+                        @input="updateDocumentFilterRule(rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
+                        @keydown.ctrl.enter.prevent="applyDocumentStructuredFilters"
+                        @keydown.meta.enter.prevent="applyDocumentStructuredFilters"
+                      />
                       <Input
-                        v-if="documentStoreProvider.kind === 'elasticsearch' ? elasticsearchQueryTypeNeedsValue(rule.elasticsearchQueryType) : documentFilterModeNeedsValue(rule.mode)"
+                        v-else-if="documentStoreProvider.kind === 'elasticsearch' ? elasticsearchQueryTypeNeedsValue(rule.elasticsearchQueryType) : documentFilterModeNeedsValue(rule.mode)"
                         :model-value="rule.rawValue"
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"

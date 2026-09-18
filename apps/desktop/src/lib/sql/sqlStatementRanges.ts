@@ -709,6 +709,14 @@ export function statementRangeAtCursor(sql: string, cursorPos: number, databaseT
     }
   }
 
+  // A MySQL `delimiter X` line is a client directive, not executable SQL, so it
+  // never forms a statement range of its own. When the caret rests on such a
+  // line, target the statement the directive introduces (or the closest
+  // preceding statement when the directive ends the script) instead of
+  // reporting that there is nothing to run. See issue #9485.
+  const directiveRange = mysqlDelimiterDirectiveCursorRange(sql, pos, databaseType, parameterOptions, statements);
+  if (directiveRange) return directiveRange;
+
   return null;
 }
 
@@ -2190,6 +2198,29 @@ function parseDelimiterCommand(line: string): string | null {
   const match = /^delimiter[ \t]+(.+)$/i.exec(line.trim());
   const delimiter = match?.[1]?.trim();
   return delimiter ? delimiter : null;
+}
+
+/**
+ * Resolves a caret resting on a MySQL `delimiter X` client-directive line to
+ * the nearest executable statement: the statement the directive introduces, or
+ * the statement just before it when the directive has nothing after it.
+ */
+function mysqlDelimiterDirectiveCursorRange(sql: string, pos: number, databaseType: DatabaseType | undefined, parameterOptions: SqlParameterOptions | undefined, statements: RawStatement[]): SqlTextRange | null {
+  if (databaseType !== "mysql" || statements.length === 0) return null;
+  const lineStart = sql.lastIndexOf("\n", pos - 1) + 1;
+  const lineEnd = findLineEnd(sql, pos);
+  let directiveStart = lineStart;
+  while (directiveStart < lineEnd && (sql[directiveStart] === " " || sql[directiveStart] === "\t")) directiveStart += 1;
+  if (!startsDelimiterCommand(sql, directiveStart)) return null;
+  if (parseDelimiterCommand(sql.slice(directiveStart, lineEnd)) === null) return null;
+
+  const following = statements.find((statement) => statement.from >= lineEnd);
+  if (following) {
+    return rangeFor(splitStatementRangeAtSoftStarts(sql, following, databaseType, parameterOptions)[0] ?? following, sql);
+  }
+  const preceding = statements[statements.length - 1];
+  const precedingSoftRanges = splitStatementRangeAtSoftStarts(sql, preceding, databaseType, parameterOptions);
+  return rangeFor(precedingSoftRanges[precedingSoftRanges.length - 1] ?? preceding, sql);
 }
 
 function findLineEnd(sql: string, pos: number): number {

@@ -224,6 +224,8 @@ Password fields default to `secret` when `binding` is omitted. DBX validates req
 
 Absent optional fields stay absent: when DBX hands the manifest to its own UI it omits `description`, `placeholder`, `default`, and `binding` for fields that do not declare them, and `"default": null` means "no default" exactly like omitting the key. Treat a missing value as unset — never as an empty string, and never as the literal text `null`, which is not a storable plugin value.
 
+Well-known field keys: a `config`-bound field keyed `connect_timeout_secs` declares the plugin's own connect/handshake timeout and is the single source of truth for it. On save, DBX mirrors its resolved value (the declared `default`, or the value a user entered in the connection form) into the typed `ConnectionConfig.connect_timeout_secs` — the dialog's generic global/per-connection timeout radios do not apply to providers declaring this field. The host's `connection/test` and `connection/connect` RPC deadline follows the same resolved value (stored `external_config` first, then the declared `default`), so the deadline never fires before the plugin's own timeout; providers that do not declare the field keep the generic typed-timeout behavior. Declare it when your transport needs more than the generic built-in 10s default (e.g. SSH handshakes on slow links).
+
 #### Local file fields
 
 A `text`, `password`, or `textarea` field may declare `picker` when the user should choose a local file (private keys, keystores, credential files):

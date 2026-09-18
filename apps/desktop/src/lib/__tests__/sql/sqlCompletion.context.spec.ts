@@ -6,12 +6,49 @@ import {
   buildSqlCompletionItemsFromContext,
   getPostgresSequenceLiteralCompletionContext,
   getSqlCompletionContext,
+  prepareSqlCompletionReplacement,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
 } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
+
+describe("SQL completion replacement", () => {
+  const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
+
+  it("marks a standalone SELECT wildcard for replacement", () => {
+    const sql = "SELECT * FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).toMatchObject({ replaceSelectWildcard: true });
+  });
+
+  it("does not mark the multiplication operator before an untyped right operand", () => {
+    const sql = "SELECT *qty FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).not.toHaveProperty("replaceSelectWildcard");
+  });
+
+  it("does not mark an expression operator after another projection operand", () => {
+    const sql = "SELECT amount + * FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).not.toHaveProperty("replaceSelectWildcard");
+  });
+
+  it("marks a standalone wildcard after a SELECT modifier", () => {
+    const sql = "SELECT DISTINCT * FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).toMatchObject({ replaceSelectWildcard: true });
+  });
+});
 
 describe("sqlCompletion keyword snippets", () => {
   it("auto-opens and suggests SELECT when typing sel", () => {

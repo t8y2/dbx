@@ -3465,9 +3465,23 @@ export const useQueryStore = defineStore("query", () => {
     tab.nacosTargetKeyword = undefined;
   }
 
+  /**
+   * Effective connection binding of a plugin tab: bridge-created tabs carry
+   * the connection only inside context (tab-level connectionId is ""), so
+   * read both. New tabs normalize the context value up to the tab level at
+   * creation, but restored/legacy tabs still need the fallback.
+   */
+  function pluginTabConnectionId(tab: QueryTab): string {
+    if (tab.connectionId) return tab.connectionId;
+    const contextConnectionId = tab.pluginWorkbench?.context?.connectionId;
+    return typeof contextConnectionId === "string" ? contextConnectionId : "";
+  }
+
   function openPluginWorkbench(pluginId: string, contributionId: string, options: { title?: string; connectionId?: string; database?: string; context?: Record<string, unknown>; forceNew?: boolean } = {}) {
+    const contextConnectionId = typeof options.context?.connectionId === "string" ? options.context.connectionId : "";
+    const connectionId = options.connectionId || contextConnectionId;
     if (!options.forceNew) {
-      const existing = tabs.value.find((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && tab.pluginWorkbench?.contributionId === contributionId && tab.connectionId === (options.connectionId || ""));
+      const existing = tabs.value.find((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && tab.pluginWorkbench?.contributionId === contributionId && pluginTabConnectionId(tab) === connectionId);
       if (existing) {
         // Reopening surfaces the existing tab as-is. Replacing the context
         // here (openPluginConnection mints a fresh workbenchId per click)
@@ -3484,11 +3498,23 @@ export const useQueryStore = defineStore("query", () => {
       }
     }
 
+    // Termius-style session numbering: the first same-plugin + same-connection
+    // tab keeps the bare connection name; each additional one gets " (n)"
+    // where n advances beyond the highest live suffix (second tab → (1)).
+    // Numbers are assigned at creation and never backfilled after a close —
+    // stable titles beat dense numbering, while live titles stay unique.
+    const siblingTabs = tabs.value.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && pluginTabConnectionId(tab) === connectionId);
+    const nextSessionNumber =
+      siblingTabs.reduce((highest, tab) => {
+        const suffix = / \((\d+)\)$/.exec(tab.title);
+        return suffix ? Math.max(highest, Number(suffix[1])) : highest;
+      }, 0) + 1;
+    const baseTitle = options.title || contributionId;
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: options.title || contributionId,
-      connectionId: options.connectionId || "",
+      title: siblingTabs.length >= 1 ? `${baseTitle} (${nextSessionNumber})` : baseTitle,
+      connectionId,
       database: options.database || "",
       sql: "",
       isExecuting: false,

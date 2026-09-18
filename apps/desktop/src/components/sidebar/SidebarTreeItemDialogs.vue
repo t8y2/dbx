@@ -600,21 +600,23 @@ watch(
   </Dialog>
 
   <Dialog :open="showCreateDatabasePreviewDialog" @update:open="updateCreateDatabasePreviewDialog">
-    <DialogContent class="sm:max-w-[720px]">
+    <DialogContent class="sm:max-w-[720px] grid-rows-[auto_minmax(0,1fr)_auto]">
       <DialogHeader>
         <DialogTitle>{{ t("contextMenu.createDatabaseSqlPreview") }}</DialogTitle>
       </DialogHeader>
-      <pre class="max-h-[48vh] min-h-44 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlight(createDatabasePreviewSql)" />
-      <div v-if="createDatabaseAuthorizationResults.length > 0" class="grid gap-2 rounded-md border p-3">
-        <div v-for="result in createDatabaseAuthorizationResults" :key="result.step.id" class="flex items-start gap-2 text-xs">
-          <Check v-if="result.status === 'success'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
-          <AlertTriangle v-else-if="result.status === 'failed'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
-          <span v-else class="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" />
-          <span class="min-w-0">
-            <span class="block">{{ createDatabaseAuthorizationStepLabel(result) }}</span>
-            <span v-if="result.message" class="mt-0.5 block break-all text-destructive">{{ result.message }}</span>
-            <span v-else-if="result.status === 'skipped'" class="mt-0.5 block text-muted-foreground">{{ t("contextMenu.createDatabaseStepSkipped") }}</span>
-          </span>
+      <div class="grid min-h-0 max-h-full min-w-0 gap-3 overflow-hidden" :class="createDatabaseAuthorizationResults.length > 0 ? 'h-[70vh] grid-rows-[minmax(0,1fr)_minmax(0,1fr)]' : 'h-[48vh] grid-rows-[minmax(0,1fr)]'">
+        <pre class="min-h-0 min-w-0 overflow-auto overscroll-contain whitespace-pre-wrap rounded-md border bg-muted/30 p-3 font-mono text-xs leading-5" v-html="highlight(createDatabasePreviewSql)" />
+        <div v-if="createDatabaseAuthorizationResults.length > 0" class="grid min-h-0 min-w-0 content-start gap-2 overflow-y-auto overscroll-contain rounded-md border p-3">
+          <div v-for="result in createDatabaseAuthorizationResults" :key="result.step.id" class="flex items-start gap-2 text-xs">
+            <Check v-if="result.status === 'success'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-600" />
+            <AlertTriangle v-else-if="result.status === 'failed'" class="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+            <span v-else class="mt-1 h-2 w-2 shrink-0 rounded-full bg-muted-foreground" />
+            <span class="min-w-0">
+              <span class="block">{{ createDatabaseAuthorizationStepLabel(result) }}</span>
+              <span v-if="result.message" class="mt-0.5 block break-all text-destructive">{{ result.message }}</span>
+              <span v-else-if="result.status === 'skipped'" class="mt-0.5 block text-muted-foreground">{{ t("contextMenu.createDatabaseStepSkipped") }}</span>
+            </span>
+          </div>
         </div>
       </div>
       <DialogFooter>

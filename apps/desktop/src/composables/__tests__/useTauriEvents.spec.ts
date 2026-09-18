@@ -34,6 +34,7 @@ describe("useTauriEvents", () => {
       openDbFilePath: vi.fn(),
       openConnectionDeepLink: vi.fn(),
       closeActiveSurface,
+      refreshPluginWorkbenches: vi.fn(),
     });
 
     events.setupTauriListeners();
@@ -43,5 +44,24 @@ describe("useTauriEvents", () => {
     expect(closeActiveSurface).toHaveBeenCalledOnce();
     events.cleanupTauriListeners();
     expect(unlisten).toHaveBeenCalled();
+  });
+
+  it("forwards replaced plugin runtimes to the workbench refresh hook", async () => {
+    const refreshPluginWorkbenches = vi.fn();
+    const events = useTauriEvents({
+      openTableTarget: vi.fn(),
+      openSqlFilePath: vi.fn(),
+      openDbFilePath: vi.fn(),
+      openConnectionDeepLink: vi.fn(),
+      closeActiveSurface: vi.fn(),
+      refreshPluginWorkbenches,
+    });
+
+    events.setupTauriListeners();
+    await vi.waitFor(() => expect(listeners.has("plugin-runtime-replaced")).toBe(true));
+    listeners.get("plugin-runtime-replaced")!({ payload: { pluginId: "io.example.plugin", version: "0.2.0" } });
+
+    expect(refreshPluginWorkbenches).toHaveBeenCalledExactlyOnceWith("io.example.plugin");
+    events.cleanupTauriListeners();
   });
 });

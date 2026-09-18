@@ -8,7 +8,18 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/composables/useToast";
-import { buildDocumentFilterCondition, currentDocumentFilterJson, currentDocumentSortJson, documentFilterModeNeedsValue, documentFilterModeOptions, documentStoreProviderFor, type DocumentFilterMode, type DocumentFilterRule } from "@/lib/app/documentStoreProvider";
+import {
+  buildDocumentFilterCondition,
+  currentDocumentFilterJson,
+  currentDocumentSortJson,
+  documentFilterModeNeedsValue,
+  documentFilterModeOptions,
+  documentFilterModeUsesList,
+  documentFilterModeUsesRange,
+  documentStoreProviderFor,
+  type DocumentFilterMode,
+  type DocumentFilterRule,
+} from "@/lib/app/documentStoreProvider";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
@@ -147,6 +158,7 @@ function updateFilterRule(ruleId: string, patch: Partial<DocumentFilterRule>) {
     if (rule.id !== ruleId) return rule;
     const next = { ...rule, ...patch };
     if (!documentFilterModeNeedsValue(next.mode)) next.rawValue = "";
+    if (!documentFilterModeUsesRange(next.mode)) next.rawEndValue = "";
     return next;
   });
 }
@@ -548,8 +560,23 @@ watch(
                         </SelectContent>
                       </Select>
 
+                      <div v-if="documentFilterModeUsesRange(rule.mode)" class="flex min-w-0 items-center gap-1.5">
+                        <Input :model-value="rule.rawValue" class="h-8 min-w-0 flex-1 text-xs" :placeholder="t('grid.filterBuilderRangeStart')" @update:model-value="(value) => updateFilterRule(rule.id, { rawValue: String(value ?? '') })" @keydown.enter.prevent="applyStructuredFilters" />
+                        <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
+                        <Input :model-value="rule.rawEndValue" class="h-8 min-w-0 flex-1 text-xs" :placeholder="t('grid.filterBuilderRangeEnd')" @update:model-value="(value) => updateFilterRule(rule.id, { rawEndValue: String(value ?? '') })" @keydown.enter.prevent="applyStructuredFilters" />
+                      </div>
+                      <textarea
+                        v-else-if="documentFilterModeUsesList(rule.mode)"
+                        :value="rule.rawValue"
+                        rows="2"
+                        class="min-h-8 w-full min-w-0 resize-y rounded-md border bg-background px-2 py-1 text-xs outline-none"
+                        :placeholder="t('grid.filterBuilderValues')"
+                        @input="updateFilterRule(rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
+                        @keydown.ctrl.enter.prevent="applyStructuredFilters"
+                        @keydown.meta.enter.prevent="applyStructuredFilters"
+                      />
                       <Input
-                        v-if="documentFilterModeNeedsValue(rule.mode)"
+                        v-else-if="documentFilterModeNeedsValue(rule.mode)"
                         :model-value="rule.rawValue"
                         class="h-8 min-w-0 text-xs"
                         :placeholder="t('grid.filterBuilderValue')"

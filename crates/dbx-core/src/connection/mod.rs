@@ -5038,6 +5038,21 @@ impl AppState {
         self.pool_routing_control().close_removed(removed).await;
     }
 
+    /// Drop a connection's pools WITHOUT closing them. Only for plugin
+    /// connections on the connect path: the plugin's connection/connect is an
+    /// idempotent upsert, so a re-push/reconnect just replaces the pool entry.
+    /// Closing would send connection/disconnect to the sidecar, whose
+    /// semantics are "drop the registry entry AND kill every session of this
+    /// connection" — murdering the live terminals of sibling tabs. Explicit
+    /// user disconnect still goes through remove_connection_pools* and does
+    /// send connection/disconnect.
+    pub async fn drop_connection_pools_without_close(&self, connection_id: &str) {
+        self.rollback_manual_transaction_sessions(connection_id).await;
+        let removed = self.drain_connection_pools(connection_id).await;
+        self.clear_metadata_gates_for_connection(connection_id).await;
+        drop(removed);
+    }
+
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;

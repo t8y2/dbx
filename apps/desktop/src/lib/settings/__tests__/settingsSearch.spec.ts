@@ -27,6 +27,7 @@ const categoryLabels = {
   sync: "Sync",
   ai: "AI",
   mcp: "MCP",
+  updates: "Updates",
   security: "Security",
   about: "About",
 } satisfies Record<SettingsCategory, string>;

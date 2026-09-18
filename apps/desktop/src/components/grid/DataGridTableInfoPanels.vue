@@ -39,7 +39,7 @@ const { t } = useI18n();
 </script>
 
 <template>
-  <div v-if="props.activeTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
+  <div v-if="props.activeTab === 'columns'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.columnsLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -109,7 +109,7 @@ const { t } = useI18n();
     </table>
   </div>
 
-  <div v-else-if="props.activeTab === 'indexes'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'indexes'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.indexesLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -145,7 +145,7 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <div v-else-if="props.activeTab === 'foreignKeys'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'foreignKeys'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.foreignKeysLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -166,7 +166,7 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <div v-else-if="props.activeTab === 'triggers'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'triggers'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.triggersLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -187,7 +187,7 @@ const { t } = useI18n();
     </div>
   </div>
 
-  <div v-else-if="props.activeTab === 'constraints'" class="flex-1 min-h-0 overflow-auto">
+  <div v-else-if="props.activeTab === 'constraints'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
     <div v-if="props.constraintsLoading" class="h-full flex items-center justify-center">
       <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
     </div>
@@ -215,3 +215,38 @@ const { t } = useI18n();
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Unified scrollbar look for the Table Info panel tabs (matches structure editor). */
+.table-info-scroller::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.table-info-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.table-info-scroller::-webkit-scrollbar-thumb {
+  background: rgba(82, 82, 82, 0.3);
+  background: color-mix(in oklab, var(--foreground) 30%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+.table-info-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(82, 82, 82, 0.48);
+  background: color-mix(in oklab, var(--foreground) 48%, transparent);
+  border-width: 2px;
+  background-clip: padding-box;
+}
+
+html.dbx-legacy-webview.dark .table-info-scroller::-webkit-scrollbar-thumb {
+  background: rgba(212, 212, 216, 0.3);
+}
+
+html.dbx-legacy-webview.dark .table-info-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 212, 216, 0.48);
+}
+</style>

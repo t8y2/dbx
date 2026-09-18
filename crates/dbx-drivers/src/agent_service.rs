@@ -3021,8 +3021,13 @@ pub async fn import_offline_zip(
             let staging_path = parent.join(format!(".offline-agent-import-{}", uuid::Uuid::new_v4()));
             let mut out = std::fs::File::create(&staging_path)
                 .map_err(|e| format!("Failed to write driver: {}", describe_error(&e)))?;
-            std::io::copy(&mut entry, &mut out)
-                .map_err(|e| format!("Failed to copy driver: {}", describe_error(&e)))?;
+            match std::io::copy(&mut entry, &mut out) {
+                Ok(_) => {}
+                Err(e) => {
+                    std::fs::remove_file(&staging_path).ok();
+                    return Err(format!("Failed to copy driver: {}", describe_error(&e)));
+                }
+            }
             drop(out);
             if *is_native {
                 if let Err(error) = validate_native_agent_binary(&staging_path) {
@@ -3336,6 +3341,11 @@ fn extract_jre_archive(archive: &Path, dest: &Path, format: Option<ArtifactForma
     let mut last_error: Option<String> = None;
     for attempt in 0..ARCHIVE_EXTRACT_ATTEMPTS {
         if attempt > 0 {
+            // Windows rename cannot replace an existing directory, so a failed
+            // attempt may leave partial entries in dest and every retry would
+            // then fail forever. Clear dest first; errors are ignored because
+            // a failed attempt may also leave no dest at all, and extract recreates it.
+            let _ = std::fs::remove_dir_all(dest);
             let delay_ms = ARCHIVE_EXTRACT_BACKOFF_MS.get(attempt - 1).copied().unwrap_or(500);
             std::thread::sleep(Duration::from_millis(delay_ms));
         }

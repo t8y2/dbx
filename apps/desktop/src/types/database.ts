@@ -403,6 +403,8 @@ export interface PluginConnectionProviderContribution {
   filesystem_provider?: string;
   capabilities?: PluginConnectionCapability[];
   actions?: PluginConnectionActionContribution[];
+  /** Multi-endpoint providers (Kafka advertised.listeners) receive a SOCKS5 runtime.proxy route over transport layers. */
+  proxy_route?: boolean;
 }
 
 export interface PluginWorkbenchContribution {

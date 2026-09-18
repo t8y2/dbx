@@ -560,6 +560,14 @@ pub struct PluginConnectionProviderContribution {
     pub capabilities: Vec<PluginConnectionCapability>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<PluginConnectionActionContribution>,
+    /// Providers whose targets have multiple reachable endpoints (Kafka
+    /// bootstrap + advertised listeners) declare this flag so the host hands
+    /// them a SOCKS5 `runtime.proxy` route instead of a static tunnel, which
+    /// can only reach a single endpoint. Without the flag, transport layers
+    /// keep today's static-tunnel behavior (fine for single-endpoint
+    /// providers such as SSH or LDAP, which declare binding host/port fields).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy_route: bool,
 }
 
 impl PluginConnectionProviderContribution {
@@ -1469,6 +1477,26 @@ mod tests {
         PluginConnectionActionContribution, PluginConnectionProviderContribution, PluginFormFieldBinding,
         PluginManifest,
     };
+
+    #[test]
+    fn connection_provider_proxy_route_defaults_false_and_parses() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "database_type": "sample",
+            "fields": []
+        }))
+        .unwrap();
+        assert!(!provider.proxy_route);
+
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "database_type": "sample",
+            "fields": [],
+            "proxy_route": true
+        }))
+        .unwrap();
+        assert!(provider.proxy_route);
+    }
 
     #[test]
     fn parses_only_strict_https_network_permissions() {

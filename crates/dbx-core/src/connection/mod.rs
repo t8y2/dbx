@@ -39,7 +39,7 @@ use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION
 use crate::path_utils::expand_tilde;
 use crate::plugins::{
     PluginConnectionActionResult, PluginConnectionHandle, PluginDriverSession, PluginHost, PluginRegistry,
-    PluginRuntimeEnv,
+    PluginRuntimeEnv, PluginRuntimeProxy,
 };
 use crate::query_cancel::RunningQueries;
 use crate::session_credentials::SessionCredentialStore;
@@ -2334,7 +2334,9 @@ impl AppState {
 
         validate_h2_file_connection(&db_config)?;
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
-        let (host, port) = self.connection_host_port(connection_id, &db_config).await?;
+        let endpoint = self.connection_endpoint(connection_id, &db_config).await?;
+        let (host, port) = (endpoint.host, endpoint.port);
+        let runtime_proxy = endpoint.proxy;
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;
             return Err(err);
@@ -2927,9 +2929,9 @@ impl AppState {
                 }
                 self.external_driver_pool("jdbc", &jdbc_config).await?
             }
-            DatabaseType::Plugin => {
-                PoolKind::PluginConnection(self.plugin_host.connect_connection(&db_config, &host, port).await?)
-            }
+            DatabaseType::Plugin => PoolKind::PluginConnection(
+                self.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
+            ),
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 // MQ admin connections don't hold a data query pool. We just test
@@ -3161,9 +3163,29 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
+        let endpoint = self.connection_endpoint(connection_id, config).await?;
+        Ok((endpoint.host, endpoint.port))
+    }
+
+    /// Resolves the runtime dial endpoint for a plugin connection, including
+    /// the host-managed SOCKS5 route when the provider declares
+    /// `proxy_route` and transport layers are configured.
+    pub async fn plugin_connection_endpoint(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<ConnectionEndpoint, String> {
+        self.connection_endpoint(connection_id, config).await
+    }
+
+    async fn connection_endpoint(
+        &self,
+        connection_id: &str,
+        config: &ConnectionConfig,
+    ) -> Result<ConnectionEndpoint, String> {
         let transport_layers = self.resolved_transport_layers(config).await?;
         if transport_layers.is_empty() || db::sqlite_worker::sqlite_ssh_worker_requested(config) {
-            return Ok((config.host.clone(), config.port));
+            return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
         }
         if config.uses_oracle_tns() {
             // A TNS descriptor may contain several failover addresses, so rewriting it
@@ -3180,10 +3202,31 @@ impl AppState {
                 == crate::mq::types::MqSystemKind::RocketMq
         {
             self.rocketmq_socks_proxy_for_transport_layers(connection_id, &transport_layers).await?;
-            return Ok((config.host.clone(), config.port));
+            return Ok(ConnectionEndpoint::direct(config.host.clone(), config.port));
+        }
+
+        // Multi-endpoint plugin providers (Kafka bootstrap + advertised
+        // listeners) route every endpoint through a host-managed SOCKS5
+        // dialer instead of a static tunnel, which can only reach a single
+        // broker. The payload keeps the logical endpoint so the plugin can
+        // still resolve its own seed list and metadata names.
+        if config.db_type == DatabaseType::Plugin && self.plugin_host.wants_proxy_route(config).await {
+            if let Some(proxy) = self.socks5_route_for_transport_layers(connection_id, &transport_layers).await? {
+                return Ok(ConnectionEndpoint { host: config.host.clone(), port: config.port, proxy: Some(proxy) });
+            }
         }
 
         let (remote_host, remote_port) = connection_remote_endpoint(config);
+        // Plugin providers commonly declare no host/port binding (Kafka keeps
+        // its endpoints in provider fields instead), so a static tunnel would
+        // silently forward to an empty target and every downstream dial would
+        // time out with no actionable hint. Fail here instead.
+        if config.db_type == DatabaseType::Plugin && remote_host.is_empty() {
+            return Err(
+                "Transport layers for this plugin connection need a remote host and port. The connection provider must declare host/port fields or support proxy_route (SOCKS5 routing); otherwise remove the SSH/proxy/HTTP tunnel layer."
+                    .to_string(),
+            );
+        }
         let local_port = db::transport_layer_tunnel::start_transport_layers(
             connection_id,
             &transport_layers,
@@ -3195,7 +3238,67 @@ impl AppState {
         )
         .await?;
 
-        Ok(("127.0.0.1".to_string(), local_port))
+        Ok(ConnectionEndpoint { host: "127.0.0.1".to_string(), port: local_port, proxy: None })
+    }
+
+    /// Builds the host-managed SOCKS5 route from the transport chain for
+    /// plugin providers declaring `proxy_route` (mirrors the
+    /// RocketMQ proxy path). `None` = fall back to the static tunnel path.
+    async fn socks5_route_for_transport_layers(
+        &self,
+        connection_id: &str,
+        transport_layers: &[TransportLayerConfig],
+    ) -> Result<Option<PluginRuntimeProxy>, String> {
+        use crate::models::connection::ProxyType;
+
+        let Some(final_layer) = transport_layers.last() else {
+            return Ok(None);
+        };
+        match final_layer {
+            TransportLayerConfig::Ssh(_) => {
+                // The final SSH hop exposes a dynamic SOCKS5 endpoint so every
+                // advertised broker is reachable through one tunnel.
+                let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_socks5(
+                    connection_id,
+                    transport_layers,
+                    &self.tunnels,
+                    &self.proxy_tunnels,
+                    &self.http_tunnels,
+                )
+                .await?;
+                Ok(Some(PluginRuntimeProxy::socks5("127.0.0.1".to_string(), local_port, String::new(), String::new())))
+            }
+            TransportLayerConfig::Proxy(proxy) if proxy.proxy_type == ProxyType::Socks5 => {
+                if transport_layers.len() == 1 {
+                    Ok(Some(PluginRuntimeProxy::socks5(
+                        proxy.host.clone(),
+                        proxy.port,
+                        proxy.username.clone(),
+                        proxy.password.clone(),
+                    )))
+                } else {
+                    let local_port = db::transport_layer_tunnel::start_transport_layers(
+                        connection_id,
+                        &transport_layers[..transport_layers.len() - 1],
+                        &proxy.host,
+                        proxy.port,
+                        &self.tunnels,
+                        &self.proxy_tunnels,
+                        &self.http_tunnels,
+                    )
+                    .await?;
+                    Ok(Some(PluginRuntimeProxy::socks5(
+                        "127.0.0.1".to_string(),
+                        local_port,
+                        proxy.username.clone(),
+                        proxy.password.clone(),
+                    )))
+                }
+            }
+            // HTTP-tunnel chains cannot serve arbitrary endpoints; fall back
+            // to the static tunnel path (guarded below for empty endpoints).
+            TransportLayerConfig::Proxy(_) | TransportLayerConfig::HttpTunnel(_) => Ok(None),
+        }
     }
 
     pub async fn invoke_plugin_connection_action(
@@ -3210,8 +3313,12 @@ impl AppState {
         let transport_id = format!("{}:plugin-action:{action_id}", config.id);
         let has_transport_layers = config.has_effective_transport_layers();
         let connection_id = if has_transport_layers { transport_id.as_str() } else { config.id.as_str() };
-        let result = match self.connection_host_port(connection_id, &config).await {
-            Ok((host, port)) => self.plugin_host.invoke_connection_action(&config, action_id, &host, port).await,
+        let result = match self.plugin_connection_endpoint(connection_id, &config).await {
+            Ok(endpoint) => {
+                self.plugin_host
+                    .invoke_connection_action(&config, action_id, &endpoint.host, endpoint.port, endpoint.proxy)
+                    .await
+            }
             Err(error) => Err(error),
         };
         if has_transport_layers {
@@ -5558,6 +5665,24 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
 fn is_agent_validate_connection_unsupported(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("validate_connection") && (lower.contains("unknown method") || lower.contains("method not found"))
+}
+
+/// Runtime dial endpoint handed to a plugin lifecycle call: the logical
+/// `host:port` plus an optional host-managed SOCKS5 route for providers
+/// declaring `proxy_route`. When `proxy` is set the plugin is
+/// expected to dial every endpoint (its seed list and metadata names) through
+/// the route, keeping the logical endpoint only for metadata discovery.
+#[derive(Debug, Clone)]
+pub struct ConnectionEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub proxy: Option<PluginRuntimeProxy>,
+}
+
+impl ConnectionEndpoint {
+    fn direct(host: String, port: u16) -> Self {
+        Self { host, port, proxy: None }
+    }
 }
 
 fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {

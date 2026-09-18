@@ -23,7 +23,9 @@ pub use filesystem::{
     PLUGIN_FILESYSTEM_CREATE_DIRECTORY_METHOD, PLUGIN_FILESYSTEM_DELETE_METHOD, PLUGIN_FILESYSTEM_LIST_METHOD,
     PLUGIN_FILESYSTEM_READ_METHOD, PLUGIN_FILESYSTEM_RENAME_METHOD, PLUGIN_FILESYSTEM_WRITE_METHOD,
 };
-pub use host::{ActivePluginSession, PluginConnectionActionResult, PluginConnectionHandle, PluginHost};
+pub use host::{
+    ActivePluginSession, PluginConnectionActionResult, PluginConnectionHandle, PluginHost, PluginRuntimeProxy,
+};
 pub use installer::{
     PluginInstallPolicy, PluginInstallResponse, PluginInstallResult, PluginPackageInstaller, PluginRollbackResponse,
     PluginRollbackResult, PluginSignatureStatus, PluginTrustStore, PluginTrustedKey, DBXP_EXTENSION,

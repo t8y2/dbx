@@ -90,7 +90,10 @@ pub async fn start_transport_layers_with_final_ssh_local_port(
     .await
 }
 
-#[cfg(feature = "mq-admin")]
+/// Starts the layer chain with the final SSH hop exposing a dynamic SOCKS5
+/// endpoint (ssh -D) instead of a static forward, so callers can route many
+/// remote endpoints through one tunnel (RocketMQ name servers/brokers, plugin
+/// providers with `proxy_route`, ...).
 pub async fn start_transport_layers_with_final_ssh_socks5(
     connection_id: &str,
     layers: &[TransportLayerConfig],

@@ -1433,6 +1433,8 @@ export interface SqlCompletionContext {
   deleteTarget?: { table: string; schema?: string };
   oracleTableFunctionContext?: boolean;
   autoAliasTableCompletions: boolean;
+  /** The table position being completed is a DML target, where a generated alias can be rejected by the server. */
+  tableCompletionTargetAliasUnsafe?: boolean;
   tableAliasAfterCursor?: boolean;
   openingParenAfterCursor: boolean;
   contextKind: SqlCompletionContextKind;
@@ -1665,7 +1667,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveColumnSuggestions && context.suggestTables) {
-      const autoAliasTables = !!this.input.autoAliasTables && context.autoAliasTableCompletions && supportsTableAliases(this.databaseType);
+      const autoAliasTables = !!this.input.autoAliasTables && context.autoAliasTableCompletions && !context.tableCompletionTargetAliasUnsafe && supportsTableAliases(this.databaseType);
       this.items.push(...buildForeignKeyRelatedTableItems(context, completionTables, this.input.foreignKeysByTable, this.dialect, autoAliasTables, this.databaseType, this.input.keywordCase, this.input.currentSchema));
       this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, this.input.keywordCase));
       if (this.databaseType === "clickhouse") {
@@ -1715,16 +1717,22 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (isSqlCompletionSuppressedContext(sql, cursor, options)) return false;
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
-  if (/\bon\s+$/i.test(sql.slice(0, cursor))) return true;
-  if (isAfterJoinModifierContext(sql.slice(0, cursor), options.databaseType)) return true;
-  if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(sql.slice(0, cursor))) return true;
+  // Statement-bounded prefix: every probe below is anchored at the cursor and
+  // only looks back within the current statement. Slicing the whole prefix (and
+  // the literal-masking scans inside the modifier/expression helpers) made each
+  // completion trigger O(document) on large scripts.
+  const statementSpan = sqlCompletionStatementSpan(sql, cursor, options);
+  const beforeCursor = sql.slice(statementSpan.start, cursor);
+  if (/\bon\s+$/i.test(beforeCursor)) return true;
+  if (isAfterJoinModifierContext(beforeCursor, options.databaseType)) return true;
+  if (/\bcall\s+(?:[A-Za-z_][\w$]*\.)?$/i.test(beforeCursor)) return true;
   const context = getSqlCompletionContext(sql, cursor, options);
   if (previousChar === "(" && (context.insertTable || context.preferredValueKeywords?.length)) return true;
   if (/[,;()[\]]/.test(previousChar)) return false;
   if (context.exclusiveTableSuggestions || context.exclusiveRoutineSuggestions || context.suggestTables) {
     return true;
   }
-  if (context.exclusiveColumnSuggestions || shouldAutoOpenColumnCompletion(context, sql, cursor, options.databaseType)) return true;
+  if (context.exclusiveColumnSuggestions || shouldAutoOpenColumnCompletion(context, beforeCursor, beforeCursor.length, options.databaseType)) return true;
   return /[A-Za-z_$@.]/.test(previousChar);
 }
 
@@ -2126,18 +2134,93 @@ function currentSqlLikeLineBlockSpan(sql: string, cursor: number, activeStatemen
   return { start, end: blockEnd == null ? activeStatementSpan.end : Math.min(activeStatementSpan.end, blockEnd) };
 }
 
+// Equal-length masking of string/comment characters, so parenthesis depth and
+// line-start keywords can be scanned on the masked copy while offsets stay
+// valid against the original text.
+function maskSqlForStructureScan(sql: string): string {
+  let out = "";
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i]!;
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      out += ch;
+      i += 1;
+      while (i < sql.length) {
+        if (sql[i] === "\\" && i + 1 < sql.length) {
+          out += "  ";
+          i += 2;
+          continue;
+        }
+        const same = sql[i] === quote;
+        out += same ? quote : " ";
+        i += 1;
+        if (same) break;
+      }
+      continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      while (i < sql.length && sql[i] !== "\n") {
+        out += " ";
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      out += "  ";
+      i += 2;
+      while (i < sql.length) {
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          out += "  ";
+          i += 2;
+          break;
+        }
+        out += sql[i] === "\n" ? "\n" : " ";
+        i += 1;
+      }
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+// Statements users type without a trailing semicolon: a line starting one of
+// these at top level begins a new statement block (t8y2/dbx#9370).
+const STATEMENT_START_LINE_PATTERN = /^(?:select|with|insert|update|delete|create|drop|alter)\b/i;
+
 function currentLineBlockEnd(sql: string, cursor: number, start: number): number | null {
+  const masked = maskSqlForStructureScan(sql);
   let lineStart = sql.lastIndexOf("\n", cursor - 1) + 1;
+  let depth = 0;
+  for (let i = start; i < lineStart; i += 1) {
+    const ch = masked[i];
+    if (ch === "(") depth += 1;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+  }
+  let atCursorLine = true;
   while (lineStart < sql.length) {
     const lineEnd = sql.indexOf("\n", lineStart);
     const boundedLineEnd = lineEnd >= 0 ? lineEnd : sql.length;
-    const line = sql.slice(lineStart, boundedLineEnd);
-    const trimmed = line.trimStart();
-    if (lineStart > start && (!trimmed || /^(get|post|put|delete|patch|head)\s+\//i.test(trimmed))) {
+    const originalTrimmed = sql.slice(lineStart, boundedLineEnd).trimStart();
+    const trimmed = masked.slice(lineStart, boundedLineEnd).trimStart();
+    if (lineStart > start && (!originalTrimmed || /^(get|post|put|delete|patch|head)\s+\//i.test(originalTrimmed))) {
+      return lineStart;
+    }
+    // The cursor's own line always belongs to the block; only a following
+    // top-level statement line ends it.
+    if (!atCursorLine && lineStart > start && depth === 0 && STATEMENT_START_LINE_PATTERN.test(trimmed)) {
       return lineStart;
     }
     if (lineEnd < 0) break;
+    for (let i = lineStart; i < boundedLineEnd; i += 1) {
+      const ch = masked[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+    }
     lineStart = lineEnd + 1;
+    atCursorLine = false;
   }
   return null;
 }
@@ -2148,9 +2231,9 @@ export function getSqlCompletionResultValidFor(sql: string, cursor: number): Reg
   return undefined;
 }
 
-export function getSqlFunctionSignatureHelp(sql: string, cursor: number, databaseType?: DatabaseType, driverProfile?: string): SqlFunctionSignatureHelp | null {
+export function getSqlFunctionSignatureHelp(sql: string, cursor: number, databaseType?: DatabaseType, driverProfile?: string, options?: { truncatedPrefix?: boolean }): SqlFunctionSignatureHelp | null {
   const beforeCursor = sql.slice(0, cursor);
-  const call = findActiveFunctionCall(beforeCursor);
+  const call = findActiveFunctionCall(beforeCursor, options?.truncatedPrefix === true);
   if (!call) return null;
 
   const observedParameter = countTopLevelCommas(call.groupText);
@@ -5517,8 +5600,8 @@ interface ActiveFunctionCall {
   groupText: string;
 }
 
-function findActiveFunctionCall(sqlBeforeCursor: string): ActiveFunctionCall | null {
-  const activeOpenParen = findActiveFunctionOpenParen(sqlBeforeCursor);
+function findActiveFunctionCall(sqlBeforeCursor: string, truncatedPrefix = false): ActiveFunctionCall | null {
+  const activeOpenParen = findActiveFunctionOpenParen(sqlBeforeCursor, truncatedPrefix);
   if (activeOpenParen == null) return null;
 
   const beforeActiveGroup = sqlBeforeCursor.slice(0, activeOpenParen).trimEnd();
@@ -5567,12 +5650,23 @@ function findMatchingOpenParen(text: string, closeParenIndex: number): number | 
   return null;
 }
 
-function findActiveFunctionOpenParen(sqlBeforeCursor: string): number | null {
+/**
+ * Backward signature scans stop after this many characters: no human-authored
+ * argument group is worth a longer scan, and generated SQL can embed
+ * megabyte-long value lists inside a single call.
+ */
+const SQL_SIGNATURE_SCAN_LIMIT_CHARS = 100_000;
+
+function findActiveFunctionOpenParen(sqlBeforeCursor: string, truncatedPrefix = false): number | null {
   let depth = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
+  // With a truncated window the scan must not trust index 0: an "unmatched"
+  // open paren sitting exactly on the window edge may have its match before
+  // the window, which would fabricate a signature tooltip.
+  const floorIndex = Math.max(truncatedPrefix ? 1 : 0, sqlBeforeCursor.length - SQL_SIGNATURE_SCAN_LIMIT_CHARS);
 
-  for (let i = sqlBeforeCursor.length - 1; i >= 0; i--) {
+  for (let i = sqlBeforeCursor.length - 1; i >= floorIndex; i--) {
     const ch = sqlBeforeCursor[i];
     if (ch === "'" && !inDoubleQuote) {
       inSingleQuote = !inSingleQuote;

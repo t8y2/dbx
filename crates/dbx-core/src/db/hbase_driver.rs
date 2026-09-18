@@ -245,6 +245,7 @@ pub async fn list_tables(client: &HBaseClient, namespace: &str) -> Result<Vec<Ta
         .map(|name| TableInfo {
             name,
             table_type: "HBASE_TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

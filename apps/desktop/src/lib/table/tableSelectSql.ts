@@ -44,8 +44,25 @@ const DATABASE_QUALIFIED_TABLE_TYPES = new Set<DatabaseType>(["mysql", "clickhou
 // name" on schema-aware engines — except for databases that can only address
 // objects through their full qualified name (`catalog.schema.table` /
 // `database.schema.table`), where dropping it would break the query.
-function dropsSchemaQualifier(databaseType: DatabaseType | undefined, includeDatabaseName?: boolean): boolean {
+export function dropsSchemaQualifier(databaseType: DatabaseType | undefined, includeDatabaseName?: boolean): boolean {
   return includeDatabaseName === false && databaseType !== undefined && !DATABASE_SCHEMA_QUALIFIED_TYPES.has(databaseType);
+}
+
+/**
+ * Strip optional schema/database qualifiers from table metadata used to build
+ * generated SQL. Mirrors `dropsSchemaQualifier` so copy-as-INSERT/UPDATE
+ * extractors honor "Include database name in generated SQL" the same way
+ * SELECT templates do (#9326).
+ */
+export function tableMetaWithoutOptionalDatabaseQualifier<T extends { schema?: string; database?: string; catalog?: string }>(tableMeta: T | undefined, databaseType: DatabaseType | undefined, includeDatabaseName?: boolean): T | undefined {
+  if (!tableMeta || !dropsSchemaQualifier(databaseType, includeDatabaseName)) return tableMeta;
+  // Doris/StarRocks external-catalog tables are only addressable through the
+  // 3-part `catalog.database.table` form; stripping the middle segment would
+  // retarget the generated SQL, so keep the qualifiers (same rule as
+  // `qualifiedTableName`).
+  if (tableMeta.catalog && tableMeta.catalog !== "internal" && (databaseType === "doris" || databaseType === "starrocks")) return tableMeta;
+  if (tableMeta.schema === undefined && tableMeta.database === undefined) return tableMeta;
+  return { ...tableMeta, schema: undefined, database: undefined };
 }
 
 function sqlStatementSpans(sql: string, dialectId: string): Array<{ start: number; end: number }> {

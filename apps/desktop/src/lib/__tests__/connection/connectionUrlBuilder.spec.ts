@@ -80,6 +80,14 @@ describe("buildConnectionUrlCopy standard URL", () => {
     expect(buildConnectionUrlCopy(redis, "urlWithPassword")).toBe("rediss://:secret@cache.example.com:6379/0");
   });
 
+  it("falls back to db 0 for non-numeric Redis database values instead of percent-encoding them", () => {
+    // Mirrors dbx-core redis_database_index(): "0 --tls --insecure" fails to
+    // parse as an index and the backend silently uses 0.
+    const redis = config({ db_type: "redis", host: "cache.example.com", port: 6379, username: "coupon", password: "", database: "0 --tls --insecure", url_params: "insecure=true", ssl: true });
+    expect(buildConnectionUrlCopy(redis, "url")).toBe("rediss://coupon@cache.example.com:6379/0?insecure=true");
+    expect(buildConnectionUrlCopy(config({ db_type: "redis", database: "3" }), "url")).toBe("redis://app_user@db.example.com:5432/3");
+  });
+
   it("maps the MySQL family profiles to their own schemes", () => {
     expect(buildConnectionUrlCopy(config({ db_type: "mysql", port: 3306 }), "url")).toBe("mysql://app_user@db.example.com:3306/appdb");
     expect(buildConnectionUrlCopy(config({ db_type: "mysql", port: 3306, driver_profile: "mariadb" }), "urlWithPassword")).toBe("mariadb://app_user:secret@db.example.com:3306/appdb");

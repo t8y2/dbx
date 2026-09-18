@@ -8,6 +8,12 @@
 //! suspend on a `oneshot` while the Tauri layer forwards the request to the UI
 //! and the UI answers through a command.
 //!
+//! The same gateway carries generic [`SshPromptKind::UserInput`] questions that
+//! are not part of a host-owned SSH transport, e.g. a plugin backend asking for
+//! a bastion MFA code through the `host/requestUserInput` Host API method. The
+//! channel is intentionally transport-agnostic: the host only relays a question
+//! and the typed answer, and it never answers on the user's behalf.
+//!
 //! The gateway is installed once at app startup by the Tauri layer
 //! (`install_ssh_prompt_gateway`). In headless / test contexts where no
 //! gateway is installed, `request_ssh_prompt` returns `None` and callers MUST
@@ -30,6 +36,20 @@ pub enum SshPromptKind {
     SecretInput,
     /// Confirm uploading the SQLite worker binary onto the file host.
     WorkerUploadConsent,
+    /// A caller that is not a host-owned transport (today: a plugin backend
+    /// through the `host/requestUserInput` Host API method) needs a value typed
+    /// by the user. Unlike [`SshPromptKind::SecretInput`] the host never
+    /// synthesizes or auto-answers it: without a user there is no answer.
+    UserInput,
+}
+
+/// A fixed answer a [`SshPromptKind::UserInput`] request offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshPromptOption {
+    /// Value returned to the caller when the user picks this option.
+    pub value: String,
+    /// Text the dialog shows.
+    pub label: String,
 }
 
 /// A request for user input, sent from the backend to the UI.
@@ -56,17 +76,50 @@ pub struct SshPromptRequest {
     /// Passwords and verification codes normally set this to false.
     #[serde(default)]
     pub echo: bool,
+    /// UserInput: who is asking (e.g. the plugin display name), shown so the
+    /// user can tell a bastion login prompt from a host-owned one.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// UserInput: heading above `prompt`, already localized by the caller.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// UserInput: preset answer offered in the input.
+    #[serde(default)]
+    pub default_value: Option<String>,
+    /// UserInput: fixed answers; empty means free-form input.
+    #[serde(default)]
+    pub options: Vec<SshPromptOption>,
 }
 
 /// The user's answer, sent from the UI back to the backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SshPromptAnswer {
     /// Accept and (for HostKeyVerify) optionally persist the key.
     Accept { remember: bool },
     /// Reject.
     Reject,
-    /// A typed secret (SecretInput).
+    /// A typed value (SecretInput / UserInput).
     Secret(String),
+}
+
+impl Default for SshPromptRequest {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: SshPromptKind::HostKeyVerify,
+            host: String::new(),
+            port: 0,
+            key_type: None,
+            fingerprint: None,
+            previous_fingerprint: None,
+            prompt: None,
+            echo: false,
+            source: None,
+            title: None,
+            default_value: None,
+            options: Vec::new(),
+        }
+    }
 }
 
 /// Internal envelope: the request plus the channel to deliver the answer on.
@@ -86,6 +139,18 @@ pub fn install_ssh_prompt_gateway(tx: mpsc::Sender<SshPromptEnvelope>) {
 /// Clear the gateway (mainly for tests).
 pub fn clear_ssh_prompt_gateway() {
     *PROMPT_GATEWAY.lock().unwrap() = None;
+}
+
+/// Serializes every test that mutates the process-global prompt gateway.
+///
+/// One gateway serves the host's SSH transports, the SQLite worker consent
+/// prompt and plugin Host API questions, so tests in any module must hold this
+/// lock while a gateway is installed — otherwise one test's gateway (or the
+/// fail-closed checks that rely on *no* gateway) clobbers another's.
+#[cfg(test)]
+pub fn prompt_gateway_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    &LOCK
 }
 
 /// Request input from the UI. Returns the receiver the caller should await, or
@@ -117,6 +182,10 @@ pub fn host_key_verify_request(
         previous_fingerprint: None,
         prompt: None,
         echo: false,
+        source: None,
+        title: None,
+        default_value: None,
+        options: Vec::new(),
     }
 }
 
@@ -138,6 +207,10 @@ pub fn host_key_changed_request(
         previous_fingerprint,
         prompt: None,
         echo: false,
+        source: None,
+        title: None,
+        default_value: None,
+        options: Vec::new(),
     }
 }
 
@@ -153,6 +226,74 @@ pub fn secret_input_request(host: &str, port: u16, prompt: String, echo: bool) -
         previous_fingerprint: None,
         prompt: Some(prompt),
         echo,
+        source: None,
+        title: None,
+        default_value: None,
+        options: Vec::new(),
+    }
+}
+
+/// A generic question from a caller the host does not own (today: a plugin
+/// backend). Built through [`UserInputRequest::into_request`], which allocates
+/// the prompt id the UI answers with.
+#[derive(Debug, Clone)]
+pub struct UserInputRequest {
+    pub prompt: String,
+    pub echo: bool,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    pub default_value: Option<String>,
+    pub options: Vec<SshPromptOption>,
+}
+
+impl UserInputRequest {
+    pub fn new(prompt: impl Into<String>) -> Self {
+        Self { prompt: prompt.into(), echo: false, title: None, source: None, default_value: None, options: Vec::new() }
+    }
+
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title = title;
+        self
+    }
+
+    pub fn with_source(mut self, source: Option<String>) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_default(mut self, default_value: Option<String>) -> Self {
+        self.default_value = default_value;
+        self
+    }
+
+    pub fn with_options(mut self, options: Vec<SshPromptOption>) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn with_echo(mut self, echo: bool) -> Self {
+        self.echo = echo;
+        self
+    }
+
+    /// Turn the question into a prompt request. `host`/`port` are display-only
+    /// context a caller outside the host's own transports usually leaves empty.
+    pub fn into_request(self, host: &str, port: u16) -> SshPromptRequest {
+        SshPromptRequest {
+            id: Uuid::new_v4().to_string(),
+            kind: SshPromptKind::UserInput,
+            host: host.to_string(),
+            port,
+            key_type: None,
+            fingerprint: None,
+            previous_fingerprint: None,
+            prompt: Some(self.prompt),
+            echo: self.echo,
+            source: self.source,
+            title: self.title,
+            default_value: self.default_value,
+            options: self.options,
+        }
     }
 }
 

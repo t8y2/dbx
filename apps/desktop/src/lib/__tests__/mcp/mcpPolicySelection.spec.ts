@@ -165,11 +165,12 @@ describe("MCP policy settings state", () => {
     expect(tabsSource).toContain("overscroll-x-contain");
     expect(tabsSource).not.toContain("flex-wrap");
     expect(tabsSource).not.toContain("grid-cols-");
-    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(13);
+    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(14);
     expect(tabsSource).toContain('<TabsTrigger value="deepseek-harness"');
     expect(tabsSource).toContain('<TabsTrigger value="codebuddy"');
     expect(tabsSource).toContain('<TabsTrigger value="zcode"');
     expect(tabsSource).toContain('<TabsTrigger value="qoder"');
+    expect(tabsSource).toContain('<TabsTrigger value="workbuddy"');
     expect(tabsSource).not.toContain("min-w-0 px-");
 
     const codeBuddyStart = settingsDialogSource.indexOf('<TabsContent value="codebuddy"', tabsEnd);

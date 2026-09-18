@@ -10,7 +10,7 @@ use super::column_format::{
     column_definition, has_dameng_identity, is_dameng_identity_compatible_type, is_mysql_character_data_type,
     original_is_mysql_generated_column, original_mysql_generated_clause,
 };
-use super::comments::build_sqlserver_column_comment_sql;
+use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
 use super::indexes::has_existing_index_change;
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
@@ -167,6 +167,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                     &position_clause,
                     options.schema.as_deref(),
                     &options.table_name,
+                    options.driver_profile.as_deref(),
                 ));
             }
             if has_original_column_positions
@@ -286,6 +287,7 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
                 column,
                 options.schema.as_deref(),
                 &options.table_name,
+                options.driver_profile.as_deref(),
                 warnings,
             )),
             StructureDialect::Sqlite => statements.extend(build_sqlite_existing_column_sql(&table, column, warnings)),
@@ -585,6 +587,7 @@ pub(super) fn build_add_column_sql(
     position_clause: &str,
     schema: Option<&str>,
     table_name: &str,
+    driver_profile: Option<&str>,
 ) -> Vec<String> {
     let definition = column_definition(dialect, column);
     let mut statements = if is_oracle_like(dialect) || dialect == StructureDialect::Informix {
@@ -620,7 +623,14 @@ pub(super) fn build_add_column_sql(
         ));
     }
     if dialect == StructureDialect::SqlServer && !clean(&column.comment).is_empty() {
-        statements.extend(build_sqlserver_column_comment_sql(table, schema, table_name, &column.name, &column.comment));
+        statements.extend(build_sqlserver_column_comment_sql_for_profile(
+            table,
+            schema,
+            table_name,
+            &column.name,
+            &column.comment,
+            driver_profile,
+        ));
     }
     statements
 }

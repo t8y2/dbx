@@ -73,7 +73,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   impala: { deferred: "Impala database creation needs dedicated metadata validation first" },
   spark: { deferred: "Spark database creation needs agent metadata validation first" },
   db2: { database: "schema" },
-  informix: { database: "schema" },
+  informix: { connection: "database" },
   neo4j: { deferred: "database creation depends on edition/admin privileges" },
   cassandra: { deferred: "keyspace creation requires replication options" },
   bigquery: { deferred: "dataset creation needs project/location options" },
@@ -100,19 +100,30 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 
+function namespaceCreationMatrixEntry(connection: NonNullable<CreationConnection>): DatabaseNamespaceCreationMatrixEntry {
+  // GBase 8s shares `db_type: "gbase"` with the MySQL-based GBase 8a but is Informix-derived:
+  // it has no `CREATE SCHEMA <name>` (a schema is the table owner) yet does support
+  // `CREATE DATABASE`. Route it to the Informix-family semantics instead of the shared `gbase`
+  // entry, which is written for GBase 8a.
+  if (connection.db_type === "gbase" && connection.driver_profile === "gbase8s") {
+    return { connection: "database" };
+  }
+  return DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
+}
+
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
   if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
   if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
   }
-  const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
+  const entry: DatabaseNamespaceCreationMatrixEntry = namespaceCreationMatrixEntry(connection);
   return entry.connection ?? null;
 }
 
 export function databaseNodeNamespaceCreationTarget(connection: CreationConnection, node: Pick<{ type: TreeNodeType; database?: string | null }, "type" | "database">): DatabaseNodeCreationTarget | null {
   if (!connection || connectionIsEffectivelyReadOnly(connection) || node.type !== "database" || !node.database) return null;
-  const entry: DatabaseNamespaceCreationMatrixEntry = DATABASE_NAMESPACE_CREATION_MATRIX[connection.db_type];
+  const entry: DatabaseNamespaceCreationMatrixEntry = namespaceCreationMatrixEntry(connection);
   return entry.database ?? null;
 }
 

@@ -97,7 +97,7 @@ public final class AccessAgent extends AbstractJdbcAgent {
     public List<ObjectInfo> listObjects(String schema) {
         List<ObjectInfo> result = new ArrayList<>();
         for (TableInfo table : listTables(schema)) {
-            result.add(new ObjectInfo(table.getName(), table.getTable_type(), null, table.getComment()));
+            result.add(new ObjectInfo(table.getName(), table.getTable_type(), null, table.getComment(), table.getValid()));
         }
         return result;
     }

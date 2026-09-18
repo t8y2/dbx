@@ -5,6 +5,9 @@ import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
   mongoAggregateWriteStage,
+  listChainedCalls,
+  parseMongoFindExplainCommand,
+  mongoBulkWriteToQueryResult,
   mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
   mongoDatabasesToQueryResult,
@@ -446,6 +449,78 @@ test("parseMongoFindCommand validates UUID strings at parse time", () => {
   assert.deepEqual(JSON.parse(command.filter), { u: { $uuid: "3B241101-E2BB-4255-8CAF-4136C566A962" } });
 });
 
+test("parseMongoFindExplainCommand reads a final explain() with the find it wraps", () => {
+  assert.deepEqual(parseMongoFindExplainCommand('db.c.find({a: 1}, {b: 1}).sort({b: -1}).skip(2).limit(5).explain("allPlansExecution")'), {
+    collection: "c",
+    filter: '{"a": 1}',
+    projection: '{"b": 1}',
+    skip: 2,
+    limit: 5,
+    sort: '{"b": -1}',
+    verbosity: "allPlansExecution",
+  });
+  assert.equal(parseMongoFindExplainCommand("db.c.find({a: 1}).explain()")?.verbosity, "queryPlanner");
+  assert.equal(parseMongoFindExplainCommand("db.c.find({a: 1})\n  .sort({b: 1})\n  .explain('executionStats');")?.verbosity, "executionStats");
+  assert.equal(parseMongoFindExplainCommand('db["x-y"].find({}).explain()')?.collection, "x-y");
+  assert.equal(parseMongoCommand("db.c.find({}).explain()")?.command.kind, "findExplain");
+  // A plain find is not an explain, and vice versa.
+  assert.equal(parseMongoFindExplainCommand("db.c.find({a: 1}).limit(1)"), null);
+  assert.equal(parseMongoFindCommand("db.c.find({a: 1}).explain()"), null);
+});
+
+test("parseMongoFindExplainCommand rejects a misplaced explain or an unknown verbosity", () => {
+  for (const [source, expected] of [
+    ["db.c.find({}).explain('verbose')", /verbosity must be "queryPlanner", "executionStats" or "allPlansExecution", got 'verbose'/],
+    ["db.c.find({}).explain(1)", /verbosity must be .*, got 1/],
+    ["db.c.find({}).explain().limit(5)", /explain\(\) must be the final chain method/],
+    ["db.c.find({}).explain", /Unexpected text after find\(\.\.\.\): "\.explain"/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
+test("parseMongoFindCommand rejects chained methods it would otherwise silently drop", () => {
+  // Each of these used to parse as a plain find and run a different query than written.
+  for (const [source, expected] of [
+    ["db.c.find({}).hint({a: 1})", /find\(\)\.hint\(\) is not supported yet\. Supported after find\(\): sort, skip, limit, collation, count, explain, toArray, pretty\./],
+    ["db.c.find({}).batchSize(10)", /batchSize\(\) is not supported yet/],
+    ["db.c.find({}).sort({a: 1}).maxTimeMS(100)", /maxTimeMS\(\) is not supported yet/],
+    ["db.c.find({}).itcount()", /itcount\(\) is not supported; use find\(\)\.count\(\) or countDocuments\(\)/],
+    ["db.c.find({}).size()", /size\(\) is not supported; use find\(\)\.count\(\)/],
+    ["db.c.find({}).forEach(d => print(d))", /forEach\(\) runs JavaScript, which the editor does not execute/],
+    ["db.c.find({}).map(d => d.a)", /map\(\) runs JavaScript/],
+    ["db.c.find({}).toArray(1)", /toArray\(\) takes no arguments/],
+    ["db.c.find({}).count", /Unexpected text after find\(\.\.\.\): "\.count"/],
+  ] as const) {
+    assert.equal(parseMongoFindCommand(source), null, source);
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+
+  // Non-cursor methods explain why nothing can follow them.
+  assert.match(describeMongoCommandParseFailure("db.c.findOne({}).limit(1)"), /findOne\(\) returns a result, not a cursor/);
+  assert.match(describeMongoCommandParseFailure("db.c.countDocuments({}).limit(1)"), /countDocuments\(\) returns a result, not a cursor/);
+});
+
+test("parseMongoFindCommand still accepts the chain methods it executes", () => {
+  assert.equal(parseMongoFindCommand("db.c.find({a: 1}).sort({b: -1}).skip(2).limit(5)")?.limit, 5);
+  assert.ok(parseMongoFindCommand("db.c.find({}).collation({locale: 'en'}).limit(1)"));
+  assert.ok(parseMongoFindCommand("db.c.find({a: 1}).sort({b: 1}).toArray()"));
+  assert.ok(parseMongoFindCommand("db.c.find({a: 1}).pretty()"));
+  assert.ok(parseMongoFindCommand("db.c.find({a: 1})\n  .sort({b: 1})\n  .limit(10)"));
+  assert.equal(parseMongoCommand("db.c.find({a: 1}).count()")?.command.kind, "countDocuments");
+  assert.deepEqual(
+    listChainedCalls(".sort({b: 1}) . limit( 10 ).toArray()")?.map((call) => [call.name, call.args.trim()]),
+    [
+      ["sort", "{b: 1}"],
+      ["limit", "10"],
+      ["toArray", ""],
+    ],
+  );
+  assert.equal(listChainedCalls(".count"), null);
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);
@@ -669,6 +744,104 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
     filter: '{"_id": {"$oid":"507f1f77bcf86cd799439011"}}',
     update: '{"$set": {"stock": 3}}',
     many: false,
+  });
+});
+
+test("parseMongoWriteCommand reads bulkWrite with every operation kind", () => {
+  const command = parseMongoWriteCommand(`db.orders.bulkWrite([
+    { insertOne: { document: { sku: "A1", stock: 1 } } },
+    { updateOne: { filter: { sku: "A1" }, update: { $inc: { stock: 1 } }, upsert: true } },
+    { updateMany: { filter: { archived: true }, update: [{ $set: { stock: 0 } }] } },
+    { replaceOne: { filter: { sku: "B2" }, replacement: { sku: "B2", stock: 9 } } },
+    { deleteOne: { filter: { sku: "C3" } } },
+    { deleteMany: { filter: { stock: { $lt: 0 } } } }
+  ], { ordered: false })`);
+  assert.ok(command && command.kind === "bulkWrite");
+  assert.equal(command.collection, "orders");
+  assert.equal(command.options, '{ "ordered": false }');
+  assert.deepEqual(
+    (JSON.parse(command.operations) as Array<Record<string, unknown>>).map((entry) => Object.keys(entry)[0]),
+    ["insertOne", "updateOne", "updateMany", "replaceOne", "deleteOne", "deleteMany"],
+  );
+  assert.equal(parseMongoWriteCommand('db["my-coll"].bulkWrite([{ deleteOne: { filter: { a: 1 } } }]);')?.kind, "bulkWrite");
+});
+
+test("bulkWrite operations are validated and the problem is named", () => {
+  for (const [source, expected] of [
+    ["db.orders.bulkWrite()", /array of operations and optional options/],
+    ["db.orders.bulkWrite({})", /requires an array of operations/],
+    ["db.orders.bulkWrite([])", /at least one operation/],
+    ["db.orders.bulkWrite([1])", /operation 1 must be a document/],
+    ["db.orders.bulkWrite([{ insertOne: {}, deleteOne: {} }])", /exactly one operation key/],
+    ["db.orders.bulkWrite([{ upsertOne: { document: {} } }])", /unsupported operation upsertOne/],
+    ["db.orders.bulkWrite([{ insertOne: { doc: {} } }])", /unsupported field doc/],
+    ["db.orders.bulkWrite([{ insertOne: {} }])", /requires a document document/],
+    ["db.orders.bulkWrite([{ updateOne: { filter: {}, update: { a: 1 } } }])", /must use operators such as \$set/],
+    ["db.orders.bulkWrite([{ updateOne: { filter: {}, update: { $set: { a: 1 } }, upsert: 1 } }])", /upsert must be a boolean/],
+    ["db.orders.bulkWrite([{ updateOne: { filter: {}, update: { $set: { a: 1 } }, collation: {} } }])", /unsupported field collation/],
+    ["db.orders.bulkWrite([{ replaceOne: { filter: {}, replacement: { $set: { a: 1 } } } }])", /must not contain update operators such as \$set/],
+    ["db.orders.bulkWrite([{ deleteOne: { filter: [] } }])", /field filter must be a document/],
+    ["db.orders.bulkWrite([{ deleteOne: { filter: {} } }], { ordered: 1 })", /ordered option must be a boolean/],
+    ["db.orders.bulkWrite([{ deleteOne: { filter: {} } }], { writeConcern: {} })", /Unsupported bulkWrite\(\) option: writeConcern/],
+  ] as const) {
+    assert.equal(parseMongoWriteCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
+test("evaluateMongoWriteSafety treats a bulkWrite as risky as its least-bounded operation", () => {
+  const policy = { allowWrites: true, allowDangerous: false } as Parameters<typeof evaluateMongoWriteSafety>[1];
+  const bounded = parseMongoWriteCommand("db.orders.bulkWrite([{ insertOne: { document: { a: 1 } } }, { deleteOne: { filter: { sku: 'X' } } }])")!;
+  const unbounded = parseMongoWriteCommand("db.orders.bulkWrite([{ updateOne: { filter: { sku: 'X' }, update: { $set: { a: 1 } } } }, { deleteMany: { filter: {} } }])")!;
+  assert.equal(evaluateMongoWriteSafety(bounded, policy).allowed, true);
+  assert.equal(evaluateMongoWriteSafety(unbounded, policy).allowed, false);
+  assert.equal(evaluateMongoWriteSafety(unbounded, { ...policy, allowDangerous: true }).allowed, true);
+});
+
+test("mongoBulkWriteToQueryResult renders one row of counts", () => {
+  const result = mongoBulkWriteToQueryResult({ inserted_count: 2, matched_count: 3, modified_count: 1, deleted_count: 4, upserted_count: 1 }, 12.6);
+  assert.deepEqual(result.columns, ["insertedCount", "matchedCount", "modifiedCount", "deletedCount", "upsertedCount"]);
+  assert.deepEqual(result.rows, [[2, 3, 1, 4, 1]]);
+  assert.equal(result.affected_rows, 8);
+  assert.equal(result.execution_time_ms, 13);
+});
+
+test("parseMongoWriteCommand reads replaceOne as a filtered replace", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.orders.replaceOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {name: "new", tags: []}, {upsert: true})'), {
+    kind: "replace",
+    collection: "orders",
+    filter: '{"_id": {"$oid":"507f1f77bcf86cd799439011"}}',
+    replacement: '{"name": "new", "tags": []}',
+    options: '{"upsert": true}',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db["my-coll"].replaceOne({a: 1}, {b: 2});'), {
+    kind: "replace",
+    collection: "my-coll",
+    filter: '{"a": 1}',
+    replacement: '{"b": 2}',
+  });
+
+  for (const source of ["db.orders.replaceOne({a: 1})", "db.orders.replaceOne({a: 1}, {b: 2}, {upsert: true}, 4)", "db.orders.replaceOne({a: 1}, [{b: 2}])", "db.orders.replaceOne({a: 1}, {$set: {b: 2}})"]) {
+    assert.equal(parseMongoWriteCommand(source), null, source);
+  }
+  assert.match(describeMongoCommandParseFailure("db.orders.replaceOne({a: 1}, {$set: {b: 2}})"), /must not contain update operators such as \$set; use updateOne\(\)/);
+});
+
+test("evaluateMongoWriteSafety guards an unbounded replaceOne like an update", () => {
+  const bounded = parseMongoWriteCommand("db.orders.replaceOne({a: 1}, {b: 2})")!;
+  const unbounded = parseMongoWriteCommand("db.orders.replaceOne({}, {b: 2})")!;
+  const policy = { allowWrites: true, allowDangerous: false } as Parameters<typeof evaluateMongoWriteSafety>[1];
+  assert.equal(evaluateMongoWriteSafety(bounded, policy).allowed, true);
+  assert.equal(evaluateMongoWriteSafety(unbounded, policy).allowed, false);
+  assert.equal(evaluateMongoWriteSafety(bounded, { ...policy, allowWrites: false }).allowed, false);
+});
+
+test("normalizeRustMongoCommand passes a replace command through unchanged", () => {
+  assert.deepEqual(normalizeRustMongoCommand({ kind: "replace", collection: "orders", filter: '{"a":1}', replacement: '{"b":2}', options: null }), {
+    kind: "replace",
+    collection: "orders",
+    filter: '{"a":1}',
+    replacement: '{"b":2}',
   });
 });
 
@@ -1210,8 +1383,8 @@ test("describeMongoCommandParseFailure explains the argument shape a known metho
 });
 
 test("describeMongoCommandParseFailure names unsupported methods and points at alternatives", () => {
-  const replaceOne = describeMongoCommandParseFailure("db.c.replaceOne({a: 1}, {b: 2})");
-  assert.match(replaceOne, /^Collection method replaceOne\(\) is not supported\. Supported collection methods: find, findOne/);
+  const rename = describeMongoCommandParseFailure('db.c.renameCollection("d")');
+  assert.match(rename, /^Collection method renameCollection\(\) is not supported\. Supported collection methods: find, findOne/);
   // Bracket and getCollection targets are recognised too.
   assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
@@ -1222,7 +1395,7 @@ test("describeMongoCommandParseFailure names unsupported methods and points at a
   assert.match(describeMongoCommandParseFailure("show collections"), /listed in the sidebar/);
 
   // Leading comments do not hide the command shape.
-  assert.match(describeMongoCommandParseFailure("// note\ndb.c.bulkWrite([])"), /bulkWrite\(\) is not supported/);
+  assert.match(describeMongoCommandParseFailure("// note\ndb.c.mapReduce()"), /mapReduce\(\) is not supported/);
 });
 
 test("describeMongoCommandParseFailure reports unclosed delimiters and shell hints", () => {

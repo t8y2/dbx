@@ -104,6 +104,32 @@
         "value": { "type": "string" }
       }
     },
+    "fieldPicker": {
+      "description": "Local-file action on a text/password/textarea field. Desktop hosts store the chosen absolute path in the declaring field; browser hosts cannot read a client path and upload the file content into 'content_field' instead.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "'directory' is desktop-only: a browser cannot hand a folder to the plugin.",
+          "enum": ["file", "directory"]
+        },
+        "accept": {
+          "description": "Filters offered by the picker: file extensions ('.pem') or MIME types ('text/plain').",
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(\\.[A-Za-z0-9]{1,16}|[A-Za-z0-9+*._-]{1,64}/[A-Za-z0-9+*._-]{1,64})$"
+          }
+        },
+        "content_field": {
+          "description": "Declared sibling field that receives the file content on hosts without a client filesystem.",
+          "$ref": "#/$defs/identifier"
+        }
+      }
+    },
     "formFieldLocalization": {
       "type": "object",
       "additionalProperties": false,
@@ -142,12 +168,64 @@
       }
     },
     "fieldCondition": {
+      "oneOf": [
+        { "$ref": "#/$defs/fieldConditionClause" },
+        { "$ref": "#/$defs/fieldConditionAllOf" },
+        { "$ref": "#/$defs/fieldConditionAnyOf" },
+        { "$ref": "#/$defs/fieldConditionNot" }
+      ]
+    },
+    "fieldConditionClause": {
       "type": "object",
       "additionalProperties": false,
       "required": ["field", "one_of"],
       "properties": {
         "field": { "$ref": "#/$defs/identifier" },
-        "one_of": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        "one_of": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "description": "Compared against the referenced field's value by canonical string form, so `false` and `\"false\"` both match a boolean false.",
+            "type": ["string", "boolean", "number"]
+          }
+        }
+      }
+    },
+    "fieldConditionAllOf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all_of"],
+      "properties": {
+        "all_of": {
+          "description": "Matches only when every nested condition matches.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fieldCondition" }
+        }
+      }
+    },
+    "fieldConditionAnyOf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["any_of"],
+      "properties": {
+        "any_of": {
+          "description": "Matches when at least one nested condition matches.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fieldCondition" }
+        }
+      }
+    },
+    "fieldConditionNot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": {
+        "not": {
+          "description": "Inverts the nested condition.",
+          "$ref": "#/$defs/fieldCondition"
+        }
       }
     },
     "formField": {
@@ -164,6 +242,7 @@
         "default": { "type": ["string", "number", "boolean", "null"] },
         "options": { "type": "array", "items": { "$ref": "#/$defs/selectOption" } },
         "binding": { "enum": ["config", "secret", "name", "host", "port", "username", "password", "database"] },
+        "picker": { "$ref": "#/$defs/fieldPicker" },
         "visible_when": { "$ref": "#/$defs/fieldCondition" },
         "required_when": { "$ref": "#/$defs/fieldCondition" }
       },

@@ -439,9 +439,16 @@ pub async fn mongo_find_documents_extended_json_core(
     }
 }
 
-fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
+pub(crate) fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains(method) && (lower.contains("unknown method") || lower.contains("method not found"))
+}
+
+/// True only when a legacy agent refused a bulk write because it has no `insertMany` at all, which
+/// is the one failure a document-by-document retry can still get through. It must stay precise:
+/// every other legacy-agent failure, a rejected document included, has to surface as-is.
+pub(crate) fn is_legacy_agent_insert_many_unsupported(error: &str) -> bool {
+    error.contains("does not support insertMany") || error.contains("does not support bulk insertMany")
 }
 
 pub async fn mongo_aggregate_documents_core(
@@ -730,10 +737,18 @@ pub async fn mongo_insert_documents_core(
                     "docs_json": docs_json,
                 }))
                 .await?;
-            result
-                .get("affected_rows")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| "MongoDB Legacy Agent returned an invalid insertMany result".to_string())
+            let outcome = mongo_driver::agent_insert_outcome(&result)?;
+            // The agent reports a partly applied batch as a success, so a rejected document has to
+            // fail the call here exactly like the native driver's insert_many does.
+            if let Some(first) = outcome.errors.first() {
+                return Err(format!(
+                    "MongoDB Legacy Agent rejected {} of {} documents: {}",
+                    outcome.errors.len(),
+                    documents.len(),
+                    first.message
+                ));
+            }
+            Ok(outcome.inserted)
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -802,6 +817,97 @@ pub async fn mongo_update_documents_core(
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
+}
+
+pub async fn mongo_replace_document_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::replace_document(client, database, collection, filter_json, replacement_json, options_json)
+                .await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoReplaceDocument) {
+                return Err(
+                    "MongoDB Legacy Agent does not support replaceOne; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            let result: serde_json::Value = client
+                .mongo_replace_document(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "filter_json": filter_json,
+                    "replacement_json": replacement_json,
+                    "options_json": options_json,
+                }))
+                .await?;
+            Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_bulk_write_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    operations_json: &str,
+    options_json: Option<&str>,
+) -> Result<mongo_driver::MongoBulkWriteResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::bulk_write(client, database, collection, operations_json, options_json).await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoBulkWrite) {
+                return Err(
+                    "MongoDB Legacy Agent does not support bulkWrite; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            client
+                .mongo_bulk_write(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "operations_json": operations_json,
+                    "options_json": options_json,
+                }))
+                .await
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+/// One row of counts, the way the shell prints a `BulkWriteResult`.
+pub fn mongo_bulk_write_query_result(result: &mongo_driver::MongoBulkWriteResult) -> QueryResult {
+    let columns = ["insertedCount", "matchedCount", "modifiedCount", "deletedCount", "upsertedCount"];
+    let values = [
+        result.inserted_count,
+        result.matched_count,
+        result.modified_count,
+        result.deleted_count,
+        result.upserted_count,
+    ];
+    query_result(
+        columns.iter().map(ToString::to_string).collect(),
+        vec![values.iter().map(|value| serde_json::Value::from(*value)).collect()],
+        result.inserted_count + result.modified_count + result.deleted_count + result.upserted_count,
+    )
 }
 
 pub async fn mongo_delete_document_core(
@@ -1029,6 +1135,25 @@ pub async fn execute_mongo_command_core(
         }
         MongoCommand::Insert { collection, documents } => {
             let affected = mongo_insert_documents_core(state, connection_id, database, collection, documents).await?;
+            Ok(affected_query_result(affected))
+        }
+        MongoCommand::BulkWrite { collection, operations, options } => {
+            let result =
+                mongo_bulk_write_core(state, connection_id, database, collection, operations, options.as_deref())
+                    .await?;
+            Ok(mongo_bulk_write_query_result(&result))
+        }
+        MongoCommand::Replace { collection, filter, replacement, options } => {
+            let affected = mongo_replace_document_core(
+                state,
+                connection_id,
+                database,
+                collection,
+                filter,
+                replacement,
+                options.as_deref(),
+            )
+            .await?;
             Ok(affected_query_result(affected))
         }
         MongoCommand::Update { collection, filter, update, options, many } => {
@@ -1704,6 +1829,46 @@ for line in sys.stdin:
         let affected = mongo_insert_documents_core(&state, "legacy", "app", "user", documents).await.unwrap();
 
         assert_eq!(affected, 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_insert_many_fails_when_the_legacy_agent_rejects_a_document() {
+        let documents = r#"[{"_id":1},{"_id":1}]"#;
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "insert_documents",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "docs_json": documents,
+            }),
+            serde_json::json!({
+                "affected_rows": 1,
+                "errors": [{ "index": 1, "code": 11000, "message": "E11000 duplicate key" }],
+            }),
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let error = mongo_insert_documents_core(&state, "legacy", "app", "users", documents).await.unwrap_err();
+
+        // The agent reports a partly applied batch as a success, so a rejected document has to
+        // fail the call here rather than being rounded up to "inserted".
+        assert_eq!(error, "MongoDB Legacy Agent rejected 1 of 2 documents: E11000 duplicate key");
+    }
+
+    #[test]
+    fn legacy_insert_many_heuristic_covers_only_the_missing_capability() {
+        assert!(is_legacy_agent_insert_many_unsupported(
+            "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"
+        ));
+        assert!(is_legacy_agent_insert_many_unsupported(
+            "MongoDB legacy agent does not support bulk insertMany/insertOne writes"
+        ));
+        // A rejected document must not be retried one by one: the rest of the batch is written.
+        assert!(!is_legacy_agent_insert_many_unsupported(
+            "MongoDB Legacy Agent rejected 1 of 2 documents: E11000 duplicate key"
+        ));
     }
 
     #[cfg(unix)]

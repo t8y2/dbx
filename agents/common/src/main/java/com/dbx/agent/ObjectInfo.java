@@ -7,9 +7,10 @@ public final class ObjectInfo {
     private String object_type;
     private String schema;
     private String comment;
+    private Boolean valid;
 
     public ObjectInfo() {
-        this("", "", null, null);
+        this("", "", null, null, null);
     }
 
     public ObjectInfo(String name, String object_type) {
@@ -17,10 +18,15 @@ public final class ObjectInfo {
     }
 
     public ObjectInfo(String name, String object_type, String schema, String comment) {
+        this(name, object_type, schema, comment, null);
+    }
+
+    public ObjectInfo(String name, String object_type, String schema, String comment, Boolean valid) {
         this.name = name;
         this.object_type = object_type;
         this.schema = schema;
         this.comment = comment;
+        this.valid = valid;
     }
 
     public String getName() {
@@ -39,6 +45,10 @@ public final class ObjectInfo {
         return comment;
     }
 
+    public Boolean getValid() {
+        return valid;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -55,6 +65,10 @@ public final class ObjectInfo {
         this.comment = comment;
     }
 
+    public void setValid(Boolean valid) {
+        this.valid = valid;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -63,12 +77,13 @@ public final class ObjectInfo {
         return Objects.equals(name, that.name)
             && Objects.equals(object_type, that.object_type)
             && Objects.equals(schema, that.schema)
-            && Objects.equals(comment, that.comment);
+            && Objects.equals(comment, that.comment)
+            && Objects.equals(valid, that.valid);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, object_type, schema, comment);
+        return Objects.hash(name, object_type, schema, comment, valid);
     }
 
     @Override
@@ -77,6 +92,7 @@ public final class ObjectInfo {
             + ", object_type=" + object_type
             + ", schema=" + schema
             + ", comment=" + comment
+            + ", valid=" + valid
             + ")";
     }
 }

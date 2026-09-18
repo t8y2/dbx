@@ -56,6 +56,22 @@ export function isValidActionForMode(action: AiAction, mode: AiAssistantMode): b
   return (mode === "agent" ? AGENT_ACTIONS : ASK_ACTIONS).includes(action);
 }
 
+/**
+ * UI-level picker selection: every concrete transport action plus the `auto`
+ * entry that lets the assistant pick one of them at send time (#9118).
+ *
+ * `auto` deliberately stays OUT of `AiAction`, `ASK_ACTIONS`/`AGENT_ACTIONS` and
+ * `isValidActionForMode`: it is resolved by `aiIntentRouter` before
+ * `buildAgentRequest`/`runAgentStream` run, so an "auto" string can never reach
+ * `AiTaskContract.action` — the backend interpolates that value into its system
+ * prompt and uses it for `validate_final_answer`/contract repair.
+ */
+export type AiActionSelection = AiAction | "auto";
+
+export function isAutoActionSelection(selection: AiActionSelection): selection is "auto" {
+  return selection === "auto";
+}
+
 function isChineseLocale(locale: Locale): boolean {
   return locale === "zh-CN" || locale === "zh-TW";
 }
@@ -132,6 +148,8 @@ export interface AiRequestInput {
   confirmedConnectionId?: string;
   confirmedDatabase?: string;
   confirmedSchema?: string;
+  /** Stable per-conversation key forwarded to the Responses API. */
+  promptCacheKey?: string;
 }
 
 export interface AiNamespaceSelection {
@@ -194,6 +212,7 @@ export async function runAiAction(input: AiRequestInput, history?: api.AiMessage
     messages,
     taskContract,
     maxTokens,
+    promptCacheKey: input.promptCacheKey,
   });
 }
 
@@ -209,6 +228,7 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
       messages,
       taskContract,
       maxTokens,
+      promptCacheKey: input.promptCacheKey,
     },
     (chunk) => {
       if (!chunk.done) {
@@ -232,6 +252,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
       messages,
       taskContract,
       maxTokens,
+      promptCacheKey: input.promptCacheKey,
     },
     input.context.connectionId,
     input.context.database,

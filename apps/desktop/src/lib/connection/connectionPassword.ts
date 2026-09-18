@@ -46,7 +46,7 @@ export function pluginConnectionNeedsPasswordPrompt(fields: readonly PluginFormF
   if (!passwordFields.length) return false;
   const readValue = (key: string): PluginFormFieldValue => {
     const stored = isRecord(externalConfig) ? (externalConfig[key] as PluginFormFieldValue) : undefined;
-    return stored !== undefined ? stored : fields.find((candidate) => candidate.key === key)?.default;
+    return stored !== undefined ? stored : (fields.find((candidate) => candidate.key === key)?.default ?? undefined);
   };
   return passwordFields.some((field) => pluginFieldIsRequired(field, readValue));
 }

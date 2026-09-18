@@ -49,6 +49,7 @@ import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from ".
 import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisKeyTemplates, redisKeyTemplatesToTextarea } from "@/lib/redis/redisKeyTemplates";
+import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -2637,7 +2638,9 @@ watch(
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
-        database: config.database,
+        // Show the index the backend actually connects with; legacy dirty values
+        // (e.g. redis-cli flags in the field) are healed when the form is saved.
+        database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
@@ -2886,6 +2889,7 @@ const transportPathSegments = computed(() => {
 
 function defaultDatabaseForProfile() {
   if (form.value.db_type === "redshift") return "dev";
+  if (form.value.db_type === "redis") return "0";
   if (form.value.db_type === "gaussdb") return "postgres";
   if (form.value.db_type === "kwdb") return "defaultdb";
   if (form.value.db_type === "databend") return "default";
@@ -3606,7 +3610,7 @@ const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
 
 function pluginFieldValue(field: PluginFormField): PluginFormFieldValue {
   if (field.binding === "name") return form.value.name;
-  return pluginFormValues.value[field.key] ?? field.default;
+  return pluginFormValues.value[field.key] ?? field.default ?? undefined;
 }
 
 function pluginFieldHasValue(field: PluginFormField): boolean {
@@ -4106,8 +4110,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
     config.save_password = form.value.save_password;
-    config.is_production = form.value.is_production;
-    config.production_databases = form.value.production_databases;
+    // 生产保护只拦截 SQL/数据编辑路径，插件连接走不到；表单已隐藏该区块，提交时清掉历史残留标志。
+    config.is_production = false;
+    config.production_databases = [];
   } else {
     config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   }
@@ -4404,6 +4409,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.redis_key_separator = config.redis_key_separator?.trim() ?? ":";
     const scanSize = Number(config.redis_scan_page_size);
     config.redis_scan_page_size = Number.isFinite(scanSize) && scanSize >= REDIS_SCAN_PAGE_SIZE_MIN && scanSize <= REDIS_SCAN_PAGE_SIZE_MAX ? Math.round(scanSize) : REDIS_SCAN_PAGE_SIZE_DEFAULT;
+    {
+      // A Redis database is a numeric index; dirty values (e.g. redis-cli flags
+      // pasted into the field) are stored as the index the backend connects with.
+      const database = normalizeRedisDatabaseValue(config.database);
+      config.database = database;
+      form.value.database = database || "";
+    }
     {
       const templates = normalizeRedisKeyTemplates(redisKeyTemplatesText.value);
       config.redis_key_templates = templates.length > 0 ? templates : undefined;
@@ -9016,7 +9028,7 @@ function openExternalUrl(url: string) {
                     </p>
                   </div>
                 </div>
-                <div class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
+                <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
                   <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
                     <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD</span>
                   </Label>

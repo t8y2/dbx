@@ -1,6 +1,7 @@
 import { reactive, computed } from "vue";
 import * as api from "@/lib/backend/api";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
+import { uuid } from "@/lib/common/utils";
 
 export type BackgroundTaskKind = "table-export" | "database-export" | "sql-file" | "data-transfer" | "multi-db-execution" | "schema-diff" | "data-compare";
 export type BackgroundTaskStatus = "Running" | "Writing" | "Cancelling" | "Done" | "Error" | "Cancelled";
@@ -47,6 +48,9 @@ export interface ExportTask {
   failureCount?: number;
   affectedRows?: number;
   elapsedMs?: number;
+  bytesRead?: number;
+  totalBytes?: number;
+  sqlFilePhase?: api.SqlFileProgress["phase"];
   startedAt?: number;
   finishedAt?: number;
   statementSummary?: string;
@@ -387,20 +391,8 @@ export function useExportTracker() {
 
   const hasActive = computed(() => activeCount.value > 0);
 
-  function generateUUID() {
-    if (typeof crypto !== "undefined" && crypto.randomUUID) {
-      return crypto.randomUUID();
-    }
-    let buffer = new Uint8Array(16);
-    crypto.getRandomValues(buffer);
-    buffer[6] = (buffer[6] & 0x0f) | 0x40;
-    return Array.from(buffer, (b) => b.toString(16).padStart(2, "0"))
-      .join("")
-      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
-  }
-
   function addTask(tableName: string, format: string, filePath: string, exportId?: string): ExportTask {
-    const id = exportId ?? generateUUID();
+    const id = exportId ?? uuid();
     const task = reactive<ExportTask>({
       exportId: id,
       kind: "table-export",
@@ -672,9 +664,12 @@ export function useExportTracker() {
     task.failureCount = progress.failureCount;
     task.affectedRows = progress.affectedRows;
     task.elapsedMs = progress.elapsedMs;
+    task.bytesRead = progress.bytesRead ?? task.bytesRead;
+    task.totalBytes = progress.totalBytes ?? task.totalBytes;
+    task.sqlFilePhase = progress.phase ?? task.sqlFilePhase;
     task.statementSummary = progress.statementSummary;
     task.rowsExported = progress.successCount + progress.failureCount;
-    task.totalRows = Math.max(progress.statementIndex, progress.successCount + progress.failureCount) || null;
+    task.totalRows = null;
   }
 
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {

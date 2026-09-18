@@ -26,6 +26,16 @@ describe("plugin center integration", () => {
     expect(driverStoreSource).not.toContain("PluginContributionsPanel");
   });
 
+  it("formats structured backend errors for local and URL package installs", () => {
+    const localInstall = pluginCenterSource.slice(pluginCenterSource.indexOf("async function installPlugin("), pluginCenterSource.indexOf("function isHttpPackageUrl("));
+    const urlInstall = pluginCenterSource.slice(pluginCenterSource.indexOf("async function installPluginFromUrl("), pluginCenterSource.indexOf("const urlProgressPercent"));
+
+    for (const installSource of [localInstall, urlInstall]) {
+      expect(installSource).toContain("toast(translateBackendError(t, cause), 8000)");
+      expect(installSource).not.toContain("String(cause)");
+    }
+  });
+
   it("creates and edits plugin connections in the unified connection dialog", () => {
     expect(appDialogsSource).toContain(':edit-config="editConfig"');
     expect(appDialogsSource).toContain(':plugin-provider="connectionPluginProvider"');

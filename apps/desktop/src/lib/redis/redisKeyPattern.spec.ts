@@ -1,5 +1,59 @@
 import { describe, expect, it } from "vitest";
-import { createRedisKeyPatternMatcher, redisGroupSubtreePattern, redisKeyMatchesPattern } from "@/lib/redis/redisKeyPattern";
+import { createRedisKeyPatternMatcher, escapeRedisGlobText, redisGroupSubtreePattern, redisKeyMatchesPattern, redisKeySearchPattern } from "@/lib/redis/redisKeyPattern";
+
+describe("redisKeySearchPattern", () => {
+  it("returns `*` for empty input regardless of fuzzy", () => {
+    expect(redisKeySearchPattern("", false)).toBe("*");
+    expect(redisKeySearchPattern("   ", true)).toBe("*");
+  });
+
+  it("non-fuzzy (pattern) mode returns the trimmed value verbatim", () => {
+    expect(redisKeySearchPattern("user:*", false)).toBe("user:*");
+    expect(redisKeySearchPattern("  prod:login_fail_count:* ", false)).toBe("prod:login_fail_count:*");
+  });
+
+  it("fuzzy mode wraps plain text as `*text*` for substring-contains matching", () => {
+    expect(redisKeySearchPattern("admin", true)).toBe("*admin*");
+    expect(redisKeySearchPattern("login_fail_count", true)).toBe("*login_fail_count*");
+  });
+
+  it("fuzzy mode keeps user `*` as a wildcard so explicit globs still match (#9012)", () => {
+    // `prod:login_fail_count:*` must NOT escape the `*` to `\*`; the key
+    // prod:login_fail_count:admin:2026-09-14 must be findable.
+    expect(redisKeySearchPattern("prod:login_fail_count:*", true)).toBe("*prod:login_fail_count:**");
+    expect(redisKeySearchPattern("prod:login_fail_count:admin:2026*", true)).toBe("*prod:login_fail_count:admin:2026**");
+    // A bare `2026*` becomes `*2026**` (substring contains, wildcard honoured).
+    expect(redisKeySearchPattern("2026*", true)).toBe("*2026**");
+  });
+
+  it("fuzzy mode keeps `?` as a single-char wildcard", () => {
+    expect(redisKeySearchPattern("user:?", true)).toBe("*user:?*");
+  });
+
+  it("fuzzy mode still escapes `[` / `]` / `\\` to avoid char-class / escape ambiguity", () => {
+    expect(redisKeySearchPattern("a[b", true)).toBe("*a\\[b*");
+    expect(redisKeySearchPattern("a]b", true)).toBe("*a\\]b*");
+    expect(redisKeySearchPattern("a\\b", true)).toBe("*a\\\\b*");
+  });
+});
+
+describe("escapeRedisGlobText", () => {
+  it("non-fuzzy (default) escapes the full glob metacharacter set", () => {
+    expect(escapeRedisGlobText("a*b")).toBe("a\\*b");
+    expect(escapeRedisGlobText("a?b")).toBe("a\\?b");
+    expect(escapeRedisGlobText("a[b")).toBe("a\\[b");
+    expect(escapeRedisGlobText("a]b")).toBe("a\\]b");
+    expect(escapeRedisGlobText("a\\b")).toBe("a\\\\b");
+  });
+
+  it("fuzzy escapes only `[` / `]` / `\\`, leaving `*` / `?` as wildcards", () => {
+    expect(escapeRedisGlobText("a*b", true)).toBe("a*b");
+    expect(escapeRedisGlobText("a?b", true)).toBe("a?b");
+    expect(escapeRedisGlobText("a[b", true)).toBe("a\\[b");
+    expect(escapeRedisGlobText("a]b", true)).toBe("a\\]b");
+    expect(escapeRedisGlobText("a\\b", true)).toBe("a\\\\b");
+  });
+});
 
 describe("redisGroupSubtreePattern", () => {
   it("builds a prefix pattern for single and nested groups", () => {

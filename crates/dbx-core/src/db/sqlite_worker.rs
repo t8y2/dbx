@@ -437,6 +437,10 @@ async fn ensure_worker_consent(data_dir: &Path, identity: &str, dest: &str, dige
         previous_fingerprint: None,
         prompt: Some(dest.to_string()),
         echo: false,
+        source: None,
+        title: None,
+        default_value: None,
+        options: Vec::new(),
     };
     let Some(rx) = ssh_prompt::request_ssh_prompt(request) else {
         return Err("Uploading a SQLite worker requires explicit consent in the Desktop UI".to_string());

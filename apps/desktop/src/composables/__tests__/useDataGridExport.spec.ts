@@ -965,6 +965,32 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
   });
 
+  it("recognizes PostgreSQL serial primary keys when excluding primary keys", () => {
+    const serialTable: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        {
+          name: "id",
+          data_type: "integer",
+          is_nullable: false,
+          is_primary_key: true,
+          extra: "serial",
+        },
+        { name: "name", data_type: "text", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    };
+
+    const state = createExportState(serialTable, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+  });
+
   it("keeps a manually-assigned primary key insertable under primary-key exclusion", () => {
     const compositeKeyTable: DataGridTableMeta = {
       tableName: "daily_stats",

@@ -31,6 +31,7 @@ type Env = {
   PLUGIN_ARCHIVE: KvBinding;
   ANALYTICS_TOKEN: string;
   CF_ACCOUNT_ID: string;
+  STATS_SALT: string;
 };
 
 const DOWNLOAD_PATTERN = /^\/plugins\/([A-Za-z0-9._-]{1,64})\/([0-9A-Za-z.+-]{1,32})\//;
@@ -50,12 +51,25 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Max-Age": "86400",
 };
 
-function recordEvent(env: Env, kind: "dl" | "inst", pluginId: string, version: string): void {
+// Truncated HMAC of (salt, ip|utc-day): lets aggregations count distinct
+// downloaders per group without storing IPs. Anti-inflation only — a
+// determined attacker rotating IPs can still inflate; that is acceptable for
+// decorative stats. Legacy events written before this field have no blob4 and
+// are excluded from unique counts (raw counts keep covering them).
+async function ipDayIdentity(env: Env, request: Request): Promise<string> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const day = new Date().toISOString().slice(0, 10);
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.STATS_SALT), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${ip}|${day}`));
+  return [...new Uint8Array(mac)].slice(0, 8).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function recordEvent(env: Env, kind: "dl" | "inst", pluginId: string, version: string, identity: string): Promise<void> {
   try {
     env.PLUGIN_STATS.writeDataPoint({
       // index on pluginId keeps per-plugin queries well-sharded
       indexes: [pluginId],
-      blobs: [kind, pluginId, version],
+      blobs: [kind, pluginId, version, identity],
       doubles: [1],
     });
   } catch (error) {
@@ -94,10 +108,52 @@ function parseSqlRows(payload: unknown): Array<Record<string, unknown>> {
   return Array.isArray(result) ? (result as Array<Record<string, unknown>>) : [];
 }
 
+type DailyUnique = { kind: string; plugin: string; day: string; uniq: number };
+
+async function fetchDailyUniques(env: Env, from: Date, to: Date): Promise<DailyUnique[]> {
+  // The SQL dialect rejects function expressions in GROUP BY but accepts
+  // aliases, so bucket per hour and merge into per-day sums in JS. Hourly
+  // distincts slightly overestimate the daily distinct (an identity active
+  // across an hour boundary counts once per bucket); acceptable for decorative
+  // unique counts and immune to multi-version release inflation.
+  const query =
+    "SELECT blob1 AS kind, blob2 AS plugin, toStartOfHour(timestamp) AS hour, count(DISTINCT blob4) AS uniq " +
+    `FROM DBX_PLUGIN_STATS WHERE timestamp > toDateTime(${sqlString(sqlTimestamp(from))}) ` +
+    `AND timestamp <= toDateTime(${sqlString(sqlTimestamp(to))}) AND blob4 != '' ` +
+    "GROUP BY kind, plugin, hour";
+  const response = await fetch(`${SQL_ENDPOINT}/${env.CF_ACCOUNT_ID}/analytics_engine/sql?query=${encodeURIComponent(query)}`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${env.ANALYTICS_TOKEN}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Analytics SQL API ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  }
+  const payload = (await response.json()) as unknown;
+  const buckets = parseSqlRows(payload)
+    .map((row) => ({
+      kind: String(row.kind ?? ""),
+      plugin: String(row.plugin ?? ""),
+      day: String(row.hour ?? "").slice(0, 10),
+      uniq: Number(row.uniq ?? 0) || 0,
+    }))
+    .filter((row) => COUNTED_KINDS.has(row.kind) && PLUGIN_ID_PATTERN.test(row.plugin));
+  const byDay = new Map<string, number>();
+  for (const bucket of buckets) {
+    const key = `${bucket.kind}:${bucket.plugin}:${bucket.day}`;
+    byDay.set(key, (byDay.get(key) ?? 0) + bucket.uniq);
+  }
+  return [...byDay].map(([key, uniq]) => {
+    const [kind, plugin, day] = key.split(":");
+    return { kind, plugin, day, uniq };
+  });
+}
+
 async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<WindowCount[]> {
+  // SQL reads the dataset by NAME (wrangler.json `dataset`), not by binding —
+  // keep in sync with the analytics_engine_datasets entry.
   const query =
     "SELECT blob1 AS kind, blob2 AS plugin, blob3 AS version, SUM(_sample_interval) AS events " +
-    `FROM PLUGIN_STATS WHERE timestamp > toDateTime(${sqlString(sqlTimestamp(from))}) ` +
+    `FROM DBX_PLUGIN_STATS WHERE timestamp > toDateTime(${sqlString(sqlTimestamp(from))}) ` +
     `AND timestamp <= toDateTime(${sqlString(sqlTimestamp(to))}) GROUP BY blob1, blob2, blob3`;
   // The SQL API takes the statement as a URL parameter, not a form body (a
   // form-encoded body is parsed as the raw SQL and rejected with a 422).
@@ -123,26 +179,42 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
 // marker is only advanced after every write lands, so a failed run retries the
 // same window on the next cron; a crash mid-write can double-count a window,
 // which is acceptable for decorative stats.
-async function runAggregation(env: Env): Promise<{ from: string; to: string; activeKeys: number }> {
+async function runAggregation(env: Env, fromOverride?: string): Promise<{ from: string; to: string; activeKeys: number }> {
   const to = new Date();
+  // `x-archive-from: reset` re-aggregates from the epoch (backfill after a fix);
+  // totals are additive, so only use it when the archived window is known-empty.
+  const override = fromOverride?.trim().toLowerCase() === "reset" ? new Date(0) : undefined;
   const lastSuccess = await env.PLUGIN_ARCHIVE.get(ARCHIVE_META_KEY);
-  const from = lastSuccess ? new Date(`${lastSuccess.replace(" ", "T")}Z`) : new Date(0);
+  const from = override ?? (lastSuccess ? new Date(`${lastSuccess.replace(" ", "T")}Z`) : new Date(0));
   if (Number.isNaN(from.getTime())) throw new Error(`Corrupted ${ARCHIVE_META_KEY}: ${lastSuccess}`);
 
-  const counts = await fetchWindowCounts(env, from, to);
+  const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
   const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
 
+  const pluginTotals = new Map<string, number>();
   for (const count of counts) {
     const totalKey = `total:${count.kind}:${count.plugin}:${count.version}`;
     const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(totalKey)) ?? "0", 10) || 0;
     await env.PLUGIN_ARCHIVE.put(totalKey, String(current + count.events));
+    pluginTotals.set(`${count.kind}:${count.plugin}`, (pluginTotals.get(`${count.kind}:${count.plugin}`) ?? 0) + count.events);
     const byKind = (summary[count.kind] ??= {});
     byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
+  }
+  for (const [pair, delta] of pluginTotals) {
+    const [kind, plugin] = pair.split(":");
+    const pluginKey = `total:${kind}:${plugin}`;
+    const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(pluginKey)) ?? "0", 10) || 0;
+    await env.PLUGIN_ARCHIVE.put(pluginKey, String(current + delta));
+  }
+  // Daily uniques overwrite (not add): reruns converge to the full-day value,
+  // and multi-version releases cannot inflate the per-plugin downloader count.
+  for (const unique of uniques) {
+    await env.PLUGIN_ARCHIVE.put(`uniqd:${unique.kind}:${unique.plugin}:${unique.day}`, String(unique.uniq));
   }
 
   await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
   await env.PLUGIN_ARCHIVE.put(ARCHIVE_META_KEY, sqlTimestamp(to));
-  return { from: sqlTimestamp(from), to: sqlTimestamp(to), activeKeys: counts.length };
+  return { from: sqlTimestamp(from), to: sqlTimestamp(to), activeKeys: counts.length, uniqueDays: uniques.length };
 }
 
 async function handleInstallBeacon(request: Request, env: Env): Promise<Response> {
@@ -153,7 +225,7 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
     if (request.method !== "POST") return emptyResponse(405);
     if (request.headers.get(ARCHIVE_TRIGGER_HEADER) !== env.ANALYTICS_TOKEN) return emptyResponse(401);
     try {
-      return Response.json(await runAggregation(env), { headers: { "Cache-Control": "no-store" } });
+      return Response.json(await runAggregation(env, request.headers.get("x-archive-from") ?? undefined), { headers: { "Cache-Control": "no-store" } });
     } catch (error) {
       console.error("plugin-stats aggregation failed", error);
       return Response.json({ error: String(error) }, { status: 500, headers: { "Cache-Control": "no-store" } });
@@ -174,7 +246,7 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
   if (typeof id !== "string" || !PLUGIN_ID_PATTERN.test(id)) return emptyResponse(400);
   if (typeof version !== "string" || !VERSION_PATTERN.test(version)) return emptyResponse(400);
 
-  recordEvent(env, "inst", id, version);
+  await recordEvent(env, "inst", id, version, await ipDayIdentity(env, request));
   return emptyResponse(204);
 }
 
@@ -185,7 +257,7 @@ export default {
       if (request.method === "GET") {
         const download = url.pathname.match(DOWNLOAD_PATTERN);
         if (download && ARTIFACT_SUFFIX_PATTERN.test(url.pathname)) {
-          recordEvent(env, "dl", download[1], download[2]);
+          await recordEvent(env, "dl", download[1], download[2], await ipDayIdentity(env, request));
         }
       }
       return fetch(request);

@@ -268,6 +268,7 @@ pub async fn list_tables(client: &Influxdb3Client, database: &str) -> Result<Vec
             Some(TableInfo {
                 name,
                 table_type: "TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,

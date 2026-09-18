@@ -484,6 +484,8 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -575,6 +577,8 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
 
@@ -690,6 +694,8 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);
@@ -1288,6 +1294,8 @@ INSERT INTO install_check (id) VALUES (1), (2);
             .into_owned(),
         continue_on_error: false,
         selected_tables: None,
+        part_cooldown_ms: 0,
+        skip_relational_constraints: false,
     };
 
     let _ = execute_sql_statement(
@@ -1374,6 +1382,8 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
             .into_owned(),
         continue_on_error: false,
         selected_tables: None,
+        part_cooldown_ms: 0,
+        skip_relational_constraints: false,
     };
 
     let _ = execute_sql_statement(
@@ -1444,6 +1454,8 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
         file_path: std::env::temp_dir().join(format!("mysql-binary-dump-{suffix}.sql")).to_string_lossy().into_owned(),
         continue_on_error: false,
         selected_tables: None,
+        part_cooldown_ms: 0,
+        skip_relational_constraints: false,
     };
 
     tokio::fs::write(&request.file_path, script).await.unwrap();

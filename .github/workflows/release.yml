@@ -1033,6 +1033,9 @@ jobs:
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
+          # The CNB registry rejects provenance attestation manifests
+          # ("artifact type UNKNOWN is not allowed"); Docker Hub accepts them.
+          provenance: false
 
       - name: Export digests
         run: |

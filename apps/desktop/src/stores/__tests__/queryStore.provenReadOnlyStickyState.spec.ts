@@ -59,17 +59,17 @@ function installLocalStorage() {
   });
 }
 
-type OracleResult = Record<string, unknown>;
+type StickyResult = Record<string, unknown>;
 
-function cleanSelect(): OracleResult[] {
+function cleanSelect(): StickyResult[] {
   return [{ columns: ["VALUE"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, manual_transaction_proven_read_only: true }];
 }
 
-function dirtyUpdate(): OracleResult[] {
+function dirtyUpdate(): StickyResult[] {
   return [{ columns: [], rows: [], affected_rows: 1, execution_time_ms: 1 }];
 }
 
-function noOpResult(): OracleResult[] {
+function noOpResult(): StickyResult[] {
   return [{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1, manual_transaction_no_statement: true }];
 }
 
@@ -86,7 +86,7 @@ function expiredTransactionError() {
   };
 }
 
-describe("queryStore Oracle manual-transaction sticky state", () => {
+describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior frozen)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -144,7 +144,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     await store.executeTabSql(tabId, "SELECT * FROM EMP");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+    expect(tab.txnPossiblyDirty).not.toBe(true);
     expect(tab.txnSessionId).toBe("txn-oracle");
   });
 
@@ -158,7 +158,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     await store.executeTabSql(tabId, "UPDATE EMP SET DEPTNO = 10");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 
   it("marks an Oracle manual session dirty when the result grid dispatches a mutation", async () => {
@@ -172,7 +172,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     store.markManualTransactionDirty(tabId);
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 
   it("never clears the sticky state after a later read (UPDATE -> SELECT)", async () => {
@@ -186,7 +186,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     await store.executeTabSql(tabId, "SELECT * FROM EMP");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 
   it("dirties the session for any unproven statement in a mixed script", async () => {
@@ -202,7 +202,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     await store.executeTabSql(tabId, "SELECT * FROM DUAL; DELETE FROM EMP");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 
   it("treats a Core no-op result as neither dirty nor clean-changing", async () => {
@@ -217,7 +217,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     await store.executeTabSql(tabId, "SELECT * FROM EMP");
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+    expect(tab.txnPossiblyDirty).not.toBe(true);
   });
 
   it("passes no classificationSql and changes no sticky state on a cursor-page fetch", async () => {
@@ -242,7 +242,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     expect(args.at(-1)).toBeUndefined();
     const tab = store.tabs.find((item) => item.id === tabId)!;
     // Page fetch must neither set nor clear the dirty bit.
-    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 
   it("resets the sticky state on session-expiry recovery and recomputes from the retry", async () => {
@@ -258,7 +258,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.txnSessionId).toBe("txn-new");
-    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+    expect(tab.txnPossiblyDirty).not.toBe(true);
   });
 
   it("clears the sticky state together with the session on DBX rollback", async () => {
@@ -273,7 +273,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.txnSessionId).toBeUndefined();
-    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+    expect(tab.txnPossiblyDirty).not.toBe(true);
   });
 
   it("clears session and sticky state when a statement failure disposes the manual session", async () => {
@@ -290,7 +290,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     // The `rolled back` fragment is the cleanup compatibility contract: the
     // backend removed the manual session, so both fields must reset with it.
     expect(tab.txnSessionId).toBeUndefined();
-    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+    expect(tab.txnPossiblyDirty).not.toBe(true);
     expect(tab.txnAutoRolledBack).not.toBe(true);
   });
 
@@ -307,7 +307,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     // The statement may still have executed server-side while the manual
     // session survives, so the sticky state must stay fail-closed dirty.
     expect(tab.txnSessionId).toBe("txn-oracle");
-    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 
   it("keeps a clean session clean when a cursor-page fetch times out", async () => {
@@ -325,34 +325,126 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     // Page fetches never participate in the sticky state, matching aggregation.
     expect(tab.txnSessionId).toBe("txn-oracle");
-    expect(tab.oracleTxnPossiblyDirty).not.toBe(true);
+    expect(tab.txnPossiblyDirty).not.toBe(true);
   });
 
-  it("leaves non-Oracle manual sessions using the old rule and no marker handling", async () => {
+  it("keeps the legacy toolbar rule for dialects without sticky state", async () => {
     mocks.getConnectionConfig.mockReturnValue({
-      id: "pg-1",
-      name: "Postgres",
-      db_type: "postgres",
-      database: "postgres",
+      id: "jdbc-1",
+      name: "JDBC",
+      db_type: "jdbc",
+      database: "appdb",
       query_timeout_secs: 30,
     });
-    mocks.beginManualTransaction.mockResolvedValue("txn-pg");
-    // A Postgres manual execution never returns the Oracle marker.
+    mocks.beginManualTransaction.mockResolvedValue("txn-jdbc");
     mocks.executeInManualTransaction.mockResolvedValue([{ columns: [], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
 
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
-    const tabId = store.createTab("pg-1", "postgres", "Query", "query", "public");
+    const tabId = store.createTab("jdbc-1", "appdb", "Query", "query", "main");
     store.setAutoCommit(tabId, false);
 
     await store.executeTabSql(tabId, "SELECT 1");
     store.markManualTransactionDirty(tabId);
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
-    // No classificationSql was sent and no Oracle sticky state exists.
+    // No classificationSql is sent and no sticky state exists for non-sticky
+    // dialects: commit/rollback follow the legacy always-visible rule.
     const args = mocks.executeInManualTransaction.mock.calls[0]!;
     expect(args.at(-1)).toBeUndefined();
-    expect(tab.oracleTxnPossiblyDirty).toBeUndefined();
-    expect(tab.txnSessionId).toBe("txn-pg");
+    expect(tab.txnPossiblyDirty).toBeUndefined();
+    expect(tab.txnSessionId).toBe("txn-jdbc");
+  });
+});
+
+describe.each([
+  { label: "MySQL", configId: "mysql-1", database: "test", dbType: "mysql", txnId: "txn-mysql" },
+  { label: "PostgreSQL", configId: "pg-1", database: "postgres", dbType: "postgres", txnId: "txn-pg" },
+])("queryStore $label proven-read-only sticky state", ({ configId, database, dbType, txnId }) => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+    mocks.getConnectionConfig.mockReturnValue({
+      id: configId,
+      name: dbType,
+      db_type: dbType,
+      database,
+      query_timeout_secs: 30,
+    });
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: undefined,
+      pageLimit: undefined,
+      pageOffset: undefined,
+      countSql: undefined,
+      useAgentResultSession: false,
+    }));
+    mocks.analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "not-select" });
+    mocks.saveOpenTabsState.mockResolvedValue(undefined);
+    mocks.beginManualTransaction.mockResolvedValue(txnId);
+  });
+
+  async function setupStickyManualTab(store: { createTab: (c: string, d: string, t: string, m: string, s: string) => string }) {
+    const tabId = store.createTab(configId, database, "Query", "query", "APP");
+    store.setAutoCommit(tabId, false);
+    return tabId;
+  }
+
+  it("sends classificationSql for the initial manual execution and stays clean on a proven read", async () => {
+    mocks.executeInManualTransaction.mockResolvedValue(cleanSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupStickyManualTab(store);
+
+    await store.executeTabSql(tabId, "SELECT * FROM users");
+
+    const args = mocks.executeInManualTransaction.mock.calls[0]!;
+    expect(args.at(-1)).toBe("SELECT * FROM users");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.txnPossiblyDirty).not.toBe(true);
+    expect(tab.txnSessionId).toBe(txnId);
+  });
+
+  it("dirties the session after an unproven statement", async () => {
+    mocks.executeInManualTransaction.mockResolvedValue(dirtyUpdate());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupStickyManualTab(store);
+
+    await store.executeTabSql(tabId, "UPDATE users SET name = 'x'");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.txnPossiblyDirty).toBe(true);
+  });
+
+  it("keeps a comment-only script from dirtying the session (core no-op)", async () => {
+    mocks.executeInManualTransaction.mockResolvedValue(noOpResult());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupStickyManualTab(store);
+
+    await store.executeTabSql(tabId, "  -- only a comment\n");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.txnPossiblyDirty).not.toBe(true);
+  });
+
+  it("marks the session dirty when the result grid dispatches a mutation", async () => {
+    mocks.executeInManualTransaction.mockResolvedValue(cleanSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupStickyManualTab(store);
+    await store.executeTabSql(tabId, "SELECT * FROM users");
+
+    store.markManualTransactionDirty(tabId);
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.txnPossiblyDirty).toBe(true);
   });
 });

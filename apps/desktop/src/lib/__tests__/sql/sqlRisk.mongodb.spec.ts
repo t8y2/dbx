@@ -24,6 +24,16 @@ describe("MongoDB shell statement risk", () => {
     }
   });
 
+  it.each(["", '"queryPlanner"', '"executionStats"', '"allPlansExecution"'])("treats find explain(%s) as read-only without hiding batch writes", (verbosity) => {
+    const explain = `db.demo.find({}).explain(${verbosity})`;
+    expect(classifySqlRisk(explain, { dialect: "mongodb" }).risk).toBe("read");
+    for (const sql of [`${explain}; db.demo.insertOne({active: true})`, `db.demo.insertOne({active: true}); ${explain}`]) {
+      const assessment = classifySqlRisk(sql, { dialect: "mongodb" });
+      expect(assessment.risk).toBe("write");
+      expect(assessment.statements.map((statement) => statement.risk)).toEqual(sql.startsWith(explain) ? ["read", "write"] : ["write", "read"]);
+    }
+  });
+
   it("retains per-command assessments for shell batches", () => {
     const assessment = classifySqlRisk('db.getCollection("demo").find({}); db.getCollection("demo").insertOne({"active": true})', { dialect: "mongodb" });
     expect(assessment.risk).toBe("write");

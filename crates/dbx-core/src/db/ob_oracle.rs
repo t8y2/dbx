@@ -81,6 +81,7 @@ pub async fn list_tables(pool: &mysql_async::Pool, schema: &str) -> Result<Vec<T
         .map(|row| TableInfo {
             name: get_str(row, 0),
             table_type: get_str(row, 1),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

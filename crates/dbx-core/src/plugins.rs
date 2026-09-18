@@ -10,6 +10,7 @@ mod assets;
 mod filesystem;
 mod host;
 mod installer;
+mod lifecycle;
 mod manifest;
 mod marketplace;
 mod runtime;
@@ -28,6 +29,7 @@ pub use installer::{
     PluginRollbackResult, PluginSignatureStatus, PluginTrustStore, PluginTrustedKey, DBXP_EXTENSION,
     MAX_PLUGIN_PACKAGE_BYTES, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
 };
+pub use lifecycle::PluginLifecycle;
 pub use marketplace::{
     url_install_trust_store, PluginMarketplace, PluginMarketplaceArtifact, PluginMarketplaceCatalog,
     PluginMarketplaceInstallRequest, PluginMarketplaceLocalization, PluginMarketplacePlugin,
@@ -40,16 +42,17 @@ pub use manifest::{
     current_plugin_target, resolve_safe_plugin_path, PluginBackendEntrypoint, PluginBackendTransport,
     PluginCompatibility, PluginConnectionActionContribution, PluginConnectionActionVariant, PluginConnectionActionWhen,
     PluginConnectionCapability, PluginConnectionProviderContribution, PluginContribution, PluginDriverManifest,
-    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFilesystemCapability,
-    PluginFilesystemProviderContribution, PluginFormFieldBinding, PluginFormFieldDefinition, PluginFormFieldOption,
+    PluginEngines, PluginEntrypoints, PluginFieldCondition, PluginFieldConditionClause, PluginFieldConditionLiteral,
+    PluginFilesystemCapability, PluginFilesystemProviderContribution, PluginFormFieldBinding,
+    PluginFormFieldDefinition, PluginFormFieldOption, PluginFormFieldPicker, PluginFormFieldPickerKind,
     PluginFormFieldType, PluginManifest, PluginUiEntrypoint, PluginWorkbenchContribution,
     PLUGIN_CONNECTION_ACTION_METHOD, PLUGIN_CONNECTION_CONNECT_METHOD, PLUGIN_CONNECTION_DISCONNECT_METHOD,
-    PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_MANIFEST_VERSION,
-    SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
+    PLUGIN_CONNECTION_TEST_METHOD, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_HOST_FEATURES,
+    SUPPORTED_PLUGIN_MANIFEST_VERSION, SUPPORTED_PLUGIN_PERMISSIONS, SUPPORTED_PLUGIN_PROTOCOL_VERSION,
 };
 pub use runtime::{
     PluginBinaryMessage, PluginEvent, PluginHandshake, PluginHandshakeIdentity, PluginSessionState,
-    PluginSessionStatus, PluginSidecarSession, PLUGIN_REQUEST_TIMEOUT,
+    PluginSessionStatus, PluginSidecarSession, PLUGIN_REQUEST_TIMEOUT, PLUGIN_REQUEST_USER_INPUT_METHOD,
 };
 
 #[derive(Debug, Clone)]
@@ -138,6 +141,7 @@ impl PluginRuntimeEnv {
 pub struct PluginRegistry {
     root_dir: PathBuf,
     app_version: String,
+    lifecycle: PluginLifecycle,
 }
 
 impl PluginRegistry {
@@ -146,7 +150,11 @@ impl PluginRegistry {
     }
 
     pub fn new_with_app_version(root_dir: PathBuf, app_version: impl Into<String>) -> Self {
-        Self { root_dir, app_version: app_version.into() }
+        Self { root_dir, app_version: app_version.into(), lifecycle: PluginLifecycle::default() }
+    }
+
+    pub fn lifecycle(&self) -> PluginLifecycle {
+        self.lifecycle.clone()
     }
 
     pub fn root_dir(&self) -> &Path {
@@ -282,11 +290,29 @@ impl PluginRegistry {
         driver_id: &str,
         env: PluginRuntimeEnv,
     ) -> Result<Arc<PluginDriverSession>, String> {
+        self.start_driver_session_for_connection(driver_id, env, driver_id).await
+    }
+
+    pub async fn start_driver_session_for_connection(
+        &self,
+        driver_id: &str,
+        env: PluginRuntimeEnv,
+        connection_label: &str,
+    ) -> Result<Arc<PluginDriverSession>, String> {
         let plugin =
             self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
+        let activity = self.lifecycle.begin_connection(&plugin.manifest.id, connection_label)?;
+        let current =
+            self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
+        if current.manifest.id != plugin.manifest.id {
+            return Err(format!("Plugin driver '{driver_id}' changed. Please reconnect."));
+        }
+        let plugin = current;
         ensure_plugin_compatible(&plugin)?;
         let env = env.with_plugin_data_dir(&self.plugin_data_dir(&plugin.manifest.id));
-        PluginDriverSession::start(plugin, driver_id.to_string(), self.app_version.clone(), env).await.map(Arc::new)
+        PluginDriverSession::start(plugin, driver_id.to_string(), self.app_version.clone(), env, activity)
+            .await
+            .map(Arc::new)
     }
 }
 
@@ -325,6 +351,7 @@ fn ensure_plugin_compatible(plugin: &InstalledPlugin) -> Result<(), String> {
 pub struct PluginDriverSession {
     sidecar: Arc<PluginSidecarSession>,
     driver_id: String,
+    _activity: lifecycle::PluginUsageGuard,
 }
 
 impl PluginDriverSession {
@@ -333,9 +360,10 @@ impl PluginDriverSession {
         driver_id: String,
         app_version: String,
         env: PluginRuntimeEnv,
+        activity: lifecycle::PluginUsageGuard,
     ) -> Result<Self, String> {
         let sidecar = PluginSidecarSession::start(plugin, app_version, env).await?;
-        Ok(Self { sidecar, driver_id })
+        Ok(Self { sidecar, driver_id, _activity: activity })
     }
 
     pub async fn invoke<T>(&self, method: &str, params: serde_json::Value) -> Result<T, String>
@@ -383,7 +411,8 @@ impl PluginDriverSession {
         driver_id: String,
         env: PluginRuntimeEnv,
     ) -> Result<Self, String> {
-        Self::start(plugin, driver_id, env!("CARGO_PKG_VERSION").to_string(), env).await
+        let activity = PluginLifecycle::default().begin_connection(&plugin.manifest.id, &driver_id)?;
+        Self::start(plugin, driver_id, env!("CARGO_PKG_VERSION").to_string(), env, activity).await
     }
 }
 
@@ -471,6 +500,7 @@ sleep 30
         .unwrap();
 
         let registry = PluginRegistry::new_with_app_version(data_dir.path().join("plugins"), "0.5.67");
+        let lifecycle = registry.lifecycle();
         let host = PluginHost::new(registry);
         let reported: String =
             host.invoke("sample.sidecar", "sample/dataDir", serde_json::Value::Null, None, None).await.unwrap();
@@ -479,6 +509,24 @@ sleep 30
             data_dir.path().join("plugin-data").join("sample.sidecar"),
             "sidecar must see <data dir>/plugin-data/<id> in DBX_PLUGIN_DATA_DIR"
         );
+        assert!(lifecycle.begin_update("sample.sidecar").is_ok());
+        let request_host = host.clone();
+        let pending = tokio::spawn(async move {
+            request_host
+                .invoke::<serde_json::Value>("sample.sidecar", "sample/wait", serde_json::Value::Null, None, None)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while lifecycle.check_update("sample.sidecar").is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lifecycle.begin_update("sample.sidecar").unwrap_err().contains("active operations"));
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert!(lifecycle.begin_update("sample.sidecar").is_ok());
         host.stop_all().await;
     }
 
@@ -517,14 +565,9 @@ sleep 30
             env!("CARGO_PKG_VERSION"),
         );
 
-        let session = PluginDriverSession::start(
-            plugin,
-            "jdbc".to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
-            PluginRuntimeEnv::default(),
-        )
-        .await
-        .expect("session should start");
+        let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("session should start");
         let pid = session.pid().await.expect("child should have a pid");
 
         session.shutdown().await;

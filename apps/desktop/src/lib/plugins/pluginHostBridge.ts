@@ -43,6 +43,8 @@ export interface PluginHostBridgeApi {
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
+  /** Write text to the system clipboard on behalf of the sandboxed plugin iframe. */
+  copyText?(pluginId: string, text: string): Promise<void>;
 }
 
 interface PluginRequestMessage {
@@ -206,6 +208,17 @@ export class PluginHostBridge {
       if (bytes.byteLength > MAX_BRIDGE_SAVE_BYTES) throw new Error(`Plugin save payload exceeds ${MAX_BRIDGE_SAVE_BYTES} bytes`);
       if (!this.api.saveFile) throw new Error("Host file saving is unavailable");
       return this.api.saveFile(this.plugin.manifest.id, { fileName: optionalTrimmedString(input.fileName), contentType: optionalTrimmedString(input.contentType) }, bytes);
+    }
+    if (method === "host.copy") {
+      const input = isRecord(params) ? params : {};
+      // The sandboxed workbench iframe has an opaque origin and no clipboard
+      // permission, so every scripted copy path is denied there; the host
+      // writes the system clipboard instead.
+      if (typeof input.text !== "string" || !input.text) throw new Error("host.copy requires text");
+      if (input.text.length > MAX_BRIDGE_PAYLOAD_BYTES) throw new Error(`Plugin copy payload exceeds ${MAX_BRIDGE_PAYLOAD_BYTES} characters`);
+      if (!this.api.copyText) throw new Error("Host clipboard is unavailable");
+      await this.api.copyText(this.plugin.manifest.id, input.text);
+      return { success: true };
     }
     throw new Error(`Unsupported plugin host method '${method}'`);
   }
@@ -493,6 +506,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.buffer : new Uint8Array(data).buffer);
         return request('host.saveFile', options, { transfer: bytes });
       },
+      copy: (text) => request('host.copy', { text }),
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },

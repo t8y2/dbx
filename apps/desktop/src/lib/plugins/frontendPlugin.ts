@@ -115,7 +115,9 @@ export function pluginConnectionActionsForDialog(contribution: PluginConnectionP
 }
 
 export function initialPluginFormValues(contribution: PluginConnectionProviderContribution): Record<string, PluginFormFieldValue> {
-  return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
+  // `null` means "no default" (older hosts serialized the absent case that way),
+  // so it must not seed the form with a value the user never typed.
+  return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined && field.default !== null).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
 }
 
 export function pluginConnectionFormValues(contribution: PluginConnectionProviderContribution, config?: ConnectionConfig): Record<string, PluginFormFieldValue> {
@@ -125,22 +127,9 @@ export function pluginConnectionFormValues(contribution: PluginConnectionProvide
   const secrets = config.connection_secrets || {};
   for (const field of contribution.fields) {
     const binding = effectiveFieldBinding(field);
+    const secret = secrets[field.key] ?? externalConfig[field.key];
     const value =
-      binding === "name"
-        ? config.name
-        : binding === "host"
-          ? config.host
-          : binding === "port"
-            ? config.port
-            : binding === "username"
-              ? config.username
-              : binding === "password"
-                ? config.password
-                : binding === "database"
-                  ? config.database
-                  : binding === "secret"
-                    ? (secrets[field.key] ?? externalConfig[field.key])
-                    : externalConfig[field.key];
+      binding === "name" ? config.name : binding === "host" ? config.host : binding === "port" ? config.port : binding === "username" ? config.username : binding === "password" ? config.password : binding === "database" ? config.database : binding === "secret" ? secret : externalConfig[field.key];
     // Port 0 is the stored representation of an optional, automatic port.
     // Keep that input empty on reopen so its protocol-default hint remains visible.
     if (binding === "port" && value === 0 && field.default === undefined) delete values[field.key];
@@ -180,7 +169,11 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     production_databases: existing?.production_databases || [],
   };
   for (const field of contribution.fields) {
-    const value = values[field.key] ?? field.default;
+    // A `null` coming from the form (or from a host that hydrated absent
+    // defaults as `null`) means "unset": fall back to the declared default and
+    // otherwise clear the stored value instead of persisting a null.
+    const raw = values[field.key];
+    const value = raw === null ? undefined : (raw ?? field.default ?? undefined);
     const binding = effectiveFieldBinding(field);
     if (binding === "config") {
       if (value === undefined) delete externalConfig[field.key];

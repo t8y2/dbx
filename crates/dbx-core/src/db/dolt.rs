@@ -189,6 +189,7 @@ mod tests {
             TableInfo {
                 name: "dolt_log".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -196,6 +197,7 @@ mod tests {
             TableInfo {
                 name: "DOLT_BRANCHES".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -203,6 +205,7 @@ mod tests {
             TableInfo {
                 name: "orders".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: Some("ordinary".to_string()),
                 parent_schema: None,
                 parent_name: None,

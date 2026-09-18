@@ -16,7 +16,7 @@ use crate::csv_export::{
 };
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
-    build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions, SqlInsertMode,
+    build_export_insert_statements_excluding, is_export_cancelled, BuildExportInsertStatementsOptions, SqlInsertMode,
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
@@ -120,6 +120,13 @@ pub struct QueryResultExportRequest {
     pub auto_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
+    /// 导出 SQL 时是否排除主键列（对应前端数据提取设置里的“排除主键”）。
+    #[serde(default)]
+    pub exclude_primary_keys: bool,
+    /// 结果集对应的原表主键列名。查询结果导出由前端从表元数据带过来；
+    /// 没有表元数据（例如自由 SQL 查询）时为空，此时无法排除主键。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_keys: Vec<String>,
 }
 
 pub struct StagedExportTarget {
@@ -322,6 +329,8 @@ struct SqlInsertWriter {
     schema: Option<String>,
     table_name: String,
     identifier_quote: Option<String>,
+    /// 生成 INSERT 时需要排除的列名，来自请求里的“不含主键”设置。
+    exclude_columns: Vec<String>,
 }
 
 /// Streams query-result JSON rows without retaining the complete result set.
@@ -408,6 +417,7 @@ impl SqlInsertWriter {
             schema: request.schema.clone(),
             table_name,
             identifier_quote: request.identifier_quote.clone(),
+            exclude_columns: if request.exclude_primary_keys { request.primary_keys.clone() } else { Vec::new() },
         })
     }
 
@@ -439,20 +449,23 @@ impl SqlInsertWriter {
         if self.pending_rows.is_empty() {
             return Ok(());
         }
-        let stmts = build_export_insert_statements(BuildExportInsertStatementsOptions {
-            database_type: Some(self.database_type),
-            identifier_quote: self.identifier_quote.clone(),
-            schema: self.schema.clone(),
-            table_name: Some(self.table_name.clone()),
-            qualified_table_name: None,
-            columns: self.columns.clone(),
-            column_types: self.column_types.clone(),
-            column_extras: Vec::new(),
-            spatial_columns: self.spatial_columns.clone(),
-            spatial_values: mem::take(&mut self.pending_spatial_values),
-            rows: mem::take(&mut self.pending_rows),
-            batch_size: Some(self.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
-        })?;
+        let stmts = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(self.database_type),
+                identifier_quote: self.identifier_quote.clone(),
+                schema: self.schema.clone(),
+                table_name: Some(self.table_name.clone()),
+                qualified_table_name: None,
+                columns: self.columns.clone(),
+                column_types: self.column_types.clone(),
+                column_extras: Vec::new(),
+                spatial_columns: self.spatial_columns.clone(),
+                spatial_values: mem::take(&mut self.pending_spatial_values),
+                rows: mem::take(&mut self.pending_rows),
+                batch_size: Some(self.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+            },
+            &self.exclude_columns,
+        )?;
         let file = self.file.as_mut().ok_or_else(|| "SQL export file already closed".to_string())?;
         for stmt in &stmts {
             writeln!(file, "{stmt}").map_err(|e| format!("Failed to write SQL: {e}"))?;
@@ -1173,6 +1186,7 @@ async fn try_export_postgres_query_result_stream(
     let setup_sql = safe_postgres_temp_setup_sql(&request.setup_sql).unwrap_or_default();
     let stream_result = crate::db::postgres::stream_select_query_with_cancel(
         &pool,
+        Some(request.database_type),
         request.schema.as_deref(),
         &setup_sql,
         &request.sql,
@@ -1964,6 +1978,7 @@ async fn try_export_sqlserver_query_result_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn staged_export_target_preserves_existing_destination_on_discard_and_replace_failure() {
@@ -2007,6 +2022,60 @@ mod tests {
         assert!(stream_export_was_cancelled("driver closed", true, false));
         assert!(stream_export_was_cancelled("driver closed", false, true));
         assert!(!stream_export_was_cancelled("network failure", false, false));
+    }
+
+    #[test]
+    fn sql_insert_writer_omits_excluded_primary_key_columns() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("users.sql");
+        let request = QueryResultExportRequest {
+            export_id: "export-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "db".to_string(),
+            schema: Some("public".to_string()),
+            catalog: None,
+            sql: "SELECT * FROM users".to_string(),
+            query_base_sql: "SELECT * FROM users".to_string(),
+            setup_sql: Vec::new(),
+            database_type: DatabaseType::Postgres,
+            use_agent_cursor: false,
+            file_path: file_path.to_string_lossy().to_string(),
+            format: "sql".to_string(),
+            include_sql_sheet: false,
+            page_size: 1000,
+            row_limit: None,
+            total_rows: None,
+            timeout_secs: None,
+            keyset_optimization_enabled: false,
+            client_session_id: None,
+            execution_id: None,
+            date_time_format: None,
+            export_table_name: Some("users".to_string()),
+            export_column_types: None,
+            numeric_column_right_align: false,
+            column_comments: None,
+            auto_filter: None,
+            identifier_quote: None,
+            insert_mode: Default::default(),
+            csv_quote_mode: Default::default(),
+            exclude_primary_keys: true,
+            primary_keys: vec!["id".to_string()],
+        };
+
+        let mut writer = SqlInsertWriter::create(&request).expect("create sql insert writer");
+        writer.set_columns(
+            vec!["id".to_string(), "name".to_string()],
+            &["integer".to_string(), "text".to_string()],
+            &[],
+            &request,
+        );
+        writer.write_row(vec![json!(1), json!("Ada")], None).expect("write export row");
+        writer.finish().expect("finish export");
+
+        assert_eq!(
+            std::fs::read_to_string(&file_path).expect("read sql export"),
+            "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');\n"
+        );
     }
 
     #[test]
@@ -2069,6 +2138,8 @@ mod tests {
             column_comments: None,
             auto_filter: None,
             identifier_quote: None,
+            exclude_primary_keys: false,
+            primary_keys: Vec::new(),
         }
     }
 

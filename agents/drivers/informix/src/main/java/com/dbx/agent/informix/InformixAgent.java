@@ -279,7 +279,7 @@ public final class InformixAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
 
             appendRoutineObjects(result, schema, "f", "FUNCTION");

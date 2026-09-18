@@ -223,6 +223,21 @@ afterEach(() => {
 });
 
 describe("SqlFileExecutionDialog retries", () => {
+  it("shows byte-based progress while SQL executes and only completes on a terminal event", async () => {
+    await mountReadyDialog();
+    const executionGate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { statementIndex: 500, successCount: 499, bytesRead: 1024, totalBytes: 4096, phase: "executing" }));
+      await executionGate.promise;
+      mocks.progressHandler?.(progress(request.executionId, "done", { bytesRead: 4096, totalBytes: 4096 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(root!.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("25"));
+    expect(root!.textContent).toContain("sqlFile.progressPhase.executing");
+    executionGate.resolve();
+    await vi.waitFor(() => expect(root!.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("100"));
+  });
+
   it("does not auto-select the first connection for an unassociated external file", async () => {
     root = document.createElement("div");
     document.body.append(root);

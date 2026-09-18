@@ -194,7 +194,7 @@ watch(
               </Button>
             </template>
             <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate" @click="emit('install-downloaded')">{{ t("updates.restartAndUpdate") }}</Button>
-            <Button v-else-if="!checkingUpdates" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t("updates.retryDownload") }}</Button>
+            <Button v-else-if="!checkingUpdates" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t(updateCheckFailed ? "updates.retryDownload" : "updates.downloadInBackground") }}</Button>
           </template>
         </template>
         <template v-else>

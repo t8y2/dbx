@@ -32,6 +32,7 @@ import {
   Upload,
   X,
   Pin,
+  Pencil,
   Rows3,
   SquareDashed,
   Minus,
@@ -52,6 +53,8 @@ import { Splitpanes, Pane } from "splitpanes";
 import { DynamicScroller, DynamicScrollerItem } from "vue-virtual-scroller";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSub, DropdownMenuSubTrigger, DropdownMenuSubContent, DropdownMenuPortal } from "@/components/ui/dropdown-menu";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -152,6 +155,7 @@ import {
   tabularResultItems,
   type ExecutionSummaryItem,
 } from "@/lib/tabs/tabPresentation";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { defaultQueryResultArchiveFileName } from "@/lib/query/queryResultArchive";
 import { saveQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { isTableDataEditable } from "@/lib/table/tableEditing";
@@ -504,6 +508,9 @@ const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
+const resultRunRenameOpen = ref(false);
+const resultRunRenameId = ref<string | null>(null);
+const resultRunRenameTitle = ref("");
 const activeResultIsLoading = computed(() => !props.activeTab.redisMonitorActive && isActiveResultLoading(props.activeTab));
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
@@ -702,7 +709,11 @@ function handleHideResultsPane() {
   }
 }
 
+function onResultsSplitResize() {
+  beginPanelResize();
+}
 function onResultsResized(payload: { panes: { size: number }[] }) {
+  endPanelResize();
   const resultsPane = payload.panes[1];
   if (resultsPane?.size != null && resultsPane.size >= 20 && resultsPane.size <= 85) {
     resultsPaneSize.value = resultsPane.size;
@@ -1088,8 +1099,31 @@ async function closeResultRunsToRight(runId: string) {
   await selectResultRun(runId);
 }
 
+function openResultRunRename(run: (typeof resultRuns.value)[number]) {
+  resultRunRenameId.value = run.id;
+  resultRunRenameTitle.value = run.title || t("tabs.runN", { n: run.sequence });
+  resultRunRenameOpen.value = true;
+  nextTick(() => {
+    const input = document.querySelector<HTMLInputElement>("[data-result-run-name-input]");
+    input?.focus();
+    input?.select();
+  });
+}
+
+function saveResultRunRename() {
+  if (!resultRunRenameId.value) return;
+  if (queryStore.renameResultRun(props.activeTab.id, resultRunRenameId.value, resultRunRenameTitle.value)) {
+    resultRunRenameOpen.value = false;
+  }
+}
+
 function resultRunContextMenuItems(run: (typeof resultRuns.value)[number]): ContextMenuItem[] {
   return [
+    {
+      label: t("tabs.renameResultRun"),
+      action: () => openResultRunRename(run),
+      icon: Pencil,
+    },
     {
       label: t(run.pinned ? "tabs.unpinResultRun" : "tabs.pinResultRun"),
       action: () => toggleResultRunPinned(run.id),
@@ -1399,7 +1433,7 @@ defineExpose({
     </div>
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
-      <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resized="onResultsResized">
+      <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
             <div v-if="activeProductionContext.active" class="production-watermark pointer-events-none absolute inset-0 z-10 grid select-none" aria-hidden="true">
@@ -2770,6 +2804,19 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'dameng-roles' && activeConnection">
       <DamengRoleAdmin :key="activeTab.id" :connection="activeConnection" />
     </template>
+
+    <Dialog v-model:open="resultRunRenameOpen">
+      <DialogContent class="sm:max-w-[400px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("tabs.renameResultRun") }}</DialogTitle>
+        </DialogHeader>
+        <Input v-model="resultRunRenameTitle" data-result-run-name-input :aria-label="t('tabs.resultRunName')" maxlength="120" @keydown.enter.prevent="saveResultRunRename" />
+        <DialogFooter>
+          <Button variant="outline" @click="resultRunRenameOpen = false">{{ t("common.cancel") }}</Button>
+          <Button :disabled="!resultRunRenameTitle.trim()" @click="saveResultRunRename">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
 

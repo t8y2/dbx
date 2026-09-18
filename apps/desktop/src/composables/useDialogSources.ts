@@ -15,6 +15,10 @@ const showDiagramDialog = ref(false);
 const showDocsDialog = ref(false);
 const showTableImportDialog = ref(false);
 const showMongoImportDialog = ref(false);
+const showMongoDatabaseDumpDialog = ref(false);
+const mongoDatabaseDumpPrefillConnectionId = ref("");
+const mongoDatabaseDumpPrefillDatabase = ref("");
+const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
 const showTableDataGenerateDialog = ref(false);
 const showFieldLineageDialog = ref(false);
 const showDatabaseSearchDialog = ref(false);
@@ -260,6 +264,18 @@ export function useDialogSources() {
           showMongoImportDialog.value = true;
           connectionStore.mongoImportSource = null;
         }
+      },
+    );
+
+    watch(
+      () => connectionStore.mongoDatabaseDumpSource,
+      (source) => {
+        if (!source) return;
+        mongoDatabaseDumpPrefillConnectionId.value = source.connectionId;
+        mongoDatabaseDumpPrefillDatabase.value = source.database;
+        mongoDatabaseDumpMode.value = source.mode;
+        showMongoDatabaseDumpDialog.value = true;
+        connectionStore.mongoDatabaseDumpSource = null;
       },
     );
 
@@ -519,6 +535,10 @@ export function useDialogSources() {
     showDocsDialog,
     showTableImportDialog,
     showMongoImportDialog,
+    showMongoDatabaseDumpDialog,
+    mongoDatabaseDumpPrefillConnectionId,
+    mongoDatabaseDumpPrefillDatabase,
+    mongoDatabaseDumpMode,
     showTableDataGenerateDialog,
     showFieldLineageDialog,
     showDatabaseSearchDialog,

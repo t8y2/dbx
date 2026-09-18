@@ -643,7 +643,7 @@ export function splitQualifiedIdentifier(identifier: string): string[] {
 }
 
 /** Match identifier against known table names (case-insensitive). Supports qualified identifiers like schema.table. */
-export function matchTable<T extends { name: string; database?: string; schema?: string }>(identifier: string, tables: T[]): T | null {
+export function matchTable<T extends { name: string; database?: string; schema?: string }>(identifier: string, tables: readonly T[]): T | null {
   const parts = splitQualifiedIdentifier(identifier);
   const normalizedIdentifier = parts.length > 0 ? parts.join(".").toLowerCase() : identifier.toLowerCase();
 

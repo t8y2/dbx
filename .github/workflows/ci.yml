@@ -641,6 +641,7 @@ jobs:
               - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
+              - '.github/workflows/plugin-release-reusable.yml'
               - '.github/workflows/ci.yml'
               - 'apps/desktop/src/types/database.ts'
               - 'crates/dbx-core/assets/database-drivers.manifest.json'

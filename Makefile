@@ -80,7 +80,7 @@ dev: node_modules/.modules.yaml check-tauri-dev-port
 	$(PNPM) dev:tauri
 
 dev-fast: node_modules/.modules.yaml check-tauri-dev-port
-	$(PNPM) tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb,sqlite-bundled
+	RUST_MIN_STACK=16777216 $(PNPM) tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb,sqlite-bundled
 
 dev-web: node_modules/.modules.yaml
 	$(PNPM) dev:web

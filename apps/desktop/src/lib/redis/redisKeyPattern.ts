@@ -1,8 +1,17 @@
+// Full glob metacharacter set — escaped when a value must match literally
+// (group subtree patterns, non-fuzzy text).
 const REDIS_GLOB_SPECIAL_CHARS = /[\\*?[\]]/g;
-const REDIS_GLOB_SPECIAL_CHARS_FUZZY = /[\\*?[\]]/g;
+// In fuzzy mode the user's `*` / `?` are intentional wildcards ("search keys
+// containing this text"), so only `[` / `]` / `\` are escaped to avoid
+// accidental character-class / escape ambiguity. The outer `*…*` wrap added
+// by `redisKeySearchPattern` keeps the substring-contains contract, so inputs
+// like `prod:*` or `2026*` match the same keys a SCAN with that glob would.
+// (#9012: previously `*` was escaped too, so `prod:*` became a literal-`*`
+// substring match and found nothing.)
+const REDIS_GLOB_LITERAL_CHARS_FUZZY = /[\\[\]]/g;
 
 export function escapeRedisGlobText(value: string, fuzzy = false): string {
-  return value.replace(fuzzy ? REDIS_GLOB_SPECIAL_CHARS_FUZZY : REDIS_GLOB_SPECIAL_CHARS, "\\$&");
+  return value.replace(fuzzy ? REDIS_GLOB_LITERAL_CHARS_FUZZY : REDIS_GLOB_SPECIAL_CHARS, "\\$&");
 }
 
 export function redisKeySearchPattern(value: string, fuzzy: boolean): string {

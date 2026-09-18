@@ -156,6 +156,8 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -240,6 +242,8 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
 
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export temporal XLSX");
@@ -313,6 +317,8 @@ async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: true,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
 
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export numeric XLSX");
@@ -391,6 +397,8 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let csv_rows = AtomicU64::new(0);
     export_query_result_core(&state, &request, None, |progress| {
@@ -471,6 +479,8 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);
@@ -542,6 +552,8 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let started_at = Instant::now();
     let result = export_query_result_core(&state, &request, None, |_| {}).await;

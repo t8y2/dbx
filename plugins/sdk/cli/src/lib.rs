@@ -1232,6 +1232,18 @@ fn template_values(
         ("PUBLISHER", options.publisher.clone()),
         ("PUBLISHER_JSON", json_string_content(&options.publisher)),
         ("VERSION", options.version.clone()),
+        ("CLI_VERSION", CLI_VERSION.to_string()),
+        ("GO_VERSION", if options.template == ProjectTemplate::Go { "1.22.x" } else { "" }.to_string()),
+        ("RUST_TOOLCHAIN", if options.template == ProjectTemplate::Rust { "stable" } else { "" }.to_string()),
+        (
+            "PACKAGE_COMMAND",
+            if options.template == ProjectTemplate::Svelte {
+                "npm ci && npm run build && dbx-plugin package ."
+            } else {
+                "dbx-plugin package ."
+            }
+            .to_string(),
+        ),
         ("TEMPLATE", options.template.as_str().to_string()),
         ("TEMPLATE_LABEL", options.template.label().to_string()),
         ("LANGUAGE", backend_language.map(BackendLanguage::as_str).unwrap_or("none").to_string()),
@@ -1583,7 +1595,7 @@ mod tests {
     use super::{
         color_enabled_with, create_project, generate_signing_key_file, package_manifest, package_project,
         resolve_create_options, run_cli, styled, title_from_slug, validate_manifest_assets, validate_semver,
-        BackendConfig, CreateInputs, CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
+        BackendConfig, CreateInputs, CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT, CLI_VERSION,
     };
 
     #[test]
@@ -1843,7 +1855,13 @@ mod tests {
             let workflow = std::fs::read_to_string(directory.join(".github/workflows/plugin-release.yml")).unwrap();
             assert!(!workflow.contains("signing-key-id"));
             assert!(!workflow.contains("DBX_PLUGIN_SIGNING_KEY"));
-            assert!(workflow.contains("plugin-cli-version: 0.1.6"));
+            assert!(workflow.contains(&format!("plugin-cli-version: {CLI_VERSION}")));
+            assert!(workflow.contains(&format!("plugin-release-reusable.yml@plugin-cli-v{CLI_VERSION}")));
+            assert!(!workflow.contains("@plugin-sdk-v1"));
+            let go_version = if template == ProjectTemplate::Go { "1.22.x" } else { "" };
+            let rust_toolchain = if template == ProjectTemplate::Rust { "stable" } else { "" };
+            assert!(workflow.contains(&format!("go-version: \"{go_version}\"")));
+            assert!(workflow.contains(&format!("rust-toolchain: \"{rust_toolchain}\"")));
             assert!(!workflow.contains("sdk-ref:"));
 
             match template {
@@ -1854,6 +1872,7 @@ mod tests {
                     assert!(workflow.contains("\"target\":\"universal\""));
                 }
                 ProjectTemplate::Svelte => {
+                    assert!(workflow.contains("package-command: npm ci && npm run build && dbx-plugin package ."));
                     assert!(manifest["entrypoints"].get("backend").is_none());
                     assert!(config.get("backend").is_none());
                     assert!(directory.join("src/App.svelte").is_file());

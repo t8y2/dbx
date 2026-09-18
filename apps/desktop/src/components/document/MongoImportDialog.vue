@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -14,8 +14,9 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { TABLE_IMPORT_ENCODING_OPTIONS } from "@/lib/table/tableImport";
-import { importPreviewInput, importSourceDisplayName, importTextDelimiterForName, uploadedImportSourceFromPreview, type UploadedImportSource } from "@/lib/import/importSource";
+import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview, type UploadedImportSource } from "@/lib/import/importSource";
 import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -92,13 +93,6 @@ const parseOptions = computed((): api.MongoImportParseOptions => {
   };
 });
 
-function formatFromName(name: string): api.MongoImportFormat {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".ndjson") || lower.endsWith(".jsonl")) return "ndjson";
-  if (lower.endsWith(".json")) return "json";
-  return "csv";
-}
-
 function releasePreviewSource() {
   const sourceRef = uploadedSource?.sourceRef;
   uploadedSource = null;
@@ -110,10 +104,7 @@ function assignSource(source: string | File) {
   releasePreviewSource();
   selectedSource.value = source;
   sourceName.value = importSourceDisplayName(source);
-  format.value = formatFromName(sourceName.value);
-  typeMode.value = format.value === "csv" ? "auto" : "extendedJson";
   columnTypeOverrides.value = {};
-  delimiter.value = importTextDelimiterForName(sourceName.value);
   wizardStep.value = "source";
   queuePreview();
 }
@@ -126,7 +117,7 @@ async function selectFile() {
   const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
   const selected = await openDialog({
     multiple: false,
-    filters: [{ name: t("mongo.import.fileFilter"), extensions: ["csv", "json", "ndjson", "jsonl", "tsv"] }],
+    filters: [{ name: t("mongo.import.fileFilter"), extensions: ["bson", "gz", "csv", "json", "ndjson", "jsonl", "tsv"] }],
   });
   if (!selected || Array.isArray(selected)) return;
   assignSource(selected);
@@ -142,15 +133,17 @@ function handleFileInputChange(event: Event) {
 function queuePreview() {
   if (!selectedSource.value) return;
   if (previewReloadTimer) clearTimeout(previewReloadTimer);
+  const requestId = ++previewRequestId;
+  loadingPreview.value = true;
   previewReloadTimer = setTimeout(() => {
-    void loadPreview();
+    previewReloadTimer = null;
+    void loadPreview(requestId);
   }, 200);
 }
 
-async function loadPreview() {
+async function loadPreview(requestId: number) {
   const source = selectedSource.value;
   if (!source) return;
-  const requestId = ++previewRequestId;
   const keepExistingPreview = !!preview.value;
   if (!keepExistingPreview) {
     loadingPreview.value = true;
@@ -164,7 +157,10 @@ async function loadPreview() {
       previewLimit: previewLimit.value,
       sourceRef: input.sourceRef,
     });
-    if (requestId !== previewRequestId) return;
+    if (requestId !== previewRequestId) {
+      if (next.sourceRef && next.sourceRef !== uploadedSource?.sourceRef) void api.releaseMongodbImportSource(next.sourceRef);
+      return;
+    }
     preview.value = next;
     previewError.value = "";
     uploadedSource = uploadedImportSourceFromPreview(next) ?? uploadedSource;
@@ -177,13 +173,21 @@ async function loadPreview() {
   }
 }
 
-watch([format, hasHeader, typeMode], () => {
-  if (Object.keys(columnTypeOverrides.value).length) columnTypeOverrides.value = {};
-});
+watch(
+  [format, hasHeader, typeMode],
+  () => {
+    if (Object.keys(columnTypeOverrides.value).length) columnTypeOverrides.value = {};
+  },
+  { flush: "sync" },
+);
 
-watch([format, encoding, delimiter, hasHeader, trim, emptyAsNull, typeMode, recognizeObjectIdHex, previewLimit, columnTypeOverrides], () => {
-  if (selectedSource.value) queuePreview();
-});
+watch(
+  [format, encoding, delimiter, hasHeader, trim, emptyAsNull, typeMode, recognizeObjectIdHex, previewLimit, columnTypeOverrides],
+  () => {
+    if (selectedSource.value) queuePreview();
+  },
+  { flush: "sync" },
+);
 
 watch(open, (value) => {
   if (value) return;
@@ -196,6 +200,10 @@ watch(open, (value) => {
 });
 
 function reset() {
+  previewRequestId += 1;
+  if (previewReloadTimer) clearTimeout(previewReloadTimer);
+  previewReloadTimer = null;
+  loadingPreview.value = false;
   releasePreviewSource();
   selectedSource.value = null;
   sourceName.value = "";
@@ -210,8 +218,12 @@ function reset() {
   importId.value = "";
 }
 
+onBeforeUnmount(() => {
+  if (!running.value) reset();
+});
+
 function canConfirm() {
-  return !!preview.value && !loadingPreview.value && !previewError.value && !effectivelyReadOnly.value && (!preview.value.errors.length || skipErrorRows.value);
+  return !!preview.value && preview.value.format === format.value && !loadingPreview.value && !previewError.value && !effectivelyReadOnly.value && (!preview.value.errors.length || skipErrorRows.value);
 }
 
 async function startImport() {
@@ -267,7 +279,7 @@ async function startImport() {
     running.value = false;
     open.value = false;
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : String(error);
+    errorMessage.value = translateBackendError(t, error);
     running.value = false;
   } finally {
     cancelling.value = false;
@@ -286,7 +298,7 @@ function formatPreviewCell(value: unknown) {
 }
 
 function setFormat(value: unknown) {
-  if (value === "csv" || value === "json" || value === "ndjson") format.value = value;
+  if (value === "csv" || value === "json" || value === "ndjson" || value === "bson") format.value = value;
 }
 
 function setEncoding(value: unknown) {
@@ -342,7 +354,7 @@ function requestClose() {
       </DialogHeader>
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1 text-sm">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-          <input ref="fileInput" type="file" class="hidden" accept=".csv,.json,.ndjson,.jsonl,.tsv" @change="handleFileInputChange" />
+          <input ref="fileInput" type="file" class="hidden" accept=".bson,.bson.gz,.csv,.json,.ndjson,.jsonl,.tsv" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("mongo.import.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">{{ targetLabel }}</span>
@@ -365,10 +377,11 @@ function requestClose() {
                   <SelectItem value="csv">CSV</SelectItem>
                   <SelectItem value="json">JSON</SelectItem>
                   <SelectItem value="ndjson">NDJSON</SelectItem>
+                  <SelectItem value="bson">BSON dump</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <div class="space-y-1.5">
+            <div v-if="format !== 'bson'" class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="encoding" @update:model-value="setEncoding">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
@@ -381,7 +394,7 @@ function requestClose() {
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
               <Input v-model="delimiter" class="h-8 text-xs font-mono" :aria-label="t('tableImport.delimiter')" />
             </div>
-            <div class="space-y-1.5">
+            <div v-if="format !== 'bson'" class="space-y-1.5">
               <Label class="text-xs">{{ t("mongo.import.typeMode") }}</Label>
               <Select :model-value="typeMode" :aria-label="t('mongo.import.typeMode')" @update:model-value="setTypeMode">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
@@ -404,13 +417,14 @@ function requestClose() {
             </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border p-3">
+          <div v-if="format !== 'bson'" class="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border p-3">
             <label class="flex items-center gap-2 text-xs"><input v-model="hasHeader" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('tableImport.hasHeader')" /> {{ t("tableImport.hasHeader") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="trim" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("tableImport.trimValues") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="emptyAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.emptyAsNull") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="recognizeObjectIdHex" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.recognizeObjectIdHex") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="skipErrorRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.skipErrorRows") }}</label>
           </div>
+          <label v-else class="flex items-center gap-2 text-xs"><input v-model="skipErrorRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.skipErrorRows") }}</label>
 
           <div v-if="loadingPreview && !preview" class="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
@@ -437,7 +451,7 @@ function requestClose() {
                         check-position="right"
                         @update:model-value="(value) => setColumnType(column.name, value)"
                       />
-                      <span v-else-if="format !== 'csv'" class="text-muted-foreground">({{ column.inferredType }})</span>
+                      <span v-else-if="format !== 'csv' && format !== 'bson'" class="text-muted-foreground">({{ column.inferredType }})</span>
                     </th>
                   </tr>
                 </thead>

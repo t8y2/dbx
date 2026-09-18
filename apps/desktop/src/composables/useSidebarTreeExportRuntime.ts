@@ -1,4 +1,5 @@
-import { createApp, type ShallowRef } from "vue";
+import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { watch, createApp, getCurrentScope, onScopeDispose, type ShallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import i18n from "@/i18n";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -18,7 +19,18 @@ import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { forceCsvTextForTemporalColumns } from "@/lib/dataGrid/columnFormatter";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
-import { isLoadingStructurePreview, showStructureDocCopyDialog, showStructurePreviewDialog, structureDocCopyText, structureDocCopyTitle, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
+import {
+  isLoadingStructurePreview,
+  showStructureDocCopyDialog,
+  showStructurePreviewDialog,
+  structureDocCopyText,
+  structureDocCopyTitle,
+  structurePreviewDefaultFileName,
+  structurePreviewError,
+  structurePreviewSql,
+  structurePreviewTitle,
+  structurePreviewHasOceanBase,
+} from "@/components/sidebar/sidebarTreeDialogState";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 
 type StructureCopyFormat = "tsv" | "markdown";
@@ -126,28 +138,62 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return sidebarTableDataExportTargets(activeNode.value, connectionStore.treeNodes, options.acceptedSelectionIds() ?? connectionStore.selectedTreeNodeIds);
   }
 
+  let structureSource: Array<{ ddl: string; databaseType: ReturnType<typeof effectiveDatabaseTypeForConnection> }> = [];
+  let structureRequestId = 0;
+  function invalidateStructureRequest() {
+    structureRequestId++;
+    structureSource = [];
+    isLoadingStructurePreview.value = false;
+  }
+  watch(
+    showStructurePreviewDialog,
+    (visible) => {
+      if (!visible) invalidateStructureRequest();
+    },
+    { flush: "sync" },
+  );
+  if (getCurrentScope()) onScopeDispose(invalidateStructureRequest);
+  function renderStructurePreview() {
+    structurePreviewSql.value = joinExportedDdls(structureSource.map(({ ddl, databaseType }) => applyDdlStoragePreference(ddl, databaseType, settingsStore.editorSettings.excludeDdlStorage)));
+  }
+  watch(
+    () => settingsStore.editorSettings.excludeDdlStorage,
+    () => {
+      if (showStructurePreviewDialog.value && structureSource.length) renderStructurePreview();
+    },
+  );
+
   async function exportStructure() {
     const targets = structureExportTargets();
     if (!targets.length) return;
+    const requestId = ++structureRequestId;
+    const requestSource: typeof structureSource = [];
     isLoadingStructurePreview.value = true;
     structurePreviewError.value = "";
     structurePreviewSql.value = "";
+    structurePreviewHasOceanBase.value = false;
+    structureSource = [];
     structurePreviewTitle.value = targets.length === 1 ? t("contextMenu.exportStructurePreviewTitle", { name: targets[0]!.label }) : t("contextMenu.exportStructurePreviewTitleMultiple", { count: targets.length });
     structurePreviewDefaultFileName.value = targets.length === 1 ? `${targets[0]!.label}.sql` : "structures.sql";
     showStructurePreviewDialog.value = true;
     try {
-      const parts: string[] = [];
       for (const target of targets) {
         await connectionStore.ensureConnected(target.connectionId);
+        if (requestId !== structureRequestId) return;
         const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type), target.catalog, true);
-        parts.push(ddl.trim());
+        if (requestId !== structureRequestId) return;
+        const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(target.connectionId));
+        requestSource.push({ ddl, databaseType });
       }
-      structurePreviewSql.value = joinExportedDdls(parts);
+      structureSource = requestSource;
+      structurePreviewHasOceanBase.value = requestSource.some(({ databaseType }) => databaseType === "oceanbase-oracle");
+      renderStructurePreview();
     } catch (error: any) {
+      if (requestId !== structureRequestId) return;
       structurePreviewError.value = error?.message || String(error);
       console.error("Export structure failed:", error);
     } finally {
-      isLoadingStructurePreview.value = false;
+      if (requestId === structureRequestId) isLoadingStructurePreview.value = false;
     }
   }
 
@@ -274,6 +320,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     if (format === "csv") return "CSV";
     if (format === "json") return "JSON";
     if (format === "ndjson") return "NDJSON";
+    if (format === "bson" || format === "bson.gz") return "MongoDB BSON dump";
     if (format === "xlsx") return "Excel";
     return "SQL";
   }
@@ -287,7 +334,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
         defaultPath: fileName,
-        filters: [{ name: exportFilterName(format), extensions: [format] }],
+        filters: [{ name: exportFilterName(format), extensions: [format === "bson.gz" ? "gz" : format] }],
       });
       return path ? String(path) : null;
     }
@@ -444,6 +491,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         columnComments,
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
+        excludePrimaryKeys: settingsStore.editorSettings.dataGridExtractorOptions.sql.excludePrimaryKeysFromInsert === true,
         batchSize: target.batchSize,
         skipCount: format === "sql",
         rowLimit: target.rowLimit,
@@ -472,10 +520,12 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return pickTableExportDirectory();
   }
 
-  async function exportMongoCollection(format: "csv" | "ndjson") {
+  async function exportMongoCollection(outputFormat: "csv" | "ndjson" | "bson" | "bsonGzip") {
     const node = activeNode.value;
     if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
-    const outputPath = await resolveExportOutputPath(node.label, format);
+    const format: api.MongoExportFormat = outputFormat === "bsonGzip" ? "bson" : outputFormat;
+    const fileExtension = outputFormat === "bsonGzip" ? "bson.gz" : outputFormat;
+    const outputPath = await resolveExportOutputPath(node.label, fileExtension);
     if (!outputPath) return;
     let task: ExportTask | null = null;
     try {
@@ -490,6 +540,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           collection: node.label,
           format,
           includeHeader: true,
+          gzip: outputFormat === "bsonGzip",
           filePath: outputPath,
         },
         (progress) => {

@@ -25,6 +25,20 @@ describe("buildObjectBrowserRows", () => {
 
     expect(rows[0]?.schema).toBeUndefined();
   });
+
+  it("preserves nullable view validity in browser rows", () => {
+    const rows = buildObjectBrowserRows({
+      objects: [
+        { name: "valid_view", object_type: "VIEW", valid: true },
+        { name: "invalid_view", object_type: "VIEW", valid: false },
+        { name: "unknown_view", object_type: "VIEW", valid: null },
+      ],
+      database: "app",
+      fallbackSchema: "app",
+    });
+
+    expect(rows.map((row) => row.valid)).toEqual([true, false, null]);
+  });
 });
 
 describe("Object Browser pinned ordering", () => {

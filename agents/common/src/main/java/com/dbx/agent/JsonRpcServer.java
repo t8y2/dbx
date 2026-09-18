@@ -246,6 +246,14 @@ public final class JsonRpcServer {
             switchCatalog(params);
             return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString());
         }
+        if (AgentProtocol.METHOD_LIST_PARTITIONS.equals(method)) {
+            switchCatalog(params);
+            return agent.listPartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
+        if (AgentProtocol.METHOD_LIST_SUBPARTITIONS.equals(method)) {
+            switchCatalog(params);
+            return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
             return agent.executeQuery(
                 params.get("sql").getAsString(),

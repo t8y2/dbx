@@ -23,6 +23,7 @@
 }
 
 @theme {
+  --color-landing-bg: #161616;
   --color-landing-ink: #ededf0;
   --color-landing-muted: #9c9ea3;
   --color-landing-blue: #6ea8ff;
@@ -30,8 +31,8 @@
   --color-landing-green: #44d19d;
   --color-landing-line: rgba(173, 176, 182, 0.18);
   --color-landing-soft: rgba(255, 255, 255, 0.05);
-  --color-landing-panel: rgba(19, 20, 23, 0.84);
-  --color-landing-panel-strong: rgba(25, 26, 30, 0.94);
+  --color-landing-panel: rgba(36, 37, 40, 0.84);
+  --color-landing-panel-strong: rgba(43, 44, 48, 0.94);
 }
 
 :root {
@@ -57,31 +58,36 @@
   --dbx-blue: #171717;
   --dbx-sky: #737373;
   --dbx-green: #525252;
+  --dbx-code-bg: #0a0a0a;
 }
 
+/* 深色版整体比亮色版抬一档：底色对齐 landing 的 --color-landing-bg，
+   其余灰阶按同样的 +17 平移，保持 fumadocs 原有的层级关系。 */
 .dark {
-  --color-fd-background: #050505;
+  --color-fd-background: #161616;
   --color-fd-foreground: #fafafa;
-  --color-fd-muted: #141414;
+  --color-fd-muted: #252525;
   --color-fd-muted-foreground: #999;
-  --color-fd-popover: #0a0a0a;
+  --color-fd-popover: #1b1b1b;
   --color-fd-popover-foreground: #fafafa;
-  --color-fd-card: #0a0a0a;
+  --color-fd-card: #1b1b1b;
   --color-fd-card-foreground: #fafafa;
   --color-fd-border: #80808033;
   --color-fd-primary: #fafafa;
-  --color-fd-primary-foreground: #171717;
-  --color-fd-secondary: #212121;
+  --color-fd-primary-foreground: #282828;
+  --color-fd-secondary: #323232;
   --color-fd-secondary-foreground: #fafafa;
-  --color-fd-accent: #262626;
+  --color-fd-accent: #373737;
   --color-fd-accent-foreground: #fff;
   --color-fd-ring: #595959;
-  --dbx-surface: #0a0a0a;
-  --dbx-surface-soft: #141414;
+  --dbx-surface: #1b1b1b;
+  --dbx-surface-soft: #252525;
   --dbx-line: var(--color-fd-border);
   --dbx-blue: #fafafa;
   --dbx-sky: #999;
   --dbx-green: #d4d4d4;
+  /* 代码块比底色高一档（原来是 #050505 上的 #0a0a0a），跟着一起抬 */
+  --dbx-code-bg: #1b1b1b;
 }
 
 html {
@@ -115,6 +121,14 @@ button {
 
 .dark body {
   background: var(--color-fd-background);
+}
+
+/* landing 页面（根容器带 .landing 或 bg-landing-bg）要连 html 画布一起变深，
+   否则移动端上拉/橡皮筋回弹会露出亮色主题的 #fafafa。
+   /docs 走 fumadocs 自己的主题，页面里没有这两个容器，不受影响。 */
+html:has(:is(.landing, .bg-landing-bg)),
+body:has(:is(.landing, .bg-landing-bg)) {
+  background: var(--color-landing-bg);
 }
 
 ::selection {
@@ -206,7 +220,7 @@ article tr:last-child td {
 article pre {
   border: 1px solid color-mix(in srgb, var(--color-fd-border) 70%, transparent);
   border-radius: 10px;
-  background: #0a0a0a !important;
+  background: var(--dbx-code-bg) !important;
   margin: 1rem 0 1.35rem;
   padding: 0.9rem 0;
   overflow-x: auto;
@@ -236,7 +250,7 @@ article pre .line {
 article figure.shiki {
   border-color: color-mix(in srgb, var(--color-fd-border) 74%, transparent);
   border-radius: 9px;
-  background: #0a0a0a !important;
+  background: var(--dbx-code-bg) !important;
   margin: 0.85rem 0 1.05rem;
   box-shadow: 0 12px 28px color-mix(in srgb, black 12%, transparent);
 }
@@ -330,6 +344,24 @@ aside a[href*="/docs/"][class*="rounded-lg"][aria-current="page"] {
   padding: 0.8rem 1rem 0;
 }
 
+.dbx-docs-sidebar-sites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.85rem;
+  margin-bottom: 0.7rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.dbx-docs-sidebar-sites a {
+  color: var(--color-fd-muted-foreground);
+  transition: color 0.15s ease;
+}
+
+.dbx-docs-sidebar-sites a:hover {
+  color: var(--color-fd-foreground);
+}
+
 .dbx-docs-sidebar-tools {
   display: flex;
   align-items: center;
@@ -375,7 +407,7 @@ a {
   --landing-max: 1180px;
   min-height: 100vh;
   color: var(--color-landing-ink);
-  background: #08080a;
+  background: var(--color-landing-bg);
   overflow: hidden;
   position: relative;
   /* 建立层叠上下文，使 position:fixed 的负 z-index 星空层被约束在本页背景之上
@@ -499,7 +531,7 @@ a {
 
 .landing-nav.is-scrolled {
   border-bottom-color: var(--color-landing-line);
-  background: color-mix(in srgb, #0c0d10 44%, transparent);
+  background: color-mix(in srgb, #1a1b1c 44%, transparent);
 }
 
 .landing-nav.is-scrolled::before {
@@ -508,7 +540,7 @@ a {
 
 .landing-nav.is-menu-open {
   border-bottom-color: var(--color-landing-line);
-  background: rgba(9, 10, 12, 0.94);
+  background: rgba(23, 24, 24, 0.94);
 }
 
 .landing-nav.is-menu-open::before {
@@ -558,7 +590,7 @@ a {
   border: 1px solid var(--color-landing-line);
   border-radius: 0 0 16px 16px;
   z-index: 1;
-  background: #08080a;
+  background: var(--color-landing-bg);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.44);
   opacity: 0;
   transform: translateY(-12px);
@@ -612,8 +644,8 @@ a {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse at 50% 34%, rgba(44, 88, 174, 0.42), transparent 52%), radial-gradient(ellipse at 18% 16%, rgba(82, 213, 255, 0.13), transparent 34%), radial-gradient(ellipse at 76% 22%, rgba(68, 209, 157, 0.1), transparent 30%),
-    linear-gradient(180deg, rgba(8, 8, 10, 0.28) 0%, rgba(13, 14, 18, 0.78) 48%, rgba(8, 8, 10, 0.36) 82%, rgba(8, 8, 10, 0.18) 100%);
+    radial-gradient(ellipse at 50% 34%, rgba(44, 88, 174, 0.16), transparent 52%), radial-gradient(ellipse at 18% 16%, rgba(82, 213, 255, 0.06), transparent 34%), radial-gradient(ellipse at 76% 22%, rgba(68, 209, 157, 0.05), transparent 30%),
+    linear-gradient(180deg, rgba(22, 22, 22, 0.28) 0%, rgba(27, 28, 30, 0.78) 48%, rgba(22, 22, 22, 0.36) 82%, rgba(22, 22, 22, 0.18) 100%);
   z-index: -3;
 }
 
@@ -621,7 +653,7 @@ a {
   content: "";
   position: absolute;
   inset: 134px -12vw -140px;
-  background-image: linear-gradient(rgba(110, 168, 255, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(110, 168, 255, 0.08) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(110, 168, 255, 0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(110, 168, 255, 0.05) 1px, transparent 1px);
   background-size: 58px 58px;
   mask-image: radial-gradient(ellipse at 50% 56%, black 0%, transparent 64%);
   opacity: 0.5;
@@ -638,8 +670,8 @@ a {
   width: min(980px, 82vw);
   height: 720px;
   border-radius: 999px;
-  background: radial-gradient(circle at 50% 28%, rgba(255, 255, 255, 0.16), transparent 12%), radial-gradient(circle at 46% 38%, rgba(82, 213, 255, 0.2), transparent 34%), radial-gradient(circle at 58% 52%, rgba(110, 168, 255, 0.16), transparent 60%);
-  filter: blur(52px);
+  background: radial-gradient(circle at 50% 28%, rgba(255, 255, 255, 0.1), transparent 12%), radial-gradient(circle at 46% 38%, rgba(82, 213, 255, 0.08), transparent 34%), radial-gradient(circle at 58% 52%, rgba(110, 168, 255, 0.06), transparent 60%);
+  filter: blur(72px);
   mix-blend-mode: screen;
   pointer-events: none;
   transform: translateX(-50%);
@@ -808,7 +840,7 @@ a {
 
 .landing-product {
   border: 1px solid var(--color-landing-line);
-  background: #0e0f12;
+  background: #1c1d1e;
   box-shadow:
     0 38px 110px rgba(0, 0, 0, 0.5),
     0 0 80px rgba(82, 213, 255, 0.1),
@@ -908,7 +940,7 @@ a {
 
 .landing-glass-card {
   border: 1px solid rgba(173, 176, 182, 0.14);
-  background: radial-gradient(circle at 78% 12%, rgba(110, 168, 255, 0.12), transparent 44%), linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)), rgba(15, 16, 19, 0.72);
+  background: radial-gradient(circle at 78% 12%, rgba(110, 168, 255, 0.12), transparent 44%), linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)), rgba(29, 30, 31, 0.72);
   box-shadow:
     0 18px 44px rgba(0, 0, 0, 0.14),
     0 0 0 1px rgba(255, 255, 255, 0.02) inset;
@@ -916,7 +948,7 @@ a {
 
 .landing-glass-card-green {
   border: 1px solid rgba(173, 176, 182, 0.14);
-  background: radial-gradient(circle at 78% 16%, rgba(68, 209, 157, 0.1), transparent 34%), linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)), rgba(15, 16, 19, 0.72);
+  background: radial-gradient(circle at 78% 16%, rgba(68, 209, 157, 0.1), transparent 34%), linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)), rgba(29, 30, 31, 0.72);
   box-shadow:
     0 18px 44px rgba(0, 0, 0, 0.14),
     0 0 0 1px rgba(255, 255, 255, 0.02) inset;
@@ -961,7 +993,7 @@ a {
 
 .landing-db-card {
   border: 1px solid rgba(173, 176, 182, 0.14);
-  background: radial-gradient(circle at 50% 112%, color-mix(in srgb, var(--db-tone) 20%, transparent), transparent 62%), linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)), rgba(15, 16, 19, 0.74);
+  background: radial-gradient(circle at 50% 112%, color-mix(in srgb, var(--db-tone) 20%, transparent), transparent 62%), linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018)), rgba(29, 30, 31, 0.74);
   box-shadow:
     0 18px 44px rgba(0, 0, 0, 0.15),
     0 0 0 1px rgba(255, 255, 255, 0.02) inset;
@@ -973,7 +1005,7 @@ a {
 
 .landing-db-card:hover {
   border-color: color-mix(in srgb, var(--db-tone) 42%, rgba(173, 176, 182, 0.18));
-  background: radial-gradient(circle at 50% 112%, color-mix(in srgb, var(--db-tone) 26%, transparent), transparent 62%), linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.024)), rgba(20, 21, 24, 0.9);
+  background: radial-gradient(circle at 50% 112%, color-mix(in srgb, var(--db-tone) 26%, transparent), transparent 62%), linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.024)), rgba(34, 35, 36, 0.9);
   transform: translateY(-3px);
 }
 
@@ -982,7 +1014,7 @@ a {
 }
 
 .landing-db-icon span {
-  background: color-mix(in srgb, var(--db-tone) 78%, #121317);
+  background: color-mix(in srgb, var(--db-tone) 78%, #202123);
   box-shadow: 0 10px 20px color-mix(in srgb, var(--db-tone) 22%, transparent);
 }
 
@@ -1001,12 +1033,12 @@ a {
 
 .landing-testimonial-wall::before {
   left: 0;
-  background: linear-gradient(90deg, #08080a, rgba(8, 8, 10, 0));
+  background: linear-gradient(90deg, var(--color-landing-bg), color-mix(in srgb, var(--color-landing-bg) 0%, transparent));
 }
 
 .landing-testimonial-wall::after {
   right: 0;
-  background: linear-gradient(270deg, #08080a, rgba(8, 8, 10, 0));
+  background: linear-gradient(270deg, var(--color-landing-bg), color-mix(in srgb, var(--color-landing-bg) 0%, transparent));
 }
 
 .landing-testimonial-marquee[data-speed="slow"] {
@@ -1139,7 +1171,7 @@ a {
   height: 58px;
   border-radius: 50%;
   border: 1.5px solid rgba(173, 176, 182, 0.16);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)), rgba(15, 16, 19, 0.78);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)), rgba(29, 30, 31, 0.78);
   box-shadow:
     0 8px 24px rgba(0, 0, 0, 0.18),
     0 0 0 1px rgba(255, 255, 255, 0.03) inset;
@@ -1524,7 +1556,7 @@ a {
 
   .landing-hero::before {
     right: 0;
-    background: radial-gradient(circle at 50% 18%, rgba(82, 213, 255, 0.18), transparent 280px), radial-gradient(circle at 76% 26%, rgba(68, 209, 157, 0.08), transparent 220px), linear-gradient(180deg, #0b0c0f 0%, #0d0e12 44%, #0b0c0f 94%);
+    background: radial-gradient(circle at 50% 18%, rgba(82, 213, 255, 0.08), transparent 280px), radial-gradient(circle at 76% 26%, rgba(68, 209, 157, 0.04), transparent 220px), linear-gradient(180deg, #191a1b 0%, #1b1c1e 44%, #191a1b 94%);
   }
 
   .landing-hero::after {
@@ -1720,12 +1752,12 @@ a {
 }
 
 .issue-page {
-  --issue-ink: #ededf0;
-  --issue-muted: #9c9ea3;
-  --issue-line: rgba(173, 176, 182, 0.18);
-  --issue-panel: rgba(19, 20, 23, 0.84);
+  --issue-ink: var(--color-landing-ink);
+  --issue-muted: var(--color-landing-muted);
+  --issue-line: var(--color-landing-line);
+  --issue-panel: var(--color-landing-panel);
   min-height: 100vh;
-  background: #08080a;
+  background: var(--color-landing-bg);
 }
 
 .issue-page::before,
@@ -1849,7 +1881,7 @@ a {
   border: 1px solid rgba(173, 176, 182, 0.22);
   border-radius: 9px;
   outline: none;
-  background: rgba(8, 9, 11, 0.72);
+  background: rgba(22, 23, 23, 0.72);
   color: var(--issue-ink);
   font-size: 14px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -1956,7 +1988,7 @@ a {
   aspect-ratio: 16 / 10;
   border: 1px solid var(--issue-line);
   border-radius: 8px;
-  background: #07080b;
+  background: #151617;
   overflow: hidden;
 }
 

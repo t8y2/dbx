@@ -29,6 +29,7 @@ export const showBatchTruncateConfirm = ref(false);
 export const showStructurePreviewDialog = ref(false);
 export const showStructureDocCopyDialog = ref(false);
 export const structurePreviewSql = ref("");
+export const structurePreviewHasOceanBase = ref(false);
 export const structurePreviewTitle = ref("");
 export const structurePreviewDefaultFileName = ref("structure.sql");
 export const structurePreviewError = ref("");
@@ -184,6 +185,9 @@ export const editDatabaseCharset = ref("utf8mb4");
 export const editDatabaseCollation = ref("utf8mb4_unicode_ci");
 export const editDatabaseCommentText = ref("");
 export const showEditSchemaCommentDialog = ref(false);
+export const showCompileErrorDialog = ref(false);
+export const compileErrorTitle = ref("");
+export const compileErrorMessage = ref("");
 export const schemaCommentText = ref("");
 export const schemaCommentLoading = ref(false);
 export const schemaCommentPreviewSql = ref("");
@@ -228,12 +232,15 @@ const openFlags = [
   showDropSchemaConfirm,
   showEditDatabasePropertiesDialog,
   showEditSchemaCommentDialog,
+  showCompileErrorDialog,
   showDeleteGroupConfirm,
   showMoveToNewGroupDialog,
 ];
 
 export function resetSidebarTreeDialogState() {
   for (const flag of openFlags) flag.value = false;
+  compileErrorTitle.value = "";
+  compileErrorMessage.value = "";
   createDatabaseUsers.value = [];
   createDatabaseSelectedUsers.value = [];
   createDatabaseUsersLoading.value = false;

@@ -66,6 +66,10 @@ pub enum MongoCommand {
     },
     #[serde(rename = "update")]
     Update { collection: String, filter: String, update: String, options: Option<String>, many: bool },
+    #[serde(rename = "replace")]
+    Replace { collection: String, filter: String, replacement: String, options: Option<String> },
+    #[serde(rename = "bulkWrite")]
+    BulkWrite { collection: String, operations: String, options: Option<String> },
     #[serde(rename = "delete")]
     Delete { collection: String, filter: String, many: bool },
     #[serde(rename = "createIndex")]
@@ -98,6 +102,8 @@ impl MongoCommand {
                 | Self::CreateUser { .. }
                 | Self::Insert { .. }
                 | Self::Update { .. }
+                | Self::Replace { .. }
+                | Self::BulkWrite { .. }
                 | Self::Delete { .. }
                 | Self::CreateIndex { .. }
                 | Self::DropIndexes { .. }
@@ -117,10 +123,14 @@ impl MongoCommand {
     pub fn has_empty_filter(&self) -> bool {
         match self {
             Self::Update { filter, .. }
+            | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
             | Self::FindOneAndUpdate { filter, .. }
             | Self::FindOneAndReplace { filter, .. }
             | Self::FindOneAndDelete { filter, .. } => is_empty_object(filter),
+            Self::BulkWrite { operations, .. } => {
+                bulk_write_filters(operations).iter().any(|filter| is_empty_object(filter))
+            }
             _ => false,
         }
     }
@@ -128,13 +138,163 @@ impl MongoCommand {
     pub fn has_effectively_unbounded_filter(&self) -> bool {
         match self {
             Self::Update { filter, .. }
+            | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
             | Self::FindOneAndUpdate { filter, .. }
             | Self::FindOneAndReplace { filter, .. }
             | Self::FindOneAndDelete { filter, .. } => mongo_filter_is_effectively_unbounded(filter),
+            Self::BulkWrite { operations, .. } => {
+                bulk_write_filters(operations).iter().any(|filter| mongo_filter_is_effectively_unbounded(filter))
+            }
             _ => false,
         }
     }
+}
+
+/// One entry of a `bulkWrite([...])` array, validated but not yet converted to BSON.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BulkWriteOperation {
+    InsertOne { document: Value },
+    UpdateOne { filter: Value, update: Value, upsert: Option<bool>, array_filters: Option<Value> },
+    UpdateMany { filter: Value, update: Value, upsert: Option<bool>, array_filters: Option<Value> },
+    ReplaceOne { filter: Value, replacement: Value, upsert: Option<bool> },
+    DeleteOne { filter: Value },
+    DeleteMany { filter: Value },
+}
+
+impl BulkWriteOperation {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::InsertOne { .. } => "insertOne",
+            Self::UpdateOne { .. } => "updateOne",
+            Self::UpdateMany { .. } => "updateMany",
+            Self::ReplaceOne { .. } => "replaceOne",
+            Self::DeleteOne { .. } => "deleteOne",
+            Self::DeleteMany { .. } => "deleteMany",
+        }
+    }
+
+    fn filter(&self) -> Option<&Value> {
+        match self {
+            Self::InsertOne { .. } => None,
+            Self::UpdateOne { filter, .. }
+            | Self::UpdateMany { filter, .. }
+            | Self::ReplaceOne { filter, .. }
+            | Self::DeleteOne { filter }
+            | Self::DeleteMany { filter } => Some(filter),
+        }
+    }
+}
+
+/// Validate a `bulkWrite` operations array the way the shell does: each entry is one
+/// `{ <op>: { ... } }` document with exactly the fields that operation takes.
+pub fn parse_bulk_write_operations(operations_json: &str) -> Result<Vec<BulkWriteOperation>, String> {
+    let Some(Value::Array(entries)) = parse_json_value(operations_json) else {
+        return Err("MongoDB bulkWrite() requires an array of operations.".to_string());
+    };
+    if entries.is_empty() {
+        return Err("MongoDB bulkWrite() requires at least one operation.".to_string());
+    }
+    entries.iter().enumerate().map(|(index, entry)| parse_bulk_write_operation(index, entry)).collect()
+}
+
+fn parse_bulk_write_operation(index: usize, entry: &Value) -> Result<BulkWriteOperation, String> {
+    let position = index + 1;
+    let Value::Object(wrapper) = entry else {
+        return Err(format!("MongoDB bulkWrite() operation {position} must be a document such as {{ insertOne: {{ document: {{ ... }} }} }}."));
+    };
+    let (kind, spec) = match wrapper.iter().collect::<Vec<_>>().as_slice() {
+        [(kind, Value::Object(spec))] => (kind.as_str(), spec),
+        [(kind, _)] => return Err(format!("MongoDB bulkWrite() operation {position} ({kind}) must be a document.")),
+        _ => return Err(format!("MongoDB bulkWrite() operation {position} must have exactly one operation key.")),
+    };
+
+    let allowed: &[&str] = match kind {
+        "insertOne" => &["document"],
+        "updateOne" | "updateMany" => &["filter", "update", "upsert", "arrayFilters"],
+        "replaceOne" => &["filter", "replacement", "upsert"],
+        "deleteOne" | "deleteMany" => &["filter"],
+        other => {
+            return Err(format!(
+                "MongoDB bulkWrite() operation {position} uses unsupported operation {other}; supported: insertOne, updateOne, updateMany, replaceOne, deleteOne, deleteMany."
+            ))
+        }
+    };
+    if let Some(unknown) = spec.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(format!("MongoDB bulkWrite() operation {position} ({kind}) has unsupported field {unknown}."));
+    }
+    let document = |field: &str| -> Result<Value, String> {
+        match spec.get(field) {
+            Some(value @ Value::Object(_)) => Ok(value.clone()),
+            Some(_) => {
+                Err(format!("MongoDB bulkWrite() operation {position} ({kind}) field {field} must be a document."))
+            }
+            None => Err(format!("MongoDB bulkWrite() operation {position} ({kind}) requires a {field} document.")),
+        }
+    };
+    let upsert = match spec.get("upsert") {
+        None => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => return Err(format!("MongoDB bulkWrite() operation {position} ({kind}) upsert must be a boolean.")),
+    };
+
+    match kind {
+        "insertOne" => Ok(BulkWriteOperation::InsertOne { document: document("document")? }),
+        "updateOne" | "updateMany" => {
+            let update = match spec.get("update") {
+                Some(value @ Value::Object(object)) => {
+                    if object.is_empty() || !object.keys().all(|key| key.starts_with('$')) {
+                        return Err(format!(
+                            "MongoDB bulkWrite() operation {position} ({kind}) update must use operators such as $set; use replaceOne for a whole document."
+                        ));
+                    }
+                    value.clone()
+                }
+                Some(value @ Value::Array(_)) => value.clone(),
+                Some(_) => {
+                    return Err(format!(
+                        "MongoDB bulkWrite() operation {position} ({kind}) update must be a document or pipeline."
+                    ))
+                }
+                None => return Err(format!("MongoDB bulkWrite() operation {position} ({kind}) requires an update.")),
+            };
+            let array_filters = match spec.get("arrayFilters") {
+                None => None,
+                Some(value @ Value::Array(_)) => Some(value.clone()),
+                Some(_) => {
+                    return Err(format!(
+                        "MongoDB bulkWrite() operation {position} ({kind}) arrayFilters must be an array."
+                    ))
+                }
+            };
+            let filter = document("filter")?;
+            Ok(if kind == "updateOne" {
+                BulkWriteOperation::UpdateOne { filter, update, upsert, array_filters }
+            } else {
+                BulkWriteOperation::UpdateMany { filter, update, upsert, array_filters }
+            })
+        }
+        "replaceOne" => {
+            let replacement = document("replacement")?;
+            if let Some(operator) =
+                replacement.as_object().and_then(|object| object.keys().find(|key| key.starts_with('$')))
+            {
+                return Err(format!(
+                    "MongoDB bulkWrite() operation {position} (replaceOne) replacement must not contain update operators such as {operator}; use updateOne to modify fields."
+                ));
+            }
+            Ok(BulkWriteOperation::ReplaceOne { filter: document("filter")?, replacement, upsert })
+        }
+        "deleteOne" => Ok(BulkWriteOperation::DeleteOne { filter: document("filter")? }),
+        _ => Ok(BulkWriteOperation::DeleteMany { filter: document("filter")? }),
+    }
+}
+
+/// Filters of every non-insert operation, as JSON text, for the safety checks.
+fn bulk_write_filters(operations_json: &str) -> Vec<String> {
+    parse_bulk_write_operations(operations_json)
+        .map(|operations| operations.iter().filter_map(|op| op.filter().map(Value::to_string)).collect())
+        .unwrap_or_default()
 }
 
 pub fn validate_safety(
@@ -607,6 +767,35 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             return Err("MongoDB insert() requires a document or document array.".to_string());
         }
         return Ok(MongoCommand::Insert { collection, documents });
+    }
+
+    if let Some((args, tail)) = method_call(source, prefix_end, "bulkWrite") {
+        if !tail.is_empty() || !(1..=2).contains(&args.len()) {
+            return Err("MongoDB bulkWrite() requires an array of operations and optional options.".to_string());
+        }
+        let operations = normalized_json(&args[0])?;
+        parse_bulk_write_operations(&operations)?;
+        let options = args.get(1).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?;
+        if let Some(options) = &options {
+            validate_bulk_write_options(options)?;
+        }
+        return Ok(MongoCommand::BulkWrite { collection, operations, options });
+    }
+
+    if let Some((args, tail)) = method_call(source, prefix_end, "replaceOne") {
+        if !tail.is_empty() || !(2..=3).contains(&args.len()) {
+            return Err(
+                "MongoDB replaceOne() requires a filter, a replacement document, and optional options.".to_string()
+            );
+        }
+        let replacement = normalized_json(&args[1])?;
+        require_replacement_document(&replacement)?;
+        return Ok(MongoCommand::Replace {
+            collection,
+            filter: normalized_json(&args[0])?,
+            replacement,
+            options: args.get(2).filter(|arg| !arg.trim().is_empty()).map(|arg| normalized_json(arg)).transpose()?,
+        });
     }
 
     for (method, many) in [("updateOne", false), ("updateMany", true)] {
@@ -1348,6 +1537,34 @@ fn parse_use_database(source: &str) -> Option<String> {
     Some(database.to_string())
 }
 
+/// `bulkWrite` options: only `ordered` is honoured, so anything else is rejected rather than dropped.
+fn validate_bulk_write_options(options: &str) -> Result<(), String> {
+    let Some(Value::Object(object)) = parse_json_value(options) else {
+        return Err("MongoDB bulkWrite() options must be a document.".to_string());
+    };
+    for (key, value) in &object {
+        match (key.as_str(), value) {
+            ("ordered", Value::Bool(_)) => {}
+            ("ordered", _) => return Err("MongoDB bulkWrite() ordered option must be a boolean.".to_string()),
+            (other, _) => return Err(format!("Unsupported MongoDB bulkWrite() option: {other}.")),
+        }
+    }
+    Ok(())
+}
+
+/// A replacement is a whole document; `{$set: ...}` here almost always means updateOne() was intended.
+fn require_replacement_document(replacement: &str) -> Result<(), String> {
+    let Some(Value::Object(document)) = parse_json_value(replacement) else {
+        return Err("MongoDB replaceOne() replacement must be a document.".to_string());
+    };
+    match document.keys().find(|key| key.starts_with('$')) {
+        Some(operator) => Err(format!(
+            "MongoDB replaceOne() replacement must not contain update operators such as {operator}; use updateOne() to modify fields."
+        )),
+        None => Ok(()),
+    }
+}
+
 fn is_empty_object(value: &str) -> bool {
     parse_json_value(value).is_some_and(|value| value.as_object().is_some_and(|object| object.is_empty()))
 }
@@ -1863,6 +2080,143 @@ mod tests {
 
         // db.collection.stats() still parses as collection stats, not a run command.
         assert!(matches!(parse("db.orders.stats()").unwrap(), MongoCommand::CollectionStats { .. }));
+    }
+
+    #[test]
+    fn parses_replace_one_as_a_filtered_write() {
+        let command = parse(
+            r#"db.orders.replaceOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {name: "new", tags: []}, {upsert: true})"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::Replace {
+                collection: "orders".to_string(),
+                filter: r#"{"_id":{"$oid":"507f1f77bcf86cd799439011"}}"#.to_string(),
+                replacement: r#"{"name":"new","tags":[]}"#.to_string(),
+                options: Some(r#"{"upsert":true}"#.to_string()),
+            }
+        );
+        assert!(command.is_mutating());
+        assert!(!command.is_dangerous());
+        assert!(!command.has_empty_filter());
+        assert_eq!(validate_safety(&command, true, false, false), Ok(()));
+        assert_eq!(validate_safety(&command, false, false, false), Err(MongoSafetyError::WritesDisabled));
+
+        let without_options = parse("db.orders.replaceOne({a: 1}, {b: 2})").unwrap();
+        assert!(matches!(without_options, MongoCommand::Replace { options: None, .. }));
+
+        // An empty filter replaces an arbitrary document, so it is guarded like an update.
+        let unbounded = parse("db.orders.replaceOne({}, {b: 2})").unwrap();
+        assert!(unbounded.has_empty_filter());
+        assert_eq!(validate_safety(&unbounded, true, false, false), Err(MongoSafetyError::EmptyFilter));
+    }
+
+    #[test]
+    fn rejects_replace_one_with_operators_or_the_wrong_shape() {
+        let error = parse("db.orders.replaceOne({a: 1}, {$set: {b: 2}})").unwrap_err();
+        assert!(error.contains("$set") && error.contains("updateOne"), "{error}");
+
+        for source in [
+            "db.orders.replaceOne({a: 1})",
+            "db.orders.replaceOne({a: 1}, {b: 2}, {upsert: true}, 4)",
+            "db.orders.replaceOne({a: 1}, [{b: 2}])",
+            "db.orders.replaceOne({a: 1}, {b: 2}).limit(1)",
+        ] {
+            assert!(parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn parses_bulk_write_with_every_operation_kind() {
+        let command = parse(
+            r#"db.orders.bulkWrite([
+                { insertOne: { document: { sku: "A1", stock: 1 } } },
+                { updateOne: { filter: { sku: "A1" }, update: { $inc: { stock: 1 } }, upsert: true } },
+                { updateMany: { filter: { archived: true }, update: { $set: { stock: 0 } }, arrayFilters: [] } },
+                { replaceOne: { filter: { sku: "B2" }, replacement: { sku: "B2", stock: 9 } } },
+                { deleteOne: { filter: { sku: "C3" } } },
+                { deleteMany: { filter: { stock: { $lt: 0 } } } }
+            ], { ordered: false })"#,
+        )
+        .unwrap();
+        let MongoCommand::BulkWrite { collection, operations, options } = &command else {
+            panic!("expected a bulkWrite command");
+        };
+        assert_eq!(collection, "orders");
+        assert_eq!(options.as_deref(), Some(r#"{"ordered":false}"#));
+        let kinds: Vec<_> = parse_bulk_write_operations(operations).unwrap().iter().map(|op| op.kind()).collect();
+        assert_eq!(kinds, ["insertOne", "updateOne", "updateMany", "replaceOne", "deleteOne", "deleteMany"]);
+
+        assert!(command.is_mutating());
+        assert!(!command.is_dangerous());
+        assert!(!command.has_effectively_unbounded_filter());
+        assert_eq!(validate_safety(&command, true, false, false), Ok(()));
+        assert_eq!(validate_safety(&command, false, false, false), Err(MongoSafetyError::WritesDisabled));
+
+        // Only an insert: no filters at all, so never unbounded.
+        let inserts = parse(r#"db.orders.bulkWrite([{ insertOne: { document: { a: 1 } } }])"#).unwrap();
+        assert!(!inserts.has_empty_filter());
+    }
+
+    #[test]
+    fn bulk_write_with_any_unbounded_filter_is_guarded_like_an_update() {
+        let command = parse(
+            r#"db.orders.bulkWrite([
+                { updateOne: { filter: { sku: "A1" }, update: { $set: { a: 1 } } } },
+                { deleteMany: { filter: {} } }
+            ])"#,
+        )
+        .unwrap();
+        assert!(command.has_empty_filter());
+        assert!(command.has_effectively_unbounded_filter());
+        assert_eq!(validate_safety(&command, true, false, false), Err(MongoSafetyError::EmptyFilter));
+    }
+
+    #[test]
+    fn rejects_malformed_bulk_write_operations() {
+        for (source, expected) in [
+            ("db.orders.bulkWrite()", "array of operations"),
+            ("db.orders.bulkWrite({})", "array of operations"),
+            ("db.orders.bulkWrite([])", "at least one"),
+            ("db.orders.bulkWrite([1])", "operation 1 must be a document"),
+            ("db.orders.bulkWrite([{ insertOne: {}, deleteOne: {} }])", "exactly one operation key"),
+            ("db.orders.bulkWrite([{ upsertOne: { document: {} } }])", "unsupported operation upsertOne"),
+            ("db.orders.bulkWrite([{ insertOne: { doc: {} } }])", "unsupported field doc"),
+            ("db.orders.bulkWrite([{ insertOne: {} }])", "requires a document document"),
+            (
+                "db.orders.bulkWrite([{ updateOne: { filter: {}, update: { a: 1 } } }])",
+                "must use operators such as $set",
+            ),
+            (
+                "db.orders.bulkWrite([{ updateOne: { filter: {}, update: { $set: { a: 1 } }, upsert: 1 } }])",
+                "upsert must be a boolean",
+            ),
+            (
+                "db.orders.bulkWrite([{ updateOne: { filter: {}, update: { $set: { a: 1 } }, collation: {} } }])",
+                "unsupported field collation",
+            ),
+            (
+                "db.orders.bulkWrite([{ replaceOne: { filter: {}, replacement: { $set: { a: 1 } } } }])",
+                "must not contain update operators such as $set",
+            ),
+            ("db.orders.bulkWrite([{ deleteOne: { filter: [] } }])", "field filter must be a document"),
+            (
+                "db.orders.bulkWrite([{ deleteOne: { filter: {} } }], { ordered: 1 })",
+                "ordered option must be a boolean",
+            ),
+            (
+                "db.orders.bulkWrite([{ deleteOne: { filter: {} } }], { writeConcern: {} })",
+                "Unsupported MongoDB bulkWrite() option: writeConcern",
+            ),
+            (
+                "db.orders.bulkWrite([{ deleteOne: { filter: {} } }]).limit(1)",
+                "array of operations and optional options",
+            ),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
     }
 
     #[test]

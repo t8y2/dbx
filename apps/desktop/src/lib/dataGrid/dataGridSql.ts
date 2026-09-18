@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 
 export type GridCellValue = string | number | boolean | null | unknown[] | { [key: string]: unknown };
 
@@ -167,8 +168,15 @@ export function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptio
   return api.buildHiveTablePropertiesSql(options);
 }
 
+function formatDataGridSaveError(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return formatError(error);
+}
+
 export function normalizeDataGridSaveError(databaseType: DatabaseType | undefined, error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = formatDataGridSaveError(error);
   if ((databaseType === "hive" || databaseType === "argo") && /Attempt to do update or delete|Error 10294/i.test(message)) {
     return "Hive UPDATE/DELETE are not enabled for this table or server. Add rows with INSERT, or enable ACID transactional tables in Hive before editing/deleting existing rows.";
   }

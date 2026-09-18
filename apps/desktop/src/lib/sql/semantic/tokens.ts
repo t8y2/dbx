@@ -149,6 +149,15 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
+    if (dialectId === "oracle" && (ch === "q" || ch === "Q") && next === "'" && input[index + 2]) {
+      const opener = input[index + 2]!;
+      const closer = ({ "[": "]", "{": "}", "(": ")", "<": ">" } as Record<string, string>)[opener] ?? opener;
+      const end = input.indexOf(closer + "'", index + 3);
+      index = end < 0 ? input.length : end + 2;
+      tokens.push(token("string", input.slice(start, index), start, index, depth, "q'", end >= 0));
+      continue;
+    }
+
     if (ch === "'") {
       const quoted = readQuotedString(input, start, "'", mysqlBackslashEscape);
       index = quoted.end;

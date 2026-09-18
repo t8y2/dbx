@@ -30,6 +30,7 @@ pub mod mcp;
 pub mod mcp_bridge;
 pub mod mcp_http_server;
 pub mod mongo_cmd;
+pub mod mongodb_dump;
 pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq_cmd;

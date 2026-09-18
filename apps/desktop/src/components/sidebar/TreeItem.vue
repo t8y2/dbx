@@ -37,6 +37,7 @@ import {
   Minus,
   X,
   CircleX,
+  Ban,
   RefreshCw,
 } from "@lucide/vue";
 import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
@@ -70,6 +71,7 @@ import {
 import { AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR } from "@/lib/ai/aiTableReferenceDrop";
 import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
+import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { connectionDisplayUrlScheme } from "@/lib/connection/connectionPresentation";
@@ -223,6 +225,8 @@ const stopPasteHandlerRegistration = watch(
 );
 
 const activeNode = shallowRef<TreeNode>(props.node);
+
+const isDisabledTrigger = computed(() => activeNode.value.type === "trigger" && (activeNode.value.meta as TriggerInfo | undefined)?.enabled === false);
 
 const showProductionBadge = computed(() => {
   const connectionId = activeNode.value.connectionId;
@@ -516,6 +520,13 @@ function hostForDisplay(host: string): string {
   return `[${host}]`;
 }
 
+// A Redis database is a numeric index; dirty stored values (e.g. redis-cli flags
+// pasted into the field) resolve to the index the backend actually connects with.
+function tooltipDatabaseValue(config: ConnectionConfig): string {
+  const database = cleanTooltipValue(config.database);
+  return config.db_type === "redis" && database ? effectiveRedisDatabaseIndex(database) : database;
+}
+
 function connectionTooltipUrl(config: ConnectionConfig): string {
   const explicit = cleanTooltipValue(config.connection_string);
   if (explicit) return redactedConnectionString(explicit);
@@ -533,7 +544,7 @@ function connectionTooltipUrl(config: ConnectionConfig): string {
   const port = Number(config.port) > 0 ? `:${config.port}` : "";
   const user = cleanTooltipValue(config.username);
   const userInfo = user ? `${encodeURIComponent(user)}@` : "";
-  const database = cleanTooltipValue(config.database);
+  const database = tooltipDatabaseValue(config);
   const encodedDatabase = config.db_type === "spanner" ? encodeSpannerResourcePath(database) : encodeURIComponent(database);
   const path = database ? `/${encodedDatabase}` : "";
   const params = cleanTooltipValue(config.url_params);
@@ -569,7 +580,7 @@ const detailTooltip = computed(() => {
       { label: "URL", value: connectionTooltipUrl(config), multiline: true },
       ...(hostValues.length > 0 ? [{ label: hostLabel, value: hostValues[0], values: hostValues } as DetailTooltipRow] : [{ label: hostLabel, value: hostValue, multiline: isLocalFileConnection(config) } as DetailTooltipRow]),
       { label: "Port", value: Number(config.port) > 0 ? String(config.port) : "" },
-      { label: t("connection.database"), value: cleanTooltipValue(config.database) },
+      { label: t("connection.database"), value: tooltipDatabaseValue(config) },
       { label: t("connection.user"), value: cleanTooltipValue(config.username) },
       { label: t("connection.type"), value: config.driver_label || config.driver_profile || config.db_type },
       { label: t("connection.databaseInfo.productVersion"), value: cleanTooltipValue(config.database_info?.productVersion) },
@@ -1589,12 +1600,23 @@ function onKeydown(event: KeyboardEvent) {
           </button>
         </template>
         <span v-else class="w-3.5 h-3.5 shrink-0" />
-        <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false }">
+        <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': node.valid === false || isDisabledTrigger }">
           <PluginIcon v-if="node.type === 'connection' && pluginConnectionIcon" :plugin-id="pluginConnectionIcon.pluginId" :contribution-id="pluginConnectionIcon.contributionId" class="h-3.5 w-3.5 shrink-0" />
           <DatabaseIcon v-else-if="node.type === 'connection'" :db-type="connectionIconType(node.connectionId)" class="h-3.5 w-3.5 shrink-0" />
           <Loader2 v-else-if="node.type === 'load-more' && node.isLoading" class="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
           <component v-else :is="getIconInfo(node)?.icon || Database" class="h-3.5 w-3.5 shrink-0" :class="databaseOpenVisual.iconClass" />
           <CircleX v-if="node.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
+          <span
+            v-if="isDisabledTrigger"
+            data-disabled-trigger-indicator="true"
+            class="absolute -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-muted-foreground"
+            :class="node.valid === false ? '-left-1' : '-right-1'"
+            role="img"
+            :aria-label="t('objects.disabled')"
+            :title="t('objects.disabled')"
+          >
+            <Ban class="h-2.5 w-2.5 stroke-[3]" aria-hidden="true" />
+          </span>
         </span>
         <div ref="trailingCommentLayoutRef" :class="hasTrailingMetadata() ? 'flex flex-1 min-w-0 items-center' : 'contents'">
           <div ref="trailingCommentLeadingRef" :class="trailingComment ? 'flex max-w-full min-w-0 shrink-0 items-center gap-2' : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'" :style="alignedCommentLeadingStyle()">

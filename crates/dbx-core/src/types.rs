@@ -106,6 +106,8 @@ impl CatalogInfo {
 pub struct TableInfo {
     pub name: String,
     pub table_type: String, // "TABLE" or "VIEW"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
     pub comment: Option<String>,
     pub parent_schema: Option<String>,
     pub parent_name: Option<String>,
@@ -552,6 +554,11 @@ impl Serialize for JsSafeCell<'_> {
                     if value > crate::db::JS_MAX_SAFE_INTEGER as u64 {
                         return serializer.serialize_str(&value.to_string());
                     }
+                } else {
+                    let value = number.as_str();
+                    if value.bytes().all(|byte| byte == b'-' || byte.is_ascii_digit()) {
+                        return serializer.serialize_str(value);
+                    }
                 }
                 self.0.serialize(serializer)
             }
@@ -856,7 +863,7 @@ pub struct CustomTypeDetails {
 mod tests {
     use super::{
         CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo, ObjectSourceKind, QueryMessage,
-        SpatialColumn, SpatialColumnBuilder,
+        SpatialColumn, SpatialColumnBuilder, TableInfo,
     };
 
     #[test]
@@ -954,6 +961,39 @@ mod tests {
         assert_eq!(trigger.enabled, Some(false));
         assert_eq!(trigger.comment.as_deref(), Some("audit"));
         assert_eq!(objects[1].xugu_type_members_expandable, Some(true));
+    }
+
+    #[test]
+    fn dameng_table_validity_round_trips_true_false_and_unknown() {
+        for validity in [Some(true), Some(false), None] {
+            let payload = serde_json::json!({"name": "VIEW_A", "table_type": "VIEW", "valid": validity});
+            let table: TableInfo = serde_json::from_value(payload).unwrap();
+            assert_eq!(table.valid, validity);
+            let encoded = serde_json::to_value(&table).unwrap();
+            assert_eq!(encoded.get("valid").and_then(serde_json::Value::as_bool), validity);
+            assert_eq!(encoded.get("valid").is_some(), validity.is_some());
+            let decoded: TableInfo = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.valid, validity);
+        }
+        let legacy: TableInfo = serde_json::from_str(r#"{"name":"TABLE_A","table_type":"TABLE"}"#).unwrap();
+        assert_eq!(legacy.valid, None);
+    }
+
+    #[test]
+    fn dameng_object_validity_round_trips_true_false_and_unknown() {
+        for validity in [Some(true), Some(false), None] {
+            let payload =
+                serde_json::json!({"name": "VIEW_A", "object_type": "VIEW", "schema": "APP", "valid": validity});
+            let object: ObjectInfo = serde_json::from_value(payload).unwrap();
+            assert_eq!(object.valid, validity);
+            let encoded = serde_json::to_value(&object).unwrap();
+            assert_eq!(encoded.get("valid").and_then(serde_json::Value::as_bool), validity);
+            assert_eq!(encoded.get("valid").is_some(), validity.is_some());
+            let decoded: ObjectInfo = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.valid, validity);
+        }
+        let legacy: ObjectInfo = serde_json::from_str(r#"{"name":"TABLE_A","object_type":"TABLE"}"#).unwrap();
+        assert_eq!(legacy.valid, None);
     }
 
     #[test]
@@ -1083,6 +1123,47 @@ mod tests {
         assert_eq!(row[4], serde_json::json!("18446744073709551615"), "big u64 becomes a string");
         assert_eq!(row[5], serde_json::json!("1391198305898897409"), "existing strings pass through");
         assert_eq!(row[6], serde_json::Value::Null, "null passes through");
+    }
+
+    #[test]
+    fn query_result_serializes_integers_beyond_64_bits_as_strings() {
+        let integers = [
+            "18446744073709551616",
+            "18446744073709551617",
+            "-9223372036854775809",
+            "2026081810175800100000000000",
+            "2026081810175800100000000001",
+            "-2026081810175800100000000000",
+            "99999999999999999999999999999999999999",
+        ];
+        let mut result = bigint_result_sample();
+        result.rows = integers.iter().map(|integer| vec![serde_json::from_str(integer).unwrap()]).collect();
+        let expected = serde_json::json!(integers.iter().map(|integer| vec![*integer]).collect::<Vec<_>>());
+
+        assert_eq!(serde_json::to_value(&result).unwrap()["rows"], expected);
+
+        let wire = serde_json::to_string(&result).unwrap();
+        let deserialized: super::QueryResult = serde_json::from_str(&wire).unwrap();
+        assert_eq!(serde_json::to_value(&deserialized.rows).unwrap(), expected);
+    }
+
+    #[test]
+    fn query_result_serialization_matches_js_normalization_for_nested_numbers() {
+        let cell: serde_json::Value = serde_json::from_str(
+            r#"{"ids":[2026081810175800100000000000,2026081810175800100000000001],"nested":{"id":-2026081810175800100000000000},"safe":42,"decimal":123.45,"exponent":1.25e-7,"null":null,"text":"2026081810175800100000000000"}"#,
+        )
+        .unwrap();
+        let mut result = bigint_result_sample();
+        result.rows = vec![vec![cell.clone()]];
+
+        let wire = serde_json::to_string(&result).unwrap();
+        let serialized: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let expected = crate::db::json_value_for_js(cell);
+
+        assert_eq!(serialized["rows"][0][0], expected);
+        assert_eq!(serialized["rows"][0][0]["ids"][0], "2026081810175800100000000000");
+        assert_eq!(serialized["rows"][0][0]["ids"][1], "2026081810175800100000000001");
+        assert_eq!(serialized["rows"][0][0]["nested"]["id"], "-2026081810175800100000000000");
     }
 
     #[test]

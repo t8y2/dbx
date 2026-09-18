@@ -197,7 +197,7 @@ export function PluginDetailClient({
   }
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={lang} active="plugins" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">

@@ -85,6 +85,9 @@ pub struct AgentLoopContext {
     /// Turn limit for this run, already clamped by the settings layer.
     /// Callers that have no user setting should pass [`DEFAULT_MAX_AGENT_TURNS`].
     pub max_agent_turns: u32,
+    /// Stable per-conversation key forwarded to providers that support prompt
+    /// caching (OpenAI Responses API). `None` disables the field entirely.
+    pub prompt_cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +286,7 @@ pub async fn run_agent_loop(
                 &on_event,
                 cancelled,
                 false,
+                agent_ctx.prompt_cache_key.as_deref(),
             )
             .await,
             CompactResult::Cancelled
@@ -306,6 +310,7 @@ pub async fn run_agent_loop(
                 &tools,
                 max_tokens,
                 task_contract.clone(),
+                agent_ctx.prompt_cache_key.clone(),
             );
 
             // Stream the LLM response, collecting text and tool_calls.
@@ -372,6 +377,7 @@ pub async fn run_agent_loop(
                         &on_event,
                         cancelled,
                         true,
+                        agent_ctx.prompt_cache_key.as_deref(),
                     )
                     .await;
                     match compacted {
@@ -659,6 +665,7 @@ fn build_tool_request(
     _tools: &[ToolDefinition], // Tools are injected in ai::stream_with_tools, not via AiCompletionRequest.
     max_tokens: Option<u32>,
     task_contract: Option<AiTaskContract>,
+    prompt_cache_key: Option<String>,
 ) -> AiCompletionRequest {
     // Note: tools are passed via the body, not via AiCompletionRequest.
     // The actual injection happens in stream_with_tools.
@@ -668,6 +675,7 @@ fn build_tool_request(
         messages: messages.to_vec(),
         task_contract,
         max_tokens: max_tokens.or(Some(4096)),
+        prompt_cache_key,
     }
 }
 
@@ -920,6 +928,7 @@ async fn run_agent_loop_text_only(
         messages: messages.to_vec(),
         task_contract: task_contract.cloned(),
         max_tokens: max_tokens.or(Some(4096)),
+        prompt_cache_key: agent_ctx.prompt_cache_key.clone(),
     };
 
     for attempt in 0..=MAX_CONTRACT_REPAIR_ATTEMPTS {
@@ -1127,6 +1136,7 @@ async fn maybe_compact(
     on_event: &(impl Fn(AgentEvent) + Send + Sync),
     cancelled: &Notify,
     force: bool,
+    prompt_cache_key: Option<&str>,
 ) -> CompactResult {
     let window = effective_context_window(config);
     let budget = prompt_budget(window, max_tokens);
@@ -1183,6 +1193,7 @@ async fn maybe_compact(
         }],
         task_contract: None,
         max_tokens: Some(1024),
+        prompt_cache_key: prompt_cache_key.map(str::to_string),
     };
 
     let summary = match cancelled.notified().now_or_never() {
@@ -1514,6 +1525,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(effective_context_window(&config), 65_536);
+    }
+
+    #[test]
+    fn build_tool_request_carries_prompt_cache_key() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai",
+            "model": "test-model",
+        }))
+        .unwrap();
+
+        // Every agent turn rebuilds the request here, so this is the join that
+        // used to drop the conversation key before it reached the provider.
+        let with_key = build_tool_request(&config, "system", &[], &[], Some(128), None, Some("conv-1".to_string()));
+        assert_eq!(with_key.prompt_cache_key.as_deref(), Some("conv-1"));
+
+        let without_key = build_tool_request(&config, "system", &[], &[], Some(128), None, None);
+        assert!(without_key.prompt_cache_key.is_none());
     }
 
     #[test]

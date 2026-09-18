@@ -117,6 +117,27 @@ describe("read-only write unlock", () => {
     expect(connectionIsEffectivelyReadOnly(connection)).toBe(false);
   });
 
+  it.each(["", '"queryPlanner"', '"executionStats"', '"allPlansExecution"'])("does not request write unlock for MongoDB find explain(%s)", async (verbosity) => {
+    const store = useReadOnlyUnlockStore();
+    const connection = { id: "mongo", read_only: true, db_type: "mongodb" as const };
+    const pending = ensureReadOnlyWriteAccess({ connection, sql: `db.demo.find({}).explain(${verbosity})` });
+
+    expect(connectionWriteUnlockState).not.toHaveBeenCalled();
+    expect(store.pending).toBeUndefined();
+    await expect(pending).resolves.toBe(true);
+    expect(unlockConnectionWrites).not.toHaveBeenCalled();
+  });
+
+  it("still requests write unlock for MongoDB explain mixed with writes", async () => {
+    const connection = { id: "mongo", read_only: true, db_type: "mongodb" as const };
+    const pending = ensureReadOnlyWriteAccess({ connection, sql: "db.demo.find({}).explain(); db.demo.insertOne({active: true})" });
+    const store = await waitForPending("mongo");
+
+    store.cancel();
+    await expect(pending).resolves.toBe(false);
+    expect(unlockConnectionWrites).not.toHaveBeenCalled();
+  });
+
   it("returns to effectively read-only when the local timer expires", async () => {
     vi.useFakeTimers();
     const store = useReadOnlyUnlockStore();

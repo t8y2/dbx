@@ -2470,6 +2470,7 @@ pub async fn list_tables_filtered(
             (!name.is_empty()).then_some(TableInfo {
                 name,
                 table_type: normalize_mysql_table_type(&get_str_by_name(row, "TABLE_TYPE")),
+                valid: None,
                 comment: get_opt_str(row, "TABLE_COMMENT")
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
@@ -2976,7 +2977,7 @@ fn table_infos_from_show_rows(rows: &[mysql_async::Row]) -> Vec<TableInfo> {
                 return None;
             }
             let table_type = normalize_mysql_table_type(&get_str(row, 1));
-            Some(TableInfo { name, table_type, comment: None, parent_schema: None, parent_name: None })
+            Some(TableInfo { name, table_type, valid: None, comment: None, parent_schema: None, parent_name: None })
         })
         .collect::<Vec<_>>();
     tables.sort_by(|a, b| a.name.cmp(&b.name));
@@ -6927,6 +6928,7 @@ mod tests {
             TableInfo {
                 name: "audit_2024".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -6934,6 +6936,7 @@ mod tests {
             TableInfo {
                 name: "audit_view".to_string(),
                 table_type: "VIEW".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -6941,6 +6944,7 @@ mod tests {
             TableInfo {
                 name: "audit_2025".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: Some("purchase order history".to_string()),
                 parent_schema: None,
                 parent_name: None,
@@ -6954,6 +6958,7 @@ mod tests {
         let rows = vec![TableInfo {
             name: "t_0001".to_string(),
             table_type: "BASE TABLE".to_string(),
+            valid: None,
             comment: Some("food orders".to_string()),
             parent_schema: None,
             parent_name: None,

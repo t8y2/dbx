@@ -45,6 +45,7 @@ pub struct PluginConnectionHandle {
     session: Option<Arc<PluginSidecarSession>>,
     disconnect: bool,
     params: serde_json::Value,
+    _activity: super::lifecycle::PluginUsageGuard,
 }
 
 impl PluginConnectionHandle {
@@ -115,6 +116,7 @@ impl PluginHost {
         plugin_id: &str,
         env: PluginRuntimeEnv,
     ) -> Result<Arc<PluginSidecarSession>, String> {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         if let Some(session) = self.running_session(plugin_id).await {
             return Ok(session);
         }
@@ -151,6 +153,7 @@ impl PluginHost {
     where
         T: DeserializeOwned,
     {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.invoke_with_timeout(method, params, None, timeout).await
@@ -163,6 +166,7 @@ impl PluginHost {
         params: serde_json::Value,
         required_permission: Option<&str>,
     ) -> Result<(), String> {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.notify(method, params, None).await
@@ -175,6 +179,7 @@ impl PluginHost {
         data: &[u8],
         required_permission: Option<&str>,
     ) -> Result<(), String> {
+        let _activity = self.inner.registry.lifecycle.begin_operation(plugin_id)?;
         let session = self.activate(plugin_id).await?;
         ensure_permission(session.plugin(), required_permission)?;
         session.send_binary(channel, data).await
@@ -195,6 +200,11 @@ impl PluginHost {
         runtime_host: &str,
         runtime_port: u16,
     ) -> Result<ConnectionTestResult, String> {
+        let _activity = self
+            .inner
+            .registry
+            .lifecycle
+            .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (plugin, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
         let provider_label = provider.label.as_deref().unwrap_or(&plugin.manifest.name);
@@ -219,6 +229,11 @@ impl PluginHost {
         runtime_host: &str,
         runtime_port: u16,
     ) -> Result<PluginConnectionHandle, String> {
+        let activity = self
+            .inner
+            .registry
+            .lifecycle
+            .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (_, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
         let params = plugin_connection_params(config, &provider, runtime_host, runtime_port)?;
@@ -250,6 +265,7 @@ impl PluginHost {
             session,
             disconnect,
             params,
+            _activity: activity,
         })
     }
 
@@ -260,6 +276,11 @@ impl PluginHost {
         runtime_host: &str,
         runtime_port: u16,
     ) -> Result<PluginConnectionActionResult, String> {
+        let _activity = self
+            .inner
+            .registry
+            .lifecycle
+            .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (_, provider) = self.resolve_connection_provider(config)?;
         let action = plugin_invoke_connection_action(&provider, action_id)?;
         validate_plugin_connection_values_for_action(config, &provider, action.requires_valid_form)?;
@@ -546,39 +567,36 @@ fn plugin_field_value_is_empty(value: Option<&serde_json::Value>) -> bool {
     }
 }
 
+/// Resolves the stored value of one plugin form field (a condition's operand).
+fn plugin_condition_field_value(
+    key: &str,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+) -> Option<serde_json::Value> {
+    let sibling = provider.fields.iter().find(|field| field.key == key)?;
+    plugin_connection_field_value(config, sibling)
+}
+
 /// Evaluates a plugin manifest field condition (`visible_when` / `required_when`,
 /// Host API 1.1) against the stored connection values. Mirrors the frontend
-/// `pluginFieldConditions.ts` semantics: the condition matches when the current
-/// value of the referenced sibling field is listed in `one_of`; a missing
-/// sibling field or an unset/empty value never matches.
+/// `pluginFieldConditions.ts` semantics: a leaf matches when the current value
+/// of the referenced sibling field is listed in `one_of`, and a missing sibling
+/// field or an unset/empty value never matches; `all_of` / `any_of` / `not`
+/// compose those clauses.
 fn plugin_field_condition_matches(
     condition: &super::PluginFieldCondition,
     config: &ConnectionConfig,
     provider: &PluginConnectionProviderContribution,
 ) -> bool {
-    let Some(sibling) = provider.fields.iter().find(|field| field.key == condition.field) else {
-        return false;
-    };
-    let Some(value) = plugin_connection_field_value(config, sibling) else {
-        return false;
-    };
-    let text = match value {
-        serde_json::Value::Null => return false,
-        serde_json::Value::String(text) => text,
-        other => other.to_string(),
-    };
-    if text.trim().is_empty() {
-        return false;
-    }
-    condition.one_of.iter().any(|option| option == &text)
+    condition.matches(&|key| plugin_condition_field_value(key, config, provider))
 }
 
 /// A field participates in the form when its `visible_when` (if any) matches.
-/// Mirrors the frontend cascade (`pluginFieldConditions.ts`): once the raw
-/// condition matches, the referenced sibling must itself be visible — a hidden
-/// container field's stored default (e.g. `krb_credential_type: "password"`
-/// while auth is simple) must not mark grandchild fields visible + required,
-/// otherwise non-dialog write paths reject connections the dialog accepts.
+/// Mirrors the frontend cascade (`pluginFieldConditions.ts`): a clause only
+/// counts while the sibling it reads is itself visible — a hidden container
+/// field's stored default (e.g. `krb_credential_type: "password"` while auth is
+/// simple) must not mark grandchild fields visible + required, otherwise
+/// non-dialog write paths reject connections the dialog accepts.
 fn plugin_field_is_visible(
     field: &PluginFormFieldDefinition,
     config: &ConnectionConfig,
@@ -598,19 +616,59 @@ fn plugin_field_is_visible_cached(
     let Some(condition) = &field.visible_when else {
         return true;
     };
-    if !plugin_field_condition_matches(condition, config, provider) {
-        return false;
+    plugin_field_condition_is_visible(condition, config, provider, seen)
+}
+
+/// Visibility-aware evaluation of one condition expression, mirroring the
+/// frontend `conditionExpressionVisible`: a clause only counts while the field
+/// it reads is itself visible, `any_of`/`all_of` compose those verdicts, and
+/// `not` additionally requires every operand to be visible (an inverted hidden
+/// value is not a usable answer).
+fn plugin_field_condition_is_visible(
+    condition: &super::PluginFieldCondition,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+    seen: &mut HashSet<String>,
+) -> bool {
+    match condition {
+        super::PluginFieldCondition::Field(clause) => {
+            if !plugin_field_condition_matches(condition, config, provider) {
+                return false;
+            }
+            plugin_field_key_is_visible(&clause.field, config, provider, seen)
+        }
+        super::PluginFieldCondition::AllOf { all_of } => {
+            all_of.iter().all(|child| plugin_field_condition_is_visible(child, config, provider, seen))
+        }
+        super::PluginFieldCondition::AnyOf { any_of } => {
+            any_of.iter().any(|child| plugin_field_condition_is_visible(child, config, provider, seen))
+        }
+        super::PluginFieldCondition::Not { not } => {
+            let operands_visible =
+                not.referenced_fields().iter().all(|key| plugin_field_key_is_visible(key, config, provider, seen));
+            operands_visible && !plugin_field_condition_matches(not, config, provider)
+        }
     }
-    // The condition matched, so the sibling exists (its value was readable);
-    // guard cycles anyway and fall through to visible, mirroring the frontend.
-    let Some(sibling) = provider.fields.iter().find(|candidate| candidate.key == condition.field) else {
+}
+
+/// Whether the sibling field behind one referenced key is itself rendered.
+/// Cycles count as visible, mirroring the frontend's `seen` guard.
+fn plugin_field_key_is_visible(
+    key: &str,
+    config: &ConnectionConfig,
+    provider: &PluginConnectionProviderContribution,
+    seen: &mut HashSet<String>,
+) -> bool {
+    let Some(sibling) = provider.fields.iter().find(|candidate| candidate.key == key) else {
         return true;
     };
     if seen.contains(&sibling.key) {
         return true;
     }
     seen.insert(sibling.key.clone());
-    plugin_field_is_visible_cached(sibling, config, provider, seen)
+    let visible = plugin_field_is_visible_cached(sibling, config, provider, seen);
+    seen.remove(&sibling.key);
+    visible
 }
 
 /// Effective required = static `required` OR a matching `required_when`
@@ -695,11 +753,62 @@ fn ensure_permission(plugin: &super::InstalledPlugin, required_permission: Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        plugin_connection_action_result, plugin_invoke_connection_action, validate_plugin_connection_values,
-        validate_plugin_connection_values_for_action,
+        plugin_connection_action_result, plugin_field_is_visible, plugin_invoke_connection_action,
+        validate_plugin_connection_values, validate_plugin_connection_values_for_action,
     };
     use crate::models::connection::ConnectionConfig;
     use crate::plugins::PluginConnectionProviderContribution;
+
+    #[tokio::test]
+    async fn ui_only_connections_hold_update_guards_but_saved_configs_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin_dir = root.path().join("sample.ui");
+        std::fs::create_dir(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.ui",
+                "name": "Sample UI",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.5.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "entry": "index.html" } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "saved-connection",
+            "name": "Saved UI connection",
+            "db_type": "plugin",
+            "host": "localhost",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "plugin_id": "sample.ui",
+            "plugin_connection_provider": "sample.connection",
+            "plugin_connection_type": "sample"
+        }))
+        .unwrap();
+        let registry = crate::plugins::PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        let lifecycle = registry.lifecycle();
+        let host = super::PluginHost::new(registry);
+        let update = lifecycle.begin_update("sample.ui").unwrap();
+        assert!(host.connect_connection(&config, "localhost", 0).await.is_err());
+        drop(update);
+        let connection = host.connect_connection(&config, "localhost", 0).await.unwrap();
+        assert!(lifecycle.begin_update("sample.ui").unwrap_err().contains("Saved UI connection"));
+        connection.disconnect().await.unwrap();
+        drop(connection);
+        assert!(lifecycle.begin_update("sample.ui").is_ok());
+    }
 
     #[test]
     fn rejects_zero_port_for_port_bound_connection_field() {
@@ -1116,5 +1225,192 @@ mod tests {
         .unwrap();
         let cyclic_config = config_for(serde_json::json!({ "a": "x", "b": "x" }));
         assert!(validate_plugin_connection_values(&cyclic_config, &cyclic).is_ok());
+    }
+
+    #[test]
+    fn condition_sibling_branches_keep_cycle_detection_path_local() {
+        let mut provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "test.connection",
+            "database_type": "test",
+            "fields": [
+                { "key": "mode", "label": "Mode", "type": "text" },
+                {
+                    "key": "auth", "label": "Auth", "type": "text",
+                    "visible_when": { "field": "mode", "one_of": ["enabled"] }
+                },
+                { "key": "flag", "label": "Flag", "type": "boolean" },
+                { "key": "target", "label": "Target", "type": "text", "required": true }
+            ]
+        }))
+        .unwrap();
+        let mut config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-connection", "name": "Test", "db_type": "plugin",
+            "host": "", "port": 0, "username": "", "password": ""
+        }))
+        .unwrap();
+        let clause = serde_json::json!({ "field": "auth", "one_of": ["password"] });
+        let branches = [
+            serde_json::json!({ "all_of": [clause, { "field": "flag", "one_of": [true] }] }),
+            serde_json::json!({ "all_of": [{ "field": "flag", "one_of": [false] }, clause] }),
+        ];
+        for condition in [
+            clause.clone(),
+            serde_json::json!({ "any_of": [clause, clause] }),
+            serde_json::json!({ "all_of": [clause, clause] }),
+            serde_json::json!({ "any_of": [branches[0], branches[1]] }),
+            serde_json::json!({ "any_of": [branches[1], branches[0]] }),
+        ] {
+            provider.fields[3].visible_when = Some(serde_json::from_value(condition.clone()).unwrap());
+            for flag in [false, true] {
+                for (mode, expected) in [("disabled", false), ("enabled", true)] {
+                    config.external_config =
+                        Some(serde_json::json!({ "mode": mode, "auth": "password", "flag": flag }));
+                    assert_eq!(
+                        plugin_field_is_visible(&provider.fields[3], &config, &provider),
+                        expected,
+                        "{condition}"
+                    );
+                    assert_eq!(validate_plugin_connection_values(&config, &provider).is_err(), expected, "{condition}");
+                }
+            }
+        }
+        provider.fields[3].visible_when = Some(
+            serde_json::from_value(serde_json::json!({
+                "not": { "any_of": [clause, clause] }
+            }))
+            .unwrap(),
+        );
+        for (mode, expected) in [("disabled", false), ("enabled", true)] {
+            config.external_config = Some(serde_json::json!({ "mode": mode, "auth": "token" }));
+            assert_eq!(plugin_field_is_visible(&provider.fields[3], &config, &provider), expected);
+        }
+    }
+
+    #[test]
+    fn condition_cycles_still_require_matching_values() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "test.connection",
+            "database_type": "test",
+            "fields": [
+                { "key": "first", "label": "First", "type": "text", "visible_when": { "field": "second", "one_of": ["on"] } },
+                { "key": "second", "label": "Second", "type": "text", "visible_when": { "field": "first", "one_of": ["on"] } },
+                { "key": "self", "label": "Self", "type": "text", "visible_when": { "field": "self", "one_of": ["on"] } },
+                { "key": "unknown", "label": "Unknown", "type": "text", "visible_when": { "field": "missing", "one_of": ["on"] } }
+            ]
+        }))
+        .unwrap();
+        let mut config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "plugin-connection", "name": "Test", "db_type": "plugin",
+            "host": "", "port": 0, "username": "", "password": ""
+        }))
+        .unwrap();
+        for (value, expected) in [("on", true), ("off", false)] {
+            config.external_config =
+                Some(serde_json::json!({ "first": value, "second": "on", "self": value, "missing": value }));
+            for field in &provider.fields {
+                assert_eq!(
+                    plugin_field_is_visible(field, &config, &provider),
+                    expected && field.key != "unknown",
+                    "{}",
+                    field.key
+                );
+            }
+        }
+    }
+
+    /// Mirrors the SSH plugin shape the composite contract was added for:
+    /// `sudo_command` is required only while `sudo_source = custom` **and**
+    /// `read_only = false`, which the single-clause contract could not express.
+    #[test]
+    fn composite_condition_gates_required_fields_like_the_dialog() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "ssh.connection",
+            "label": "SSH",
+            "database_type": "ssh",
+            "fields": [
+                {
+                    "key": "read_only",
+                    "label": "Read only",
+                    "type": "boolean",
+                    "binding": "config",
+                    "default": false
+                },
+                {
+                    "key": "sudo_source",
+                    "label": "Sudo source",
+                    "type": "select",
+                    "binding": "config",
+                    "default": "none",
+                    "options": [
+                        { "value": "none", "label": "None" },
+                        { "value": "custom", "label": "Custom" }
+                    ]
+                },
+                {
+                    "key": "sudo_command",
+                    "label": "Sudo command",
+                    "type": "text",
+                    "binding": "config",
+                    "visible_when": {
+                        "all_of": [
+                            { "field": "sudo_source", "one_of": ["custom"] },
+                            { "field": "read_only", "one_of": [false] }
+                        ]
+                    },
+                    "required_when": {
+                        "all_of": [
+                            { "field": "sudo_source", "one_of": ["custom"] },
+                            { "not": { "field": "read_only", "one_of": [true] } }
+                        ]
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+        let config_for = |external: serde_json::Value| -> ConnectionConfig {
+            serde_json::from_value(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "Prod SSH",
+                "db_type": "plugin",
+                "host": "ssh.example.com",
+                "port": 22,
+                "username": "root",
+                "password": "",
+                "database": null,
+                "plugin_id": "io.dbx.ssh",
+                "plugin_connection_provider": "ssh.connection",
+                "plugin_connection_type": "ssh",
+                "external_config": external
+            }))
+            .unwrap()
+        };
+
+        // Read-only sessions ignore the sudo block: nothing is required.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "sudo_source": "custom", "read_only": true })),
+            &provider
+        )
+        .is_ok());
+        // Sudo stays off: nothing is required either.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "sudo_source": "none", "read_only": false })),
+            &provider
+        )
+        .is_ok());
+        // Custom sudo on a writable connection: the command becomes required.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "sudo_source": "custom", "read_only": false })),
+            &provider
+        )
+        .unwrap_err()
+        .contains("Sudo command' is required"));
+        // ...and passes once it is filled in.
+        assert!(validate_plugin_connection_values(
+            &config_for(
+                serde_json::json!({ "sudo_source": "custom", "read_only": false, "sudo_command": "sudo -n true" })
+            ),
+            &provider
+        )
+        .is_ok());
     }
 }

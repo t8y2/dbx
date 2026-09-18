@@ -1606,4 +1606,60 @@ mod tests {
         let loaded = load_connections_from_file(&path, &store).unwrap();
         assert_eq!(loaded[0].connection_secrets.get("access_token").map(String::as_str), Some("plugin-secret"));
     }
+
+    #[test]
+    fn load_connections_preserves_opaque_null_plugin_secrets() {
+        let path = temp_connections_file("plugin-null-secret");
+        let store = MemorySecretStore::default();
+        let mut config = connection("plugin-connection", "", "");
+        config.db_type = DatabaseType::Plugin;
+        config.plugin_id = Some("io.dbx.ssh".to_string());
+        config.plugin_connection_provider = Some("ssh.connection".to_string());
+        config.plugin_connection_type = Some("ssh".to_string());
+        config.external_config = Some(serde_json::json!({ "sudo_source": "custom" }));
+        config.connection_secrets.insert("sudo_password".to_string(), "null".to_string());
+        config.connection_secrets.insert("totp_secret".to_string(), "".to_string());
+        config.connection_secrets.insert("private_key_passphrase".to_string(), "real-passphrase".to_string());
+
+        save_connections_to_file(&path, &[config], &store).unwrap();
+        store.set_existing("plugin-connection", &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}totp_secret"), "null");
+        let stored = store.values.borrow().clone();
+        let deleted = store.deleted.borrow().clone();
+        let raw_config = std::fs::read(&path).unwrap();
+
+        let loaded = load_connections_from_file(&path, &store).unwrap();
+        let secrets = &loaded[0].connection_secrets;
+        assert_eq!(secrets.get("sudo_password").map(String::as_str), Some("null"));
+        assert_eq!(secrets.get("totp_secret").map(String::as_str), Some("null"));
+        assert_eq!(secrets.get("private_key_passphrase").map(String::as_str), Some("real-passphrase"));
+        assert_eq!(load_connections_from_file(&path, &store).unwrap()[0].connection_secrets, *secrets);
+        assert_eq!(*store.values.borrow(), stored);
+        assert_eq!(*store.deleted.borrow(), deleted);
+        assert_eq!(std::fs::read(&path).unwrap(), raw_config);
+        save_connections_to_file(&path, &loaded, &store).unwrap();
+        assert_eq!(load_connections_from_file(&path, &store).unwrap()[0].connection_secrets, *secrets);
+        assert_eq!(*store.values.borrow(), stored);
+    }
+
+    #[test]
+    fn file_secret_store_preserves_opaque_null_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.json");
+        let secret_path = dir.path().join("secrets.json");
+        let store = super::FileSecretStore::new(secret_path.clone());
+        let mut config = connection("plugin-connection", "", "");
+        config.db_type = DatabaseType::Plugin;
+        config.connection_secrets.insert("credential".to_string(), "null".to_string());
+        save_connections_to_file(&path, &[config], &store).unwrap();
+        let raw_config = std::fs::read(&path).unwrap();
+        let raw_secrets = std::fs::read(&secret_path).unwrap();
+
+        for _ in 0..2 {
+            let reopened_store = super::FileSecretStore::new(secret_path.clone());
+            let loaded = load_connections_from_file(&path, &reopened_store).unwrap();
+            assert_eq!(loaded[0].connection_secrets.get("credential").map(String::as_str), Some("null"));
+            assert_eq!(std::fs::read(&path).unwrap(), raw_config);
+            assert_eq!(std::fs::read(&secret_path).unwrap(), raw_secrets);
+        }
+    }
 }

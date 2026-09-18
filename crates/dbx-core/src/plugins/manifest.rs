@@ -5,7 +5,15 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
 pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
-pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.0.0";
+/// Host API version the host advertises at `plugin/initialize`.
+///
+/// 1.1 adds the plugin-initiated `host/requestUserInput` method (see
+/// `plugins/runtime.rs`). It is additive: 1.0 plugins keep working, and a
+/// plugin that wants the capability must check the advertised version (or the
+/// `host.requestUserInput` entry in `host.features`) before calling it.
+pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.1.0";
+/// Capabilities the host advertises to a plugin backend at `plugin/initialize`.
+pub const SUPPORTED_PLUGIN_HOST_FEATURES: &[&str] = &["host.requestUserInput"];
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
 pub const PLUGIN_CONNECTION_TEST_METHOD: &str = "connection/test";
 pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
@@ -16,6 +24,13 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &["host.events", "host.binary"
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
 pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
+/// Bound the `visible_when` / `required_when` expression tree so a hostile
+/// manifest cannot make the host or the dialog evaluator do unbounded work.
+pub const MAX_PLUGIN_FIELD_CONDITION_DEPTH: usize = 8;
+pub const MAX_PLUGIN_FIELD_CONDITION_NODES: usize = 64;
+/// Cap the file filters a picker may declare so one manifest cannot bloat the
+/// native dialog or the browser `accept` attribute.
+pub const MAX_PLUGIN_PICKER_FILTERS: usize = 16;
 const HOST_NETWORK_PERMISSION_PREFIX: &str = "host.network:";
 
 /// Parse a `host.network:https://host[:port]` permission into the origin that
@@ -104,9 +119,9 @@ pub struct PluginEngines {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginEntrypoints {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<PluginBackendEntrypoint>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<PluginUiEntrypoint>,
 }
 
@@ -157,7 +172,7 @@ pub struct PluginDriverManifest {
     pub id: String,
     pub label: String,
     pub kind: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<String>,
 }
 
@@ -236,18 +251,27 @@ pub struct PluginFormFieldDefinition {
     pub label: String,
     #[serde(rename = "type")]
     pub field_type: PluginFormFieldType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     #[serde(default)]
     pub required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<PluginFormFieldOption>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<PluginFormFieldBinding>,
+    /// Optional local-file action on a text/password/textarea field.
+    ///
+    /// Desktop (client-side) hosts open a native picker and store the chosen
+    /// **absolute path** in this field. Browser hosts cannot read a client
+    /// path, so the same action becomes an **upload**: the host reads the file
+    /// and stores its content in `content_field` instead. Contract documented
+    /// in `plugins/README.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<PluginFormFieldPicker>,
     /// Plugin method returning `{ options: [{ value, label }] }`; the host
     /// connection form fetches it and renders the field as a dynamic select.
     /// Optional and forward/backward compatible: older hosts reject the
@@ -260,11 +284,189 @@ pub struct PluginFormFieldDefinition {
     pub required_when: Option<PluginFieldCondition>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A `visible_when` / `required_when` expression.
+///
+/// The legacy single-field form `{ "field": "mode", "one_of": ["custom"] }`
+/// keeps its exact meaning. Composite forms (`all_of`, `any_of`, `not`) let a
+/// manifest express combinations such as
+/// `sudo_source = custom AND read_only = false`, which a single-field
+/// condition cannot. Composite nodes nest arbitrarily; [`MAX_PLUGIN_FIELD_CONDITION_DEPTH`]
+/// bounds the evaluation cost of a hostile manifest.
+///
+/// Semantics are shared with the frontend evaluator
+/// (`apps/desktop/src/lib/plugins/pluginFieldConditions.ts`): a leaf matches
+/// when the referenced sibling field holds a non-empty value that equals one of
+/// the listed literals (compared by canonical string form, so the boolean
+/// `false` matches both the literal `false` and the literal `"false"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum PluginFieldCondition {
+    /// Legacy single-field clause: `{ "field": "...", "one_of": [...] }`.
+    Field(PluginFieldConditionClause),
+    /// Every nested condition must match.
+    AllOf { all_of: Vec<PluginFieldCondition> },
+    /// At least one nested condition must match.
+    AnyOf { any_of: Vec<PluginFieldCondition> },
+    /// Inverts the nested condition.
+    Not { not: Box<PluginFieldCondition> },
+}
+
+/// The legacy single-field clause of a [`PluginFieldCondition`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PluginFieldCondition {
+pub struct PluginFieldConditionClause {
     pub field: String,
-    pub one_of: Vec<String>,
+    pub one_of: Vec<PluginFieldConditionLiteral>,
+}
+
+/// A value a manifest may list in `one_of`. Plugins mostly compare strings,
+/// but booleans and numbers are allowed so a condition can be written exactly
+/// like the value the form produces (`"read_only": [false]` instead of
+/// `["false"]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PluginFieldConditionLiteral {
+    String(String),
+    Bool(bool),
+    Number(serde_json::Number),
+}
+
+impl PluginFieldConditionLiteral {
+    /// Canonical string form used for comparison. This is the rule the
+    /// frontend has always applied (`String(value)`), so every manifest written
+    /// against the string-only contract keeps matching.
+    pub fn canonical(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Bool(value) => value.to_string(),
+            // `serde_json::Number` prints `22.0` for a float that JavaScript
+            // renders as `22`; normalize integral floats so the two sides agree.
+            Self::Number(value) => normalize_condition_number(value),
+        }
+    }
+}
+
+fn normalize_condition_number(number: &serde_json::Number) -> String {
+    if let Some(value) = number.as_i64() {
+        return value.to_string();
+    }
+    if let Some(value) = number.as_u64() {
+        return value.to_string();
+    }
+    if let Some(value) = number.as_f64() {
+        if value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+            return format!("{}", value as i64);
+        }
+    }
+    number.to_string()
+}
+
+impl PluginFieldCondition {
+    /// Every sibling field key the expression reads, in declaration order.
+    /// Duplicates are preserved; callers de-duplicate when they need to.
+    pub fn referenced_fields(&self) -> Vec<&str> {
+        let mut fields = Vec::new();
+        self.collect_referenced_fields(&mut fields);
+        fields
+    }
+
+    fn collect_referenced_fields<'a>(&'a self, fields: &mut Vec<&'a str>) {
+        match self {
+            Self::Field(clause) => fields.push(clause.field.as_str()),
+            Self::AllOf { all_of } => all_of.iter().for_each(|child| child.collect_referenced_fields(fields)),
+            Self::AnyOf { any_of } => any_of.iter().for_each(|child| child.collect_referenced_fields(fields)),
+            Self::Not { not } => not.collect_referenced_fields(fields),
+        }
+    }
+
+    /// Structural validation shared by every condition site. Returns
+    /// human-readable problems without a location prefix.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.node_count() > MAX_PLUGIN_FIELD_CONDITION_NODES {
+            errors.push(format!("condition uses more than {MAX_PLUGIN_FIELD_CONDITION_NODES} nodes"));
+            return errors;
+        }
+        self.validate_at_depth(0, &mut errors);
+        errors
+    }
+
+    fn validate_at_depth(&self, depth: usize, errors: &mut Vec<String>) {
+        if depth > MAX_PLUGIN_FIELD_CONDITION_DEPTH {
+            errors.push(format!("condition nesting exceeds {MAX_PLUGIN_FIELD_CONDITION_DEPTH} levels"));
+            return;
+        }
+        match self {
+            Self::Field(clause) => {
+                if clause.field.trim().is_empty() {
+                    errors.push("condition field cannot be empty".to_string());
+                }
+                if clause.one_of.is_empty() {
+                    errors.push("condition one_of cannot be empty".to_string());
+                }
+            }
+            Self::AllOf { all_of } => {
+                if all_of.is_empty() {
+                    errors.push("condition all_of cannot be empty".to_string());
+                }
+                for child in all_of {
+                    child.validate_at_depth(depth + 1, errors);
+                }
+            }
+            Self::AnyOf { any_of } => {
+                if any_of.is_empty() {
+                    errors.push("condition any_of cannot be empty".to_string());
+                }
+                for child in any_of {
+                    child.validate_at_depth(depth + 1, errors);
+                }
+            }
+            Self::Not { not } => not.validate_at_depth(depth + 1, errors),
+        }
+    }
+
+    /// Number of nodes in this expression tree (including this one).
+    pub fn node_count(&self) -> usize {
+        match self {
+            Self::Field(_) => 1,
+            Self::AllOf { all_of } => 1 + all_of.iter().map(Self::node_count).sum::<usize>(),
+            Self::AnyOf { any_of } => 1 + any_of.iter().map(Self::node_count).sum::<usize>(),
+            Self::Not { not } => 1 + not.node_count(),
+        }
+    }
+
+    /// Raw expression evaluation against a field-value reader. Visibility
+    /// cascade handling (a referenced field that is itself hidden) is applied
+    /// by callers, exactly like the single-field contract behaved.
+    pub fn matches(&self, read: &impl Fn(&str) -> Option<serde_json::Value>) -> bool {
+        match self {
+            Self::Field(clause) => {
+                let Some(value) = read(&clause.field) else {
+                    return false;
+                };
+                let text = condition_value_text(&value);
+                if text.trim().is_empty() {
+                    return false;
+                }
+                clause.one_of.iter().any(|literal| literal.canonical() == text)
+            }
+            Self::AllOf { all_of } => all_of.iter().all(|child| child.matches(read)),
+            Self::AnyOf { any_of } => any_of.iter().any(|child| child.matches(read)),
+            Self::Not { not } => !not.matches(read),
+        }
+    }
+}
+
+/// Canonical string form of a stored field value, mirroring the frontend
+/// (`String(value)`) so a boolean `false` and the literal `"false"` agree.
+pub fn condition_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => normalize_condition_number(value),
+        other => other.to_string(),
+    }
 }
 
 impl PluginFormFieldDefinition {
@@ -309,22 +511,50 @@ pub struct PluginFormFieldOption {
     pub value: String,
 }
 
+/// A file action on a plugin connection field (see
+/// [`PluginFormFieldDefinition::picker`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginFormFieldPicker {
+    pub kind: PluginFormFieldPickerKind,
+    /// File filters offered by the picker, e.g. `[".pem", ".key"]`. Entries are
+    /// extensions (`.ext`) or MIME types (`text/plain`); non-empty entries only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept: Vec<String>,
+    /// Field that receives the file **content** on hosts without a client
+    /// filesystem (the browser build), which cannot produce a usable path.
+    /// Required for the picker to appear in the browser; on desktop the chosen
+    /// path goes into the declaring field and this field is cleared so the two
+    /// sources cannot disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginFormFieldPickerKind {
+    /// Pick one existing file.
+    File,
+    /// Pick one existing directory (desktop only; no browser equivalent).
+    Directory,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginConnectionProviderContribution {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub database_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default)]
     pub fields: Vec<PluginFormFieldDefinition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workbench: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<PluginConnectionCapability>,
@@ -351,17 +581,17 @@ pub enum PluginConnectionCapability {
 pub struct PluginConnectionActionContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<PluginConnectionActionVariant>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<PluginConnectionActionWhen>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub close_on_success: bool,
     #[serde(default = "default_action_requires_valid_form", skip_serializing_if = "is_true")]
     pub requires_valid_form: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -400,9 +630,9 @@ pub enum PluginConnectionActionWhen {
 pub struct PluginWorkbenchContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }
 
@@ -414,9 +644,9 @@ pub struct PluginWorkbenchContribution {
 pub struct PluginContextMenuContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     /// Menu surface the item belongs to; currently only `connection`.
     #[serde(default)]
@@ -430,9 +660,9 @@ pub struct PluginContextMenuContribution {
 pub struct PluginResultViewContribution {
     pub id: String,
     pub label: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }
 
@@ -442,13 +672,13 @@ pub struct PluginFilesystemProviderContribution {
     pub id: String,
     pub label: String,
     pub schemes: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<PluginFilesystemCapability>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_uri: Option<String>,
 }
 
@@ -979,6 +1209,78 @@ fn validate_connection_actions(
     }
 }
 
+/// A picker action only makes sense on a field the user can type into, and the
+/// field that receives uploaded content must be a declared sibling.
+fn validate_form_field_picker(
+    field: &PluginFormFieldDefinition,
+    fields: &[PluginFormFieldDefinition],
+    contribution_index: usize,
+    field_index: usize,
+    errors: &mut Vec<String>,
+) {
+    let Some(picker) = &field.picker else {
+        return;
+    };
+    let location = format!("Contribution at index {contribution_index} field {field_index} picker");
+    if !matches!(
+        field.field_type,
+        PluginFormFieldType::Text | PluginFormFieldType::Password | PluginFormFieldType::Textarea
+    ) {
+        errors.push(format!("{location} is only supported on text, password, or textarea fields"));
+    }
+    if picker.accept.len() > MAX_PLUGIN_PICKER_FILTERS {
+        errors.push(format!("{location} declares more than {MAX_PLUGIN_PICKER_FILTERS} filters"));
+    }
+    for filter in &picker.accept {
+        if !valid_picker_filter(filter) {
+            errors.push(format!("{location} filter '{filter}' must look like '.pem' or 'text/plain'"));
+        }
+    }
+    if picker.kind == PluginFormFieldPickerKind::Directory && picker.content_field.is_some() {
+        errors.push(format!("{location} cannot upload a directory into a content field"));
+    }
+    let Some(content_key) = &picker.content_field else {
+        return;
+    };
+    match fields.iter().find(|candidate| candidate.key == *content_key) {
+        None => errors.push(format!("{location} content_field references unknown field '{content_key}'")),
+        Some(content) => {
+            if content.key == field.key {
+                errors.push(format!("{location} content_field cannot be the declaring field"));
+            }
+            if !matches!(
+                content.field_type,
+                PluginFormFieldType::Text | PluginFormFieldType::Password | PluginFormFieldType::Textarea
+            ) {
+                errors.push(format!("{location} content_field '{content_key}' must be a text or textarea field"));
+            }
+        }
+    }
+}
+
+/// Accept entries are file extensions (`.pem`) or MIME types (`text/plain`), so
+/// the browser `<input accept>` attribute and the native dialog filters can use
+/// them directly. Anything else is rejected instead of silently ignored.
+fn valid_picker_filter(filter: &str) -> bool {
+    if let Some(extension) = filter.strip_prefix('.') {
+        return !extension.is_empty()
+            && extension.len() <= 16
+            && extension.chars().all(|character| character.is_ascii_alphanumeric());
+    }
+    let mut parts = filter.split('/');
+    let (Some(kind), Some(subtype), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 64
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.' | '_' | '*'))
+    };
+    valid_part(kind) && valid_part(subtype)
+}
+
 fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index: usize, errors: &mut Vec<String>) {
     let mut seen_keys = HashSet::new();
     let field_keys = fields.iter().map(|field| field.key.as_str()).collect::<HashSet<_>>();
@@ -993,6 +1295,7 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             &format!("Contribution at index {contribution_index} field {field_index} label"),
             errors,
         );
+        validate_form_field_picker(field, fields, contribution_index, field_index, errors);
 
         for (name, condition) in
             [("visible_when", field.visible_when.as_ref()), ("required_when", field.required_when.as_ref())]
@@ -1000,16 +1303,15 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             let Some(condition) = condition else {
                 continue;
             };
-            if condition.one_of.is_empty() {
-                errors.push(format!(
-                    "Contribution at index {contribution_index} field {field_index} {name} one_of cannot be empty"
-                ));
-            }
-            if !field_keys.contains(condition.field.as_str()) {
-                errors.push(format!(
-                    "Contribution at index {contribution_index} field {field_index} {name} references unknown field '{}'",
-                    condition.field
-                ));
+            let location = format!("Contribution at index {contribution_index} field {field_index} {name}");
+            errors.extend(condition.validate().into_iter().map(|error| format!("{location} {error}")));
+            for referenced in condition.referenced_fields() {
+                // Self-references are tolerated for backward compatibility (a
+                // single-field manifest could always point a field at itself);
+                // unknown targets were already rejected by the v1 contract.
+                if !field_keys.contains(referenced) {
+                    errors.push(format!("{location} references unknown field '{referenced}'"));
+                }
             }
         }
 
@@ -1713,6 +2015,55 @@ mod tests {
         assert!(errors.iter().any(|error| error.contains("timeout_ms must be between")));
     }
 
+    /// The manifest the frontend receives is a re-serialization of the parsed
+    /// manifest, so an absent optional must stay absent. Emitting `null`
+    /// instead made the connection form treat "no default" as a real `null`
+    /// value: untouched fields showed a literal "null" and a save persisted the
+    /// four-character string "null" into `connection_secrets`.
+    #[test]
+    fn serialized_form_fields_omit_absent_optionals() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.nulls",
+            "name": "Nulls",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "nulls.connection",
+                "label": "Nulls",
+                "database_type": "nulls",
+                "fields": [
+                    { "key": "sudo_password", "label": "Sudo password", "type": "password", "binding": "secret" },
+                    { "key": "with_default", "label": "With default", "type": "text", "default": "root" },
+                    { "key": "explicit_null", "label": "Explicit null", "type": "text", "default": null },
+                    { "key": "mode", "label": "Mode", "type": "text" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        let fields = serialized["contributions"][0]["fields"].as_array().unwrap();
+
+        // A field that declares nothing optional carries none of those keys, so
+        // the frontend can never mistake "absent" for a `null` value.
+        for key in ["default", "binding", "description", "placeholder"] {
+            assert!(fields[3].get(key).is_none(), "bare field must not serialize `{key}`: {}", fields[3]);
+        }
+        // Declared values survive the round trip; an explicit `null` default
+        // means "no default" and normalizes to an absent key rather than a
+        // value the form would try to render.
+        assert_eq!(fields[0]["binding"], "secret");
+        assert_eq!(fields[1]["default"], "root");
+        assert!(fields[2].get("default").is_none());
+        // Provider-level optionals follow the same rule.
+        assert!(serialized["contributions"][0].get("icon").is_none());
+        assert!(serialized["contributions"][0].get("workbench").is_none());
+        assert!(serialized["contributions"][0].get("filesystem_provider").is_none());
+    }
+
     #[test]
     fn parses_form_field_conditions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1754,9 +2105,21 @@ mod tests {
 
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
         let visible_when = provider.fields[1].visible_when.as_ref().unwrap();
-        assert_eq!(visible_when.field, "mode");
-        assert_eq!(visible_when.one_of, vec!["custom".to_string()]);
-        assert_eq!(provider.fields[1].required_when.as_ref().unwrap().one_of, vec!["custom".to_string()]);
+        let super::PluginFieldCondition::Field(clause) = visible_when else {
+            panic!("legacy single-field condition must deserialize into the field clause");
+        };
+        assert_eq!(clause.field, "mode");
+        assert_eq!(clause.one_of, vec![super::PluginFieldConditionLiteral::String("custom".to_string())]);
+        // Serializing a legacy clause keeps the exact v1 manifest shape.
+        assert_eq!(
+            serde_json::to_value(visible_when).unwrap(),
+            serde_json::json!({ "field": "mode", "one_of": ["custom"] })
+        );
+        let required = provider.fields[1].required_when.as_ref().unwrap();
+        let super::PluginFieldCondition::Field(required_clause) = required else {
+            panic!("legacy single-field condition must deserialize into the field clause");
+        };
+        assert_eq!(required_clause.one_of, vec![super::PluginFieldConditionLiteral::String("custom".to_string())]);
     }
 
     #[test]
@@ -1815,10 +2178,222 @@ mod tests {
         let compatibility = manifest.compatibility(dir.path(), "0.5.68");
 
         assert!(!compatibility.compatible);
-        assert!(compatibility.errors.iter().any(|error| error.contains("visible_when one_of cannot be empty")));
+        assert!(compatibility
+            .errors
+            .iter()
+            .any(|error| error.contains("visible_when condition one_of cannot be empty")));
         assert!(compatibility
             .errors
             .iter()
             .any(|error| error.contains("visible_when references unknown field 'missing'")));
+    }
+
+    #[test]
+    fn parses_composite_form_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    { "key": "authentication", "label": "Auth", "type": "text" },
+                    { "key": "read_only", "label": "Read only", "type": "boolean" },
+                    { "key": "sudo_source", "label": "Sudo source", "type": "text" },
+                    {
+                        "key": "sudo_command",
+                        "label": "Sudo command",
+                        "type": "text",
+                        "visible_when": {
+                            "all_of": [
+                                { "field": "sudo_source", "one_of": ["custom"] },
+                                { "field": "read_only", "one_of": [false] }
+                            ]
+                        },
+                        "required_when": {
+                            "all_of": [
+                                { "field": "sudo_source", "one_of": ["custom"] },
+                                { "not": { "field": "read_only", "one_of": [true] } }
+                            ]
+                        }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.14");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        let provider = manifest.connection_provider("conditions.connection").unwrap().unwrap();
+        let visible_when = provider.fields[3].visible_when.as_ref().unwrap();
+        assert_eq!(visible_when.referenced_fields(), vec!["sudo_source", "read_only"]);
+        assert_eq!(visible_when.node_count(), 3);
+        assert!(matches!(visible_when, super::PluginFieldCondition::AllOf { .. }));
+    }
+
+    #[test]
+    fn rejects_malformed_composite_form_field_conditions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.conditions",
+            "name": "Conditions",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "conditions.connection",
+                "database_type": "conditions",
+                "fields": [
+                    { "key": "mode", "label": "Mode", "type": "text" },
+                    {
+                        "key": "empty_all_of",
+                        "label": "Empty",
+                        "type": "text",
+                        "visible_when": { "all_of": [] }
+                    },
+                    {
+                        "key": "unknown_nested",
+                        "label": "Unknown",
+                        "type": "text",
+                        "required_when": { "any_of": [{ "field": "ghost", "one_of": ["x"] }] }
+                    }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.14");
+        assert!(!compatibility.compatible);
+        assert!(compatibility.errors.iter().any(|error| error.contains("condition all_of cannot be empty")));
+        assert!(compatibility
+            .errors
+            .iter()
+            .any(|error| error.contains("required_when references unknown field 'ghost'")));
+    }
+
+    /// The SSH plugin asks the host for a key file: desktop hosts store the
+    /// client path, browser hosts upload the content into a paired field.
+    #[test]
+    fn parses_and_validates_file_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "ssh.connection",
+                "label": "SSH",
+                "database_type": "ssh",
+                "fields": [
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key path",
+                        "type": "text",
+                        "binding": "config",
+                        "picker": {
+                            "kind": "file",
+                            "accept": [".pem", ".key", "text/plain"],
+                            "content_field": "private_key"
+                        }
+                    },
+                    { "key": "private_key", "label": "Private key", "type": "textarea", "binding": "secret" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+        let provider = manifest.connection_provider("ssh.connection").unwrap().unwrap();
+        let picker = provider.fields[0].picker.as_ref().unwrap();
+        assert_eq!(picker.kind, super::PluginFormFieldPickerKind::File);
+        assert_eq!(picker.accept, vec![".pem", ".key", "text/plain"]);
+        assert_eq!(picker.content_field.as_deref(), Some("private_key"));
+        // The picker round-trips through the manifest the UI receives.
+        let serialized = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(serialized["contributions"][0]["fields"][0]["picker"]["kind"], "file");
+    }
+
+    #[test]
+    fn rejects_invalid_file_pickers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.ssh",
+            "name": "SSH",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "ssh.connection",
+                "label": "SSH",
+                "database_type": "ssh",
+                "fields": [
+                    { "key": "port", "label": "Port", "type": "number", "picker": { "kind": "file" } },
+                    {
+                        "key": "private_key_path",
+                        "label": "Private key path",
+                        "type": "text",
+                        "picker": {
+                            "kind": "file",
+                            "accept": ["pem", ".", "text/"],
+                            "content_field": "missing"
+                        }
+                    },
+                    {
+                        "key": "self_reference",
+                        "label": "Self",
+                        "type": "text",
+                        "picker": { "kind": "file", "content_field": "self_reference" }
+                    },
+                    {
+                        "key": "folder",
+                        "label": "Folder",
+                        "type": "text",
+                        "picker": { "kind": "directory", "content_field": "private_key_path" }
+                    },
+                    { "key": "private_key", "label": "Private key", "type": "textarea", "binding": "secret" }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let compatibility = manifest.compatibility(dir.path(), "0.6.15");
+        assert!(!compatibility.compatible);
+        let errors = compatibility.errors.join("\n");
+        assert!(errors.contains("picker is only supported on text, password, or textarea fields"), "{errors}");
+        assert!(errors.contains("filter 'pem' must look like '.pem' or 'text/plain'"), "{errors}");
+        assert!(errors.contains("filter 'text/' must look like '.pem' or 'text/plain'"), "{errors}");
+        assert!(errors.contains("content_field references unknown field 'missing'"), "{errors}");
+        assert!(errors.contains("content_field cannot be the declaring field"), "{errors}");
+        assert!(errors.contains("cannot upload a directory into a content field"), "{errors}");
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_mixed_condition_shapes() {
+        // A clause may not smuggle composite keys, and a composite node may not
+        // smuggle `field`/`one_of`; both must fail to deserialize.
+        assert!(serde_json::from_value::<super::PluginFieldCondition>(serde_json::json!({
+            "field": "mode",
+            "one_of": ["custom"],
+            "all_of": [{ "field": "mode", "one_of": ["custom"] }]
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<super::PluginFieldCondition>(serde_json::json!({})).is_err());
+        assert!(serde_json::from_value::<super::PluginFieldCondition>(serde_json::json!({ "not": 1 })).is_err());
     }
 }

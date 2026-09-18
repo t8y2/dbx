@@ -152,6 +152,51 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 
 每个字段必须声明 `key`、`label`、`type`，可选 `description`、`placeholder`、`required`、`default`、`options` 和 `binding`；默认值必须符合字段类型。省略 binding 的 `password` 字段默认按 `secret` 处理。`database_type` 是插件自定义类型标识，不会给 DBX 内置数据库枚举添加成员。
 
+字段还支持条件显隐/条件必填。`visible_when` 与 `required_when` 接受单条子句 `{ "field": "mode", "one_of": ["custom"] }`（引用字段取到列表中的值时命中，按字符串比较，因此 `[false]` 与 `["false"]` 都能匹配布尔 `false`），并用 `all_of` / `any_of` / `not` 组合：
+
+```json
+{
+  "key": "sudo_command",
+  "label": "Sudo command",
+  "type": "text",
+  "visible_when": {
+    "all_of": [
+      { "field": "sudo_source", "one_of": ["custom"] },
+      { "field": "read_only", "one_of": [false] }
+    ]
+  }
+}
+```
+
+条件会级联：子句引用的字段自身处于隐藏状态时该子句不参与判定，因此隐藏容器的默认值不会把孙级字段点亮；未填写或空值永不命中；组合树最多 8 层、64 个节点。DBX 在对话框与保存/测试/连接校验中使用同一套求值，不会出现「表单放行、宿主拒绝」的分歧。
+
+`text`、`password`、`textarea` 字段可以用 `picker` 声明**本机文件选择**（例如 SSH 私钥、keystore）：
+
+```json
+{
+  "key": "private_key_path",
+  "label": "Private key path",
+  "type": "text",
+  "binding": "config",
+  "picker": { "kind": "file", "accept": [".pem", ".key"], "content_field": "private_key" }
+}
+```
+
+桌面端打开系统文件选择器，把选中的**绝对路径**写回该字段（插件后端同机运行，可自行读取文件）；网页端拿不到客户端路径，同一操作变成**上传**：DBX 读取文件内容写入声明的 `content_field` 兄弟字段，并清空路径字段。两者互相清除——选了路径就丢弃已上传内容，上传内容就清空路径，避免同时存在两份互相矛盾的来源。`kind` 还支持 `directory`（仅桌面端），`accept` 最多 16 条扩展名或 MIME 过滤，上传上限 1 MiB。
+
+插件在连接过程中需要用户输入时（堡垒机登录期 keyboard-interactive 验证码、主机密钥确认、账号选择等），可以调用 Host API 1.1 新增的 `host/requestUserInput`，通过 DBX 同一个阻塞对话框拿到用户输入，`连接测试` 与真实连接走同一条通道：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "prompt-1",
+  "method": "host/requestUserInput",
+  "params": { "prompt": "Verification code (6 digits)", "title": "JumpServer login", "echo": false, "timeoutSecs": 300 }
+}
+```
+
+返回值为 `{ "action": "submit", "value": "123456" }`、`{ "action": "cancel" }` 或 `{ "action": "timeout" }`；只有 `submit` 带值，其余必须按「没有答案」处理并失败关闭。插件发起的请求使用字符串 id，DBX 自己的请求与响应继续使用数字 id；提示期间 DBX 会暂停等待该回答的请求超时计时，用户输入验证码不会被误判成连接超时。错误码 `-32001` 表示没有可用的用户界面（headless/MCP），`-32602` 参数非法，`-32601` 宿主不支持该方法，三种情况都要优雅降级。调用前请确认 `plugin/initialize` 通告的 `hostApiVersion` 为 `1.1.0`（或 `host.features` 含 `host.requestUserInput`）；Rust SDK 对应 `dbx_plugin_sdk::host_client()` 与 `HostClient::supports("host/requestUserInput")`、`HostClient::request_user_input(&UserInputPrompt::secret("Verification code"))`。
+
 连接生命周期使用固定的 `connection/test`、`connection/connect`、`connection/disconnect`，自定义表单动作使用 `connection/action`，参数包含 `provider`、`connection`、`runtime`；动作额外包含 `action: { id }`。后端使用 `connection.id` 保存会话，并使用 `runtime.host`/`runtime.port` 连接经过 DBX 隧道或代理转换后的端点。仅在后端生命周期请求中接收补齐 Secret 的连接；前端通过 `connectionId` 使用已经建立的会话。
 
 动作的 `when` 可为 `always`、`create`、`edit`；`variant` 可为 `default`、`outline`、`secondary`、`destructive`、`ghost`；`timeout_ms` 为 1–120000。`requires_valid_form` 决定是否要求完整表单，`close_on_success` 决定成功后是否关闭。返回 `{ "success": true, "message": "...", "fieldValues": { "port": 443 } }` 可以更新已声明的字段；返回 `success: false` 表示失败。

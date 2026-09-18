@@ -34,10 +34,10 @@ describe("sqlFormatter", () => {
     expect(defaultFormatted).toContain("-- tstt\nSELECT");
     expect(preserved).toContain("-- tstt\n\nSELECT");
     expect(preservedConsecutive).toContain("-- section\n\n\nSELECT");
-    expect(preservedQueriesNoSpacing).toBe("SELECT\n  1;\n\nSELECT\n  2;");
-    expect(preservedQueries).toBe("SELECT\n  1;\n\nSELECT\n  2;");
-    expect(preservedQueriesWideSpacing).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
-    expect(preservedQueriesWithTwoEmptyLines).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preservedQueriesNoSpacing).toBe("SELECT 1;\n\nSELECT 2;");
+    expect(preservedQueries).toBe("SELECT 1;\n\nSELECT 2;");
+    expect(preservedQueriesWideSpacing).toBe("SELECT 1;\n\n\nSELECT 2;");
+    expect(preservedQueriesWithTwoEmptyLines).toBe("SELECT 1;\n\n\nSELECT 2;");
     expect(preserved).not.toContain("__DBX_PRESERVE_EMPTY_LINE_");
   });
 
@@ -69,7 +69,7 @@ describe("sqlFormatter", () => {
   });
 
   it("formats an OceanBase Oracle single-line view DDL into readable multi-line SQL (issue #7540)", async () => {
-    const singleLine = `CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE'`;
+    const singleLine = `create or replace view "APP"."ACTIVE_USERS" as select ID, NAME, EMAIL, CREATED_AT from USERS where STATUS = 'ACTIVE' and DELETED_AT is null order by CREATED_AT desc`;
     const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
 
     expect(formatted).not.toBe(singleLine);
@@ -83,11 +83,23 @@ describe("sqlFormatter", () => {
     expect(formatted).toContain('"ACTIVE_USERS"');
   });
 
+  it("collapses a short OceanBase Oracle view DDL onto one line (issue #7540)", async () => {
+    // The default style joins a statement that fits the line width onto one
+    // line, so a short view body comes back with its keywords cased rather
+    // than spread over several.
+    const singleLine = `create or replace view "APP"."ACTIVE_USERS" as select ID, NAME from USERS where STATUS = 'ACTIVE'`;
+    const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).toBe(`CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE'`);
+    expect(formatted).toContain("'ACTIVE'");
+    expect(formatted).toContain('"ACTIVE_USERS"');
+  });
+
   it("formats a bare OceanBase Oracle view source wrapped as CREATE VIEW (issue #7540)", async () => {
     // Mirrors the backend build_view_ddl_sql output for a fallback ALL_VIEWS.TEXT
     // body: `CREATE VIEW <name> AS <single-line SELECT>`.
-    const wrapped = `CREATE VIEW "APP"."ACTIVE_USERS" AS
-SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE';`;
+    const wrapped = `create view "APP"."ACTIVE_USERS" as
+select ID, NAME, EMAIL, CREATED_AT from USERS where STATUS = 'ACTIVE' and DELETED_AT is null order by CREATED_AT desc;`;
     const formatted = await formatSqlForDisplay(wrapped, sqlFormatDialectForDbType("oceanbase-oracle"));
 
     expect(formatted.split("\n").length).toBeGreaterThan(2);
@@ -121,27 +133,40 @@ WHERE STATUS = 'ACTIVE';`;
   });
 
   it("keeps issue #7138 Oracle hierarchy clauses intact", async () => {
+    const sql = "SELECT ctt.u_dm, ctt.u_mc, ctt.parent_id, ctt.level_num, ctt.create_time FROM cte_test ctt WHERE ctt.status = 'A' AND ctt.deleted = 0 START WITH ctt.su_dm IN ('16','17','18') CONNECT BY PRIOR ctt.u_dm = ctt.su_dm;";
+
+    // `START WITH` and `CONNECT BY PRIOR` are clauses of their own, not part of
+    // the WHERE condition: each opens a line, and the hierarchy is never dropped.
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(`SELECT ctt.u_dm,
+       ctt.u_mc,
+       ctt.parent_id,
+       ctt.level_num,
+       ctt.create_time
+FROM cte_test ctt
+WHERE ctt.status = 'A'
+      AND ctt.deleted = 0
+START WITH ctt.su_dm IN ('16', '17', '18')
+CONNECT BY PRIOR ctt.u_dm = ctt.su_dm;`);
+  });
+
+  it("collapses a short Oracle hierarchy query onto one line", async () => {
     const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM IN ('16','17','18','19') CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;";
 
-    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(`SELECT
-  ctt.U_DM
-FROM
-  cte_test ctt
-START WITH ctt.SU_DM IN ('16', '17', '18', '19')
-CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;`);
+    await expect(formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"))).resolves.toBe(`SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM IN ('16', '17', '18', '19') CONNECT BY PRIOR ctt.U_DM = HY.SU_DM;`);
   });
 
   it("formats valid Oracle hierarchy clauses with the same alias", async () => {
-    const sql = "SELECT ctt.U_DM FROM cte_test ctt START WITH ctt.SU_DM = '16' CONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;";
+    const sql = "select ctt.u_dm, ctt.u_mc, ctt.parent_id, ctt.level_num, ctt.create_time from cte_test ctt where ctt.status = 'A' and ctt.deleted = 0 start with ctt.su_dm = '16' connect by prior ctt.u_dm = ctt.su_dm;";
 
     const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("oracle"));
 
-    expect(formatted).toContain("FROM\n  cte_test ctt\nSTART WITH ctt.SU_DM = '16'");
-    expect(formatted).toContain("\nCONNECT BY PRIOR ctt.U_DM = ctt.SU_DM;");
+    expect(formatted).toContain("FROM cte_test ctt");
+    expect(formatted).toContain("\nSTART WITH ctt.su_dm = '16'");
+    expect(formatted).toContain("\nCONNECT BY PRIOR ctt.u_dm = ctt.su_dm;");
   });
 
   it("formats ordinary Oracle SQL and anonymous PL/SQL", async () => {
-    await expect(formatSqlForEditing("select employee_id from employees where department_id = 10;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("SELECT\n  employee_id\nFROM\n  employees\nWHERE\n  department_id = 10;");
+    await expect(formatSqlForEditing("select employee_id from employees where department_id = 10;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("SELECT employee_id FROM employees WHERE department_id = 10;");
     await expect(formatSqlForEditing("declare v_count number := 1; begin v_count := v_count + 1; end;", sqlFormatDialectForDbType("oracle"))).resolves.toBe("DECLARE v_count number := 1;\n\nBEGIN v_count := v_count + 1;\n\nEND;");
   });
 
@@ -243,14 +268,15 @@ OR inside$$ as note
   it("preserves the ClickHouse table alias from issue #7079", async () => {
     const formatted = await formatSqlText("SELECT *\nFROM MATERIAL m\nLIMIT 100;", sqlFormatDialectForDbType("clickhouse"));
 
-    expect(formatted).toBe("SELECT\n  *\nFROM\n  MATERIAL m\nLIMIT\n  100;");
+    expect(formatted).toBe("SELECT * FROM MATERIAL m LIMIT 100;");
   });
 
   it.each(["d", "dd", "h", "hh", "m", "mcs", "mi", "mm", "ms", "n", "ns", "q", "qq", "s", "ss", "wk", "ww", "yy", "yyyy"])("preserves ClickHouse identifier-like date part %s while formatting keywords", async (identifier) => {
     const formatted = await formatSqlText(`select ${identifier}, t.${identifier} from material ${identifier} limit 100;`, sqlFormatDialectForDbType("clickhouse"));
 
-    expect(formatted).toContain(`  ${identifier},`);
-    expect(formatted).toContain(`material ${identifier}`);
+    // Alias casing is the tokenizer's business, not the keyword casing's: the
+    // date part stays an identifier, so `keywordCase: "upper"` leaves it alone.
+    expect(formatted).toBe(`SELECT ${identifier}, t.${identifier} FROM material ${identifier} LIMIT 100;`);
     expect(formatted).toContain("SELECT");
     expect(formatted).toContain("FROM");
     expect(formatted).toContain("LIMIT");
@@ -262,17 +288,15 @@ OR inside$$ as note
     const lowerKeywords = await formatSqlText(sql, sqlFormatDialectForDbType("clickhouse"), { keywordCase: "lower", identifierCase: "preserve" });
     const lowerIdentifiers = await formatSqlText(sql, sqlFormatDialectForDbType("clickhouse"), { keywordCase: "upper", identifierCase: "lower" });
 
-    expect(lowerKeywords).toContain("from\n  MATERIAL M");
-    expect(lowerKeywords).toContain("limit\n  100");
-    expect(lowerIdentifiers).toContain("FROM\n  material m");
-    expect(lowerIdentifiers).toContain("LIMIT\n  100");
+    expect(lowerKeywords).toBe("select * from MATERIAL M limit 100;");
+    expect(lowerIdentifiers).toBe("SELECT * FROM material m LIMIT 100;");
   });
 
   it("still formats unambiguous ClickHouse interval keywords", async () => {
     const formatted = await formatSqlText("select now() + interval 1 minutes from source_table m;", sqlFormatDialectForDbType("clickhouse"));
 
     expect(formatted).toContain("INTERVAL 1 MINUTES");
-    expect(formatted).toContain("FROM\n  source_table m");
+    expect(formatted).toContain("FROM source_table m");
   });
 
   it("preserves DBX brace placeholders in generic and MySQL SQL", async () => {
@@ -344,19 +368,19 @@ OR inside$$ as note
   it("formats complete backtick-quoted spans with the PostgreSQL dialect", async () => {
     const formatted = await formatSqlText("select `schema`.`odd``name` from user;", "postgres");
 
-    expect(formatted).toBe("SELECT\n  `schema`.`odd``name`\nFROM\n  user;");
+    expect(formatted).toBe("SELECT `schema`.`odd``name` FROM user;");
   });
 
   it("keeps PostgreSQL double-quoted identifiers and casts unchanged", async () => {
     const formatted = await formatSqlText('select "display""name" from records where payload::jsonb is not null;', "postgres");
 
-    expect(formatted).toBe('SELECT\n  "display""name"\nFROM\n  records\nWHERE\n  payload::jsonb IS NOT NULL;');
+    expect(formatted).toBe('SELECT "display""name" FROM records WHERE payload::jsonb IS NOT NULL;');
   });
 
   it("keeps MySQL backtick formatting unchanged", async () => {
     const formatted = await formatSqlText("select `schema`.`odd``name` from `user`;", "mysql");
 
-    expect(formatted).toBe("SELECT\n  `schema`.`odd``name`\nFROM\n  `user`;");
+    expect(formatted).toBe("SELECT `schema`.`odd``name` FROM `user`;");
   });
 
   it("keeps malformed PostgreSQL backtick input unchanged while editing", async () => {
@@ -372,7 +396,9 @@ OR inside$$ as note
     const formatted = await formatSqlForEditing(sql, sqlFormatDialectForDbType("dameng"));
 
     expect(formatted).toContain('JS1.REC_CREATOR AS "recCreator"');
-    expect(formatted).toContain("DECODE (");
+    // Known and unknown functions alike are written without a space before the
+    // parenthesis.
+    expect(formatted).toContain("DECODE(");
     expect(formatted.endsWith("JS1.REC_CREATE_TIME DESC .")).toBe(true);
   });
 
@@ -383,7 +409,7 @@ OR inside$$ as note
   });
 
   it("preserves whitespace after a recovered trailing dot", async () => {
-    await expect(formatSqlForEditing("SELECT 1 .\n", "dameng")).resolves.toBe("SELECT\n  1 .\n");
+    await expect(formatSqlForEditing("SELECT 1 .\n", "dameng")).resolves.toBe("SELECT 1 .\n");
   });
 
   it("preserves the newline before a trailing dot after a line comment", async () => {
@@ -438,7 +464,18 @@ OR inside$$ as note
 
   it("still formats selected SQL comparison fragments", async () => {
     await expect(formatSqlText(`< 10`, "postgres")).resolves.toBe(`< 10`);
-    await expect(formatSqlText(`< 10 AND score > 2`, "postgres")).resolves.toBe(`< 10\nAND score > 2`);
+    // A short fragment collapses like any other short statement.
+    await expect(formatSqlText(`< 10 AND score > 2`, "postgres")).resolves.toBe(`< 10 AND score > 2`);
+    // A wider one has no clause to lay out, so it falls back to sql-formatter's
+    // own operand-per-line rendering of a fragment rather than the clause rules.
+    await expect(formatSqlText(`< 10 AND score > 2 AND status = 'active' AND deleted_at IS NULL AND created_at > now() - interval '30 days' AND owner_id = 42`, "postgres")).resolves.toBe(
+      `< 10
+AND score > 2
+AND status = 'active'
+AND deleted_at IS NULL
+AND created_at > now() - interval '30 days'
+AND owner_id = 42`,
+    );
   });
 
   it("keeps logical conditions on one line when configured", async () => {
@@ -492,16 +529,22 @@ OR inside$$ as note
       tabWidth: 4,
     });
 
-    expect(formatted).toContain("FROM\ttVillage AS tv");
-    expect(formatted).toContain("ON tv.villageId = tl.villageId AND 1 = 1");
+    // The join keeps `FROM` and its source together (the setting's whole point),
+    // indents by one tab width, and the `ON` condition stays on the join's line.
+    expect(formatted).toBe("SELECT *\nFROM tVillage AS tv\n\tINNER JOIN tLand AS tl ON tv.villageId = tl.villageId AND 1 = 1");
   });
 
   it("keeps derived tables multiline with FROM same-line layout", async () => {
-    const formatted = await formatSqlText("SELECT * FROM (SELECT * FROM tVillage) AS tv", "sqlserver", { fromClauseLayout: "sameLine" });
+    const sql = "SELECT * FROM (SELECT villageId, villageName, townshipId, createdAt, updatedAt, deletedAt FROM tVillage WHERE deletedAt IS NULL AND villageName LIKE '%x%') AS tv";
 
-    expect(formatted).toContain("FROM\n");
-    expect(formatted).toContain("\n    SELECT");
-    expect(formatted).toContain("FROM  tVillage");
+    const formatted = await formatSqlText(sql, "sqlserver", { fromClauseLayout: "sameLine" });
+
+    // The derived table still expands — `FROM (` stays on the line it opens and
+    // the subquery's clauses align under that parenthesis, so the same-line
+    // setting only decides whether the group starts on the keyword's line.
+    expect(formatted).toContain("FROM (SELECT villageId,");
+    expect(formatted).toContain("\n      FROM tVillage");
+    expect(formatted.endsWith(") AS tv")).toBe(true);
   });
 
   it("keeps display formatting lossless for XML/JSON-looking input", async () => {

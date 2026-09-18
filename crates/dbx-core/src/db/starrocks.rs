@@ -110,6 +110,7 @@ fn merge_materialized_views(
             tables.push(TableInfo {
                 name: name.clone(),
                 table_type: "MATERIALIZED_VIEW".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -245,6 +246,7 @@ mod tests {
         TableInfo {
             name: name.to_string(),
             table_type: table_type.to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

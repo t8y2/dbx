@@ -1,5 +1,6 @@
 package com.dbx.agent.mongodb;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -12,7 +13,12 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoClientSettings;
+import com.mongodb.ServerAddress;
+import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.BulkWriteResult;
+import com.mongodb.bulk.WriteConcernError;
 import com.mongodb.client.AggregateIterable;
 import com.mongodb.client.FindIterable;
 import com.mongodb.client.ListCollectionsIterable;
@@ -26,6 +32,13 @@ import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
 import com.mongodb.client.model.InsertManyOptions;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.model.DeleteManyModel;
+import com.mongodb.client.model.DeleteOneModel;
+import com.mongodb.client.model.InsertOneModel;
+import com.mongodb.client.model.ReplaceOneModel;
+import com.mongodb.client.model.UpdateManyModel;
+import com.mongodb.client.model.UpdateOneModel;
+import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
 import java.lang.reflect.Proxy;
@@ -40,8 +53,12 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.bson.BsonDocument;
+import org.bson.BsonRegularExpression;
 import org.bson.Document;
+import org.bson.types.Binary;
 import org.bson.types.ObjectId;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -99,6 +116,11 @@ class MongoAgentTest {
         Files.writeString(clientKeyPath, pkcs8Pem);
     }
 
+    @AfterEach
+    void resetFindCursors() {
+        MongoAgent.resetFindCursorsForTests();
+    }
+
     // ─── existing tests ───
 
     @Test
@@ -128,6 +150,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_FIND_CURSOR));
     }
 
     @Test
@@ -150,6 +173,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_CLONE_COLLECTION));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_RUN_COMMAND));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_FIND_CURSOR));
     }
 
     @Test
@@ -894,6 +918,10 @@ class MongoAgentTest {
         assertEquals("12", batches.get(0).get(1).getString("refid"));
         assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_INSERT_DOCUMENTS));
         assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_INSERT_DOCUMENTS));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_FIND_CURSOR));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_START_FIND_CURSOR));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_FETCH_FIND_CURSOR));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_CLOSE_FIND_CURSOR));
     }
 
     @Test
@@ -937,6 +965,293 @@ class MongoAgentTest {
             assertTrue(calls.isEmpty(), documents + ": " + calls);
             assertTrue(batches.isEmpty(), documents + ": " + batches);
         }
+    }
+
+    @Test
+    void documentForWritePreservesExtendedJsonBsonTypes() {
+        Document document = MongoAgent.documentForWrite(
+            "{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},"
+                + "\"count\":{\"$numberLong\":\"9007199254740993\"},"
+                + "\"when\":{\"$date\":\"2020-01-02T03:04:05.000Z\"}}"
+        );
+
+        assertEquals(new ObjectId("507f1f77bcf86cd799439011"), document.getObjectId("_id"));
+        assertEquals(9007199254740993L, document.get("count"));
+        assertTrue(document.get("when") instanceof Date);
+        assertEquals(Date.from(java.time.Instant.parse("2020-01-02T03:04:05.000Z")), document.getDate("when"));
+    }
+
+    @Test
+    void insertDocumentsRpcHonoursExplicitUnorderedInserts() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        List<Boolean> ordered = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches, ordered);
+
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        params.addProperty("collection", "users");
+        params.addProperty("docs_json", "[{\"name\":\"Ada\"}]");
+        params.addProperty("ordered", false);
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", 44);
+        request.addProperty("method", "insert_documents");
+        request.add("params", params);
+
+        JsonObject response = JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(List.of(false), ordered);
+        assertEquals(1, response.getAsJsonObject("result").get("affected_rows").getAsInt());
+    }
+
+    @Test
+    void insertDocumentsRpcPreservesExtendedJsonTypesInTheInsertManyBatch() {
+        List<List<Document>> batches = new ArrayList<>();
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(calls, batches);
+        String documents = "[{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},"
+            + "\"count\":{\"$numberLong\":\"9007199254740993\"}}]";
+
+        JsonObject response = insertDocumentsRpc(client, 45, "users", documents);
+
+        assertFalse(response.has("error"), response.toString());
+        assertEquals(1, batches.size());
+        Document written = batches.get(0).get(0);
+        assertEquals(new ObjectId("507f1f77bcf86cd799439011"), written.getObjectId("_id"));
+        assertEquals(9007199254740993L, written.get("count"));
+        assertTrue(written.get("count") instanceof Long);
+    }
+
+    @Test
+    void insertDocumentsRpcParsesCanonicalBinaryAndRegularExpression() {
+        List<List<Document>> batches = new ArrayList<>();
+        MongoClient client = recordingInsertMongoClient(new ArrayList<>(), batches);
+        String documents = "[{\"bin\":{\"$binary\":{\"base64\":\"AQID\",\"subType\":\"00\"}},"
+            + "\"re\":{\"$regularExpression\":{\"pattern\":\"^test$\",\"options\":\"i\"}}}]";
+
+        JsonObject response = insertDocumentsRpc(client, 46, "users", documents);
+
+        assertFalse(response.has("error"), response.toString());
+        Document written = batches.get(0).get(0);
+        assertTrue(written.get("bin") instanceof Binary, String.valueOf(written.get("bin")));
+        Binary binary = (Binary) written.get("bin");
+        assertEquals(0, binary.getType());
+        assertArrayEquals(new byte[] {1, 2, 3}, binary.getData());
+        assertTrue(written.get("re") instanceof BsonRegularExpression, String.valueOf(written.get("re")));
+        BsonRegularExpression regex = (BsonRegularExpression) written.get("re");
+        assertEquals("^test$", regex.getPattern());
+        assertEquals("i", regex.getOptions());
+    }
+
+    @Test
+    void bulkInsertResultKeepsInsertedCountAndPerDocumentErrors() {
+        BulkWriteResult writeResult = BulkWriteResult.acknowledged(1, 0, 0, 0, List.of());
+        MongoBulkWriteException error = new MongoBulkWriteException(
+            writeResult,
+            List.of(new BulkWriteError(11000, "E11000 duplicate key", new BsonDocument(), 1)),
+            null,
+            new ServerAddress()
+        );
+
+        Map<String, Object> result = MongoAgent.bulkInsertResult(error);
+
+        assertEquals(1, result.get("affected_rows"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) result.get("errors");
+        assertEquals(1, errors.size());
+        assertEquals(1, errors.get(0).get("index"));
+        assertEquals(11000, errors.get(0).get("code"));
+        assertEquals("E11000 duplicate key", errors.get(0).get("message"));
+    }
+
+    @Test
+    void bulkInsertResultReportsWriteConcernFailures() {
+        // The driver raises MongoBulkWriteException with no write errors when only the write
+        // concern failed, so the batch must not come back looking successful.
+        MongoBulkWriteException error = new MongoBulkWriteException(
+            BulkWriteResult.acknowledged(0, 0, 0, 0, List.of()),
+            List.of(),
+            new WriteConcernError(64, "WriteConcernFailed", "waiting for replication timed out", new BsonDocument()),
+            new ServerAddress()
+        );
+
+        Map<String, Object> result = MongoAgent.bulkInsertResult(error);
+
+        assertEquals(0, result.get("affected_rows"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> errors = (List<Map<String, Object>>) result.get("errors");
+        assertEquals(1, errors.size());
+        assertEquals(64, errors.get(0).get("code"));
+        assertEquals("waiting for replication timed out", errors.get(0).get("message"));
+        assertFalse(errors.get(0).containsKey("index"));
+    }
+
+    @Test
+    void findCursorRpcPagesExtendedJsonDocumentsThenExhausts() {
+        List<String> calls = new ArrayList<>();
+        List<Document> documents = List.of(
+            new Document("_id", new ObjectId("507f1f77bcf86cd799439011"))
+                .append("n", 1L)
+                .append("bin", new Binary((byte) 0, new byte[] {1, 2, 3}))
+                .append("re", new BsonRegularExpression("^test$", "i")),
+            new Document("_id", new ObjectId("507f1f77bcf86cd799439012")).append("n", 2L)
+        );
+        MongoClient client = recordingFindMongoClient(calls, documents);
+
+        JsonObject start = findCursorRpc(client, 50, "start_find_cursor", cursorParams("users", 1, null));
+        assertFalse(start.has("error"), start.toString());
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+        assertEquals(1, start.getAsJsonObject("result").get("batch_size").getAsInt());
+
+        JsonObject first = findCursorRpc(client, 51, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        assertFalse(first.has("error"), first.toString());
+        assertEquals(1, first.getAsJsonObject("result").getAsJsonArray("documents").size());
+        assertFalse(first.getAsJsonObject("result").get("exhausted").getAsBoolean());
+        JsonObject firstDocument = first.getAsJsonObject("result").getAsJsonArray("documents").get(0).getAsJsonObject();
+        assertEquals(
+            "507f1f77bcf86cd799439011",
+            firstDocument.getAsJsonObject("_id").get("$oid").getAsString()
+        );
+        assertEquals("1", firstDocument.getAsJsonObject("n").get("$numberLong").getAsString());
+        JsonObject binary = firstDocument.getAsJsonObject("bin").getAsJsonObject("$binary");
+        assertEquals("AQID", binary.get("base64").getAsString(), firstDocument.toString());
+        assertEquals("00", binary.get("subType").getAsString(), firstDocument.toString());
+        JsonObject regex = firstDocument.getAsJsonObject("re").getAsJsonObject("$regularExpression");
+        assertEquals("^test$", regex.get("pattern").getAsString(), firstDocument.toString());
+        assertEquals("i", regex.get("options").getAsString(), firstDocument.toString());
+
+        JsonObject second = findCursorRpc(client, 52, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        assertFalse(second.has("error"), second.toString());
+        assertEquals(1, second.getAsJsonObject("result").getAsJsonArray("documents").size());
+        assertTrue(second.getAsJsonObject("result").get("exhausted").getAsBoolean());
+
+        JsonObject missing = findCursorRpc(client, 53, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        assertTrue(missing.has("error"), missing.toString());
+        assertEquals("Find cursor not found", missing.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(calls.contains("find"));
+        assertTrue(calls.contains("batchSize:1"));
+        assertTrue(calls.contains("iterator"));
+        assertTrue(calls.contains("close"));
+    }
+
+    @Test
+    void closeFindCursorRpcIsIdempotent() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindMongoClient(calls, List.of(new Document("n", 1)));
+        JsonObject start = findCursorRpc(client, 54, "start_find_cursor", cursorParams("users", 10, null));
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+
+        JsonObject closed = findCursorRpc(client, 55, "close_find_cursor", cursorParams(null, 0, cursorId));
+        JsonObject again = findCursorRpc(client, 56, "close_find_cursor", cursorParams(null, 0, cursorId));
+
+        assertFalse(closed.has("error"), closed.toString());
+        assertFalse(again.has("error"), again.toString());
+        assertEquals(1, calls.stream().filter("close"::equals).count());
+    }
+
+    @Test
+    void bsonToCanonicalExtendedJsonKeepsInt64DistinctFromJsonNumber() {
+        JsonObject json = MongoAgent.bsonToCanonicalExtendedJson(
+            new Document("n", 5L)
+                .append("bin", new Binary((byte) 0, new byte[] {1, 2, 3}))
+                .append("re", new BsonRegularExpression("^test$", "i"))
+        );
+
+        assertEquals("5", json.getAsJsonObject("n").get("$numberLong").getAsString());
+        assertFalse(json.get("n").isJsonPrimitive(), json.toString());
+        JsonObject binary = json.getAsJsonObject("bin").getAsJsonObject("$binary");
+        assertEquals("AQID", binary.get("base64").getAsString(), json.toString());
+        assertEquals("00", binary.get("subType").getAsString(), json.toString());
+        assertFalse(json.getAsJsonObject("bin").has("$type"), json.toString());
+        JsonObject regex = json.getAsJsonObject("re").getAsJsonObject("$regularExpression");
+        assertEquals("^test$", regex.get("pattern").getAsString(), json.toString());
+        assertEquals("i", regex.get("options").getAsString(), json.toString());
+        assertFalse(json.getAsJsonObject("re").has("$regex"), json.toString());
+    }
+
+    @Test
+    void disconnectClosesOpenFindCursors() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindMongoClient(calls, List.of(new Document("n", 1L)));
+        JsonObject start = findCursorRpc(client, 57, "start_find_cursor", cursorParams("users", 10, null));
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+
+        JsonObject disconnect = JsonParser.parseString(MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":58,\"method\":\"disconnect\",\"params\":{}}"
+        )).getAsJsonObject();
+        JsonObject fetch = findCursorRpc(client, 59, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+
+        assertFalse(disconnect.has("error"), disconnect.toString());
+        assertTrue(fetch.has("error"), fetch.toString());
+        assertEquals("Find cursor not found", fetch.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(calls.contains("close"));
+    }
+
+    @Test
+    void fetchFailureReleasesTheCursorSlot() {
+        List<String> calls = new ArrayList<>();
+        MongoCursor<Document> failing = new MongoCursor<>() {
+            @Override
+            public void close() {
+                calls.add("close");
+            }
+
+            @Override
+            public boolean hasNext() {
+                throw new IllegalStateException("cursor id 42 not found");
+            }
+
+            @Override
+            public Document next() {
+                throw new IllegalStateException("cursor id 42 not found");
+            }
+
+            @Override
+            public Document tryNext() {
+                throw new IllegalStateException("cursor id 42 not found");
+            }
+
+            @Override
+            public ServerAddress getServerAddress() {
+                return new ServerAddress();
+            }
+
+            @Override
+            public com.mongodb.ServerCursor getServerCursor() {
+                return null;
+            }
+        };
+        MongoClient client = findMongoClientWithCursor(calls, failing);
+
+        JsonObject start = findCursorRpc(client, 60, "start_find_cursor", cursorParams("users", 10, null));
+        String cursorId = start.getAsJsonObject("result").get("cursor_id").getAsString();
+        JsonObject fetch = findCursorRpc(client, 61, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+        JsonObject again = findCursorRpc(client, 62, "fetch_find_cursor", cursorParams(null, 0, cursorId));
+
+        assertTrue(fetch.has("error"), fetch.toString());
+        assertTrue(calls.contains("close"));
+        // A dead cursor is dropped, so the slot is free again instead of being held until disconnect.
+        assertEquals("Find cursor not found", again.getAsJsonObject("error").get("message").getAsString());
+    }
+
+    @Test
+    void startFindCursorEnforcesPerOwnerBudget() {
+        List<String> calls = new ArrayList<>();
+        MongoClient client = recordingFindMongoClient(calls, List.of(new Document("n", 1)));
+
+        for (int index = 0; index < 16; index++) {
+            JsonObject started = findCursorRpc(client, 100 + index, "start_find_cursor", cursorParams("users", 100, null));
+            assertFalse(started.has("error"), started.toString());
+        }
+        JsonObject rejected = findCursorRpc(client, 200, "start_find_cursor", cursorParams("users", 100, null));
+
+        assertTrue(rejected.has("error"), rejected.toString());
+        assertEquals(
+            "MongoDB find cursor limit reached: 16",
+            rejected.getAsJsonObject("error").get("message").getAsString()
+        );
     }
 
     @Test
@@ -1005,6 +1320,112 @@ class MongoAgentTest {
             () -> MongoAgent.updateOptionsForWrite("{\"upsert\":\"yes\"}")
         );
         assertEquals("upsert must be a boolean", error.getMessage());
+    }
+
+    @Test
+    void replaceDocumentMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"replace_document\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"filter_json\":\"{\\\"_id\\\":1}\","
+                + "\"replacement_json\":\"{\\\"name\\\":\\\"new\\\"}\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(11, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_REPLACE_DOCUMENT));
+    }
+
+    @Test
+    void bulkWriteMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"bulk_write\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\","
+                + "\"operations_json\":\"[{\\\"insertOne\\\":{\\\"document\\\":{\\\"a\\\":1}}}]\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(12, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_BULK_WRITE));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_BULK_WRITE));
+    }
+
+    @Test
+    void buildsBulkWriteModelsForEveryOperationKind() {
+        List<WriteModel<Document>> models = MongoAgent.bulkWriteModelsForWrite(
+            "[{\"insertOne\":{\"document\":{\"sku\":\"A1\"}}},"
+                + "{\"updateOne\":{\"filter\":{\"sku\":\"A1\"},\"update\":{\"$inc\":{\"stock\":1}},\"upsert\":true}},"
+                + "{\"updateMany\":{\"filter\":{},\"update\":[{\"$set\":{\"stock\":0}}]}},"
+                + "{\"replaceOne\":{\"filter\":{\"sku\":\"B2\"},\"replacement\":{\"sku\":\"B2\"}}},"
+                + "{\"deleteOne\":{\"filter\":{\"sku\":\"C3\"}}},"
+                + "{\"deleteMany\":{\"filter\":{\"stock\":{\"$lt\":0}}}}]");
+
+        assertEquals(6, models.size());
+        assertTrue(models.get(0) instanceof InsertOneModel);
+        assertTrue(models.get(1) instanceof UpdateOneModel);
+        assertTrue(((UpdateOneModel<Document>) models.get(1)).getOptions().isUpsert());
+        assertTrue(models.get(2) instanceof UpdateManyModel);
+        assertNotNull(((UpdateManyModel<Document>) models.get(2)).getUpdatePipeline());
+        assertTrue(models.get(3) instanceof ReplaceOneModel);
+        assertTrue(models.get(4) instanceof DeleteOneModel);
+        assertTrue(models.get(5) instanceof DeleteManyModel);
+    }
+
+    @Test
+    void rejectsMalformedBulkWriteOperations() {
+        for (String[] item : new String[][] {
+            {"[]", "non-empty array"},
+            {"[{\"insertOne\":{},\"deleteOne\":{}}]", "exactly one operation key"},
+            {"[{\"upsertOne\":{\"document\":{}}}]", "unsupported operation upsertOne"},
+            {"[{\"insertOne\":{}}]", "requires a document document"},
+            {"[{\"updateOne\":{\"filter\":{},\"update\":{\"a\":1}}}]", "update operators such as $set"},
+            {"[{\"updateOne\":{\"filter\":{},\"update\":{\"$set\":{\"a\":1}},\"upsert\":1}}]", "upsert must be a boolean"},
+            {"[{\"replaceOne\":{\"filter\":{},\"replacement\":{\"$set\":{\"a\":1}}}}]", "must not contain update operators"},
+        }) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteModelsForWrite(item[0]), item[0]);
+            assertTrue(error.getMessage().contains(item[1]), item[0] + " -> " + error.getMessage());
+        }
+    }
+
+    @Test
+    void parsesBulkWriteOptions() {
+        assertTrue(MongoAgent.bulkWriteOptionsForWrite(null).isOrdered());
+        assertTrue(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":true}").isOrdered());
+        assertFalse(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":false}").isOrdered());
+        IllegalArgumentException unsupported = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteOptionsForWrite("{\"writeConcern\":{}}"));
+        assertEquals("Unsupported bulkWrite option: writeConcern", unsupported.getMessage());
+        IllegalArgumentException notBoolean = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":\"yes\"}"));
+        assertEquals("ordered must be a boolean", notBoolean.getMessage());
+    }
+
+    @Test
+    void parsesReplaceOptions() {
+        assertTrue(MongoAgent.replaceOptionsForWrite("{\"upsert\":true}").isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite("{\"upsert\":false}").isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite(null).isUpsert());
+        assertFalse(MongoAgent.replaceOptionsForWrite("{}").isUpsert());
+
+        IllegalArgumentException unsupported = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.replaceOptionsForWrite("{\"arrayFilters\":[]}")
+        );
+        assertEquals("Unsupported replace option: arrayFilters", unsupported.getMessage());
+        IllegalArgumentException notBoolean = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.replaceOptionsForWrite("{\"upsert\":\"yes\"}")
+        );
+        assertEquals("upsert must be a boolean", notBoolean.getMessage());
+    }
+
+    @Test
+    void rejectsReplacementDocumentsWithUpdateOperators() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.requireReplacementDocument(Document.parse("{\"$set\":{\"a\":1}}"))
+        );
+        assertEquals("Replacement document must not contain update operators such as $set", error.getMessage());
+        // A plain document, including one with nested `$`-keys inside values, is fine.
+        MongoAgent.requireReplacementDocument(Document.parse("{\"name\":\"new\",\"meta\":{\"$ref\":\"x\"}}"));
     }
 
     @Test
@@ -1414,9 +1835,140 @@ class MongoAgentTest {
         return JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
     }
 
+    private static JsonObject cursorParams(String collection, int batchSize, String cursorId) {
+        JsonObject params = new JsonObject();
+        params.addProperty("database", "app");
+        if (collection != null) {
+            params.addProperty("collection", collection);
+        }
+        if (batchSize > 0) {
+            params.addProperty("batch_size", batchSize);
+        }
+        if (cursorId != null) {
+            params.addProperty("cursor_id", cursorId);
+            params.addProperty("limit", 1);
+        }
+        return params;
+    }
+
+    private static JsonObject findCursorRpc(MongoClient client, int id, String method, JsonObject params) {
+        JsonObject request = new JsonObject();
+        request.addProperty("jsonrpc", "2.0");
+        request.addProperty("id", id);
+        request.addProperty("method", method);
+        request.add("params", params);
+        return JsonParser.parseString(MongoAgent.handleRequest(request.toString(), client)).getAsJsonObject();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingFindMongoClient(List<String> calls, List<Document> documents) {
+        MongoCursor<Document> cursor = new MongoCursor<>() {
+            private int index;
+            private boolean closed;
+
+            @Override
+            public void close() {
+                closed = true;
+                calls.add("close");
+            }
+
+            @Override
+            public boolean hasNext() {
+                return !closed && index < documents.size();
+            }
+
+            @Override
+            public Document next() {
+                return documents.get(index++);
+            }
+
+            @Override
+            public Document tryNext() {
+                return hasNext() ? next() : null;
+            }
+
+            @Override
+            public com.mongodb.ServerAddress getServerAddress() {
+                return new com.mongodb.ServerAddress();
+            }
+
+            @Override
+            public com.mongodb.ServerCursor getServerCursor() {
+                return null;
+            }
+        };
+        return findMongoClientWithCursor(calls, cursor);
+    }
+
+    /** Same proxy chain as [recordingFindMongoClient], for cursors that fail mid-iteration. */
+    @SuppressWarnings("unchecked")
+    private static MongoClient findMongoClientWithCursor(List<String> calls, MongoCursor<Document> cursor) {
+        FindIterable<Document> iterable = (FindIterable<Document>) Proxy.newProxyInstance(
+            FindIterable.class.getClassLoader(),
+            new Class<?>[] {FindIterable.class},
+            (proxy, method, args) -> {
+                switch (method.getName()) {
+                    case "batchSize" -> {
+                        calls.add("batchSize:" + args[0]);
+                        return proxy;
+                    }
+                    case "projection", "sort", "collation", "filter", "skip", "limit" -> {
+                        calls.add(method.getName());
+                        return proxy;
+                    }
+                    case "iterator" -> {
+                        calls.add("iterator");
+                        return cursor;
+                    }
+                    default -> throw new UnsupportedOperationException(method.getName());
+                }
+            }
+        );
+        MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
+            MongoCollection.class.getClassLoader(),
+            new Class<?>[] {MongoCollection.class},
+            (proxy, method, args) -> {
+                if ("find".equals(method.getName())) {
+                    calls.add("find");
+                    return iterable;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        MongoDatabase database = (MongoDatabase) Proxy.newProxyInstance(
+            MongoDatabase.class.getClassLoader(),
+            new Class<?>[] {MongoDatabase.class},
+            (proxy, method, args) -> {
+                if ("getCollection".equals(method.getName())) {
+                    calls.add("getCollection:" + args[0]);
+                    return collection;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+        return (MongoClient) Proxy.newProxyInstance(
+            MongoClient.class.getClassLoader(),
+            new Class<?>[] {MongoClient.class},
+            (proxy, method, args) -> {
+                if ("getDatabase".equals(method.getName())) {
+                    calls.add("getDatabase:" + args[0]);
+                    return database;
+                }
+                throw new UnsupportedOperationException(method.getName());
+            }
+        );
+    }
+
     @SuppressWarnings("unchecked")
     private static MongoClient recordingInsertMongoClient(
         List<String> calls, List<List<Document>> batches
+    ) {
+        return recordingInsertMongoClient(calls, batches, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static MongoClient recordingInsertMongoClient(
+        List<String> calls, List<List<Document>> batches, List<Boolean> ordered
     ) {
         MongoCollection<Document> collection = (MongoCollection<Document>) Proxy.newProxyInstance(
             MongoCollection.class.getClassLoader(),
@@ -1426,6 +1978,13 @@ class MongoAgentTest {
                     List<Document> batch = ((List<Document>) args[0]).stream().map(Document::new).toList();
                     batches.add(batch);
                     calls.add("insertMany:" + batch.size());
+                    if (ordered != null) {
+                        boolean isOrdered = true;
+                        if (args.length > 1 && args[1] instanceof InsertManyOptions options) {
+                            isOrdered = options.isOrdered();
+                        }
+                        ordered.add(isOrdered);
+                    }
                     return null;
                 }
                 throw new UnsupportedOperationException(method.getName());

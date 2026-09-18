@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { dataTransferFailureCopyText, sqlFileFailureCopyText } from "@/components/export/failureDetailCopyText";
+import SqlFileProgressIndicator from "@/components/sql-file/SqlFileProgressIndicator.vue";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -64,12 +65,6 @@ const progressValue = (task: ExportTask) => {
     if (task.overallPercent !== undefined) return task.overallPercent;
     if (!task.totalObjects || task.totalObjects <= 0) return 0;
     return Math.min(100, Math.round(((task.objectIndex ?? 0) / task.totalObjects) * 100));
-  }
-  if (task.kind === "sql-file") {
-    const total = task.totalRows ?? task.statementIndex ?? 0;
-    if (task.status === "Done") return 100;
-    if (total <= 0) return 0;
-    return Math.min(95, Math.round((task.rowsExported / total) * 100));
   }
   if (task.kind === "data-transfer") {
     if (!task.totalTables || task.totalTables <= 0) return 0;
@@ -358,7 +353,8 @@ function openTask(task: ExportTask): void {
             </div>
 
             <!-- Progress bar -->
-            <div v-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+            <SqlFileProgressIndicator v-if="task.kind === 'sql-file'" :status="task.status" :bytes-read="task.bytesRead" :total-bytes="task.totalBytes" :phase="task.sqlFilePhase" />
+            <div v-else-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
               <div
                 v-if="
                   task.totalRows ||
@@ -384,6 +380,7 @@ function openTask(task: ExportTask): void {
 
             <div class="min-w-0 text-muted-foreground">
               <span class="break-words tabular-nums">{{ rowsText(task) }}</span>
+              <span v-if="task.kind === 'sql-file' && task.elapsedMs !== undefined" class="ml-1 tabular-nums">{{ t("exportProgress.elapsed", { duration: formatDataTransferDuration(task.elapsedMs) }) }}</span>
               <span v-if="task.kind !== 'data-transfer' && task.startedAt !== undefined" class="ml-1 tabular-nums">{{ elapsedText(task) }}</span>
               <span v-if="taskStatusText(task)" class="ml-1 font-medium text-primary">{{ taskStatusText(task) }}</span>
               <span v-if="hasUnlistedTaskError(task)" class="mt-1 block whitespace-normal break-words text-destructive" :title="translateBackendError(t, task.errorMessage!)">

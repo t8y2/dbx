@@ -9,10 +9,12 @@ permissions:
 
 jobs:
   release:
-    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-sdk-v1
+    uses: t8y2/dbx/.github/workflows/plugin-release-reusable.yml@plugin-cli-v{{CLI_VERSION}}
     with:
       release-tag: ${{ github.event.release.tag_name }}
       package-command: dbx-plugin package .
       package-path: dist/*.dbxp
       metadata-path: dist/*.artifact.json
-      plugin-cli-version: 0.1.6
+      plugin-cli-version: {{CLI_VERSION}}
+      go-version: "{{GO_VERSION}}"
+      rust-toolchain: "{{RUST_TOOLCHAIN}}"

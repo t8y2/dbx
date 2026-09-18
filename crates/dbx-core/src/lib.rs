@@ -58,6 +58,7 @@ pub mod models;
 pub mod mongo_oidc;
 pub mod mongo_ops;
 pub mod mongo_shell;
+pub mod mongodb_dump;
 pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
@@ -95,6 +96,7 @@ pub mod sql_dialect;
 pub mod sql_editability;
 pub mod sql_error_position;
 pub mod sql_file_import;
+pub mod sql_file_zip_package;
 pub mod sql_parser;
 pub mod sql_risk;
 pub mod sqlite_backup;

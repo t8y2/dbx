@@ -18,10 +18,11 @@ use crate::csv_export::{
     format_csv_with_quote_mode, format_tsv, push_table_csv_row, push_table_csv_row_with_quote_mode, push_tsv_row,
     CsvQuoteMode,
 };
+use crate::data_grid_sql::extra_is_auto_generated;
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
-    build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
-    SqlInsertMode,
+    build_export_insert_statements_excluding, is_export_cancelled, is_internal_export_column,
+    BuildExportInsertStatementsOptions, SqlInsertMode,
 };
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
@@ -40,6 +41,31 @@ const SQL_INSERT_BATCH_SIZE: usize = 100;
 
 pub fn table_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("table-export", export_id)
+}
+
+/// SQL 导出时需要排除的列名：用户选择了“不含主键”时，与 copy-as-INSERT
+/// 一致只剔除自增/identity 主键；手动赋值的主键保留，否则回放 INSERT 缺值。
+fn sql_export_excluded_columns(
+    request: &TableExportRequest,
+    primary_keys: &[String],
+    col_names: &[String],
+    column_extras: &[Option<String>],
+) -> Vec<String> {
+    if !request.exclude_primary_keys {
+        return Vec::new();
+    }
+    primary_keys
+        .iter()
+        .filter(|pk| {
+            col_names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case(pk))
+                .and_then(|index| column_extras.get(index))
+                .and_then(|extra| extra.as_deref())
+                .is_some_and(extra_is_auto_generated)
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +91,9 @@ pub struct TableExportRequest {
     pub column_types: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub primary_keys: Option<Vec<String>>,
+    /// 导出 SQL 时是否排除主键列（对应前端数据提取设置里的“排除主键”）。
+    #[serde(default)]
+    pub exclude_primary_keys: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1314,20 +1343,23 @@ async fn try_export_native_table_stream(
                     if pending_rows.is_empty() {
                         return Ok(());
                     }
-                    let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
-                        database_type: Some(*db_type),
-                        identifier_quote: request.identifier_quote.clone(),
-                        schema: request.schema.clone(),
-                        table_name: Some(request.table_name.clone()),
-                        qualified_table_name: None,
-                        columns: col_names.to_vec(),
-                        column_types: column_types.to_vec(),
-                        column_extras: column_extras.to_vec(),
-                        spatial_columns: Vec::new(),
-                        spatial_values: Vec::new(),
-                        rows: std::mem::take(pending_rows),
-                        batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
-                    })?;
+                    let statements = build_export_insert_statements_excluding(
+                        BuildExportInsertStatementsOptions {
+                            database_type: Some(*db_type),
+                            identifier_quote: request.identifier_quote.clone(),
+                            schema: request.schema.clone(),
+                            table_name: Some(request.table_name.clone()),
+                            qualified_table_name: None,
+                            columns: col_names.to_vec(),
+                            column_types: column_types.to_vec(),
+                            column_extras: column_extras.to_vec(),
+                            spatial_columns: Vec::new(),
+                            spatial_values: Vec::new(),
+                            rows: std::mem::take(pending_rows),
+                            batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+                        },
+                        &sql_export_excluded_columns(request, primary_keys, col_names, column_extras),
+                    )?;
                     if !statements.is_empty() {
                         if wrote_statements {
                             file.write_all(b"\n").map_err(|e| format!("Failed to write SQL: {e}"))?;
@@ -2152,20 +2184,23 @@ async fn export_table_data_core_inner(
                     break;
                 }
 
-                let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
-                    database_type: Some(db_type),
-                    identifier_quote: request.identifier_quote.clone(),
-                    schema: request.schema.clone(),
-                    table_name: Some(request.table_name.clone()),
-                    qualified_table_name: None,
-                    columns: col_names.clone(),
-                    column_types: column_types.clone(),
-                    column_extras: column_extras.clone(),
-                    spatial_columns: result.spatial_columns.clone(),
-                    spatial_values: result.spatial_values.clone(),
-                    rows: result.rows.clone(),
-                    batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
-                })?;
+                let statements = build_export_insert_statements_excluding(
+                    BuildExportInsertStatementsOptions {
+                        database_type: Some(db_type),
+                        identifier_quote: request.identifier_quote.clone(),
+                        schema: request.schema.clone(),
+                        table_name: Some(request.table_name.clone()),
+                        qualified_table_name: None,
+                        columns: col_names.clone(),
+                        column_types: column_types.clone(),
+                        column_extras: column_extras.clone(),
+                        spatial_columns: result.spatial_columns.clone(),
+                        spatial_values: result.spatial_values.clone(),
+                        rows: result.rows.clone(),
+                        batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
+                    },
+                    &sql_export_excluded_columns(request, &primary_keys, &col_names, &column_extras),
+                )?;
                 if !statements.is_empty() {
                     if wrote_statements {
                         file.write_all(b"\n").map_err(|e| format!("Failed to write SQL: {e}"))?;
@@ -2226,7 +2261,7 @@ async fn export_table_data_core_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database_export::{clear_export_cancelled, set_export_cancelled};
+    use crate::database_export::{build_export_insert_statements, clear_export_cancelled, set_export_cancelled};
     use crate::models::connection::ConnectionConfig;
     #[cfg(unix)]
     use crate::plugins::{
@@ -2351,6 +2386,7 @@ mod tests {
             columns: Some(vec!["id".to_string(), "name".to_string()]),
             column_types: Some(vec![Some("INTEGER".to_string()), Some("VARCHAR".to_string())]),
             primary_keys: Some(vec!["id".to_string()]),
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count,
@@ -2512,6 +2548,7 @@ mod tests {
             format: "csv".to_string(),
             insert_mode: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            exclude_primary_keys: false,
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2680,6 +2717,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: Some("WHERE temperature > 1".to_string()),
             order_by: Some("Time DESC".to_string()),
             skip_count: true,
@@ -2739,6 +2777,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -2776,6 +2815,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -2808,6 +2848,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -2848,6 +2889,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -2900,6 +2942,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: Some("WHERE status = 'active'".to_string()),
             order_by: None,
             skip_count: false,
@@ -2946,6 +2989,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: false,
@@ -3020,6 +3064,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: false,
@@ -3076,6 +3121,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: true,
@@ -3134,6 +3180,7 @@ mod tests {
             columns: None,
             column_types: None,
             primary_keys: None,
+            exclude_primary_keys: false,
             where_input: None,
             order_by: None,
             skip_count: false,

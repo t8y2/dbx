@@ -1414,8 +1414,59 @@ func trimStatementSQL(sqlText string) string {
 }
 
 func isQuerySQL(sqlText string) bool {
-	lower := strings.ToLower(strings.TrimSpace(sqlText))
-	return strings.HasPrefix(lower, "select") || strings.HasPrefix(lower, "with") || strings.HasPrefix(lower, "show") || strings.HasPrefix(lower, "explain")
+	for {
+		sqlText = strings.TrimSpace(sqlText)
+		if strings.HasPrefix(sqlText, "--") {
+			end := strings.IndexAny(sqlText, "\r\n")
+			if end < 0 {
+				return false
+			}
+			sqlText = sqlText[end:]
+			continue
+		}
+		if strings.HasPrefix(sqlText, "/*") {
+			depth := 1
+			index := 2
+			for index+1 < len(sqlText) && depth > 0 {
+				switch sqlText[index : index+2] {
+				case "/*":
+					depth++
+					index += 2
+				case "*/":
+					depth--
+					index += 2
+				default:
+					index++
+				}
+			}
+			if depth > 0 {
+				return false
+			}
+			sqlText = sqlText[index:]
+			continue
+		}
+		break
+	}
+	end := 0
+	for end < len(sqlText) {
+		char := sqlText[end]
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')) {
+			break
+		}
+		end++
+	}
+	if end < len(sqlText) {
+		char := sqlText[end]
+		if (char >= '0' && char <= '9') || char == '_' || char == '$' || char == '#' || char >= 0x80 {
+			return false
+		}
+	}
+	switch strings.ToLower(sqlText[:end]) {
+	case "select", "with", "show", "explain":
+		return true
+	default:
+		return false
+	}
 }
 
 func quoteIdentifier(value string) string {

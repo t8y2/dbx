@@ -128,6 +128,7 @@ pub async fn list_tables(client: &CloudflareD1Client, _schema: &str) -> Result<V
             TableInfo {
                 name: value_as_string(row.first()).unwrap_or_default(),
                 table_type: if table_type.eq_ignore_ascii_case("view") { "VIEW" } else { "BASE TABLE" }.to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,

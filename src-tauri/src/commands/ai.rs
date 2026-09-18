@@ -394,6 +394,7 @@ pub async fn ai_agent_stream(
         cli_mcp_server_command,
         sql_permissions,
         max_agent_turns,
+        prompt_cache_key: request.prompt_cache_key.clone(),
     };
     let is_agent_mode = mode.as_deref() == Some("agent");
 

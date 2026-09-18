@@ -7,15 +7,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use chrono::{DateTime as ChronoDateTime, NaiveDate, Utc};
+use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
 use mongodb::bson::{oid::ObjectId, Bson, DateTime, Decimal128, Document};
 use serde::{Deserialize, Serialize};
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::csv_export::{push_csv_field, CsvQuoteMode};
-use crate::db::agent_driver::AgentCapability;
+use crate::db::agent_driver::{AgentCapability, PooledAgentClient};
 use crate::db::mongo_driver::{
     self, document_to_canonical_extended_json, for_each_find_document, insert_bson_documents,
-    json_object_to_document_extended_json, MongoBulkWriteError, MongoInsertOutcome,
+    json_object_to_document_extended_json, MongoBulkWriteError, MongoDocumentResult, MongoInsertOutcome,
 };
 use crate::table_import::{open_transcoded_text_file, TableImportTextEncoding};
 
@@ -26,6 +27,7 @@ pub const MAX_BATCH_SIZE: usize = 5000;
 /// Rows sampled for CSV type inference, independent of the preview window so that the
 /// preview and the import always agree on column types.
 pub const TYPE_SAMPLE_ROWS: usize = 1000;
+const BSON_MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
 const TYPE_STRING: u8 = 1 << 0;
 const TYPE_BOOLEAN: u8 = 1 << 1;
@@ -45,6 +47,7 @@ pub enum MongoImportFormat {
     Csv,
     Json,
     Ndjson,
+    Bson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -341,14 +344,16 @@ struct CsvParseConfig {
 
 pub fn format_from_path(path: &str) -> Result<MongoImportFormat, String> {
     let lower = path.to_lowercase();
-    if lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".txt") {
+    if lower.ends_with(".bson") || lower.ends_with(".bson.gz") {
+        Ok(MongoImportFormat::Bson)
+    } else if lower.ends_with(".csv") || lower.ends_with(".tsv") || lower.ends_with(".txt") {
         Ok(MongoImportFormat::Csv)
     } else if lower.ends_with(".ndjson") || lower.ends_with(".jsonl") {
         Ok(MongoImportFormat::Ndjson)
     } else if lower.ends_with(".json") {
         Ok(MongoImportFormat::Json)
     } else {
-        Err("Unsupported MongoDB import file type; use .csv, .json, or .ndjson".to_string())
+        Err("Unsupported MongoDB import file type; use .bson, .bson.gz, .csv, .json, or .ndjson".to_string())
     }
 }
 
@@ -1348,6 +1353,72 @@ fn file_size(path: &str) -> u64 {
     std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
 }
 
+fn open_bson_dump_reader(path: &str) -> Result<Box<dyn Read>, MongoImportIssue> {
+    let file = File::open(path).map_err(|error| MongoImportIssue::new("FILE_UNREADABLE", error.to_string()))?;
+    let reader = BufReader::new(file);
+    if path.to_lowercase().ends_with(".gz") {
+        Ok(Box::new(MultiGzDecoder::new(reader)))
+    } else {
+        Ok(Box::new(reader))
+    }
+}
+
+fn read_bson_dump_document<R: Read + ?Sized>(reader: &mut R, row: u64) -> Result<Option<Document>, MongoImportIssue> {
+    let mut length_bytes = [0u8; 4];
+    loop {
+        match reader.read(&mut length_bytes[..1]) {
+            Ok(0) => return Ok(None),
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(MongoImportIssue::new("FILE_UNREADABLE", error.to_string()).with_row(row)),
+        }
+    }
+    reader.read_exact(&mut length_bytes[1..]).map_err(|error| {
+        MongoImportIssue::new("BSON_STRUCTURE", format!("Truncated BSON document length: {error}")).with_row(row)
+    })?;
+
+    let document_length = i32::from_le_bytes(length_bytes);
+    if document_length < 5 || document_length as usize > BSON_MAX_DOCUMENT_BYTES {
+        return Err(MongoImportIssue::new(
+            "BSON_STRUCTURE",
+            format!("Invalid BSON document length {document_length}; expected 5..={BSON_MAX_DOCUMENT_BYTES} bytes"),
+        )
+        .with_row(row));
+    }
+
+    let mut bytes = vec![0u8; document_length as usize];
+    bytes[..4].copy_from_slice(&length_bytes);
+    reader.read_exact(&mut bytes[4..]).map_err(|error| {
+        MongoImportIssue::new(
+            "BSON_STRUCTURE",
+            format!("Truncated BSON document; expected {document_length} bytes: {error}"),
+        )
+        .with_row(row)
+    })?;
+    let document = mongodb::bson::from_slice::<Document>(&bytes).map_err(|error| {
+        MongoImportIssue::new("BSON_STRUCTURE", format!("Invalid BSON document: {error}")).with_row(row)
+    })?;
+    Ok(Some(document))
+}
+
+fn parse_bson_preview(
+    path: &str,
+    preview_limit: usize,
+) -> Result<(Vec<ParsedMongoDocument>, u64, bool), MongoImportIssue> {
+    let mut reader = open_bson_dump_reader(path)?;
+    let mut documents = Vec::with_capacity(preview_limit.min(DEFAULT_PREVIEW_LIMIT));
+    let mut row = 1u64;
+    while documents.len() <= preview_limit {
+        let Some(document) = read_bson_dump_document(&mut *reader, row)? else {
+            return Ok((documents, row - 1, true));
+        };
+        documents.push(parsed_document(row, document, true));
+        row += 1;
+    }
+    documents.truncate(preview_limit);
+    Ok((documents, preview_limit as u64, false))
+}
+
 pub fn preview_mongodb_import_file(
     request: &MongoImportPreviewRequest,
 ) -> Result<MongoImportPreview, MongoImportIssue> {
@@ -1406,6 +1477,25 @@ pub fn preview_mongodb_import_file(
                 estimated_rows_exact,
             })
         }
+        MongoImportFormat::Bson => {
+            let (documents, estimated_rows, estimated_rows_exact) =
+                parse_bson_preview(&request.file_path, preview_limit)?;
+            Ok(MongoImportPreview {
+                source_ref: request.source_ref.clone(),
+                format: request.format,
+                detected_encoding: None,
+                file_name: file_name(&request.file_path),
+                file_path: request.file_path.clone(),
+                size_bytes: file_size(&request.file_path),
+                columns: columns_from_documents(&documents),
+                row_numbers: documents.iter().map(|document| document.row).collect(),
+                rows: documents.into_iter().map(|document| document.extended_json).collect(),
+                warnings: Vec::new(),
+                errors: Vec::new(),
+                estimated_rows: Some(estimated_rows),
+                estimated_rows_exact,
+            })
+        }
     }
 }
 
@@ -1419,6 +1509,7 @@ pub fn preview_mongodb_import_bytes(
         MongoImportFormat::Csv => "csv",
         MongoImportFormat::Json => "json",
         MongoImportFormat::Ndjson => "ndjson",
+        MongoImportFormat::Bson => "bson",
     };
     let dir = std::env::temp_dir().join(format!("dbx-mongo-import-preview-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).map_err(|error| MongoImportIssue::new("FILE_UNREADABLE", error.to_string()))?;
@@ -1517,6 +1608,20 @@ where
     Ok(())
 }
 
+fn stream_bson_file<F>(path: &str, mut on_document: F) -> Result<(), MongoImportIssue>
+where
+    F: FnMut(Result<ParsedMongoDocument, MongoImportIssue>) -> Result<(), MongoImportIssue>,
+{
+    let mut reader = open_bson_dump_reader(path)?;
+    let mut row = 1u64;
+    loop {
+        // A corrupt frame has no reliable next-document boundary, even when skipping row errors.
+        let Some(document) = read_bson_dump_document(&mut *reader, row)? else { return Ok(()) };
+        on_document(Ok(parsed_document(row, document, false)))?;
+        row += 1;
+    }
+}
+
 pub fn for_each_mongodb_import_document<F>(
     path: &str,
     format: MongoImportFormat,
@@ -1531,6 +1636,7 @@ where
         MongoImportFormat::Csv => stream_csv_file(path, options, on_document),
         MongoImportFormat::Json => stream_json_file(path, options, false, on_document),
         MongoImportFormat::Ndjson => stream_json_file(path, options, true, on_document),
+        MongoImportFormat::Bson => stream_bson_file(path, on_document),
     }
 }
 
@@ -1569,7 +1675,6 @@ async fn insert_documents_batch(
     database: &str,
     collection: &str,
     documents: Vec<Document>,
-    require_bson_types: bool,
 ) -> Result<MongoInsertOutcome, MongoImportIssue> {
     let pool =
         state.pool_handle(connection_id).await.ok_or_else(|| MongoImportIssue::new("CONNECTION", "Not found"))?;
@@ -1578,12 +1683,6 @@ async fn insert_documents_batch(
             insert_bson_documents(client, database, collection, documents).await.map_err(bulk_write_issue)
         }
         PoolKind::Agent(client) => {
-            if require_bson_types {
-                return Err(MongoImportIssue::new(
-                    "LEGACY_AGENT",
-                    "MongoDB Legacy Agent cannot preserve BSON types during file import; use the native MongoDB driver",
-                ));
-            }
             let mut client = client.lock().await;
             if !client.supports_capability(AgentCapability::MongoInsertDocuments) {
                 return Err(MongoImportIssue::new(
@@ -1599,16 +1698,18 @@ async fn insert_documents_batch(
                     "database": database,
                     "collection": collection,
                     "docs_json": docs_json,
+                    "ordered": false,
                 }))
                 .await
                 .map_err(|error| MongoImportIssue::new("PERMISSION", error).retryable())?;
-            let inserted = result.get("affected_rows").and_then(serde_json::Value::as_u64).ok_or_else(|| {
-                MongoImportIssue::new("CONNECTION", "MongoDB Legacy Agent returned an invalid insertMany result")
-            })?;
-            Ok(MongoInsertOutcome { inserted, errors: Vec::new() })
+            agent_insert_outcome(&result)
         }
         _ => Err(MongoImportIssue::new("CONNECTION", "Not a MongoDB connection")),
     }
+}
+
+fn agent_insert_outcome(result: &serde_json::Value) -> Result<MongoInsertOutcome, MongoImportIssue> {
+    mongo_driver::agent_insert_outcome(result).map_err(|error| MongoImportIssue::new("CONNECTION", error))
 }
 
 /// Rewrites a write issue's batch-relative index into the source file row it came from, so the
@@ -1644,7 +1745,6 @@ where
 {
     let started_at = Instant::now();
     let batch_size = clamp_batch_size(if request.batch_size == 0 { DEFAULT_BATCH_SIZE } else { request.batch_size })?;
-    let require_bson_types = !matches!(request.parse_options.type_mode(), MongoImportTypeMode::String);
     on_progress(progress(
         &request.import_id,
         MongoImportPhase::Preparing,
@@ -1788,7 +1888,6 @@ where
                     &request.database,
                     &request.collection,
                     documents,
-                    require_bson_types,
                 )
                 .await
                 {
@@ -1936,6 +2035,7 @@ pub fn mongodb_export_client_session_id(export_id: &str) -> String {
 pub enum MongoExportFormat {
     Csv,
     Ndjson,
+    Bson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1965,6 +2065,8 @@ pub struct MongoExportRequest {
     pub format: MongoExportFormat,
     #[serde(default = "default_true")]
     pub include_header: bool,
+    #[serde(default)]
+    pub gzip: bool,
     pub file_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
@@ -1999,7 +2101,7 @@ pub struct MongoExportSummary {
 
 fn temp_export_path(target: &Path) -> PathBuf {
     let name = target.file_name().and_then(|name| name.to_str()).unwrap_or("export");
-    target.with_file_name(format!(".{name}.dbx-export.tmp"))
+    target.with_file_name(format!(".{name}.{}.dbx-export.tmp", uuid::Uuid::new_v4()))
 }
 
 fn cleanup_temp(path: &Path) {
@@ -2221,6 +2323,9 @@ where
 {
     let started_at = Instant::now();
     on_progress(export_progress(&request.export_id, MongoExportStatus::Running, 0, 0, None, None, started_at));
+    if request.gzip && request.format != MongoExportFormat::Bson {
+        return Err("Gzip compression is only supported for BSON dump exports".to_string());
+    }
     if is_cancelled(&request.export_id).await {
         on_progress(export_progress(
             &request.export_id,
@@ -2236,28 +2341,12 @@ where
 
     state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
     let pool = state.pool_handle(&request.connection_id).await.ok_or_else(|| "Not found".to_string())?;
-    let client = match &pool {
-        PoolKind::MongoDb(client) => client.clone(),
-        PoolKind::Agent(_) => {
-            return Err(
-                "MongoDB Legacy Agent does not support cursor export of the full query; use the native MongoDB driver"
-                    .to_string(),
-            );
-        }
+    match &pool {
+        PoolKind::MongoDb(_) | PoolKind::Agent(_) => {}
         _ => return Err("Not a MongoDB connection".to_string()),
-    };
+    }
 
-    let total_documents = if request
-        .filter
-        .as_deref()
-        .is_none_or(|filter| filter.trim().is_empty() || filter.trim() == "{}")
-    {
-        mongo_driver::count_documents(&client, &request.database, &request.collection, request.filter.as_deref(), false)
-            .await
-            .ok()
-    } else {
-        None
-    };
+    let total_documents = count_export_documents(state, request).await;
 
     let target = PathBuf::from(&request.file_path);
     if let Some(parent) = target.parent() {
@@ -2268,11 +2357,13 @@ where
 
     let result = match request.format {
         MongoExportFormat::Ndjson => {
-            export_ndjson(&client, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress)
-                .await
+            export_ndjson(state, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
         }
         MongoExportFormat::Csv => {
-            export_csv(&client, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
+            export_csv(state, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
+        }
+        MongoExportFormat::Bson => {
+            export_bson(state, request, &temp, total_documents, started_at, &mut is_cancelled, &mut on_progress).await
         }
     };
 
@@ -2325,8 +2416,349 @@ where
     }
 }
 
+async fn count_export_documents(state: &AppState, request: &MongoExportRequest) -> Option<u64> {
+    if request.filter.as_deref().is_some_and(|filter| !filter.trim().is_empty() && filter.trim() != "{}") {
+        return None;
+    }
+    let pool = state.pool_handle(&request.connection_id).await?;
+    match pool {
+        PoolKind::MongoDb(client) => mongo_driver::count_documents(
+            &client,
+            &request.database,
+            &request.collection,
+            request.filter.as_deref(),
+            false,
+        )
+        .await
+        .ok(),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            client
+                .mongo_count_documents::<u64>(serde_json::json!({
+                    "database": request.database,
+                    "collection": request.collection,
+                    "filter": request.filter,
+                    "accurate": false,
+                }))
+                .await
+                .ok()
+        }
+        _ => None,
+    }
+}
+
+async fn for_each_export_json_document<C, F>(
+    state: &AppState,
+    request: &MongoExportRequest,
+    is_cancelled: &mut C,
+    mut on_document: F,
+) -> Result<(), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    let pool = state.pool_handle(&request.connection_id).await.ok_or_else(|| "Not found".to_string())?;
+    match pool {
+        PoolKind::MongoDb(client) => {
+            for_each_find_document(
+                &client,
+                &request.database,
+                &request.collection,
+                request.filter.as_deref(),
+                request.projection.as_deref(),
+                request.sort.as_deref(),
+                request.collation.as_deref(),
+                DEFAULT_EXPORT_BATCH_SIZE,
+                |document| on_document(document_to_canonical_extended_json(&document)),
+            )
+            .await
+        }
+        PoolKind::Agent(client) => for_each_agent_export_document(&client, request, is_cancelled, on_document).await,
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+async fn for_each_agent_export_document<C, F>(
+    client: &PooledAgentClient,
+    request: &MongoExportRequest,
+    is_cancelled: &mut C,
+    mut on_document: F,
+) -> Result<(), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    // The lock is taken per RPC, not for the whole export: a long export must not block every
+    // other operation that shares this pooled agent connection.
+    let supports_cursor = client.lock().await.supports_capability(AgentCapability::MongoFindCursor);
+    if supports_cursor {
+        export_agent_find_cursor(client, request, is_cancelled, &mut on_document).await
+    } else {
+        export_agent_find_pages(client, request, is_cancelled, &mut on_document).await
+    }
+}
+
+/// The caller's filter as a JSON object when the export can page by `_id`, or `None` when it has
+/// to keep offset paging: an explicit order, a collation, or a projection that drops `_id` all
+/// make the `_id` keyset unusable.
+fn agent_keyset_base_filter(request: &MongoExportRequest) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if request.sort.is_some() || request.collation.is_some() || !projection_keeps_id(request.projection.as_deref()) {
+        return None;
+    }
+    match request.filter.as_deref() {
+        None => Some(serde_json::Map::new()),
+        Some(filter) => {
+            let trimmed = filter.trim();
+            if trimmed.is_empty() || trimmed == "{}" {
+                return Some(serde_json::Map::new());
+            }
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(serde_json::Value::Object(object)) => Some(object),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// A keyset export has to read each page's last `_id`, so an unparseable projection counts as
+/// unsafe and keeps the export on offset paging.
+fn projection_keeps_id(projection: Option<&str>) -> bool {
+    let Some(projection) = projection else {
+        return true;
+    };
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_str::<serde_json::Value>(projection) else {
+        return false;
+    };
+    match object.get("_id") {
+        Some(serde_json::Value::Bool(false)) => false,
+        Some(serde_json::Value::Number(excluded)) => excluded.as_i64() != Some(0),
+        _ => true,
+    }
+}
+
+/// Builds one `_id`-keyset page request. The keyset is ANDed with the caller's filter rather than
+/// merged into it, so a filter that constrains `_id` itself keeps its own bounds.
+fn agent_keyset_find_params(
+    request: &MongoExportRequest,
+    base: &serde_json::Map<String, serde_json::Value>,
+    last_id: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let filter = match last_id {
+        None => serde_json::Value::Object(base.clone()),
+        Some(last_id) if base.is_empty() => serde_json::json!({ "_id": { "$gt": last_id } }),
+        Some(last_id) => {
+            serde_json::json!({ "$and": [serde_json::Value::Object(base.clone()), { "_id": { "$gt": last_id } }] })
+        }
+    };
+    let mut params = serde_json::json!({
+        "database": request.database,
+        "collection": request.collection,
+        "skip": 0,
+        "limit": DEFAULT_EXPORT_BATCH_SIZE,
+        "filter": filter.to_string(),
+        "sort": "{\"_id\":1}",
+        "batch_size": DEFAULT_EXPORT_BATCH_SIZE,
+    });
+    if let Some(projection) = &request.projection {
+        params["projection"] = serde_json::json!(projection);
+    }
+    params
+}
+
+fn agent_find_params(request: &MongoExportRequest, skip: u64, limit: u32) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "database": request.database,
+        "collection": request.collection,
+        "skip": skip,
+        "limit": limit,
+        "filter": request.filter,
+        "sort": request.sort,
+        "batch_size": limit,
+    });
+    if let Some(projection) = &request.projection {
+        params["projection"] = serde_json::json!(projection);
+    }
+    if let Some(collation) = &request.collation {
+        params["collation"] = serde_json::json!(collation);
+    }
+    params
+}
+
+/// Cursor start request. `start_find_cursor` pages server-side, so it neither needs nor honors
+/// the offset paging's `skip`/`limit`; sending them would invite a silent split brain the day a
+/// caller-facing limit exists.
+fn agent_cursor_find_params(request: &MongoExportRequest) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "database": request.database,
+        "collection": request.collection,
+        "filter": request.filter,
+        "sort": request.sort,
+        "batch_size": DEFAULT_EXPORT_BATCH_SIZE,
+    });
+    if let Some(projection) = &request.projection {
+        params["projection"] = serde_json::json!(projection);
+    }
+    if let Some(collation) = &request.collation {
+        params["collation"] = serde_json::json!(collation);
+    }
+    params
+}
+
+async fn export_agent_find_cursor<C, F>(
+    client: &PooledAgentClient,
+    request: &MongoExportRequest,
+    is_cancelled: &mut C,
+    on_document: &mut F,
+) -> Result<(), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    if is_cancelled(&request.export_id).await {
+        return Err("Export cancelled".to_string());
+    }
+    let started: serde_json::Value = {
+        let mut guard = client.lock().await;
+        match guard.mongo_start_find_cursor(agent_cursor_find_params(request)).await {
+            Ok(started) => started,
+            Err(error) if crate::mongo_ops::is_unknown_agent_method_error(&error, "start_find_cursor") => {
+                return export_agent_find_pages(client, request, is_cancelled, on_document).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let cursor_id = started
+        .get("cursor_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MongoDB Legacy Agent returned an invalid find cursor".to_string())?
+        .to_string();
+    let result = fetch_agent_find_cursor(client, request, &cursor_id, is_cancelled, on_document).await;
+    let _: Result<serde_json::Value, String> = {
+        let mut guard = client.lock().await;
+        guard.mongo_close_find_cursor(serde_json::json!({ "cursor_id": cursor_id })).await
+    };
+    result
+}
+
+async fn fetch_agent_find_cursor<C, F>(
+    client: &PooledAgentClient,
+    request: &MongoExportRequest,
+    cursor_id: &str,
+    is_cancelled: &mut C,
+    on_document: &mut F,
+) -> Result<(), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    loop {
+        if is_cancelled(&request.export_id).await {
+            return Err("Export cancelled".to_string());
+        }
+        let mut page: serde_json::Value = {
+            let mut guard = client.lock().await;
+            guard
+                .mongo_fetch_find_cursor(serde_json::json!({
+                    "cursor_id": cursor_id,
+                    "limit": DEFAULT_EXPORT_BATCH_SIZE,
+                }))
+                .await?
+        };
+        let documents = page
+            .get_mut("documents")
+            .and_then(serde_json::Value::as_array_mut)
+            .map(std::mem::take)
+            .ok_or_else(|| "MongoDB Legacy Agent returned an invalid find cursor page".to_string())?;
+        let exhausted = page.get("exhausted").and_then(serde_json::Value::as_bool).unwrap_or(documents.is_empty());
+        let empty = documents.is_empty();
+        for document in documents {
+            on_document(document)?;
+        }
+        if exhausted || empty {
+            return Ok(());
+        }
+    }
+}
+
+async fn export_agent_find_pages<C, F>(
+    client: &PooledAgentClient,
+    request: &MongoExportRequest,
+    is_cancelled: &mut C,
+    on_document: &mut F,
+) -> Result<(), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(serde_json::Value) -> Result<(), String>,
+{
+    let keyset_base = agent_keyset_base_filter(request);
+    // Offset paging costs the server one scan of every skipped document per page, so it is only
+    // used when the export needs the caller's own ordering; `_id` keyset paging is linear and
+    // cannot duplicate or drop documents when the collection changes mid-export. Neither order is
+    // the natural order an agent with cursors returns, but both are "unspecified" to the caller.
+    let mut skip = 0u64;
+    let mut last_id: Option<serde_json::Value> = None;
+    loop {
+        if is_cancelled(&request.export_id).await {
+            return Err("Export cancelled".to_string());
+        }
+        let params = match &keyset_base {
+            Some(base) => agent_keyset_find_params(request, base, last_id.as_ref()),
+            None => agent_find_params(request, skip, DEFAULT_EXPORT_BATCH_SIZE),
+        };
+        let mut page: MongoDocumentResult = {
+            let mut guard = client.lock().await;
+            match guard.mongo_find_documents_extended_json(params).await {
+                Ok(page) => page,
+                Err(error)
+                    if crate::mongo_ops::is_unknown_agent_method_error(&error, "find_documents_extended_json") =>
+                {
+                    return Err(
+                        "MongoDB Legacy Agent does not support type-preserving export; upgrade or reinstall the MongoDB Legacy driver"
+                            .to_string(),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        // The shipped legacy agent answers this method with `documentQueryResult`, so
+        // `extended_documents` is normally absent and `documents` (relaxed Extended JSON, which
+        // keeps ObjectId/date/binary but not integer widths) is what gets exported.
+        let documents = match page.extended_documents.take() {
+            Some(extended) if extended.len() == page.documents.len() => extended,
+            _ => std::mem::take(&mut page.documents),
+        };
+        if documents.is_empty() {
+            return Ok(());
+        }
+        let count = documents.len() as u64;
+        if keyset_base.is_some() {
+            let Some(next_id) = documents.last().and_then(|document| document.get("_id")).cloned() else {
+                return Err("MongoDB Legacy Agent returned a document without _id".to_string());
+            };
+            // A page that does not move the keyset forward would be re-requested forever, which
+            // offset paging cannot hit because it always advances `skip`.
+            if last_id.as_ref() == Some(&next_id) {
+                return Err(
+                    "MongoDB Legacy Agent returned the same export page twice; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            last_id = Some(next_id);
+        }
+        for document in documents {
+            on_document(document)?;
+        }
+        if count < u64::from(DEFAULT_EXPORT_BATCH_SIZE) {
+            return Ok(());
+        }
+        if keyset_base.is_none() {
+            skip = skip.saturating_add(count);
+        }
+    }
+}
+
 async fn export_ndjson<C, F>(
-    client: &mongodb::Client,
+    state: &AppState,
     request: &MongoExportRequest,
     temp: &Path,
     total_documents: Option<u64>,
@@ -2342,8 +2774,99 @@ where
     let mut writer = BufWriter::new(file);
     let mut documents_read = 0u64;
     let mut bytes_written = 0u64;
-    for_each_find_document(
-        client,
+    for_each_export_json_document(state, request, is_cancelled, |json| {
+        let mut line = json.to_string();
+        line.push('\n');
+        bytes_written += write_export_line(&mut writer, &line)?;
+        documents_read += 1;
+        if documents_read == 1 || documents_read.is_multiple_of(500) {
+            on_progress(export_progress(
+                &request.export_id,
+                MongoExportStatus::Running,
+                documents_read,
+                bytes_written,
+                total_documents,
+                None,
+                started_at,
+            ));
+        }
+        Ok(())
+    })
+    .await?;
+    writer.flush().map_err(|error| error.to_string())?;
+    if is_cancelled(&request.export_id).await {
+        return Err("Export cancelled".to_string());
+    }
+    Ok((documents_read, bytes_written))
+}
+
+enum BsonExportWriter {
+    Plain(BufWriter<File>),
+    Gzip(Box<GzEncoder<BufWriter<File>>>),
+}
+
+impl BsonExportWriter {
+    fn finish(self) -> Result<(), String> {
+        match self {
+            Self::Plain(mut writer) => writer.flush().map_err(|error| error.to_string()),
+            Self::Gzip(writer) => {
+                let mut writer = writer.finish().map_err(|error| error.to_string())?;
+                writer.flush().map_err(|error| error.to_string())
+            }
+        }
+    }
+}
+
+impl Write for BsonExportWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buf),
+            Self::Gzip(writer) => writer.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::Gzip(writer) => writer.flush(),
+        }
+    }
+}
+
+async fn export_bson<C, F>(
+    state: &AppState,
+    request: &MongoExportRequest,
+    temp: &Path,
+    total_documents: Option<u64>,
+    started_at: Instant,
+    is_cancelled: &mut C,
+    on_progress: &mut F,
+) -> Result<(u64, u64), String>
+where
+    C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+    F: FnMut(MongoExportProgress),
+{
+    if is_cancelled(&request.export_id).await {
+        return Err("Export cancelled".to_string());
+    }
+    // BSON dumps must carry native BSON types, so they are written straight from the native
+    // driver's documents; the legacy agent's canonical Extended JSON round trip does not apply.
+    let client = match state.pool_handle(&request.connection_id).await {
+        Some(PoolKind::MongoDb(client)) => client,
+        _ => return Err("BSON dump export requires the native MongoDB driver".into()),
+    };
+    let file = File::create(temp).map_err(|error| error.to_string())?;
+    let buffered = BufWriter::new(file);
+    let mut writer = if request.gzip {
+        BsonExportWriter::Gzip(Box::new(GzEncoder::new(buffered, Compression::default())))
+    } else {
+        BsonExportWriter::Plain(buffered)
+    };
+    let mut documents_read = 0u64;
+    let mut bytes_written = 0u64;
+
+    let export = for_each_find_document(
+        &client,
         &request.database,
         &request.collection,
         request.filter.as_deref(),
@@ -2352,10 +2875,9 @@ where
         request.collation.as_deref(),
         DEFAULT_EXPORT_BATCH_SIZE,
         |document| {
-            let json = document_to_canonical_extended_json(&document);
-            let mut line = json.to_string();
-            line.push('\n');
-            bytes_written += write_export_line(&mut writer, &line)?;
+            let bytes = mongodb::bson::to_vec(&document).map_err(|error| error.to_string())?;
+            writer.write_all(&bytes).map_err(|error| error.to_string())?;
+            bytes_written += bytes.len() as u64;
             documents_read += 1;
             if documents_read == 1 || documents_read.is_multiple_of(500) {
                 on_progress(export_progress(
@@ -2370,9 +2892,22 @@ where
             }
             Ok(())
         },
-    )
-    .await?;
-    writer.flush().map_err(|error| error.to_string())?;
+    );
+    {
+        tokio::pin!(export);
+        let mut poll_cancel = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                result = &mut export => { result?; break; }
+                _ = poll_cancel.tick() => {
+                    if is_cancelled(&request.export_id).await {
+                        return Err("Export cancelled".to_string());
+                    }
+                }
+            }
+        }
+    }
+    writer.finish()?;
     if is_cancelled(&request.export_id).await {
         return Err("Export cancelled".to_string());
     }
@@ -2382,7 +2917,7 @@ where
 const CSV_FIELD_DISCOVERY_DOCS: usize = 10_000;
 
 async fn export_csv<C, F>(
-    client: &mongodb::Client,
+    state: &AppState,
     request: &MongoExportRequest,
     temp: &Path,
     total_documents: Option<u64>,
@@ -2406,47 +2941,20 @@ where
     let mut documents_read = 0u64;
     let mut bytes_written = 0u64;
 
-    for_each_find_document(
-        client,
-        &request.database,
-        &request.collection,
-        request.filter.as_deref(),
-        request.projection.as_deref(),
-        request.sort.as_deref(),
-        request.collation.as_deref(),
-        DEFAULT_EXPORT_BATCH_SIZE,
-        |document| {
-            if !header_ready {
-                let json = document_to_canonical_extended_json(&document);
-                collect_csv_fields(&json, &mut fields, &mut seen)?;
-                buffered.push(json);
-                if buffered.len() >= CSV_FIELD_DISCOVERY_DOCS {
-                    write_csv_header_and_buffer(
-                        request.include_header,
-                        &mut fields,
-                        &mut buffered,
-                        &mut writer,
-                        &mut bytes_written,
-                        &mut documents_read,
-                    )?;
-                    header_ready = true;
-                    on_progress(export_progress(
-                        &request.export_id,
-                        MongoExportStatus::Running,
-                        documents_read,
-                        bytes_written,
-                        total_documents,
-                        None,
-                        started_at,
-                    ));
-                }
-                return Ok(());
-            }
-            let json = document_to_canonical_extended_json(&document);
-            let line = format_csv_document_line(&fields, &json);
-            bytes_written += write_export_line(&mut writer, &line)?;
-            documents_read += 1;
-            if documents_read.is_multiple_of(500) {
+    for_each_export_json_document(state, request, is_cancelled, |json| {
+        if !header_ready {
+            collect_csv_fields(&json, &mut fields, &mut seen)?;
+            buffered.push(json);
+            if buffered.len() >= CSV_FIELD_DISCOVERY_DOCS {
+                write_csv_header_and_buffer(
+                    request.include_header,
+                    &mut fields,
+                    &mut buffered,
+                    &mut writer,
+                    &mut bytes_written,
+                    &mut documents_read,
+                )?;
+                header_ready = true;
                 on_progress(export_progress(
                     &request.export_id,
                     MongoExportStatus::Running,
@@ -2457,9 +2965,24 @@ where
                     started_at,
                 ));
             }
-            Ok(())
-        },
-    )
+            return Ok(());
+        }
+        let line = format_csv_document_line(&fields, &json);
+        bytes_written += write_export_line(&mut writer, &line)?;
+        documents_read += 1;
+        if documents_read.is_multiple_of(500) {
+            on_progress(export_progress(
+                &request.export_id,
+                MongoExportStatus::Running,
+                documents_read,
+                bytes_written,
+                total_documents,
+                None,
+                started_at,
+            ));
+        }
+        Ok(())
+    })
     .await?;
     if !header_ready {
         write_csv_header_and_buffer(
@@ -2551,6 +3074,112 @@ mod tests {
         }
 
         Ok(output)
+    }
+
+    fn bson_dump_bytes(documents: &[Document]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for document in documents {
+            output.extend_from_slice(&mongodb::bson::to_vec(document).unwrap());
+        }
+        output
+    }
+
+    #[test]
+    fn bson_export_writer_finishes_plain_and_gzip_dumps() {
+        let root = tempfile::tempdir().unwrap();
+        let documents = vec![doc! { "_id": 1, "name": "first" }, doc! { "_id": 2, "value": 42i64 }];
+        for expected in [Vec::new(), bson_dump_bytes(&documents)] {
+            for gzip in [false, true] {
+                let path = root.path().join(if gzip { "records.bson.gz" } else { "records.bson" });
+                let buffered = BufWriter::new(File::create(&path).unwrap());
+                let mut writer = if gzip {
+                    BsonExportWriter::Gzip(Box::new(GzEncoder::new(buffered, Compression::default())))
+                } else {
+                    BsonExportWriter::Plain(buffered)
+                };
+                writer.write_all(&expected).unwrap();
+                writer.finish().unwrap();
+
+                let bytes = std::fs::read(&path).unwrap();
+                let actual = if gzip {
+                    let mut decoded = Vec::new();
+                    MultiGzDecoder::new(bytes.as_slice()).read_to_end(&mut decoded).unwrap();
+                    decoded
+                } else {
+                    bytes
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bson_dump_preview_and_import_preserve_native_types() {
+        use mongodb::bson::spec::BinarySubtype;
+        use mongodb::bson::{Binary, DateTime};
+
+        let documents = vec![
+            doc! {
+                "_id": ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap(),
+                "createdAt": DateTime::from_millis(1_609_459_200_000),
+                "payload": Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2, 3] }),
+                "nested": { "count": 42i64 },
+            },
+            doc! { "_id": 2i32, "name": "second" },
+        ];
+        let bytes = bson_dump_bytes(&documents);
+        let preview =
+            preview_mongodb_import_bytes(&bytes, MongoImportFormat::Bson, &MongoImportParseOptions::default(), 10)
+                .unwrap();
+        assert_eq!(preview.rows.len(), 2);
+        assert_eq!(preview.estimated_rows, Some(2));
+        assert!(preview.estimated_rows_exact);
+        assert_eq!(preview.rows[0]["_id"]["$oid"], "507f1f77bcf86cd799439011");
+        assert!(preview.rows[0]["payload"].get("$binary").is_some());
+
+        let imported = execute_source(&bytes, "bson", MongoImportFormat::Bson, &MongoImportParseOptions::default());
+        assert_eq!(imported, preview.rows);
+    }
+
+    #[test]
+    fn gzip_bson_dump_import_matches_plain_dump() {
+        let documents = vec![doc! { "_id": 1i32, "name": "Ada" }, doc! { "_id": 2i32, "name": "Bob" }];
+        let plain = bson_dump_bytes(&documents);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&plain).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let imported =
+            execute_source(&compressed, "bson.gz", MongoImportFormat::Bson, &MongoImportParseOptions::default());
+        assert_eq!(imported.len(), 2);
+        assert_eq!(imported[0]["name"], "Ada");
+        assert_eq!(imported[1]["name"], "Bob");
+    }
+
+    #[test]
+    fn bson_dump_rejects_truncated_and_invalid_lengths() {
+        let mut truncated = mongodb::bson::to_vec(&doc! { "name": "Ada" }).unwrap();
+        truncated.pop();
+        let error =
+            preview_mongodb_import_bytes(&truncated, MongoImportFormat::Bson, &MongoImportParseOptions::default(), 10)
+                .unwrap_err();
+        assert_eq!(error.code, "BSON_STRUCTURE");
+        assert_eq!(error.row, Some(1));
+
+        let error = preview_mongodb_import_bytes(
+            &(BSON_MAX_DOCUMENT_BYTES as i32 + 1).to_le_bytes(),
+            MongoImportFormat::Bson,
+            &MongoImportParseOptions::default(),
+            10,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "BSON_STRUCTURE");
+    }
+
+    #[test]
+    fn bson_dump_format_is_detected_from_plain_and_gzip_paths() {
+        assert_eq!(format_from_path("users.bson").unwrap(), MongoImportFormat::Bson);
+        assert_eq!(format_from_path("users.BSON.GZ").unwrap(), MongoImportFormat::Bson);
     }
 
     #[test]
@@ -3316,5 +3945,553 @@ mod tests {
         }
         let error = csv_fields_from_extended_documents(&[serde_json::Value::Object(object)]).unwrap_err();
         assert!(error.contains("NDJSON"));
+    }
+
+    #[test]
+    fn agent_insert_outcome_maps_partial_failures() {
+        let outcome = agent_insert_outcome(&serde_json::json!({
+            "affected_rows": 1,
+            "errors": [{ "index": 1, "code": 11000, "message": "E11000 duplicate key" }]
+        }))
+        .unwrap();
+        assert_eq!(outcome.inserted, 1);
+        assert_eq!(outcome.errors.len(), 1);
+        assert_eq!(outcome.errors[0].index, Some(1));
+        assert_eq!(outcome.errors[0].code, Some(11000));
+        assert!(!outcome.errors[0].retryable);
+    }
+
+    #[test]
+    fn agent_insert_outcome_keeps_batch_wide_and_message_less_rejections() {
+        // A write concern failure is reported without a document index, and a rejection without a
+        // message must still count as a failure rather than disappear.
+        let outcome = agent_insert_outcome(&serde_json::json!({
+            "affected_rows": 0,
+            "errors": [{ "code": 64, "message": "waiting for replication timed out" }, {}]
+        }))
+        .unwrap();
+        assert_eq!(outcome.inserted, 0);
+        assert_eq!(outcome.errors.len(), 2);
+        assert_eq!(outcome.errors[0].index, None);
+        assert_eq!(outcome.errors[0].code, Some(64));
+        assert!(outcome.errors[0].retryable);
+        assert!(outcome.errors[1].message.contains("without a message"), "{:?}", outcome.errors[1]);
+    }
+
+    #[cfg(unix)]
+    async fn legacy_mongo_import_export_state(
+        script: &str,
+        capabilities: &[&str],
+    ) -> (crate::connection::AppState, tempfile::TempDir) {
+        use std::io::Write;
+
+        use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
+        use crate::models::connection::ConnectionConfig;
+        use crate::storage::Storage;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        let capabilities = serde_json::to_string(capabilities).unwrap();
+        write!(
+            file,
+            r#"import json
+import sys
+
+CAPABILITIES = {capabilities}
+{script}
+print(json.dumps({{"ready": True}}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    result = handle(request)
+    if isinstance(result, dict) and "__rpc_error" in result:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": result["__rpc_error"]}}}}), flush=True)
+    elif result is None:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": "unexpected MongoDB RPC"}}}}), flush=True)
+    else:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+        let (_, script_path) = file.keep().unwrap();
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+        client.try_optional_handshake("test").await.unwrap();
+        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy MongoDB",
+            "db_type": "mongodb",
+            "driver_profile": "mongodb-legacy",
+            "host": "localhost",
+            "port": 27017,
+            "username": "",
+            "password": "",
+            "database": null,
+        }))
+        .unwrap();
+        state.configs.write().await.insert("legacy".to_string(), config);
+        let pool = PoolKind::agent(client);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("legacy".to_string(), pool.clone());
+                connections.insert("legacy:app".to_string(), pool);
+            })
+            .await;
+        (state, directory)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_imports_extended_json_with_unordered_insert_many() {
+        let source_dir = std::env::temp_dir().join(format!("dbx-mongo-legacy-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let path = source_dir.join("data.ndjson");
+        std::fs::write(&path, "{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},\"name\":\"Ada\"}\n").unwrap();
+
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "insert_documents":
+        params = request.get("params") or {}
+        if params.get("ordered") is not False:
+            return None
+        docs = json.loads(params.get("docs_json") or "[]")
+        if not docs or docs[0].get("_id", {}).get("$oid") != "507f1f77bcf86cd799439011":
+            return None
+        return {"affected_rows": 1, "errors": []}
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let summary = import_mongodb_file_core(
+            &state,
+            &MongoImportRequest {
+                import_id: "import-1".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                file_path: path.to_string_lossy().to_string(),
+                source_ref: None,
+                format: MongoImportFormat::Ndjson,
+                parse_options: MongoImportParseOptions {
+                    type_mode: Some(MongoImportTypeMode::ExtendedJson),
+                    ..MongoImportParseOptions::default()
+                },
+                batch_size: 500,
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.rows_inserted, 1);
+        assert_eq!(summary.rows_failed, 0);
+        let _ = std::fs::remove_dir_all(source_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_exports_ndjson_through_find_cursor() {
+        let target = std::env::temp_dir().join(format!("dbx-mongo-legacy-export-{}.ndjson", uuid::Uuid::new_v4()));
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "count_documents":
+        return 1
+    if method == "start_find_cursor":
+        return {"cursor_id": "c1", "batch_size": 1000}
+    if method == "fetch_find_cursor":
+        return {"documents": [{"_id": {"$oid": "507f1f77bcf86cd799439011"}, "name": "Ada"}], "exhausted": True}
+    if method == "close_find_cursor":
+        return {"ok": True}
+    return None
+"#,
+            &["mongo_find_cursor"],
+        )
+        .await;
+
+        let summary = export_mongodb_query_core(
+            &state,
+            &MongoExportRequest {
+                export_id: "export-1".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                filter: None,
+                sort: None,
+                projection: None,
+                collation: None,
+                format: MongoExportFormat::Ndjson,
+                include_header: true,
+                gzip: false,
+                file_path: target.to_string_lossy().to_string(),
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        let _ = std::fs::remove_file(&target);
+        assert_eq!(summary.documents_exported, 1);
+        assert!(body.contains("507f1f77bcf86cd799439011"));
+        assert!(body.contains("Ada"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_export_falls_back_to_paged_find_without_cursor_capability() {
+        let target = std::env::temp_dir().join(format!("dbx-mongo-legacy-export-page-{}.ndjson", uuid::Uuid::new_v4()));
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "count_documents":
+        return 1
+    if method == "find_documents_extended_json":
+        # The shipped legacy agent answers with documentQueryResult: relaxed documents only.
+        return {"documents": [{"_id": {"$oid": "507f1f77bcf86cd799439011"}, "name": "Ada"}], "total": 1}
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let summary = export_mongodb_query_core(
+            &state,
+            &MongoExportRequest {
+                export_id: "export-2".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                filter: None,
+                sort: None,
+                projection: None,
+                collation: None,
+                format: MongoExportFormat::Ndjson,
+                include_header: true,
+                gzip: false,
+                file_path: target.to_string_lossy().to_string(),
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        let _ = std::fs::remove_file(&target);
+        assert_eq!(summary.documents_exported, 1);
+        assert!(body.contains("Ada"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_export_pages_by_id_without_skipping() {
+        let target =
+            std::env::temp_dir().join(format!("dbx-mongo-legacy-export-keyset-{}.ndjson", uuid::Uuid::new_v4()));
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+PAGE = {"index": 0}
+
+def page_documents(request):
+    params = request.get("params") or {}
+    if params.get("skip") not in (0, None):
+        return {"__rpc_error": "keyset paging must not use skip"}
+    if params.get("sort") != '{"_id":1}':
+        return {"__rpc_error": "keyset paging must sort by _id, got " + str(params.get("sort"))}
+    index = PAGE["index"]
+    PAGE["index"] = index + 1
+    if index == 0:
+        return {"documents": [{"_id": value} for value in range(1000)], "total": 2001}
+    if index == 1:
+        keyset = params.get("filter") or ""
+        if "$gt" not in keyset or "999" not in keyset:
+            return {"__rpc_error": "second page must continue after _id 999, got " + keyset}
+        return {"documents": [{"_id": value} for value in range(1000, 2000)], "total": 2001}
+    if index == 2:
+        return {"documents": [{"_id": 2000}], "total": 2001}
+    return {"__rpc_error": "unexpected extra page"}
+
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "count_documents":
+        return 2001
+    if method == "find_documents_extended_json":
+        return page_documents(request)
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let summary = export_mongodb_query_core(
+            &state,
+            &MongoExportRequest {
+                export_id: "export-keyset".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                filter: None,
+                sort: None,
+                projection: None,
+                collation: None,
+                format: MongoExportFormat::Ndjson,
+                include_header: true,
+                gzip: false,
+                file_path: target.to_string_lossy().to_string(),
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        let _ = std::fs::remove_file(&target);
+        assert_eq!(summary.documents_exported, 2001);
+        assert_eq!(body.lines().count(), 2001);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_export_stops_when_a_keyset_page_repeats() {
+        let target =
+            std::env::temp_dir().join(format!("dbx-mongo-legacy-export-stall-{}.ndjson", uuid::Uuid::new_v4()));
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "count_documents":
+        return 2000
+    if method == "find_documents_extended_json":
+        # An agent that ignores the keyset filter would otherwise be asked for this page forever.
+        return {"documents": [{"_id": value} for value in range(1000)], "total": 2000}
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let error = export_mongodb_query_core(
+            &state,
+            &MongoExportRequest {
+                export_id: "export-stall".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                filter: None,
+                sort: None,
+                projection: None,
+                collation: None,
+                format: MongoExportFormat::Ndjson,
+                include_header: true,
+                gzip: false,
+                file_path: target.to_string_lossy().to_string(),
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        let _ = std::fs::remove_file(&target);
+
+        assert!(error.contains("same export page twice"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_export_keeps_offset_paging_for_an_explicit_sort() {
+        let target =
+            std::env::temp_dir().join(format!("dbx-mongo-legacy-export-offset-{}.ndjson", uuid::Uuid::new_v4()));
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "count_documents":
+        return 1001
+    if method == "find_documents_extended_json":
+        params = request.get("params") or {}
+        if params.get("sort") != '{"name":1}':
+            return {"__rpc_error": "an explicit sort must be preserved, got " + str(params.get("sort"))}
+        if params.get("skip") == 0:
+            return {"documents": [{"_id": value, "name": "Ada"} for value in range(1000)], "total": 1001}
+        if params.get("skip") == 1000:
+            return {"documents": [{"_id": 1000, "name": "Ada"}], "total": 1001}
+        return {"__rpc_error": "unexpected skip " + str(params.get("skip"))}
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let summary = export_mongodb_query_core(
+            &state,
+            &MongoExportRequest {
+                export_id: "export-offset".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                filter: None,
+                sort: Some("{\"name\":1}".to_string()),
+                projection: None,
+                collation: None,
+                format: MongoExportFormat::Ndjson,
+                include_header: true,
+                gzip: false,
+                file_path: target.to_string_lossy().to_string(),
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let _ = std::fs::remove_file(&target);
+        assert_eq!(summary.documents_exported, 1001);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_export_does_not_use_display_find_documents() {
+        let target =
+            std::env::temp_dir().join(format!("dbx-mongo-legacy-export-display-{}.ndjson", uuid::Uuid::new_v4()));
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "count_documents":
+        return 1
+    if method == "find_documents_extended_json":
+        return {"__rpc_error": "Unknown method: find_documents_extended_json"}
+    if method == "find_documents":
+        return {"documents": [{"_id": "not-an-objectid"}], "total": 1}
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let error = export_mongodb_query_core(
+            &state,
+            &MongoExportRequest {
+                export_id: "export-3".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                filter: None,
+                sort: None,
+                projection: None,
+                collation: None,
+                format: MongoExportFormat::Ndjson,
+                include_header: true,
+                gzip: false,
+                file_path: target.to_string_lossy().to_string(),
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        let _ = std::fs::remove_file(&target);
+        assert!(error.contains("type-preserving export"), "{error}");
+        assert!(!error.contains("ISODate"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_agent_import_records_partial_insert_errors_when_skipping_rows() {
+        let source_dir = std::env::temp_dir().join(format!("dbx-mongo-legacy-import-errors-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let path = source_dir.join("data.ndjson");
+        std::fs::write(
+            &path,
+            "{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},\"name\":\"Ada\"}\n{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439012\"},\"name\":\"Grace\"}\n",
+        )
+        .unwrap();
+
+        let (state, _directory) = legacy_mongo_import_export_state(
+            r#"
+def handle(request):
+    method = request.get("method")
+    if method == "handshake":
+        return {"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}
+    if method in ("validate_connection", "connect"):
+        return {"ok": True}
+    if method == "insert_documents":
+        return {"affected_rows": 1, "errors": [{"index": 1, "code": 11000, "message": "E11000 duplicate key"}]}
+    return None
+"#,
+            &["mongo_insert_documents"],
+        )
+        .await;
+
+        let summary = import_mongodb_file_core(
+            &state,
+            &MongoImportRequest {
+                import_id: "import-2".to_string(),
+                connection_id: "legacy".to_string(),
+                database: "app".to_string(),
+                collection: "users".to_string(),
+                file_path: path.to_string_lossy().to_string(),
+                source_ref: None,
+                format: MongoImportFormat::Ndjson,
+                parse_options: MongoImportParseOptions {
+                    type_mode: Some(MongoImportTypeMode::ExtendedJson),
+                    skip_error_rows: Some(true),
+                    ..MongoImportParseOptions::default()
+                },
+                batch_size: 500,
+                execution_id: None,
+            },
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let _ = std::fs::remove_dir_all(source_dir);
+        assert_eq!(summary.rows_inserted, 1);
+        assert_eq!(summary.rows_failed, 1);
     }
 }

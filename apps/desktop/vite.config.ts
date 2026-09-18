@@ -71,6 +71,10 @@ export default defineConfig(async () => ({
       "@": path.resolve(import.meta.dirname, "./src"),
       // Prefer package source during app dev so shell parse changes need no rebuild.
       "@dbx-app/mongo-shell": path.resolve(import.meta.dirname, "../../packages/mongo-shell/src/index.ts"),
+      // sql-formatter's `exports` map only declares ".", so deep imports into its
+      // bundled parser/tokenizer are rejected by Vite's exports handling. The
+      // The default layout engine needs that AST; see src/lib/sql/layout/internals.ts.
+      "sql-formatter/dist/": `${path.resolve(import.meta.dirname, "../../node_modules/sql-formatter/dist")}/`,
     },
   },
   clearScreen: false,

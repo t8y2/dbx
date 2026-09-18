@@ -510,6 +510,98 @@ FROM (
     expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi2");
   });
 
+  it("omits generated aliases on a DELETE target table (issue #9186)", () => {
+    const { items } = semanticCompletion("DELETE FROM DH|_MODEL_CAP", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on a schema-qualified DELETE target table", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.DH_MODEL_CAP|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases while the DELETE target schema is being typed", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.DH|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    // The qualifier resolves to the delete target itself, so no alias is offered.
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on an empty-prefix DELETE target (manual trigger)", () => {
+    const { items } = semanticCompletion("DELETE FROM |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on an empty-prefix schema-qualified DELETE target", () => {
+    const { items } = semanticCompletion("DELETE FROM DH.|", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("omits generated aliases on empty-prefix UPDATE and INSERT targets", () => {
+    const updated = semanticCompletion("UPDATE |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+    const inserted = semanticCompletion("INSERT INTO |", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(updated.items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+    expect(inserted.items.filter((item) => item.type === "table").map((item) => item.apply)).toEqual(["DH_MODEL_CAP"]);
+  });
+
+  it("keeps generated aliases on JOIN sources inside a DELETE statement", () => {
+    const { items } = semanticCompletion("DELETE t1 FROM t1 JOIN ord|", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi");
+  });
+
+  it("keeps generated aliases after a multi-table DELETE target list", () => {
+    const { items } = semanticCompletion("DELETE t1 FROM |", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi");
+  });
+
+  it("keeps generated aliases on FROM and JOIN sources", () => {
+    const joined = semanticCompletion("SELECT * FROM DH_MODEL_CAP JOIN ord|", {
+      tables: [{ name: "order_items", type: "table" }],
+      autoAliasTables: true,
+    });
+    const queried = semanticCompletion("SELECT * FROM DH|_MODEL_CAP", {
+      tables: [{ name: "DH_MODEL_CAP", schema: "DH", type: "table" }],
+      autoAliasTables: true,
+    });
+
+    expect(joined.items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi");
+    expect(queried.items.find((item) => item.label === "DH_MODEL_CAP")?.apply).toBe("DH_MODEL_CAP AS dmc");
+  });
+
   it("preserves dialect-aware identifier quoting in apply text", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([["Order Details", [{ name: "User Name", table: "Order Details" }]]]);
 

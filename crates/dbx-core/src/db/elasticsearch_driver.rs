@@ -39,6 +39,9 @@ const KIBANA_PROXY_STATUS_HEADER: &str = "x-console-proxy-status-code";
 const ELASTICSEARCH_REST_TABLE_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const ELASTICSEARCH_REST_TABLE_MAX_ROWS: usize = 2_000;
 const ELASTICSEARCH_REST_TABLE_MAX_CELLS: usize = 200_000;
+const ELASTICSEARCH_MAPPING_MAX_DEPTH: u8 = 32;
+const ELASTICSEARCH_MAPPING_MAX_COLUMNS: usize = 2_000;
+const ELASTICSEARCH_MAPPING_THREAD_STACK: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ElasticsearchTransportMode {
@@ -711,20 +714,12 @@ pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db
         return Err(format!("Elasticsearch error: {body}"));
     }
 
-    let body: Value = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-    let mut seen = HashSet::new();
-    let mut columns = Vec::new();
-
-    if let Some(indices) = body.as_object() {
-        for index_mapping in indices.values() {
-            if let Some(properties) = mapping_properties(index_mapping) {
-                collect_mapping_columns("", properties, &mut seen, &mut columns);
-            }
-        }
-    }
-
-    columns.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(columns)
+    let bytes = resp.bytes().await.map_err(|e| format!("Elasticsearch read error: {e}"))?;
+    // serde_json parsing is recursive. Tokio worker stacks are ~2MB in debug and
+    // abort the process on overflow, so flatten on a dedicated larger stack.
+    tokio::task::spawn_blocking(move || mapping_bytes_to_columns_on_large_stack(bytes.to_vec()))
+        .await
+        .map_err(|error| format!("Elasticsearch mapping task failed: {error}"))?
 }
 
 fn mapping_properties(mapping: &Value) -> Option<&serde_json::Map<String, Value>> {
@@ -739,32 +734,85 @@ fn mapping_properties(mapping: &Value) -> Option<&serde_json::Map<String, Value>
         .find_map(|typed_mapping| typed_mapping.get("properties").and_then(Value::as_object))
 }
 
+fn mapping_bytes_to_columns_on_large_stack(bytes: Vec<u8>) -> Result<Vec<crate::db::ColumnInfo>, String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("es-mapping-columns".into())
+        .stack_size(ELASTICSEARCH_MAPPING_THREAD_STACK)
+        .spawn(move || {
+            let _ = tx.send(mapping_bytes_to_columns(&bytes));
+        })
+        .map_err(|error| format!("Elasticsearch mapping thread failed: {error}"))?;
+    rx.recv().map_err(|error| format!("Elasticsearch mapping thread failed: {error}"))?
+}
+
+fn mapping_bytes_to_columns(bytes: &[u8]) -> Result<Vec<crate::db::ColumnInfo>, String> {
+    let body: Value = serde_json::from_slice(bytes).map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    let mut seen = HashSet::new();
+    let mut columns = Vec::new();
+    if let Some(indices) = body.as_object() {
+        for index_mapping in indices.values() {
+            if let Some(properties) = mapping_properties(index_mapping) {
+                collect_mapping_columns("", properties, &mut seen, &mut columns);
+            }
+        }
+    }
+    columns.sort_by(|left, right| left.name.cmp(&right.name));
+    drop_json_iteratively(body);
+    Ok(columns)
+}
+
 fn collect_mapping_columns(
     prefix: &str,
     properties: &serde_json::Map<String, Value>,
     seen: &mut HashSet<String>,
     columns: &mut Vec<crate::db::ColumnInfo>,
 ) {
-    for (name, definition) in properties {
-        let field_name = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
-        let field_type = definition.get("type").and_then(Value::as_str);
-        let children = definition.get("properties").and_then(Value::as_object);
-
-        if let Some(data_type) = field_type {
-            push_mapping_column(&field_name, data_type, seen, columns);
-        } else if children.is_some() {
-            // Elasticsearch infers `object` for a field with `properties` when
-            // the mapping omits an explicit type. Return the parent too because
-            // the document grid renders top-level object values as one column.
-            push_mapping_column(&field_name, "object", seen, columns);
+    // Walk nested `properties` / multi-`fields` on the heap with hard caps.
+    // Recursive walks overflow tokio worker stacks on indexes like `dbx_all_types`.
+    let mut stack = vec![(prefix.to_string(), properties, 0_u8)];
+    while let Some((prefix, properties, depth)) = stack.pop() {
+        if columns.len() >= ELASTICSEARCH_MAPPING_MAX_COLUMNS {
+            break;
         }
+        for (name, definition) in properties {
+            if columns.len() >= ELASTICSEARCH_MAPPING_MAX_COLUMNS {
+                break;
+            }
+            let field_name = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+            let field_type = definition.get("type").and_then(Value::as_str);
+            let nested_properties = definition.get("properties").and_then(Value::as_object);
+            let nested_fields = definition.get("fields").and_then(Value::as_object);
 
-        if let Some(fields) = definition.get("fields").and_then(Value::as_object) {
-            collect_mapping_columns(&field_name, fields, seen, columns);
+            if let Some(data_type) = field_type {
+                push_mapping_column(&field_name, data_type, seen, columns);
+            } else if nested_properties.is_some() {
+                // Elasticsearch infers `object` for a field with `properties` when
+                // the mapping omits an explicit type. Return the parent too because
+                // the document grid renders top-level object values as one column.
+                push_mapping_column(&field_name, "object", seen, columns);
+            }
+
+            if depth + 1 >= ELASTICSEARCH_MAPPING_MAX_DEPTH {
+                continue;
+            }
+            if let Some(properties) = nested_properties {
+                stack.push((field_name.clone(), properties, depth + 1));
+            }
+            if let Some(fields) = nested_fields {
+                stack.push((field_name, fields, depth + 1));
+            }
         }
+    }
+}
 
-        if let Some(children) = children {
-            collect_mapping_columns(&field_name, children, seen, columns);
+fn drop_json_iteratively(value: Value) {
+    let mut stack = vec![value];
+    while let Some(node) = stack.pop() {
+        match node {
+            Value::Array(items) => stack.extend(items),
+            Value::Object(map) => stack.extend(map.into_iter().map(|(_, child)| child)),
+            _ => {}
         }
     }
 }
@@ -3215,6 +3263,23 @@ mod tests {
 
         assert!(columns.iter().any(|column| column.name == "profile" && column.data_type == "object"));
         assert!(columns.iter().any(|column| column.name == "profile.name" && column.data_type == "keyword"));
+    }
+
+    #[test]
+    fn mapping_columns_do_not_overflow_on_deep_nested_objects() {
+        let mut current = json!({ "type": "keyword" });
+        for depth in 0..512 {
+            current = json!({ "properties": { format!("n{depth}"): current } });
+        }
+        let properties = current.get("properties").and_then(|value| value.as_object()).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let mut columns = Vec::new();
+
+        super::collect_mapping_columns("", properties, &mut seen, &mut columns);
+
+        assert!(columns.iter().any(|column| column.name == "n511" && column.data_type == "object"));
+        assert_eq!(columns.len(), super::ELASTICSEARCH_MAPPING_MAX_DEPTH as usize);
+        super::drop_json_iteratively(current);
     }
 
     #[test]

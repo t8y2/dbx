@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { InstalledPlugin, PluginConnectionProviderContribution } from "@/types/database";
+import type { InstalledPlugin, PluginConnectionProviderContribution, PluginFormFieldValue } from "@/types/database";
 import { buildPluginConnectionConfig, createFrontendPluginRegistry, initialPluginFormValues, parsePluginConnectionProviderOptionValue, pluginConnectionActionsForDialog, pluginConnectionFormValues, pluginConnectionProviderIcon, pluginConnectionProviderOptionValue } from "./frontendPlugin";
 
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
@@ -322,6 +322,91 @@ describe("FrontendPluginRegistry", () => {
 
     expect(values).toEqual({ port: 1234, tls: false });
     expect(values).not.toHaveProperty("host");
+  });
+
+  it("treats a host-serialized null default as unset instead of a value", () => {
+    // Hosts before the manifest serialization fix sent `"default": null` for
+    // every field that declares no default, so an untouched password field
+    // turned into the four-character string "null" once it was saved.
+    const provider = connectionProvider({
+      fields: [
+        { key: "sudo_password", label: "Sudo password", type: "password", binding: "secret", default: null },
+        { key: "mode", label: "Mode", type: "text", binding: "config", default: null },
+        { key: "read_only", label: "Read only", type: "boolean", binding: "config", default: false },
+      ],
+    });
+
+    expect(initialPluginFormValues(provider)).toEqual({ read_only: false });
+
+    const config = buildPluginConnectionConfig("io.dbx.ssh", provider, {
+      sudo_password: null,
+      mode: null,
+      read_only: false,
+    } as unknown as Record<string, string>);
+
+    expect(config.connection_secrets?.sudo_password).toBeUndefined();
+    expect(config.external_config).toEqual({ read_only: false });
+  });
+
+  it("preserves opaque 'null' credentials when reopening and saving connections", () => {
+    const provider = connectionProvider({
+      fields: [
+        { key: "sudo_password", label: "Sudo password", type: "password", binding: "secret" },
+        { key: "totp_secret", label: "TOTP secret", type: "textarea", binding: "secret" },
+        { key: "sudo_source", label: "Sudo source", type: "text", binding: "config" },
+      ],
+    });
+    const existing = buildPluginConnectionConfig("io.dbx.ssh", provider, {});
+    existing.connection_secrets = { sudo_password: "null", totp_secret: "JBSWY3DPEHPK3PXP" };
+    existing.external_config = { sudo_source: "custom", stale: null };
+
+    const values = pluginConnectionFormValues(provider, existing);
+
+    expect(values.sudo_password).toBe("null");
+    expect(values.totp_secret).toBe("JBSWY3DPEHPK3PXP");
+    expect(values.stale).toBeUndefined();
+    expect(values.sudo_source).toBe("custom");
+
+    const saved = buildPluginConnectionConfig("io.dbx.ssh", provider, values, existing);
+    expect(saved.connection_secrets?.sudo_password).toBe("null");
+    expect(saved.connection_secrets?.totp_secret).toBe("JBSWY3DPEHPK3PXP");
+  });
+
+  it.each([undefined, "secret", "password"] as const)("round-trips explicit 'null' credentials with binding %s", (binding) => {
+    const provider = connectionProvider({ fields: [{ key: "credential", label: "Credential", type: "password", binding }] });
+    const saved = buildPluginConnectionConfig("example.plugin", provider, { credential: "null" });
+    expect(binding === "password" ? saved.password : saved.connection_secrets?.credential).toBe("null");
+    expect(pluginConnectionFormValues(provider, saved)).toEqual({ credential: "null" });
+    const reopened = buildPluginConnectionConfig("example.plugin", provider, pluginConnectionFormValues(provider, saved), saved);
+    expect(pluginConnectionFormValues(provider, reopened)).toEqual({ credential: "null" });
+  });
+
+  it("migrates an opaque 'null' credential from config to secret storage without losing it", () => {
+    const provider = connectionProvider({ fields: [{ key: "credential", label: "Credential", type: "password" }] });
+    const existing = buildPluginConnectionConfig("example.plugin", provider, {});
+    existing.external_config = { credential: "null" };
+    const values = pluginConnectionFormValues(provider, existing);
+    expect(values).toEqual({ credential: "null" });
+    const saved = buildPluginConnectionConfig("example.plugin", provider, values, existing);
+    expect(saved.connection_secrets).toEqual({ credential: "null" });
+    expect(saved.external_config).toEqual({});
+  });
+
+  it.each([null, undefined, ""])("keeps an unset credential %s absent without a default", (credential) => {
+    const provider = connectionProvider({ fields: [{ key: "credential", label: "Credential", type: "password" }] });
+    const existing = buildPluginConnectionConfig("example.plugin", provider, {});
+    existing.connection_secrets = { credential: "old-secret" };
+    const saved = buildPluginConnectionConfig("example.plugin", provider, { credential } as unknown as Record<string, PluginFormFieldValue>, existing);
+    expect(saved.connection_secrets).toEqual({});
+    expect(pluginConnectionFormValues(provider, saved)).toEqual({});
+  });
+
+  it("uses an explicit string default only for missing input, not a cleared input", () => {
+    const provider = connectionProvider({ fields: [{ key: "credential", label: "Credential", type: "password", default: "null" }] });
+    expect(initialPluginFormValues(provider)).toEqual({ credential: "null" });
+    expect(buildPluginConnectionConfig("example.plugin", provider, {}).connection_secrets).toEqual({ credential: "null" });
+    expect(buildPluginConnectionConfig("example.plugin", provider, { credential: null } as unknown as Record<string, PluginFormFieldValue>).connection_secrets).toEqual({});
+    expect(buildPluginConnectionConfig("example.plugin", provider, { credential: "" }).connection_secrets).toEqual({});
   });
 
   it("maps provider fields into common, config, and secret storage", () => {

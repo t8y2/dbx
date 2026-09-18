@@ -24,6 +24,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
+import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
@@ -43,10 +44,10 @@ const props = defineProps<{
   txnAutoRolledBack?: boolean;
   /** Oracle-only: whether the current manual Oracle session executed a statement
    *  DBX cannot prove read-only. Commit/Rollback are hidden while false. */
-  oracleTxnPossiblyDirty?: boolean;
+  txnPossiblyDirty?: boolean;
   /** Oracle manual mode derived from the resolved database type (not raw
    *  db_type, which can be the agent transport). */
-  isOracleManualTransaction?: boolean;
+  stickyProvenReadOnlyState?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -249,7 +250,7 @@ const explainAnalyzeTooltip = computed(() => {
   if (dbType === "sqlserver") return t("toolbar.actualPlan");
   return t("toolbar.autotrace");
 });
-const canSaveSql = computed(() => !!props.activeTab.externalSqlPath || !!props.activeTab.sql.trim());
+const canSaveSql = computed(() => canSaveSqlTab(props.activeTab));
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
 const sqlSemanticDiagnosticsEnabled = computed(() => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
@@ -272,10 +273,11 @@ function toggleInsertValueHints() {
 const isTransactionActive = computed(() => !!props.txnSessionId);
 const isManualTransactionMode = computed(() => props.autoCommit === false || isTransactionActive.value);
 const transactionModeBadge = computed(() => (isManualTransactionMode.value ? "M" : "A"));
-// Oracle manual mode hides Commit/Rollback while the session is clean (no
-// unproven statement executed). Every other database keeps the existing rule.
+// Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL)
+// hide Commit/Rollback while the session is clean (no unproven statement
+// executed). Every other database keeps the existing rule.
 const showTxnActions = computed(() => {
-  if (props.isOracleManualTransaction) return isTransactionActive.value && props.oracleTxnPossiblyDirty === true;
+  if (props.stickyProvenReadOnlyState) return isTransactionActive.value && props.txnPossiblyDirty === true;
   return isTransactionActive.value;
 });
 const transactionTooltip = computed(() => {

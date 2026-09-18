@@ -44,7 +44,7 @@ test("AI composer exposes mode and action as one compact selector", () => {
   assert.match(footer, /selectModeActionItem\(button\.action\)/);
   assert.doesNotMatch(footer, /selectAction\(button\.action\)/);
   assert.match(footer, /<template v-if="showActionButtons">[\s\S]*?<div class="border-t my-1" \/>[\s\S]*?v-for="button in actionButtons"/);
-  assert.match(source, /function selectModeActionItem\(action: AiAction\) \{\s*\/\/ Vector databases[\s\S]*?if \(!showActionButtons\.value\) return;/);
+  assert.match(source, /function selectModeActionItem\(action: AiActionSelection\) \{\s*\/\/ Vector databases[\s\S]*?if \(!showActionButtons\.value\) return;/);
 });
 
 test("AI effort control opens as a hoverable side submenu", () => {

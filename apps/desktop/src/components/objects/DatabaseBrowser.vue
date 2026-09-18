@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowDown, ArrowUp, Check, Database, GripVertical, LayoutGrid, List, Loader2, RefreshCw, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import * as api from "@/lib/backend/api";
 import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
+import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -112,7 +113,8 @@ const visibleRows = computed(() => {
 });
 
 function openDatabase(database: string) {
-  queryStore.openObjectBrowser(props.connection.id, database);
+  const tabId = queryStore.openObjectBrowser(props.connection.id, database);
+  void nextTick(() => requestObjectBrowserSearchFocus(tabId));
 }
 
 function columnLabel(key: DatabaseBrowserColumnKey): string {

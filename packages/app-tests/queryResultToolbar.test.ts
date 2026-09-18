@@ -168,7 +168,15 @@ test("table-data toolbar refresh keeps page size independent from SQL editor set
   assert.match(dataGrid, /pageSizePreference = computed\(\(\) => resolveDataGridPageSizePreference\(props\.context, props\.pageSizePreference\)\)/);
   assert.match(dataGrid, /pageSize = ref\(preferredDataGridPageSize\(settingsStore\.editorSettings, pageSizePreference\.value, props\.pageLimit\)\)/);
   assert.match(dataGrid, /watch\([\s\S]*\(\) => settingsStore\.editorSettings\.pageSize,[\s\S]*if \(pageSizePreference\.value !== "results"\) return;[\s\S]*pageSize\.value = normalizeResultPageSize\(value, pageSize\.value\)/);
-  assert.match(dataGrid, /settingsStore\.updateEditorSettings\(dataGridPageSizeSettingsPatch\(pageSizePreference\.value, normalizedSize\)\)/);
+  // Changing the page size in the grid is temporary; only the explicit
+  // set-as-default action persists it back into editor settings.
+  const changePageSizeStart = dataGrid.indexOf("function changePageSize(size: number) {");
+  assert.ok(changePageSizeStart >= 0);
+  const changePageSizeEnd = dataGrid.indexOf("function setDefaultPageSize", changePageSizeStart);
+  assert.ok(changePageSizeEnd > changePageSizeStart);
+  const changePageSize = dataGrid.slice(changePageSizeStart, changePageSizeEnd);
+  assert.doesNotMatch(changePageSize, /updateEditorSettings/);
+  assert.match(dataGrid, /function setDefaultPageSize\(\) \{[\s\S]*?settingsStore\.updateEditorSettings\(dataGridPageSizeSettingsPatch\(pageSizePreference\.value, pageSize\.value\)\)/);
   assert.match(dataGrid, /const resetToFirstPage = hasPendingConditionInputs\(\);/);
   assert.match(dataGrid, /emit\("reload", props\.sql, searchText\.value, currentWhereInput\(\), currentOrderBy\(\), pageSize\.value, resetToFirstPage \? 0 : \(currentPage\.value - 1\) \* pageSize\.value, intent\)/);
 });
@@ -189,7 +197,10 @@ test("embedded result toolbar progressively compacts when editing actions overfl
 
   assert.match(dataGrid, /dataGridTopbarMutationObserver = new MutationObserver\(updateDataGridTopbarWidth\)/);
   assert.match(dataGrid, /dataGridTopbarMutationObserver\.observe\(topbar, \{ childList: true, characterData: true, subtree: true \}\)/);
-  assert.match(dataGrid, /topbar\.scrollWidth > topbar\.clientWidth \+ 1/);
+  const measurementStart = dataGrid.indexOf("function updateDataGridTopbarWidth()");
+  const measurementEnd = dataGrid.indexOf("function resetDataGridTopbarOverflowCompact()", measurementStart);
+  assert.ok(measurementStart >= 0 && measurementEnd > measurementStart);
+  assert.match(dataGrid.slice(measurementStart, measurementEnd), /(\w+)\.scrollWidth > \1\.clientWidth \+ 1/);
   assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = true/);
   assert.match(dataGrid, /dataGridTopbarOverflowActionCount\.value = compactDataGridToolbarActionCount\.value \+ 1/);
   assert.match(dataGrid, /dataGridTopbarWidth\.value >= dataGridTopbarExpandedRequiredWidth\.value/);

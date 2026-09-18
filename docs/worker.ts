@@ -645,6 +645,9 @@ export default {
     if (url.pathname === "/api/auth/me" && request.method === "GET") return currentUser(request, env);
     if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout();
     if (url.pathname === "/api/contributor-avatar" && request.method === "GET") return contributorAvatar(request);
+    // API paths must never fall through to the cached HTML 404 page: a navigation to an
+    // unmatched /api route would otherwise be edge-cached and shadow this worker.
+    if (url.pathname.startsWith("/api/")) return json({ error: "NOT_FOUND" }, 404);
     const response = await env.ASSETS.fetch(request);
     if (response.status === 404) {
       const shellRequest = pluginDetailShellRequest(url, request);

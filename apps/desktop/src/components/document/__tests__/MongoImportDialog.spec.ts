@@ -143,6 +143,53 @@ describe("MongoImportDialog", () => {
     app.unmount();
   });
 
+  it("does not override the selected format from the file extension", async () => {
+    const app = createApp(
+      defineComponent({
+        setup() {
+          return () => h(MongoImportDialog, { open: true, connectionId: "c1", database: "shop", collection: "orders" });
+        },
+      }),
+    );
+    app.mount(document.body);
+    await nextTick();
+
+    const input = document.querySelector("input[type='file']") as HTMLInputElement;
+    const file = new File([new Uint8Array([5, 0, 0, 0, 0])], "orders.bson.gz", { type: "application/gzip" });
+    Object.defineProperty(input, "files", { value: [file] });
+    input.dispatchEvent(new Event("change"));
+    await vi.advanceTimersByTimeAsync(200);
+    await Promise.resolve();
+    await nextTick();
+
+    expect(api.previewMongodbImportFile.mock.calls[0]?.[1]).toMatchObject({
+      format: "csv",
+      parseOptions: { delimiter: ",", typeMode: "auto" },
+    });
+    expect(document.body.textContent).toContain("tableImport.encoding");
+    expect(document.body.textContent).toContain("mongo.import.typeMode");
+    app.unmount();
+  });
+
+  it("keeps an explicitly selected BSON format when changing files", async () => {
+    api.previewMongodbImportFile.mockResolvedValue(previewResult({ format: "bson" }));
+    const app = createApp(MongoImportDialog, { open: true, connectionId: "c1", database: "shop", collection: "orders" });
+    app.mount(document.body);
+    await nextTick();
+    await setLabeledSelect("tableImport.sourceFormat", "bson");
+    expect(document.body.textContent).not.toContain("tableImport.encoding");
+
+    for (const name of ["orders.bson", "renamed.json"]) {
+      const input = document.querySelector("input[type='file']") as HTMLInputElement;
+      Object.defineProperty(input, "files", { configurable: true, value: [new File([new Uint8Array([5, 0, 0, 0, 0])], name)] });
+      input.dispatchEvent(new Event("change"));
+      await vi.advanceTimersByTimeAsync(200);
+      await nextTick();
+      expect(api.previewMongodbImportFile.mock.lastCall?.[1]).toMatchObject({ format: "bson" });
+    }
+    app.unmount();
+  });
+
   it("reuses the uploaded sourceRef on later previews and releases it on close", async () => {
     const open = ref(true);
     const app = createApp(
@@ -180,6 +227,9 @@ describe("MongoImportDialog", () => {
 
     const header = document.querySelector("input[type='checkbox']") as HTMLInputElement;
     header.click();
+    await nextTick();
+    const next = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("tableImport.next"));
+    expect(next?.disabled).toBe(true);
     await vi.advanceTimersByTimeAsync(200);
     await Promise.resolve();
     await nextTick();
@@ -194,7 +244,7 @@ describe("MongoImportDialog", () => {
     app.unmount();
   });
 
-  async function mountWithFile(fileName: string, preview: MongoImportPreview) {
+  async function mountWithFile(fileName: string, preview: MongoImportPreview, format: MongoImportPreview["format"] = "csv") {
     api.previewMongodbImportFile.mockResolvedValue(preview);
     const app = createApp(
       defineComponent({
@@ -211,6 +261,7 @@ describe("MongoImportDialog", () => {
     );
     app.mount(document.body);
     await nextTick();
+    if (format !== "csv") await setLabeledSelect("tableImport.sourceFormat", format);
     const input = document.querySelector("input[type='file']") as HTMLInputElement;
     const file = new File(["id\n1"], fileName, { type: "text/csv" });
     Object.defineProperty(input, "files", { configurable: true, value: [file] });
@@ -317,6 +368,7 @@ describe("MongoImportDialog", () => {
         fileName: "orders.json",
         columns: [{ name: "id", inferredType: "string" }],
       }),
+      "json",
     );
     expect(columnTypeTrigger()).toBeNull();
     expect(document.body.textContent).toContain("(string)");

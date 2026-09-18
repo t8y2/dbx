@@ -1218,6 +1218,8 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -1295,6 +1297,8 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         file_path: "fixture.sql".to_string(),
         continue_on_error: false,
         selected_tables: None,
+        part_cooldown_ms: 0,
+        skip_relational_constraints: false,
     };
     let done_seen = AtomicBool::new(false);
 

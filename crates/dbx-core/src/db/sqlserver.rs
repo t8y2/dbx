@@ -2136,6 +2136,7 @@ pub async fn list_linked_server_tables(
         .map(|row| TableInfo {
             name: row.name,
             table_type: normalize_linked_server_table_type(row.table_type.as_deref()),
+            valid: None,
             comment: row.comment,
             parent_schema: None,
             parent_name: None,
@@ -2335,6 +2336,7 @@ async fn list_tables_by_kind(
         .map(|row| TableInfo {
             name: row.get::<&str, _>(0).unwrap_or("").to_string(),
             table_type: row.get::<&str, _>(1).unwrap_or("BASE TABLE").to_string(),
+            valid: None,
             comment: row.get::<&str, _>(2).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
             parent_schema: None,
             parent_name: None,

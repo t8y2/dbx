@@ -132,10 +132,14 @@ describe("QueryEditor execution routing", () => {
 
   it("routes custom SQL shortcuts through selection-aware execution with dual keymap and DOM handlers", () => {
     expect(queryEditorSource).toContain("function runSqlShortcutAction(");
-    expect(queryEditorSource).toContain("resolveSqlShortcutTemplate(action.sql, selected)");
+    expect(queryEditorSource).toContain('if (queryEditorSelectionLanguage() !== "sql") return false;');
+    expect(queryEditorSource).toContain("buildSqlShortcutExecutionSql(action, selected, props.databaseType)");
     expect(queryEditorSource).toContain("enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts)");
-    expect(queryEditorSource).toContain("isCharacterProducingShortcut(action.shortcut)");
+    expect(queryEditorSource).toContain("uniqueSqlShortcutBindings(sqlShortcutActions)");
+    expect(queryEditorSource).toContain("resolveSqlShortcutForDatabase(settingsStore.editorSettings.sqlShortcuts, shortcut, props.databaseType)");
+    expect(queryEditorSource).toContain("isCharacterProducingShortcut(shortcut)");
     expect(queryEditorSource).toContain("createQueryEditorSqlShortcutDomHandler(");
+    expect(queryEditorSource).toContain("() => props.databaseType");
     expect(queryEditorSource).toContain("shouldBlockExecutionShortcut(event, currentView)");
     expect(queryEditorSource).toContain("if (props.readOnly) return true;");
     expect(queryEditorSource).toContain("settingsStore.editorSettings.sqlShortcuts");

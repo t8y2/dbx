@@ -92,7 +92,7 @@ function searchEngineAssessment(sql: string, dialect: DatabaseType | string | un
   return { risk: risk === "read" ? "read" : risk === "write" ? "write" : "ddl", firstKeyword: "rest" };
 }
 
-const MONGO_READ_KINDS = new Set<MongoCommand["kind"]>(["find", "findOne", "countDocuments", "distinct", "getIndexes", "collectionStats", "version", "showDatabases", "use"]);
+const MONGO_READ_KINDS = new Set<MongoCommand["kind"]>(["find", "findExplain", "findOne", "countDocuments", "distinct", "getIndexes", "collectionStats", "version", "showDatabases", "use"]);
 const MONGO_DDL_KINDS = new Set<MongoCommand["kind"]>(["createIndex", "dropIndex", "dropIndexes", "dropCollection", "createUser"]);
 
 /**

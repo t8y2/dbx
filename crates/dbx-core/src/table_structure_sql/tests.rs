@@ -3374,6 +3374,42 @@ fn sqlserver_add_column_with_identity() {
 }
 
 #[test]
+fn sqlserver_legacy_column_comment_change_uses_legacy_extended_properties() {
+    let mut category_id = column("CategoryID");
+    category_id.comment = "test".to_string();
+    category_id.original = Some(ColumnInfo {
+        name: "CategoryID".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        driver_profile: Some("sqlserver-legacy".to_string()),
+        schema: Some("dbo".to_string()),
+        table_name: "Categories".to_string(),
+        columns: vec![category_id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 1);
+    assert!(result.statements[0].contains("::fn_listextendedproperty"));
+    assert!(result.statements[0].contains("EXEC sp_addextendedproperty"));
+    assert!(!result.statements[0].contains("sys.extended_properties"));
+}
+
+#[test]
 fn dameng_add_column_with_identity() {
     let mut id = column("ID");
     id.data_type = "INT".to_string();
@@ -6655,6 +6691,37 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
     assert_eq!(
         result.statements,
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
+    );
+}
+
+#[test]
+fn goldendb_character_column_keeps_charset_collation_when_default_changes() {
+    let mut name = column("name");
+    name.data_type = "varchar(64)".to_string();
+    name.default_value = "guest".to_string();
+    name.character_set = "utf8mb4".to_string();
+    name.collation = "utf8mb4_bin".to_string();
+    name.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(64)".to_string(),
+        is_nullable: true,
+        column_default: Some("member".to_string()),
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_bin".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Goldendb,
+        Some("app"),
+        "users",
+        vec![name],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(64) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_bin` DEFAULT 'guest';"]
     );
 }
 #[test]

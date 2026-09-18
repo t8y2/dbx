@@ -151,7 +151,7 @@ public final class Db2Agent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<ObjectInfo> result = new ArrayList<>();
             for (TableInfo table : listTables(schema)) {
-                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+                result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
             }
 
             String sql = "SELECT PROCNAME, 'PROCEDURE' FROM SYSCAT.PROCEDURES WHERE PROCSCHEMA = ? ORDER BY PROCNAME";
@@ -401,6 +401,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
             if (sqlType == Types.CLOB || sqlType == Types.NCLOB) {
                 String value = rs.getString(index);
                 return rs.wasNull() ? null : value;
+            }
+            if (sqlType == Types.BLOB || sqlType == Types.BINARY || sqlType == Types.VARBINARY || sqlType == Types.LONGVARBINARY) {
+                byte[] value = rs.getBytes(index);
+                return rs.wasNull() ? null : JdbcExecutor.bytesToHex(value);
             }
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();

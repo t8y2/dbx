@@ -6731,6 +6731,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_connections_preserves_opaque_null_plugin_secrets() {
+        let path = temp_db_path("plugin-null-secret");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = mq_connection("plugin-connection", "");
+        config.name = "SSH plugin".to_string();
+        config.db_type = DatabaseType::Plugin;
+        config.driver_profile = Some("plugin".to_string());
+        config.plugin_id = Some("io.dbx.ssh".to_string());
+        config.plugin_connection_provider = Some("io.dbx.ssh.connection".to_string());
+        config.plugin_connection_type = Some("ssh".to_string());
+        config.connection_secrets.insert("sudo_password".to_string(), "null".to_string());
+        config.connection_secrets.insert("totp_secret".to_string(), "".to_string());
+        config.connection_secrets.insert("private_key_passphrase".to_string(), "real-passphrase".to_string());
+
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        storage
+            .set_secret("plugin-connection", &plugin_connection_secret_key("totp_secret").unwrap(), "null")
+            .await
+            .unwrap();
+        let loaded = storage.load_connections().await.unwrap();
+        let secrets = &loaded[0].connection_secrets;
+        assert_eq!(secrets.len(), 3);
+        assert_eq!(secrets.get("sudo_password").map(String::as_str), Some("null"));
+        assert_eq!(secrets.get("totp_secret").map(String::as_str), Some("null"));
+        assert_eq!(secrets.get("private_key_passphrase").map(String::as_str), Some("real-passphrase"));
+        assert_eq!(
+            storage
+                .get_secret("plugin-connection", &plugin_connection_secret_key("sudo_password").unwrap())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("null")
+        );
+        assert_eq!(
+            storage
+                .get_secret("plugin-connection", &plugin_connection_secret_key("totp_secret").unwrap())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("null")
+        );
+        assert_eq!(storage.load_connections().await.unwrap()[0].connection_secrets, *secrets);
+        storage.save_connections(&loaded).await.unwrap();
+        assert_eq!(storage.load_connections().await.unwrap()[0].connection_secrets, *secrets);
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_connections().await.unwrap()[0].connection_secrets, *secrets);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn metadata_save_scrubs_mq_auth_token_and_preserves_existing_secret() {
         let path = temp_db_path("mq-token-metadata");
         let storage = Storage::open(&path).await.unwrap();
@@ -7683,6 +7735,7 @@ mod tests {
                 selection: AiEffortSelection::Enum("high".to_string()),
             }],
             default_mode: Some(AiAssistantMode::Agent),
+            default_auto_routing: true,
             restore_last_conversation: true,
             default_templates_by_db_type: BTreeMap::from([("postgresql".to_string(), vec!["tpl-1".to_string()])]),
             last_used_templates_by_db_type: BTreeMap::from([("mysql".to_string(), vec!["tpl-2".to_string()])]),

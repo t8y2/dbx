@@ -119,7 +119,8 @@ pub async fn install_marketplace_plugin(
     request: PluginMarketplaceInstallRequest,
 ) -> Result<PluginInstallResponse, String> {
     let marketplace =
-        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?;
+        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?
+            .with_lifecycle(state.plugins.lifecycle());
     let result = marketplace.install(request).await?;
     stop_replaced_plugin_runtime(&state, &result.plugin).await;
     Ok(result.response())
@@ -190,8 +191,9 @@ pub async fn install_plugin_package(
     let app_version = state.plugins.app_version().to_string();
     let policy = if allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
     let path = std::path::PathBuf::from(path);
+    let lifecycle = state.plugins.lifecycle();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.install_file(&path, policy)
+        PluginPackageInstaller::new(root_dir, app_version)?.with_lifecycle(lifecycle).install_file(&path, policy)
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -207,7 +209,8 @@ pub async fn install_plugin_package_from_url(
     app: AppHandle,
 ) -> Result<PluginInstallResponse, String> {
     let marketplace =
-        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?;
+        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?
+            .with_lifecycle(state.plugins.lifecycle());
     let policy = if allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
     let result = marketplace
         .install_url_package(&url, policy, move |downloaded, total| {
@@ -229,16 +232,15 @@ pub async fn rollback_plugin(
     state: State<'_, Arc<AppState>>,
     plugin_id: String,
 ) -> Result<PluginRollbackResponse, String> {
-    state.remove_plugin_connection_pools(&plugin_id).await;
-    state.plugin_host.stop(&plugin_id).await;
     let root_dir = state.plugins.root_dir().to_path_buf();
     let app_version = state.plugins.app_version().to_string();
+    let lifecycle = state.plugins.lifecycle();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.rollback(&plugin_id)
+        PluginPackageInstaller::new(root_dir, app_version)?.with_lifecycle(lifecycle).rollback(&plugin_id)
     })
     .await
     .map_err(|error| error.to_string())??;
-    stop_external_driver_pools(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await;
     Ok(result.response())
 }
 

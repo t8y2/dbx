@@ -45,7 +45,7 @@ test("tracks database export progress and cancels through database export API", 
   );
 });
 
-test("tracks SQL file progress and clears terminal tasks", () => {
+test("tracks byte-based SQL file progress and clears terminal tasks", () => {
   const tracker = useExportTracker();
   const task = tracker.addSqlFileTask("sql-1", "init.sql", "/tmp/init.sql");
 
@@ -57,6 +57,8 @@ test("tracks SQL file progress and clears terminal tasks", () => {
     failureCount: 1,
     affectedRows: 12,
     elapsedMs: 1500,
+    bytesRead: 128,
+    totalBytes: 512,
     statementSummary: "insert into users...",
     error: null,
   });
@@ -64,7 +66,9 @@ test("tracks SQL file progress and clears terminal tasks", () => {
   assert.equal(task.kind, "sql-file");
   assert.equal(task.status, "Running");
   assert.equal(task.rowsExported, 3);
-  assert.equal(task.totalRows, 3);
+  assert.equal(task.totalRows, null);
+  assert.equal(task.bytesRead, 128);
+  assert.equal(task.totalBytes, 512);
   assert.equal(task.affectedRows, 12);
 
   tracker.updateSqlFileTask("sql-1", {
@@ -75,11 +79,17 @@ test("tracks SQL file progress and clears terminal tasks", () => {
     failureCount: 0,
     affectedRows: 16,
     elapsedMs: 2000,
+    bytesRead: 512,
+    totalBytes: 512,
     statementSummary: "",
     error: null,
   });
 
   assert.equal(task.status, "Done");
+  assert.equal(task.rowsExported, 3);
+  assert.equal(task.totalRows, null);
+  assert.equal(task.bytesRead, 512);
+  assert.equal(task.totalBytes, 512);
   tracker.clearFinished();
   assert.equal(
     tracker.tasks.value.some((item) => item.exportId === "sql-1"),

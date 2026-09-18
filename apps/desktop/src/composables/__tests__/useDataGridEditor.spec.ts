@@ -49,6 +49,8 @@ function createEditorWithResult(
   onCellValueChanged?: (rowId: number, columnIndex: number) => void,
   tableColumns?: Array<{ name: string; data_type: string; extra?: string; column_default?: string }>,
   mongoCollectionGrid = false,
+  quickEntry = false,
+  editable = ref(true),
 ) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
@@ -58,7 +60,7 @@ function createEditorWithResult(
 
   editor = useDataGridEditor({
     result: computed(() => result.value),
-    editable: computed(() => true),
+    editable: computed(() => editable.value),
     databaseType: computed(() => (mongoCollectionGrid ? "mongodb" : "postgres")),
     normalizeEditorInput: mongoCollectionGrid ? mongoDocumentGridInputValue : undefined,
     connectionId: computed(() => "connection-1"),
@@ -77,6 +79,7 @@ function createEditorWithResult(
     onExecuteSql: computed(() => undefined),
     sql: computed(() => undefined),
     searchText: ref(""),
+    dataGridQuickEntryEnabled: computed(() => quickEntry),
     whereFilterInput: ref(""),
     currentWhereInput: computed(() => undefined),
     orderByInput: ref(""),
@@ -135,6 +138,162 @@ function createEditorWithResult(
 function createEditor(...args: Parameters<typeof createEditorWithResult>) {
   return createEditorWithResult(...args).editor;
 }
+
+describe("useDataGridEditor searched replacements", () => {
+  beforeEach(() => {
+    mocks.prepareDataGridSave.mockReset();
+    mocks.executeBatch.mockReset();
+    mocks.getConfig.mockReturnValue(undefined);
+  });
+
+  it.each([true, false])("blocks queued saves while row identity is pending (autoSave=%s)", async (autoSave) => {
+    const editable = ref(true);
+    const editor = createEditor(undefined, true, undefined, undefined, [["old", "keep", "last"]], undefined, undefined, false, false, editable);
+    editor.newRows.value = [];
+    editor.applyCellValue(0, 0, "new");
+    editable.value = false;
+
+    await editor.saveChanges({ autoSave });
+
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.hasPendingChanges.value).toBe(true);
+    editable.value = true;
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE people SET first='new'"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue([]);
+    await editor.saveChanges();
+    expect(mocks.executeBatch).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks row identity readiness after asynchronous save preparation", async () => {
+    const editable = ref(true);
+    const editor = createEditor(undefined, true, undefined, undefined, [["old", "keep", "last"]], undefined, undefined, false, false, editable);
+    editor.newRows.value = [];
+    editor.applyCellValue(0, 0, "new");
+    let finishPreparation!: (value: { statements: string[]; rollbackStatements: string[] }) => void;
+    mocks.prepareDataGridSave.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishPreparation = resolve;
+      }),
+    );
+    const save = editor.saveChanges();
+    expect(mocks.prepareDataGridSave).toHaveBeenCalledOnce();
+    editable.value = false;
+    finishPreparation({ statements: ["UPDATE people SET first='new'"], rollbackStatements: [] });
+    await save;
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.hasPendingChanges.value).toBe(true);
+    expect(editor.isSaving.value).toBe(false);
+  });
+
+  it("stages one undoable batch, keeps empty strings and preserves prior pending edits", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["hit", "keep", "hit"]]);
+    editor.newRows.value = [];
+    editor.applyCellValue(0, 1, "draft");
+    expect(
+      editor.stageCellReplacements([
+        { rowId: 0, col: 0, previousValue: "hit", value: "" },
+        { rowId: 0, col: 2, previousValue: "hit", value: "new" },
+      ]),
+    ).toBe(2);
+    expect(editor.dirtyRows.value.get(0)).toEqual(
+      new Map([
+        [1, "draft"],
+        [0, ""],
+        [2, "new"],
+      ]),
+    );
+    expect(editor.manualSaveRequired.value).toBe(true);
+    editor.undoPendingChange();
+    expect(editor.dirtyRows.value.get(0)).toEqual(new Map([[1, "draft"]]));
+    expect(editor.manualSaveRequired.value).toBe(false);
+    editor.redoPendingChange();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("");
+    expect(editor.manualSaveRequired.value).toBe(true);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it("rejects readonly, stale, deleted, non-string and out-of-range targets", () => {
+    const editor = createEditor(
+      ["first", undefined, "last"],
+      true,
+      undefined,
+      [2],
+      [
+        ["hit", "hit", "hit"],
+        [123, null, false],
+      ],
+    );
+    editor.newRows.value = [];
+    editor.deletedRows.value.add(0);
+    const changes = [
+      { rowId: 0, col: 0, previousValue: "hit", value: "x" },
+      { rowId: 1, col: 0, previousValue: "123", value: "x" },
+      { rowId: 9, col: 0, previousValue: "hit", value: "x" },
+    ];
+    expect(editor.stageCellReplacements(changes)).toBe(0);
+    editor.deletedRows.value.clear();
+    expect(
+      editor.stageCellReplacements([
+        { rowId: 0, col: 0, previousValue: "stale", value: "x" },
+        { rowId: 0, col: 1, previousValue: "hit", value: "x" },
+        { rowId: 0, col: 2, previousValue: "hit", value: "x" },
+        { rowId: -1, col: 0, previousValue: "hit", value: "x" },
+      ]),
+    ).toBe(0);
+    expect(editor.dirtyRows.value.size).toBe(0);
+    expect(editor.manualSaveRequired.value).toBe(false);
+  });
+
+  it("blocks later quick-entry autosaves until explicit save or discard", async () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["hit", "keep", "hit"]], undefined, undefined, false, true);
+    editor.newRows.value = [];
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "hit", value: "new" }]);
+    editor.applyCellValue(0, 1, "later edit");
+    await editor.saveChanges({ autoSave: true });
+    expect(mocks.prepareDataGridSave).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.hasPendingChanges.value).toBe(true);
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE people SET first='new',hidden='later edit' WHERE last='hit'"], rollbackStatements: [] });
+    mocks.executeBatch.mockResolvedValue([]);
+    await editor.saveChanges();
+    expect(mocks.executeBatch).toHaveBeenCalledOnce();
+    expect(editor.manualSaveRequired.value).toBe(false);
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "new", value: "other" }]);
+    editor.discardChanges();
+    expect(editor.manualSaveRequired.value).toBe(false);
+  });
+
+  it("persists the manual-save interlock across a tab remount", async () => {
+    const key = "replace-remount";
+    const rows: CellValue[][] = [["hit", "keep", "hit"]];
+    const first = createEditor(undefined, true, key, undefined, rows);
+    first.newRows.value = [];
+    first.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "hit", value: "new" }]);
+    first.savePendingSnapshot();
+    const second = createEditor(undefined, true, key, undefined, rows);
+    second.newRows.value = [];
+    expect(second.manualSaveRequired.value).toBe(true);
+    await second.saveChanges({ autoSave: true });
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    second.discardChanges();
+    clearDataGridPendingSnapshot(key);
+  });
+
+  it("clears the manual-save interlock when replacement restores all original values", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["hit", "keep", "hit"]]);
+    editor.newRows.value = [];
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "hit", value: "new" }]);
+    editor.stageCellReplacements([{ rowId: 0, col: 0, previousValue: "new", value: "hit" }]);
+    expect(editor.hasPendingChanges.value).toBe(false);
+    expect(editor.manualSaveRequired.value).toBe(false);
+    editor.undoPendingChange();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("new");
+    expect(editor.manualSaveRequired.value).toBe(true);
+    editor.redoPendingChange();
+    expect(editor.manualSaveRequired.value).toBe(false);
+  });
+});
 
 function beforeTabSwitchEvent(fromTabId: string, tabId = "next-tab") {
   return new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId } });

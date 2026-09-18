@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   closeOtherTabsDefaultShortcut,
+  countShortcutConflictPairs,
   DEFAULT_SHORTCUT_SETTINGS,
+  findCrossScopeShortcutConflicts,
   findShortcutConflict,
   formatShortcut,
   isReservedShortcut,
@@ -430,5 +432,70 @@ describe("shortcutRegistry editor actions", () => {
     const windows = normalizeShortcutSettings({ find: "Mod+H", formatSql: "Mod+F" }, "Win32");
     expect(windows.find).toBe("Mod+H");
     expect(windows.formatSql).toBe("Mod+F");
+  });
+
+  describe("findCrossScopeShortcutConflicts", () => {
+    it("reports the intentional cross-scope overlaps in the defaults", () => {
+      // 默认配置里确实存在跨作用域同键，这是设计使然；设置界面把它作为“提示”
+      // 展示，而 normalizeShortcutSettings 的占用判定刻意不管它们。
+      const conflicts = findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS);
+      expect(conflicts.find).toContain("focusSearch");
+      expect(conflicts.focusSearch).toContain("find");
+      expect(conflicts.acceptCompletion).toContain("toggleTranspose");
+      expect(conflicts.explainSql).toContain("editSidebarConnection");
+      // Shift+Mod+D 与 Mod+Shift+D 经 formatShortcut 规范化后同键。
+      expect(conflicts.viewTableDdl).toContain("editTableStructure");
+    });
+
+    it("never reports same-scope duplicates (those are blocking conflicts)", () => {
+      // uppercaseSelection 改成 Mod+A 只与同作用域的 selectAll 重复，
+      // 跨作用域提示不应把它列出来——那属于 findShortcutConflict 的职责。
+      const shortcuts = normalizeShortcutSettings({ uppercaseSelection: "Mod+A" });
+      expect(findShortcutConflict("uppercaseSelection", shortcuts.uppercaseSelection, shortcuts)).toBe("selectAll");
+      expect(findCrossScopeShortcutConflicts(shortcuts).uppercaseSelection).toBeUndefined();
+    });
+
+    it("ignores unbound shortcuts", () => {
+      const shortcuts = normalizeShortcutSettings({ find: "", focusSearch: "" });
+      expect(shortcuts.find).toBe("");
+      expect(shortcuts.focusSearch).toBe("");
+      const conflicts = findCrossScopeShortcutConflicts(shortcuts);
+      expect(conflicts.find).toBeUndefined();
+      expect(conflicts.focusSearch).toBeUndefined();
+      // goToColumn 默认未绑定，也不参与比较。
+      expect(conflicts.goToColumn).toBeUndefined();
+    });
+
+    it("resolves platform-dependent keys before comparing", () => {
+      // Win32 上 Mod+F 展开为 Ctrl+F，两边仍然是同键，提示照旧成立；
+      // 未自定义的组合也不会被误判。
+      const windows = findCrossScopeShortcutConflicts(normalizeShortcutSettings(undefined, "Win32"), "Win32");
+      expect(windows.find).toContain("focusSearch");
+      const mac = findCrossScopeShortcutConflicts(normalizeShortcutSettings(undefined, "MacIntel"), "MacIntel");
+      expect(mac.find).toContain("focusSearch");
+    });
+
+    it("does not mutate the settings it inspects", () => {
+      const shortcuts = normalizeShortcutSettings({ duplicateLine: "Mod+Alt+K" });
+      const before = { ...shortcuts };
+      findCrossScopeShortcutConflicts(shortcuts);
+      expect(shortcuts).toEqual(before);
+    });
+  });
+
+  describe("countShortcutConflictPairs", () => {
+    it("counts an unordered pair once even though the map is bidirectional", () => {
+      expect(countShortcutConflictPairs({ find: "focusSearch", focusSearch: "find" })).toBe(1);
+    });
+
+    it("flattens multi-partner entries", () => {
+      expect(countShortcutConflictPairs({ find: ["focusSearch", "formatSql"], formatSql: ["find"] })).toBe(2);
+    });
+
+    it("ignores empty entries", () => {
+      expect(countShortcutConflictPairs({})).toBe(0);
+      expect(countShortcutConflictPairs({ find: "" })).toBe(0);
+      expect(countShortcutConflictPairs({ find: [] })).toBe(0);
+    });
   });
 });

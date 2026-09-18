@@ -100,6 +100,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "generateSqlQuoteIdentifiers",
     "formatSqlOnSqlFileSave",
     "showTableDdlHoverPreview",
+    "tableHoverLookupMode",
     "sqlVariableSubstitutionEnabled",
     "sqlVariableSyntaxOverrides",
   ],
@@ -171,7 +172,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
   snippets: ["snippets"],
-  other: ["updateDownloadSource", "updateNotificationsEnabled"],
+  other: ["updateDownloadSource", "updateNotificationsEnabled", "autoDownloadUpdates"],
 };
 
 const KEY_TO_CATEGORY = new Map<string, SettingsTransferCategoryId>();
@@ -267,6 +268,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "sidebarAllowHorizontalScroll",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
+  "autoDownloadUpdates",
 ] as const satisfies readonly EditorSettingsDraftKey[];
 
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
@@ -352,7 +354,17 @@ function isSqlSnippetItem(value: unknown): boolean {
 function isSqlShortcutActionItem(value: unknown): boolean {
   if (!isPlainObject(value)) return false;
   if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || typeof value.shortcut !== "string" || typeof value.sql !== "string") return false;
-  return value.enabled === undefined || typeof value.enabled === "boolean";
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean") return false;
+  if (value.kind !== undefined && value.kind !== "template" && value.kind !== "select-limit") return false;
+  if (value.limit !== undefined && (typeof value.limit !== "number" || !Number.isFinite(value.limit))) return false;
+  if (value.databaseTypes !== undefined) {
+    if (!Array.isArray(value.databaseTypes) || !value.databaseTypes.every((item) => typeof item === "string" && item.trim().length > 0)) return false;
+  }
+  if (value.sqlByDatabaseType !== undefined) {
+    if (!isPlainObject(value.sqlByDatabaseType)) return false;
+    if (!Object.values(value.sqlByDatabaseType).every((sql) => typeof sql === "string")) return false;
+  }
+  return true;
 }
 
 const SHORTCUT_ACTION_IDS = new Set<string>(SHORTCUT_DEFINITIONS.map((definition) => definition.id));

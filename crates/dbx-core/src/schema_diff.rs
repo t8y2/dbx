@@ -6203,6 +6203,7 @@ mod tests {
         TableInfo {
             name: name.to_string(),
             table_type: table_type.to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -9065,6 +9066,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "users".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: Some("用户表".to_string()),
                 parent_schema: None,
                 parent_name: None,
@@ -9072,6 +9074,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: "users".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: Some("Users".to_string()),
                 parent_schema: None,
                 parent_name: None,
@@ -9119,6 +9122,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "users".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9126,6 +9130,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: "users".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9444,6 +9449,7 @@ mod tests {
             TableInfo {
                 name: "orders".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9451,6 +9457,7 @@ mod tests {
             TableInfo {
                 name: "users".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9512,6 +9519,7 @@ mod tests {
             TableInfo {
                 name: "order_items".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9519,6 +9527,7 @@ mod tests {
             TableInfo {
                 name: "orders".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9526,6 +9535,7 @@ mod tests {
             TableInfo {
                 name: "users".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -9929,6 +9939,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: table_name.to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: table_comment.map(str::to_string),
                 parent_schema: None,
                 parent_name: None,
@@ -10445,6 +10456,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "users_old".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -10452,6 +10464,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: "users_new".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -10502,6 +10515,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "new_table".to_string(),
                 table_type: "BASE TABLE".to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -11101,6 +11115,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "users".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -11108,6 +11123,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: "users".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -11154,6 +11170,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -11161,6 +11178,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -11620,6 +11638,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: Some("new".into()),
                 parent_schema: None,
                 parent_name: None,
@@ -11627,6 +11646,7 @@ mod tests {
             target_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: Some("old".into()),
                 parent_schema: None,
                 parent_name: None,
@@ -12113,6 +12133,7 @@ mod tests {
             TableInfo {
                 name: "sys_organization".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -12120,6 +12141,7 @@ mod tests {
             TableInfo {
                 name: "sys_user".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -12230,6 +12252,7 @@ mod tests {
         let table_infos = vec![TableInfo {
             name: "orders".into(),
             table_type: "BASE TABLE".into(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -12474,6 +12497,7 @@ mod tests {
                 source_tables: vec![TableInfo {
                     name: "t".into(),
                     table_type: "BASE TABLE".into(),
+                    valid: None,
                     comment: Some("new_comment".into()),
                     parent_schema: None,
                     parent_name: None,
@@ -12481,6 +12505,7 @@ mod tests {
                 target_tables: vec![TableInfo {
                     name: "t".into(),
                     table_type: "BASE TABLE".into(),
+                    valid: None,
                     comment: Some("old_comment".into()),
                     parent_schema: None,
                     parent_name: None,
@@ -12592,6 +12617,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -13122,6 +13148,7 @@ mod tests {
             source_tables: vec![TableInfo {
                 name: "t".into(),
                 table_type: "BASE TABLE".into(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,

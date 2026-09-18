@@ -7,8 +7,12 @@ permissions:
   contents: read
 
 jobs:
-  build-windows-x64:
+  build-windows-7-x64:
     runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v5
 
@@ -33,16 +37,25 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust for standard Windows
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Check standard Windows dependency path
+        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
+
+      - name: Setup Rust for Windows 7
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-22
+          components: rust-src
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
-          shared-key: sqlserver2000-windows-x64
+          shared-key: sqlserver2000-windows-7-x64
           cache-on-failure: true
 
       - name: Build SQL Server legacy agent
@@ -59,15 +72,63 @@ jobs:
           }
           Copy-Item $agent.FullName "sqlserver-legacy-agent.jar" -Force
 
-      - name: Build Windows x64 installer
-        run: pnpm tauri build --bundles nsis --target x86_64-pc-windows-msvc --ci --no-sign
+      - name: Prepare Win7-compatible WebView2 loader
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
+
+      - name: Prepare WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
+
+      - name: Probe WebView2 109 fixed runtime
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build DBX for Windows 7
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+
+      - name: Audit Windows 7 PE imports
+        shell: pwsh
+        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Audit Win7 WebView2 loader markers
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-loader.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Bundle Windows 7 fixed-runtime installer
+        shell: pwsh
+        run: |
+          $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
+          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc --config src-tauri/tauri.webview2-win7-fixed.conf.json
+          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (!$installer) {
+            Write-Error "Missing Windows 7 fixed-runtime installer in ${bundleDir}"
+            exit 1
+          }
+          Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+
+      - name: Audit Windows 7 installer contents
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "target/x86_64-win7-windows-msvc/release/bundle/nsis" -Filter "*.exe" |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
 
       - name: Upload installer
         uses: actions/upload-artifact@v7
         with:
-          name: DBX-SQLServer2000-Windows-x64
+          name: DBX-SQLServer2000-Windows-7-x64
           path: |
-            target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            target/x86_64-win7-windows-msvc/release/bundle/nsis/*.exe
             sqlserver-legacy-agent.jar
           if-no-files-found: error
           retention-days: 7

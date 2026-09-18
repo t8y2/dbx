@@ -182,6 +182,12 @@ function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, dep
 
 export const GENERIC_TRANSPORT_FAILURE_MESSAGE = "Backend request failed";
 
+/**
+ * Marks a backend message the UI could not classify, so it is carried as raw text inside a
+ * structured envelope. Callers may still match that text against the known-message catalog.
+ */
+export const LEGACY_BACKEND_ERROR_CODE = "DBX-LEGACY-0001";
+
 export class BackendErrorException extends Error {
   readonly backendError: BackendError;
 
@@ -193,7 +199,7 @@ export class BackendErrorException extends Error {
     this.name = "BackendErrorException";
     this.backendError = backendError ?? {
       version: 1,
-      code: "DBX-LEGACY-0001",
+      code: LEGACY_BACKEND_ERROR_CODE,
       messageKey: "backendErrors.legacy",
       messageParams: {},
       source: "legacyBackend",
@@ -277,9 +283,11 @@ export function formatError(e: unknown): string {
     }
   }
 
-  // Fallback: attempt to stringify
+  // Fallback: prefer bounded nested text (message/reason/detail, .error/.backendError)
+  // over raw string coercion so object-shaped failures never degrade to "[object Object]".
+  const fallback = boundedFallbackText(e);
   try {
-    return sanitizeBackendErrorMessage(String(e));
+    return sanitizeBackendErrorMessage(fallback ?? String(e));
   } catch {
     return "Unknown error occurred";
   }

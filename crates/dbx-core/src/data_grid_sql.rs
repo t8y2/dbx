@@ -3250,14 +3250,15 @@ pub(crate) fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Opt
     database_type == Some(DatabaseType::Neo4j) && name == Some(DBX_NEO4J_ELEMENT_ID_COLUMN)
 }
 
+pub(crate) fn extra_is_auto_generated(extra: &str) -> bool {
+    extra.to_ascii_lowercase().split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|part| {
+        matches!(part, "auto_increment" | "autoincrement" | "identity" | "smallserial" | "serial" | "bigserial")
+    })
+}
+
 pub(crate) fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
-    column
-        .extra
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-        .any(|part| matches!(part, "auto_increment" | "autoincrement" | "identity"))
+    extra_is_auto_generated(column.extra.as_deref().unwrap_or(""))
+        || column.column_default.as_deref().is_some_and(|default| default.to_ascii_lowercase().contains("nextval("))
 }
 
 fn grid_value_is_empty(value: &Value) -> bool {
@@ -4025,6 +4026,55 @@ mod tests {
             statement.as_deref(),
             Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
         );
+    }
+
+    #[test]
+    fn recognizes_postgres_serial_extras_as_auto_generated() {
+        for extra in ["serial", "smallserial", "bigserial"] {
+            assert!(extra_is_auto_generated(extra), "expected {extra} to be auto-generated");
+        }
+    }
+
+    #[test]
+    fn builds_postgres_copy_insert_without_serial_primary_key() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "name".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');"));
     }
 
     #[test]
@@ -6018,6 +6068,60 @@ mod tests {
         assert_eq!(
             format_grid_sql_literal(&json!("123-not-a-number"), Some(DatabaseType::Oracle), Some(&number)),
             "'123-not-a-number'"
+        );
+    }
+
+    #[test]
+    fn prepares_oracle_number28_updates_from_serialized_query_results() {
+        let identifiers = ["2026081810175800100000000000", "2026081810175800100000000001"];
+        let rows: Vec<Vec<Value>> = identifiers
+            .iter()
+            .map(|identifier| vec![serde_json::from_str(identifier).unwrap(), json!("old")])
+            .collect();
+        let query_result: crate::types::QueryResult = serde_json::from_value(json!({
+            "columns": ["ID", "NAME"],
+            "column_types": ["NUMBER(28)", "VARCHAR2(20)"],
+            "rows": rows,
+            "affected_rows": 0,
+            "execution_time_ms": 0,
+        }))
+        .unwrap();
+        let wire = serde_json::to_string(&query_result).unwrap();
+        let deserialized: crate::types::QueryResult = serde_json::from_str(&wire).unwrap();
+
+        for (row, identifier) in deserialized.rows.iter().zip(identifiers) {
+            assert_eq!(row[0], json!(identifier));
+        }
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "ITEMS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER(28)", false, None),
+                    column("NAME", "VARCHAR2(20)", true, None),
+                ]),
+            },
+            columns: deserialized.columns,
+            source_columns: None,
+            rows: deserialized.rows,
+            dirty_rows: vec![(0, vec![(1, json!("new"))]), (1, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            identifiers
+                .iter()
+                .map(|identifier| format!("UPDATE \"APP\".\"ITEMS\" SET \"NAME\" = 'new' WHERE \"ID\" = {identifier};"))
+                .collect::<Vec<_>>()
         );
     }
 

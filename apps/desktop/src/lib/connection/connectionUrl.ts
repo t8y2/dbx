@@ -1,6 +1,7 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { h2JdbcUrlHasPasswordParam, h2JdbcUrlHasUserParam, parseH2JdbcUrl } from "@/lib/database/h2Connection";
 import { damengSslFormConfig } from "@/lib/database/damengSslOptions";
+import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
 
 export interface ParsedConnectionUrl {
   name?: string;
@@ -198,6 +199,29 @@ function databaseFromPath(pathname: string): string | undefined {
   const value = pathname.replace(/^\/+/, "");
   if (!value) return undefined;
   return decodeUrlPart(value.split("/")[0]);
+}
+
+interface RedisUrlPathParts {
+  database: string | undefined;
+  tls: boolean;
+  insecure: boolean;
+}
+
+// Users paste redis-cli invocations into the URL field (e.g.
+// "redis://host:6379/0 --tls --insecure"); WHATWG URL folds the flags into the
+// path. Salvage them: the first non-flag token is the numeric db index, --tls
+// enables TLS (like the rediss:// scheme) and --insecure skips certificate
+// verification (like the #insecure fragment).
+function parseRedisUrlPath(rawPath: string): RedisUrlPathParts {
+  const parts: RedisUrlPathParts = { database: undefined, tls: false, insecure: false };
+  for (const token of rawPath.split(/\s+/)) {
+    if (!token) continue;
+    const flag = token.toLowerCase();
+    if (flag === "--tls") parts.tls = true;
+    else if (flag === "--insecure") parts.insecure = true;
+    else if (parts.database === undefined) parts.database = normalizeRedisDatabaseValue(token);
+  }
+  return parts;
 }
 
 function dynamodbRegionFromHost(hostname: string): string | undefined {
@@ -716,7 +740,11 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const name = connectionNameParam(parsed);
   const urlParamsWithoutName = stripConnectionNameParam(urlParams);
   const normalizedFragment = decodeUrlPart(parsed.hash.replace(/^#/, "")).trim().toLowerCase();
-  const parsedUrlParams = profile.type === "redis" && normalizedFragment === "insecure" ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
+  // A Redis path can carry pasted redis-cli flags ("…/0 --tls --insecure");
+  // salvage the db index plus the TLS/insecure intent before they are dropped.
+  const redisPath = profile.type === "redis" ? parseRedisUrlPath(databaseFromPath(parsed.pathname) || "") : null;
+  const redisInsecure = redisPath?.insecure || normalizedFragment === "insecure";
+  const parsedUrlParams = profile.type === "redis" && redisInsecure && !/(^|&)insecure=/i.test(urlParamsWithoutName) ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
   const jdbcCredentials = isJdbcUrl && (profile.type === "mysql" || profile.profile === "oceanbase-oracle") ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
   const effectiveUrlParams = jdbcCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
@@ -754,6 +782,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
 
   const isMeilisearch = profile.type === "meilisearch";
   const defaultPort = isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+  // A Redis URL path is a numeric db index; redis-cli flags salvaged above.
+  const pathDatabase = redisPath ? redisPath.database : databaseFromPath(parsed.pathname);
 
   return {
     ...(name ? { name } : {}),
@@ -765,9 +795,9 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     ...(profile.type === "sqlserver" && parsed.port ? { portExplicit: true } : {}),
     username: jdbcCredentials?.username ?? decodeUrlPart(parsed.username),
     password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
-    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : databaseFromPath(parsed.pathname),
+    database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
-    ssl: scheme === "rediss" || scheme === "https" || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
+    ssl: scheme === "rediss" || scheme === "https" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
     ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };

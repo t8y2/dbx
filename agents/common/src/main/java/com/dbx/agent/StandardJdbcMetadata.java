@@ -115,7 +115,7 @@ public final class StandardJdbcMetadata {
     public List<ObjectInfo> listObjects(List<TableInfo> tables, String schema, MetadataListConstraints constraints) {
         List<ObjectInfo> result = new ArrayList<>();
         for (TableInfo table : tables) {
-            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
         }
         return MetadataListConstraints.orNone(constraints).filterObjects(result);
     }

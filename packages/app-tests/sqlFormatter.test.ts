@@ -18,7 +18,10 @@ test("rejects very large SQL before importing formatter", async () => {
 });
 
 test("formats SQL with uppercase keywords and readable line breaks by default", async () => {
-  const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
+  const formatted = await formatSqlText(
+    "select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc",
+    "postgres",
+  );
 
   assert.match(formatted, /^SELECT\b/);
   assert.match(formatted, /\nFROM\b/);
@@ -26,22 +29,35 @@ test("formats SQL with uppercase keywords and readable line breaks by default", 
   assert.match(formatted, /\nORDER BY\b/);
 });
 
+test("collapses a statement that fits on one line", async () => {
+  const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
+
+  assert.equal(formatted, "SELECT id, name FROM users WHERE active = 1 ORDER BY name");
+});
+
 test("formats SQL with custom keyword case and indentation settings", async () => {
-  const formatted = await formatSqlText("select id from users where active = 1", "postgres", {
-    keywordCase: "lower",
-    dataTypeCase: "preserve",
-    functionCase: "preserve",
-    useTabs: true,
-    tabWidth: 2,
-    logicalOperatorNewline: "before",
-    expressionWidth: 50,
-    linesBetweenQueries: 1,
-    denseOperators: false,
-    newlineBeforeSemicolon: false,
-  });
+  const formatted = await formatSqlText(
+    "select id, name, email, created_at, updated_at, deleted_at, tenant_id from users where active = 1 and verified = 1 order by name, created_at desc",
+    "postgres",
+    {
+      keywordCase: "lower",
+      dataTypeCase: "preserve",
+      functionCase: "preserve",
+      useTabs: true,
+      tabWidth: 2,
+      logicalOperatorNewline: "before",
+      expressionWidth: 50,
+      linesBetweenQueries: 1,
+      denseOperators: false,
+      newlineBeforeSemicolon: false,
+    },
+  );
 
   assert.match(formatted, /^select\b/);
   assert.match(formatted, /\nfrom\b/);
+  // Continuations align under the first element, and that padding is indentation
+  // at a column past the first tab stop, so it starts with tabs.
+  assert.match(formatted, /\n\t+ name,/);
   assert.doesNotMatch(formatted, /^SELECT\b/);
 });
 

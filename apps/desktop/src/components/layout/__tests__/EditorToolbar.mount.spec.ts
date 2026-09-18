@@ -122,8 +122,8 @@ describe("EditorToolbar mount contract", () => {
       autoCommit: true,
       txnSessionId: undefined,
       txnAutoRolledBack: false,
-      oracleTxnPossiblyDirty: false,
-      isOracleManualTransaction: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
       onToolbarExecute,
     });
     app.use(pinia);
@@ -195,8 +195,8 @@ describe("EditorToolbar mount contract", () => {
       autoCommit: true,
       txnSessionId: undefined,
       txnAutoRolledBack: false,
-      oracleTxnPossiblyDirty: false,
-      isOracleManualTransaction: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
       onExecutePointerDown,
       onToolbarExecute,
     });
@@ -274,8 +274,8 @@ describe("EditorToolbar mount contract", () => {
               autoCommit: true,
               txnSessionId: undefined,
               txnAutoRolledBack: false,
-              oracleTxnPossiblyDirty: false,
-              isOracleManualTransaction: false,
+              txnPossiblyDirty: false,
+              stickyProvenReadOnlyState: false,
               onExecutePointerDown: () => {
                 pendingSnapshot = editorRef.value?.captureExecutionSnapshot?.();
               },
@@ -341,8 +341,8 @@ describe("EditorToolbar mount contract", () => {
       autoCommit: true,
       txnSessionId: undefined,
       txnAutoRolledBack: false,
-      oracleTxnPossiblyDirty: false,
-      isOracleManualTransaction: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
     });
     app.use(pinia);
     app.use(i18n);
@@ -396,8 +396,8 @@ describe("EditorToolbar mount contract", () => {
       autoCommit: true,
       txnSessionId: undefined,
       txnAutoRolledBack: false,
-      oracleTxnPossiblyDirty: false,
-      isOracleManualTransaction: false,
+      txnPossiblyDirty: false,
+      stickyProvenReadOnlyState: false,
     });
     app.config.errorHandler = (err) => {
       errors.push(err);

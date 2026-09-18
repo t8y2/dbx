@@ -152,6 +152,7 @@ pub async fn list_tables_show_from(pool: &MySqlPool, catalog: &str, database: &s
             Some(TableInfo {
                 name,
                 table_type: if table_type.trim().is_empty() { "TABLE".to_string() } else { table_type },
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,

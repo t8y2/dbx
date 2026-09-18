@@ -473,6 +473,9 @@ pub struct BuildExportInsertStatementsOptions {
 pub struct BuildExportSqlInsertOptions {
     #[serde(flatten)]
     pub insert: BuildExportInsertStatementsOptions,
+    /// 生成 INSERT 时需要排除的列名（例如导出时不带主键），忽略大小写匹配。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1154,10 +1157,24 @@ fn is_export_numeric_literal(text: &str) -> bool {
 }
 
 pub fn build_export_insert_statements(options: BuildExportInsertStatementsOptions) -> Result<Vec<String>, String> {
+    build_export_insert_statements_excluding(options, &[])
+}
+
+/// 与 [`build_export_insert_statements`] 行为一致，但可以额外按列名排除若干列
+/// （典型场景：导出 SQL 时不带主键）。列名比较忽略大小写。
+///
+/// 行值与空间列仍然按列在 `columns` 中的原始下标取值，所以调用方不需要自己裁剪
+/// 行数据，也不会出现“列删了、值没删”导致的错位。
+pub fn build_export_insert_statements_excluding(
+    options: BuildExportInsertStatementsOptions,
+    exclude_columns: &[String],
+) -> Result<Vec<String>, String> {
     if options.columns.is_empty() || options.rows.is_empty() {
         return Ok(Vec::new());
     }
 
+    let excluded_names: HashSet<String> =
+        exclude_columns.iter().map(|column| column.trim().to_ascii_uppercase()).collect();
     let table = export_qualified_table_name(
         options.database_type,
         options.schema.as_deref(),
@@ -1173,20 +1190,36 @@ pub fn build_export_insert_statements(options: BuildExportInsertStatementsOption
         .enumerate()
         .filter_map(|(index, column)| {
             let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
+            let excluded = excluded_names.contains(&column.trim().to_ascii_uppercase());
+            (is_export_insert_column(
+                options.database_type,
+                column,
+                column_type,
+                options.column_extras.get(index).and_then(|value| value.as_deref()),
+            ) && !excluded)
+                .then(|| {
+                    let sqlserver_unicode_string = options.database_type == Some(DatabaseType::SqlServer)
+                        && column_type.is_some_and(is_sqlserver_unicode_export_type);
+                    (index, column, sqlserver_unicode_string)
+                })
+        })
+        .collect::<Vec<_>>();
+    if insert_columns.is_empty() {
+        // Only fail when the exclusion itself removed the last insertable column;
+        // emptiness caused by other omission rules (e.g. generated columns) keeps
+        // the silent empty result.
+        let had_insertable_without_exclusion = options.columns.iter().enumerate().any(|(index, column)| {
+            let column_type = export_column_type(&options.column_types, index, options.database_type, &spatial_columns);
             is_export_insert_column(
                 options.database_type,
                 column,
                 column_type,
                 options.column_extras.get(index).and_then(|value| value.as_deref()),
             )
-            .then(|| {
-                let sqlserver_unicode_string = options.database_type == Some(DatabaseType::SqlServer)
-                    && column_type.is_some_and(is_sqlserver_unicode_export_type);
-                (index, column, sqlserver_unicode_string)
-            })
-        })
-        .collect::<Vec<_>>();
-    if insert_columns.is_empty() {
+        });
+        if had_insertable_without_exclusion {
+            return Err("No insertable columns remain after excluding columns from the export.".to_string());
+        }
         return Ok(Vec::new());
     }
     let batch_size = if options.database_type.is_some_and(uses_single_row_insert_statements) {
@@ -1354,7 +1387,8 @@ fn is_postgres_bytea_export_column(database_type: Option<DatabaseType>, column_t
 }
 
 pub fn build_export_sql_insert(options: BuildExportSqlInsertOptions) -> Result<String, String> {
-    build_export_insert_statements(options.insert).map(|statements| statements.join("\n"))
+    build_export_insert_statements_excluding(options.insert, &options.exclude_columns)
+        .map(|statements| statements.join("\n"))
 }
 
 pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Result<String, String> {
@@ -3837,18 +3871,20 @@ mod tests {
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
-        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
-        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
-        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        build_export_insert_statements_excluding, build_export_sql_insert, create_database_export_writer,
+        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
+        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
+        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
+        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_extension_ddl,
+        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
         sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension,
-        PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql,
+        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE,
+        DATABASE_EXPORT_ROW_LIMIT,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -4000,6 +4036,7 @@ mod tests {
         TableInfo {
             name: name.to_string(),
             table_type: table_type.to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -5448,6 +5485,78 @@ mod tests {
         .unwrap();
 
         assert_eq!(statements, vec!["INSERT INTO \"public\".\"articles\" (\"id\", \"title\") VALUES (1, 'Hello');"]);
+    }
+
+    #[test]
+    fn sql_insert_export_omits_excluded_columns_and_keeps_values_aligned() {
+        let statements = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                schema: Some("public".to_string()),
+                table_name: Some("users".to_string()),
+                qualified_table_name: None,
+                columns: vec!["id".to_string(), "name".to_string(), "email".to_string()],
+                column_types: vec![Some("integer".to_string()), Some("text".to_string()), Some("text".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1), json!("Ada"), json!("ada@example.com")]],
+                batch_size: Some(10),
+            },
+            &["id".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO \"public\".\"users\" (\"name\", \"email\") VALUES ('Ada', 'ada@example.com');"]
+        );
+    }
+
+    #[test]
+    fn sql_insert_export_reports_error_when_excluding_leaves_no_columns() {
+        let result = build_export_insert_statements_excluding(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                schema: Some("public".to_string()),
+                table_name: Some("user_roles".to_string()),
+                qualified_table_name: None,
+                columns: vec!["user_id".to_string()],
+                column_types: vec![Some("integer".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1)]],
+                batch_size: Some(10),
+            },
+            &["user_id".to_string()],
+        );
+
+        assert_eq!(
+            result.expect_err("excluding every column must fail instead of writing an empty export"),
+            "No insertable columns remain after excluding columns from the export."
+        );
+    }
+
+    #[test]
+    fn build_export_sql_insert_honors_exclude_columns_from_payload() {
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "postgres",
+            "schema": "public",
+            "tableName": "users",
+            "columns": ["id", "name"],
+            "columnTypes": ["integer", "text"],
+            "rows": [[1, "Ada"]],
+            "excludeColumns": ["id"],
+            "batchSize": 10
+        }))
+        .expect("deserialize export insert payload");
+
+        let sql = build_export_sql_insert(options).expect("build export sql insert");
+
+        assert_eq!(sql, "INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');");
     }
 
     #[test]

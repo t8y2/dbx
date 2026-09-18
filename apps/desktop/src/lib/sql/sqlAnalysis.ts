@@ -338,7 +338,10 @@ export function analyzeSelectStructureForDisplay(sql: string): EditableQueryInfo
   const hasWindowClause = findTopLevelKeyword(normalized, "OVER", "SELECT".length) >= 0 || findTopLevelKeyword(normalized, "WINDOW", fromIndex + "FROM".length) >= 0;
   const hasRightJoinClause = hasTopLevelRightJoin(fromBody);
 
-  const selectStar = sources.length === 1 && isSelectStar(selectBody, source.alias);
+  // A bare `*` in a multi-source query expands in source/projection order.
+  // Keep it as a display-only star so joined result columns can still resolve
+  // to their physical metadata without making the query editable.
+  const selectStar = isSelectStar(selectBody, source.alias);
   const columns = selectStar ? [] : parseSelectColumns(selectBody, sources);
   if (!selectStar && columns.length === 0) return null;
   if (sources.length > 1 && columns.some((column) => column.star && !column.sourceKey)) return null;

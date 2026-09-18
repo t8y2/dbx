@@ -269,9 +269,16 @@ pub struct TransactionSession {
     pub pool_key: String,
     pub last_activity: std::time::Instant,
     pub busy: bool,
+    pub snapshot_rotation_safe: bool,
     pub connection_id: String,
     pub database: String,
     pub schema: Option<String>,
+}
+
+impl TransactionSession {
+    pub fn can_rotate_read_only_snapshot(&self, conn: &TxnConnection) -> bool {
+        self.snapshot_rotation_safe && matches!(conn, TxnConnection::Mysql(Some(_)) | TxnConnection::Postgres(_))
+    }
 }
 
 macro_rules! agent_connection_pool_database_type {
@@ -941,6 +948,17 @@ pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
         .is_some_and(|profile| profile.eq_ignore_ascii_case(db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE))
 }
 
+fn metadata_pool_database<'a>(config: Option<&ConnectionConfig>, database: Option<&'a str>) -> Option<&'a str> {
+    if config.is_some_and(sqlserver_uses_legacy_driver) {
+        // The legacy SQL Server Agent switches catalogs on the borrowed JDBC connection for
+        // each metadata request. Reuse the connection-level pool so expanding a database does
+        // not create another physical login session on SQL Server 2000.
+        None
+    } else {
+        database
+    }
+}
+
 pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
     // This mapper handles both AgentManager launch strings and Agent call errors, so context
     // must remain before any structured-error compatibility marker.
@@ -1542,7 +1560,7 @@ impl AppState {
 
     pub async fn external_driver_pool(&self, driver_id: &str, config: &ConnectionConfig) -> Result<PoolKind, String> {
         let env = self.external_driver_runtime_env(driver_id)?;
-        let session = self.plugins.start_driver_session_with_env(driver_id, env).await?;
+        let session = self.plugins.start_driver_session_for_connection(driver_id, env, &config.name).await?;
         let params = serde_json::json!({ "connection": config });
         session
             .invoke_with_timeout::<serde_json::Value>("connect", params, Some(external_driver_connect_timeout(config)))
@@ -2143,9 +2161,14 @@ impl AppState {
         database: Option<&str>,
         client_session_id: Option<&str>,
     ) -> Result<String, String> {
+        let config = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).cloned()
+        };
+        let pool_database = metadata_pool_database(config.as_ref(), database);
         self.get_or_create_pool_for_session_inner(
             connection_id,
-            database,
+            pool_database,
             None,
             client_session_id,
             AgentSessionRole::Metadata,
@@ -4008,7 +4031,12 @@ impl AppState {
         };
         let db_type = config.as_ref().map(|config| config.db_type);
         let catalog = catalog.map(str::trim).filter(|value| !value.is_empty());
-        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, database, catalog, true);
+        let pool_database = if session_role == AgentSessionRole::Metadata {
+            metadata_pool_database(config.as_ref(), database)
+        } else {
+            database
+        };
+        let base_pool_key = base_pool_key_for_with_catalog(db_type, connection_id, pool_database, catalog, true);
         let pool_key = pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, session_role);
         if self.uses_forwarded_transport(connection_id).await {
             self.remove_connection_pools(connection_id).await;
@@ -4024,7 +4052,7 @@ impl AppState {
         }
         self.get_or_create_pool_for_session_inner(
             connection_id,
-            database,
+            pool_database,
             catalog,
             client_session_id,
             session_role,
@@ -4055,8 +4083,13 @@ impl AppState {
         database: Option<&str>,
         client_session_id: &str,
     ) -> Result<bool, String> {
+        let config = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).cloned()
+        };
+        let pool_database = metadata_pool_database(config.as_ref(), database);
         let Some((pool_key, pool)) = self
-            .take_client_session_pool(connection_id, database, client_session_id, AgentSessionRole::Metadata)
+            .take_client_session_pool(connection_id, pool_database, client_session_id, AgentSessionRole::Metadata)
             .await?
         else {
             return Ok(false);
@@ -4107,7 +4140,12 @@ impl AppState {
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_database = if session_role == AgentSessionRole::Metadata {
+            metadata_pool_database(config.as_ref(), database)
+        } else {
+            database
+        };
+        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key.clone(), Some(client_session_id), session_role);
         if pool_key == base_pool_key {
@@ -4146,7 +4184,8 @@ impl AppState {
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_database = metadata_pool_database(config.as_ref(), database);
+        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
         self.detach_pool_by_key(&pool_key, true).await
@@ -4165,7 +4204,8 @@ impl AppState {
             configs.get(connection_id).cloned()
         };
         let db_type = config.as_ref().map(|config| config.db_type);
-        let base_pool_key = base_pool_key_for(db_type, connection_id, database, false);
+        let pool_database = metadata_pool_database(config.as_ref(), database);
+        let base_pool_key = base_pool_key_for(db_type, connection_id, pool_database, false);
         let pool_key =
             pool_key_for_session_role(config.as_ref(), base_pool_key, client_session_id, AgentSessionRole::Metadata);
         if let Some(session_id) = agent_session_id {
@@ -4985,15 +5025,43 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
+        self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         self.pool_routing_control().close_removed(removed).await;
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
+        self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
         self.pool_routing_control().close_removed_in_background(removed);
+    }
+
+    /// Close and roll back every manual-transaction session of a connection
+    /// before its pools are drained. The transaction sessions hold dedicated
+    /// connections outside the pools being removed; without this the session
+    /// map survives a user disconnect with open transactions, and a later
+    /// reconnect/execution could observe or reuse the stale snapshot state.
+    /// Errors are logged and the session is dropped regardless: pool removal
+    /// is already the caller's decision.
+    async fn rollback_manual_transaction_sessions(&self, connection_id: &str) {
+        let sessions: Vec<(String, TransactionSession)> = {
+            let mut map = self.transaction_sessions.write().await;
+            let keys: Vec<String> = map
+                .iter()
+                .filter(|(_, session)| session.connection_id == connection_id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            keys.into_iter().filter_map(|id| map.remove(&id).map(|session| (id, session))).collect()
+        };
+        for (session_id, session) in sessions {
+            let mut conn = session.connection.lock().await;
+            let outcome = crate::query::rollback_manual_txn_connection(&mut conn).await;
+            if let Err(error) = outcome {
+                log::warn!("[connection:manual-txn:rollback-on-disconnect] session={} error={}", session_id, error);
+            }
+        }
     }
 
     pub async fn invalidate_agent_pool_if_current(
@@ -5682,8 +5750,13 @@ fn pool_key_for_session_role(
 ) -> String {
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
     if session_role == AgentSessionRole::Metadata
-        && config.is_some_and(|config| database_capabilities::is_agent_type(&config.db_type))
+        && config.is_some_and(|config| {
+            database_capabilities::is_agent_type(&config.db_type) || sqlserver_uses_legacy_driver(config)
+        })
     {
+        // The legacy SQL Server Agent borrows one connection-level pool for metadata across
+        // databases and switches catalogs per request. The role suffix keeps that shared
+        // pool from colliding with workload pools on the bare connection id.
         format!("{pool_key}:role:metadata")
     } else {
         pool_key
@@ -6136,13 +6209,14 @@ mod tests {
         connection_probe_endpoints, connection_remote_endpoint, connection_url_for_endpoint,
         database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, mysql_metadata_fallback_url,
-        mysql_pool_setup_queries, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        kafka_single_loopback_bootstrap_endpoint, metadata_connection_config, metadata_pool_database,
+        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
+        sqlserver_uses_legacy_driver, task_client_session_id, transport_layers_through_last_ssh,
+        upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe, validate_connection_url_params,
+        validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS,
+        GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -6662,6 +6736,16 @@ mod tests {
         assert_eq!(legacy.driver_profile.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE));
         assert_eq!(legacy.driver_label.as_deref(), Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_LABEL));
         assert!(sqlserver_uses_legacy_driver(&legacy));
+    }
+
+    #[test]
+    fn legacy_sqlserver_metadata_reuses_connection_pool_across_databases() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        let legacy = sqlserver_legacy_agent_config(&config);
+
+        assert_eq!(metadata_pool_database(Some(&legacy), Some("app")), None);
+        assert_eq!(metadata_pool_database(Some(&config), Some("app")), Some("app"));
     }
 
     #[test]
@@ -7889,6 +7973,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_sqlserver_metadata_pool_keys_share_role_isolated_key() {
+        let mut config = mysql_config(Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        let legacy = sqlserver_legacy_agent_config(&config);
+
+        let metadata_key = |database: Option<&str>, client_session_id: Option<&str>| {
+            let pool_database = super::metadata_pool_database(Some(&legacy), database);
+            let base_pool_key = super::base_pool_key_for(Some(legacy.db_type), "conn", pool_database, false);
+            super::pool_key_for_session_role(
+                Some(&legacy),
+                base_pool_key,
+                client_session_id,
+                crate::agent_connection::AgentSessionRole::Metadata,
+            )
+        };
+
+        // Every database resolves to one shared, role-isolated metadata pool key that never
+        // collides with the bare connection-level workload pool.
+        assert_eq!(metadata_key(Some("a"), Some("task:1")), "conn:session:task_1:role:metadata");
+        assert_eq!(metadata_key(Some("b"), Some("task:1")), "conn:session:task_1:role:metadata");
+        assert_eq!(metadata_key(Some("a"), None), "conn:role:metadata");
+        assert_ne!(metadata_key(Some("a"), None), "conn");
+
+        let workload = super::pool_key_for_session_role(
+            Some(&legacy),
+            "conn".to_string(),
+            Some("task:1"),
+            crate::agent_connection::AgentSessionRole::Workload,
+        );
+        assert_eq!(workload, "conn:session:task_1");
+        assert_ne!(metadata_key(Some("a"), Some("task:1")), workload);
+
+        // Without the legacy driver profile the metadata role keeps sharing workload keys.
+        let shared = super::pool_key_for_session_role(
+            Some(&config),
+            "conn".to_string(),
+            Some("task:1"),
+            crate::agent_connection::AgentSessionRole::Metadata,
+        );
+        assert_eq!(shared, "conn:session:task_1");
+    }
+
+    #[test]
     fn redis_sentinel_transport_ids_are_connection_scoped_by_role_and_endpoint() {
         let endpoint = db::redis_driver::RedisNodeEndpoint { host: "10.0.0.8".to_string(), port: 6379 };
 
@@ -8688,6 +8815,51 @@ for line in sys.stdin:
         assert!(state.connections.read().await.contains_key(manual_txn_pool_key));
         assert!(state.pool_activity.read().await.contains_key(manual_txn_pool_key));
         assert!(!runtime.is_failed());
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_sqlserver_metadata_close_finds_role_isolated_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("master"));
+        config.id = "conn".to_string();
+        config.db_type = DatabaseType::SqlServer;
+        let legacy = sqlserver_legacy_agent_config(&config);
+        state.configs.write().await.insert(legacy.id.clone(), legacy.clone());
+
+        let metadata_pool_key = {
+            let pool_database = super::metadata_pool_database(Some(&legacy), Some("a"));
+            let base_pool_key = super::base_pool_key_for(Some(legacy.db_type), "conn", pool_database, false);
+            super::pool_key_for_session_role(
+                Some(&legacy),
+                base_pool_key,
+                Some("metadata-session"),
+                crate::agent_connection::AgentSessionRole::Metadata,
+            )
+        };
+        assert_eq!(metadata_pool_key, "conn:session:metadata-session:role:metadata");
+        let workload_pool_key = "conn".to_string();
+        {
+            let mut connections = state.connections.write().await;
+            connections.insert(metadata_pool_key.clone(), agent_pool_stub());
+            connections.insert(workload_pool_key.clone(), agent_pool_stub());
+        }
+        {
+            let mut activity = state.pool_activity.write().await;
+            activity.insert(metadata_pool_key.clone(), super::PoolActivity::now());
+            activity.insert(workload_pool_key.clone(), super::PoolActivity::now());
+        }
+
+        // Closing through any database resolves the same shared metadata pool and leaves the
+        // connection-level workload pool untouched.
+        assert!(state.close_metadata_session_pool("conn", Some("b"), "metadata-session").await.unwrap());
+
+        assert!(!state.connections.read().await.contains_key(&metadata_pool_key));
+        assert!(!state.pool_activity.read().await.contains_key(&metadata_pool_key));
+        assert!(state.connections.read().await.contains_key(&workload_pool_key));
+        assert!(state.pool_activity.read().await.contains_key(&workload_pool_key));
 
         state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);

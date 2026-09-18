@@ -112,7 +112,7 @@ function buttonWithText(text: string): HTMLButtonElement | undefined {
 }
 
 function downloadButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Retry Download");
+  return buttonWithText("Download in Background") ?? buttonWithText("Retry Download");
 }
 
 function cancelDownloadButton(): HTMLButtonElement | undefined {

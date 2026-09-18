@@ -1,5 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sqlparser::dialect::OracleDialect;
+use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
 use crate::models::connection::DatabaseType;
 use crate::types::ObjectSourceKind;
@@ -225,8 +227,16 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
 
 pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let source = input.source.trim();
+    let terminated_source = if matches!(
+        input.database_type,
+        Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+    ) {
+        ensure_oracle_ddl_terminated(source)
+    } else {
+        ensure_semicolon(source)
+    };
     if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(source) {
-        return ensure_semicolon(source);
+        return terminated_source;
     }
 
     // Backtick-quoting is used for MySQL-family engines and for connections
@@ -248,10 +258,10 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
                 || database_type == DatabaseType::Questdb
         })
     {
-        return format!("CREATE OR REPLACE VIEW {qualified_name} AS\n{}", ensure_semicolon(source));
+        return format!("CREATE OR REPLACE VIEW {qualified_name} AS\n{terminated_source}");
     }
 
-    format!("CREATE VIEW {qualified_name} AS\n{}", ensure_semicolon(source))
+    format!("CREATE VIEW {qualified_name} AS\n{terminated_source}")
 }
 
 pub fn build_export_object_source_sql(
@@ -364,6 +374,23 @@ fn quote_postgres_identifier(value: &str) -> String {
 
 fn quote_mysql_identifier(value: &str) -> String {
     format!("`{}`", value.replace('`', "``"))
+}
+
+pub(crate) fn ensure_oracle_ddl_terminated(sql: &str) -> String {
+    let trimmed = sql.trim_end();
+    if trimmed.trim().is_empty() {
+        return String::new();
+    }
+    if let Ok(tokens) = Tokenizer::new(&OracleDialect {}, trimmed).tokenize() {
+        let last_code = tokens.iter().rev().find(|token| !matches!(token, Token::Whitespace(_)));
+        if matches!(last_code, Some(Token::SemiColon | Token::Div)) {
+            return trimmed.to_string();
+        }
+        if !matches!(tokens.last(), Some(Token::Whitespace(Whitespace::SingleLineComment { .. }))) {
+            return format!("{trimmed};");
+        }
+    }
+    format!("{trimmed}\n;")
 }
 
 fn ensure_semicolon(sql: &str) -> String {
@@ -966,6 +993,22 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oracle_ddl_terminator_respects_quoted_tokens_and_slash_delimiters() {
+        for (source, expected) in [
+            ("SELECT q'[owner's --;]' FROM DUAL -- tail;", "SELECT q'[owner's --;]' FROM DUAL -- tail;\n;"),
+            ("SELECT q'[owner's --;]' FROM DUAL; -- tail;", "SELECT q'[owner's --;]' FROM DUAL; -- tail;"),
+            ("SELECT 1 AS \"名--称\" FROM DUAL -- tail;", "SELECT 1 AS \"名--称\" FROM DUAL -- tail;\n;"),
+            ("SELECT 1 FROM DUAL\n/", "SELECT 1 FROM DUAL\n/"),
+            ("SELECT 1 FROM DUAL;\n/", "SELECT 1 FROM DUAL;\n/"),
+            ("SELECT 1 FROM DUAL\n/\n-- tail;", "SELECT 1 FROM DUAL\n/\n-- tail;"),
+            ("  CREATE TABLE t (id NUMBER);\n", "  CREATE TABLE t (id NUMBER);"),
+            ("  \n", ""),
+        ] {
+            assert_eq!(ensure_oracle_ddl_terminated(source), expected);
+        }
+    }
 
     fn input(database_type: DatabaseType, object_type: ObjectSourceKind, source: &str) -> EditableObjectSourceSqlInput {
         EditableObjectSourceSqlInput {

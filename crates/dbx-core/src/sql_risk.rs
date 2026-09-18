@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     visit_expressions, BinaryOperator, Expr, FromTable, OnConflictAction, OnInsert, Query, SetExpr, SqliteOnConflict,
-    Statement, UnaryOperator, Value,
+    Statement, TableFactor, UnaryOperator, Value, Visit, Visitor,
 };
 use sqlparser::dialect::{
     ClickHouseDialect, DuckDbDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
@@ -86,21 +86,7 @@ fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
         Statement::ExplainTable { .. } => SqlRisk::ReadOnly,
 
         // Show/Describe variants
-        Statement::ShowTables { .. }
-        | Statement::ShowColumns { .. }
-        | Statement::ShowCatalogs { .. }
-        | Statement::ShowDatabases { .. }
-        | Statement::ShowSchemas { .. }
-        | Statement::ShowViews { .. }
-        | Statement::ShowFunctions { .. }
-        | Statement::ShowCreate { .. }
-        | Statement::ShowVariable { .. }
-        | Statement::ShowVariables { .. }
-        | Statement::ShowStatus { .. }
-        | Statement::ShowProcessList { .. }
-        | Statement::ShowCharset(_)
-        | Statement::ShowObjects(_)
-        | Statement::ShowCollation { .. } => SqlRisk::ReadOnly,
+        stmt if is_show_read_only_statement(stmt) => SqlRisk::ReadOnly,
 
         // Write operations
         Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } | Statement::Merge { .. } => {
@@ -139,6 +125,31 @@ fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
         // Catch-all: conservative write classification
         _ => SqlRisk::Write,
     }
+}
+
+/// SHOW/DESCRIBE-style statement variants sqlparser models as reads. Shared by
+/// the risk classifier and the manual-transaction proof (#9018) so the two
+/// cannot drift; unparseable SHOW variants fail closed upstream in the proof
+/// (parse error) and to the keyword fallback in the risk classifier.
+fn is_show_read_only_statement(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::ShowTables { .. }
+            | Statement::ShowColumns { .. }
+            | Statement::ShowCatalogs { .. }
+            | Statement::ShowDatabases { .. }
+            | Statement::ShowSchemas { .. }
+            | Statement::ShowViews { .. }
+            | Statement::ShowFunctions { .. }
+            | Statement::ShowCreate { .. }
+            | Statement::ShowVariable { .. }
+            | Statement::ShowVariables { .. }
+            | Statement::ShowStatus { .. }
+            | Statement::ShowProcessList { .. }
+            | Statement::ShowCharset(_)
+            | Statement::ShowObjects(_)
+            | Statement::ShowCollation { .. }
+    )
 }
 
 fn statement_is_dangerous(stmt: &Statement, detect_select_into: bool) -> bool {
@@ -876,9 +887,470 @@ fn sql_contains_locking_clause(sql: &str, dialect: &dyn sqlparser::dialect::Dial
     false
 }
 
+// ---------------------------------------------------------------------------
+// Strict manual-transaction read-only proof (#9018)
+//
+// Unlike `classify_sql_risk*` (keyword fallback on parse failure may answer
+// ReadOnly), the proof below is fail-closed end to end: the parse must succeed
+// and yield exactly one statement, no write-capable construct may appear, and
+// every called function must be an allowlisted pure builtin. The outcome only
+// drives commit/rollback button visibility in manual transaction mode — it is
+// a heuristic, never a security boundary (PG custom operators/casts and MySQL
+// UDFs can hide arbitrary side effects static syntax cannot see).
+// ---------------------------------------------------------------------------
+
+/// Strict manual-transaction UX proof outcome. UI-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadProof {
+    /// DBX's strict heuristic is satisfied for this statement.
+    ProvenReadOnly,
+    /// Anything unprovable. Buttons stay visible; execution is unaffected.
+    Unproven,
+}
+
+/// Pure built-in functions accepted by the MySQL proof. Fail-closed: a call to
+/// anything not listed (UDFs, session-state setters like `LAST_INSERT_ID(expr)`,
+/// `SLEEP`/`GET_LOCK`, ...) is Unproven. Only ever grows by review.
+const MYSQL_PROOF_SAFE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "ascii",
+    "avg",
+    "bin",
+    "ceiling",
+    "char_length",
+    "character_length",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "conv",
+    "count",
+    "crc32",
+    "curdate",
+    "curtime",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "date_format",
+    "datediff",
+    "dayname",
+    "dayofmonth",
+    "dayofweek",
+    "dayofyear",
+    "exp",
+    "floor",
+    "format",
+    "greatest",
+    "hex",
+    "hour",
+    "if",
+    "ifnull",
+    "inet_aton",
+    "inet_ntoa",
+    "instr",
+    "isnull",
+    "json_extract",
+    "json_length",
+    "json_unquote",
+    "json_valid",
+    "last_day",
+    "lcase",
+    "least",
+    "left",
+    "length",
+    "ln",
+    "locate",
+    "log",
+    "log10",
+    "log2",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "md5",
+    "microsecond",
+    "min",
+    "minute",
+    "mod",
+    "month",
+    "monthname",
+    "now",
+    "nullif",
+    "oct",
+    "ord",
+    "position",
+    "pow",
+    "power",
+    "quarter",
+    "rand",
+    "repeat",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rpad",
+    "rtrim",
+    "second",
+    "sha",
+    "sha1",
+    "sha2",
+    "sign",
+    "space",
+    "sqrt",
+    "str_to_date",
+    "substring",
+    "substr",
+    "time_format",
+    "timediff",
+    "timestampadd",
+    "timestampdiff",
+    "truncate",
+    "unhex",
+    "unix_timestamp",
+    "upper",
+    "ucase",
+    "utc_date",
+    "utc_time",
+    "utc_timestamp",
+    "uuid",
+    "week",
+    "weekday",
+    "year",
+];
+
+/// Pure built-in functions accepted by the PostgreSQL proof. Same contract as
+/// `MYSQL_PROOF_SAFE_FUNCTIONS`; sequence mutators/readers (`nextval`/`setval`),
+/// `pg_sleep`, advisory-lock and large-object functions are deliberately absent.
+const POSTGRES_PROOF_SAFE_FUNCTIONS: &[&str] = &[
+    "abs",
+    "age",
+    "array_agg",
+    "array_length",
+    "ascii",
+    "avg",
+    "btrim",
+    "cardinality",
+    "ceil",
+    "ceiling",
+    "char_length",
+    "character_length",
+    "chr",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "count",
+    "current_catalog",
+    "current_date",
+    "current_schema",
+    "current_setting",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "date_part",
+    "date_trunc",
+    "decode",
+    "div",
+    "encode",
+    "every",
+    "exp",
+    "floor",
+    "format",
+    "gen_random_uuid",
+    "greatest",
+    "left",
+    "length",
+    "localtime",
+    "localtimestamp",
+    "log",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "md5",
+    "min",
+    "mod",
+    "now",
+    "nullif",
+    "position",
+    "power",
+    "repeat",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rpad",
+    "rtrim",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "sign",
+    "split_part",
+    "sqrt",
+    "starts_with",
+    "strpos",
+    "string_agg",
+    "substr",
+    "substring",
+    "to_char",
+    "to_date",
+    "to_hex",
+    "to_number",
+    "to_timestamp",
+    "trunc",
+    "unnest",
+    "upper",
+    "version",
+];
+
+/// Prove that a single SQL statement is, by DBX's strict heuristic, an
+/// ordinary read. Only MySQL/PostgreSQL take part in this proof; every other
+/// database type is Unproven so its manual-transaction toolbar keeps the
+/// legacy behavior. Oracle keeps its own lexical classifier
+/// (`is_oracle_proven_read_only_statement`) — do not reroute it here.
+pub fn prove_read_only_for_database(sql: &str, database_type: DatabaseType) -> ReadProof {
+    match database_type {
+        DatabaseType::Mysql => prove_read_only_statement(sql, "mysql", MYSQL_PROOF_SAFE_FUNCTIONS),
+        DatabaseType::Postgres => prove_read_only_statement(sql, "postgres", POSTGRES_PROOF_SAFE_FUNCTIONS),
+        _ => ReadProof::Unproven,
+    }
+}
+
+fn prove_read_only_statement(sql: &str, dialect: &str, allowed_functions: &[&str]) -> ReadProof {
+    let database_type = if dialect == "mysql" { DatabaseType::Mysql } else { DatabaseType::Postgres };
+    // Lexical rejections that must not depend on parser support: dialect-specific
+    // write syntax (executable comments, INTO OUTFILE/DUMPFILE, PostgreSQL
+    // SELECT INTO) and MySQL session writes the parser models inconsistently
+    // (SELECT @a := 1, SELECT ... INTO @var — INTO may sit in several positions).
+    // `supports_select_into_table_creation` is deliberately NOT reused here: it
+    // answers "SELECT INTO table creation" risk and excludes MySQL on purpose,
+    // while the proof must reject any INTO target as session state.
+    let cleaned = crate::query_execution_sql::strip_sql_comments_and_literals(sql);
+    if cleaned.trim().is_empty() || crate::query_execution_sql::has_dialect_specific_write(sql, database_type) {
+        return ReadProof::Unproven;
+    }
+    let parser_dialect = resolve_dialect(dialect);
+    if dialect == "mysql"
+        && (cleaned.contains(":=")
+            || crate::query_execution_sql::contains_unquoted_keyword(&cleaned, parser_dialect.as_ref(), "INTO"))
+    {
+        return ReadProof::Unproven;
+    }
+    // The strict proof has NO keyword fallback: parse failure is Unproven, and
+    // the API stays fail-closed even for callers that skipped pre-splitting.
+    let Ok(statements) = Parser::parse_sql(parser_dialect.as_ref(), sql) else {
+        return ReadProof::Unproven;
+    };
+    let [statement] = statements.as_slice() else {
+        return ReadProof::Unproven;
+    };
+    prove_statement(statement, allowed_functions)
+}
+
+fn prove_statement(statement: &Statement, allowed_functions: &[&str]) -> ReadProof {
+    match statement {
+        Statement::Query(query) => {
+            // Reuses the risk engine's structural walk: writable CTEs, DML set
+            // branches, locking clauses, SELECT INTO and denylisted side-effect
+            // functions. detect_select_into is always true — a proof is about a
+            // clean session, not table-creation risk.
+            if query_is_write_capable(query, true) {
+                return ReadProof::Unproven;
+            }
+            let mut visitor = ProofFunctionVisitor { allowed_functions, rejected: false };
+            let _ = query.visit(&mut visitor);
+            if visitor.rejected {
+                ReadProof::Unproven
+            } else {
+                ReadProof::ProvenReadOnly
+            }
+        }
+        // Plain EXPLAIN never executes the statement; EXPLAIN ANALYZE does.
+        Statement::Explain { analyze: false, statement, .. } => prove_statement(statement, allowed_functions),
+        Statement::Explain { .. } => ReadProof::Unproven,
+        // MySQL `DESC t` / `DESCRIBE t`.
+        Statement::ExplainTable { .. } => ReadProof::ProvenReadOnly,
+        statement if is_show_read_only_statement(statement) => ReadProof::ProvenReadOnly,
+        _ => ReadProof::Unproven,
+    }
+}
+
+/// Full-statement allowlist scan. Deliberately uses the `visitor`-feature walk
+/// (covers CTE bodies, FROM subqueries, LATERAL derived tables and ORDER BY
+/// expressions) instead of `visit_expressions`, which skips FROM subqueries.
+/// Window functions and table functions (`FROM generate_series(...)`) are
+/// rejected outright in v1 — fail-closed, relaxed only by review.
+struct ProofFunctionVisitor<'a> {
+    allowed_functions: &'a [&'a str],
+    rejected: bool,
+}
+
+impl Visitor for ProofFunctionVisitor<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        if let Expr::Function(function) = expr {
+            if function.over.is_some() {
+                self.rejected = true;
+                return ControlFlow::Break(());
+            }
+            let parts = &function.name.0;
+            let allowed = parts.len() == 1
+                && parts.last().and_then(|part| part.as_ident()).is_some_and(|ident| {
+                    self.allowed_functions.iter().any(|candidate| ident.value.eq_ignore_ascii_case(candidate))
+                });
+            if !allowed {
+                self.rejected = true;
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, table_factor: &TableFactor) -> ControlFlow<()> {
+        if let TableFactor::Table { args: Some(_), .. } = table_factor {
+            self.rejected = true;
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_proof_accepts_plain_reads_and_allowlisted_functions() {
+        for sql in [
+            "SELECT * FROM users",
+            "SELECT COUNT(*) FROM orders",
+            "SELECT id, name FROM users WHERE id IN (1, 2, 3)",
+            "SELECT id, name FROM users WHERE id IN (SELECT user_id FROM roles) ORDER BY created_at LIMIT 10",
+            "SELECT 'update' FROM t",
+            "SELECT a FROM t UNION ALL SELECT b FROM u",
+            "WITH totals AS (SELECT COUNT(*) AS n FROM orders) SELECT n FROM totals",
+            "SELECT CONCAT(first_name, ' ', last_name) AS full_name FROM users",
+            "SELECT id FROM users ORDER BY rand() LIMIT 1",
+            "SHOW TABLES",
+            "SHOW CREATE TABLE users",
+            "EXPLAIN SELECT * FROM users",
+            "DESC users",
+            "DESCRIBE users",
+            "-- only a comment header\nSELECT id FROM users",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Mysql),
+                ReadProof::ProvenReadOnly,
+                "expected proven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_proof_rejects_session_writes_locking_and_unknown_functions() {
+        for sql in [
+            "SELECT @a := 1",
+            "SELECT 1 INTO @current_id",
+            "SELECT id FROM users INTO @current_id LIMIT 1",
+            "SELECT * FROM users INTO OUTFILE '/tmp/x'",
+            "SELECT * FROM users FOR UPDATE",
+            "SELECT * FROM users FOR SHARE",
+            "SELECT * FROM users LOCK IN SHARE MODE",
+            "SELECT SLEEP(10)",
+            "SELECT GET_LOCK('x', 1)",
+            "SELECT LAST_INSERT_ID()",
+            "SELECT my_custom_udf(1)",
+            "SELECT secret_schema.fn(1) FROM t",
+            "SELECT id FROM users WHERE EXISTS (SELECT SLEEP(1))",
+            "WITH x AS (SELECT SLEEP(1)) SELECT 1",
+            "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM users",
+            "SELECT id FROM users; SELECT 1",
+            "EXPLAIN ANALYZE SELECT * FROM users",
+            "SELEC * FORM users",
+            "SET autocommit = 1",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Mysql),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_proof_accepts_plain_reads_and_rejects_side_effects() {
+        for sql in [
+            "SELECT * FROM users",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "SELECT * FROM t WHERE id IN (SELECT id FROM u)",
+            "SELECT coalesce(a, b) FROM t",
+            "SELECT split_part(email, '@', 2) FROM users",
+            "EXPLAIN SELECT 1",
+            "SELECT 1",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Postgres),
+                ReadProof::ProvenReadOnly,
+                "expected proven: {sql}"
+            );
+        }
+        for sql in [
+            "WITH w AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM w",
+            "SELECT * INTO new_t FROM t",
+            "SELECT * FROM t FOR UPDATE",
+            // FOR SHARE parses into query.locks like FOR UPDATE; the other two
+            // PG lock strengths (FOR NO KEY UPDATE / FOR KEY SHARE) fail the
+            // parse itself in sqlparser 0.62 and stay Unproven fail-closed.
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * FROM t FOR NO KEY UPDATE",
+            "SELECT * FROM t FOR KEY SHARE",
+            "SELECT nextval('seq')",
+            "SELECT setval('seq', 1)",
+            "SELECT pg_sleep(1)",
+            "SELECT lo_import('/etc/passwd')",
+            "EXPLAIN ANALYZE SELECT 1",
+            "SELECT my_udf()",
+            "SELECT id, row_number() OVER () FROM t",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Postgres),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn proof_visitor_covers_from_subqueries_ctes_lateral_and_order_by() {
+        // visit_expressions skips FROM subqueries; the proof's visitor must not.
+        for sql in [
+            "SELECT * FROM (SELECT SLEEP(1)) AS x",
+            "SELECT * FROM t ORDER BY SLEEP(1)",
+            "SELECT a FROM t, LATERAL (SELECT my_udf() FROM u) d",
+            "SELECT * FROM generate_series(1, 10)",
+        ] {
+            assert_eq!(
+                prove_read_only_for_database(sql, DatabaseType::Postgres),
+                ReadProof::Unproven,
+                "expected unproven: {sql}"
+            );
+        }
+        assert_eq!(
+            prove_read_only_for_database("SELECT * FROM (SELECT 1) AS x ORDER BY md5(id)", DatabaseType::Postgres),
+            ReadProof::ProvenReadOnly
+        );
+    }
+
+    #[test]
+    fn proof_only_applies_to_enabled_dialects() {
+        // Oracle keeps its own lexical classifier; the gate in query.rs must
+        // never route it through the generic proof.
+        assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Oracle), ReadProof::Unproven);
+        // Family members without manual-transaction UI stay unproven in v1.
+        assert_eq!(prove_read_only_for_database("SELECT 1", DatabaseType::Doris), ReadProof::Unproven);
+    }
 
     #[test]
     fn classify_select_statements() {

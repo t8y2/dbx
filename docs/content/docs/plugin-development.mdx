@@ -152,6 +152,51 @@ Field types are `text`, `password`, `number`, `boolean`, `select`, `radio`, and 
 
 Fields require `key`, `label`, and `type`; optional fields are `description`, `placeholder`, `required`, `default`, `options`, and `binding`. Defaults must match the field type. A password field without an explicit binding defaults to `secret`. `database_type` is a plugin-defined identifier, not an extension to DBX's built-in database enum.
 
+Fields can also be conditional. `visible_when` and `required_when` take a clause `{ "field": "mode", "one_of": ["custom"] }` — matching when the sibling holds one of the listed values, compared as strings so `[false]` and `["false"]` both match a boolean `false` — and compose clauses with `all_of`, `any_of`, and `not`:
+
+```json
+{
+  "key": "sudo_command",
+  "label": "Sudo command",
+  "type": "text",
+  "visible_when": {
+    "all_of": [
+      { "field": "sudo_source", "one_of": ["custom"] },
+      { "field": "read_only", "one_of": [false] }
+    ]
+  }
+}
+```
+
+Conditions cascade: while the field a clause reads is hidden, the clause does not count, so a hidden option's stored default never surfaces a grandchild field. DBX evaluates the same expression for the dialog and for save/test/connect validation, an unset or empty value never matches, and composite trees are capped at 8 levels and 64 nodes.
+
+Text, password, and textarea fields can offer a **local file action** — for example an SSH private key or a keystore — with `picker`:
+
+```json
+{
+  "key": "private_key_path",
+  "label": "Private key path",
+  "type": "text",
+  "binding": "config",
+  "picker": { "kind": "file", "accept": [".pem", ".key"], "content_field": "private_key" }
+}
+```
+
+The desktop app opens a native picker and stores the chosen absolute path, which the plugin backend (same machine) can read. The browser build cannot resolve a client path, so the action becomes an upload: DBX reads the file and stores its content in the declared `content_field` sibling, and clears the path field — picking a path clears the uploaded content and vice versa, so the two alternatives never disagree. `kind` also accepts `directory` (desktop only), `accept` takes up to 16 extension or MIME filters, and uploads are capped at 1 MiB.
+
+When a plugin needs the user mid-flight — a bastion's keyboard-interactive MFA code, a host-key confirmation, a choice of account — it can call the Host API method `host/requestUserInput` (Host API 1.1) and receive the typed answer. The request goes through the same blocking dialog DBX uses for its own prompts, including during `connection/test` and `connection/connect`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "prompt-1",
+  "method": "host/requestUserInput",
+  "params": { "prompt": "Verification code (6 digits)", "title": "JumpServer login", "echo": false, "timeoutSecs": 300 }
+}
+```
+
+The result is `{ "action": "submit", "value": "123456" }`, `{ "action": "cancel" }`, or `{ "action": "timeout" }`; only `submit` carries a value and the plugin must fail closed on the other two. Plugin-initiated requests use string ids while DBX keeps numeric ids, and DBX pauses the request deadline of the call waiting on a prompt, so a user typing a code is not mistaken for a connect timeout. An error code of `-32001` means no user interface is attached (headless/MCP), `-32602` invalid params, `-32601` unsupported method — degrade gracefully in every case. Gate the call on `plugin/initialize` advertising `hostApiVersion` `1.1.0` (or `host.requestUserInput` in `host.features`). With the Rust SDK that is `HostClient::supports("host/requestUserInput")` plus `HostClient::request_user_input(&UserInputPrompt::secret("Verification code"))` from `dbx_plugin_sdk::host_client()`.
+
 The fixed lifecycle methods are `connection/test`, `connection/connect`, and `connection/disconnect`; custom form actions use `connection/action`. Parameters include `provider`, `connection`, and `runtime`, plus `action: { id }` for actions. Keep sessions keyed by `connection.id` and connect to `runtime.host`/`runtime.port`, which include DBX tunnel/proxy resolution. Hydrated secrets are provided only to backend lifecycle requests; the frontend uses `connectionId` to access an established session.
 
 Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`, `outline`, `secondary`, `destructive`, or `ghost`; `timeout_ms` is 1–120000. `requires_valid_form` requires a complete form and `close_on_success` closes the dialog on success. Return `{ "success": true, "message": "...", "fieldValues": { "port": 443 } }` to update declared fields; `success: false` is a failure.

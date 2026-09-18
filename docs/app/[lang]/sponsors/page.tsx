@@ -156,12 +156,13 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
   ];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={locale} active="sponsors" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">
-        <h1 className="text-4xl font-[820] tracking-tight">{t.title}</h1>
-        <p className="mt-3 max-w-[700px] text-landing-muted text-lg leading-relaxed">{t.desc}</p>
+        {/* 视觉隐藏：页面不再展示大标题，但保留语义 landmark 与 SEO */}
+        <h1 className="sr-only">{t.title}</h1>
+        <p className="mx-auto max-w-[700px] text-center text-landing-muted text-lg leading-relaxed">{t.desc}</p>
 
         <h2 className="mt-10 text-2xl font-[760]">{t.sponsorsTitle}</h2>
         <div className="mt-5 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">

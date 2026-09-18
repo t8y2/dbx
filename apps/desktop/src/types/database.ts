@@ -21,12 +21,22 @@ export interface SqlSnippet {
   enabled?: boolean;
 }
 
+export type SqlShortcutKind = "template" | "select-limit";
+
 export interface SqlShortcutAction {
   id: string;
   label: string;
   shortcut: string;
   sql: string;
   enabled?: boolean;
+  /** Empty / omitted = all databases. Non-empty = only these DatabaseType values. */
+  databaseTypes?: DatabaseType[];
+  /** Per-database SQL overrides for custom templates; missing keys fall back to `sql`. */
+  sqlByDatabaseType?: Partial<Record<DatabaseType, string>>;
+  /** `select-limit` builds dialect-aware SELECT * … LIMIT/TOP/ROWNUM at run time (built-in only). */
+  kind?: SqlShortcutKind;
+  /** Row count for `select-limit` (default 10). Ignored for plain templates. */
+  limit?: number;
 }
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
@@ -285,12 +295,52 @@ export interface PluginFormFieldOption {
   value: string;
 }
 
-export interface PluginFieldCondition {
-  /** Key of another plugin form field whose current value drives the condition. */
+/** A literal a `one_of` clause may list; compared by canonical string form. */
+export type PluginFieldConditionLiteral = string | number | boolean;
+
+/** Legacy single-field clause: `{ field, one_of }`. */
+export interface PluginFieldConditionClause {
+  /** Key of another plugin form field whose current value drives the clause. */
   field: string;
-  /** The condition matches when the referenced field's value is in this list. */
-  one_of: string[];
+  /** The clause matches when the referenced field's value is in this list. */
+  one_of: PluginFieldConditionLiteral[];
 }
+
+/** Every nested condition must match. */
+export interface PluginFieldConditionAllOf {
+  all_of: PluginFieldCondition[];
+}
+
+/** At least one nested condition must match. */
+export interface PluginFieldConditionAnyOf {
+  any_of: PluginFieldCondition[];
+}
+
+/** Inverts the nested condition. */
+export interface PluginFieldConditionNot {
+  not: PluginFieldCondition;
+}
+
+/** Host API 1.1: local-file action on a plugin connection field. */
+export interface PluginFormFieldPicker {
+  /** `directory` is desktop-only. */
+  kind: "file" | "directory";
+  /** Extensions (`.pem`) or MIME types (`text/plain`) offered by the picker. */
+  accept?: string[];
+  /**
+   * Declared sibling field that receives the file content on hosts without a
+   * client filesystem (the browser build). Desktop hosts store the chosen path
+   * in the declaring field and clear this one instead.
+   */
+  content_field?: string;
+}
+
+/**
+ * `visible_when` / `required_when` expression. The legacy `{ field, one_of }`
+ * clause keeps its exact meaning; `all_of` / `any_of` / `not` compose clauses
+ * (e.g. `sudo_source = custom AND read_only = false`).
+ */
+export type PluginFieldCondition = PluginFieldConditionClause | PluginFieldConditionAllOf | PluginFieldConditionAnyOf | PluginFieldConditionNot;
 
 export interface PluginFormField {
   key: string;
@@ -299,11 +349,15 @@ export interface PluginFormField {
   description?: string;
   placeholder?: string;
   required?: boolean;
-  default?: PluginFormFieldValue;
+  /** Declared default. Hosts older than the manifest serialization fix send
+   * `null` for "no default", which the form treats as unset. */
+  default?: PluginFormFieldValue | null;
   options?: PluginFormFieldOption[];
   /** Plugin method returning `{ options: [{ value, label }] }` for dynamic
    * select rendering; falls back to the declared type when unavailable. */
   options_action?: string;
+  /** Host API 1.1: offer a local-file action on this field. */
+  picker?: PluginFormFieldPicker;
   binding?: PluginFormFieldBinding;
   visible_when?: PluginFieldCondition;
   required_when?: PluginFieldCondition;
@@ -735,6 +789,8 @@ export interface CatalogInfo {
 export interface TableInfo {
   name: string;
   table_type: string;
+  /** Optional validity populated by status-aware object loaders. */
+  valid?: boolean | null;
   comment?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
@@ -1029,12 +1085,13 @@ export interface QueryResult {
   execution_error?: true;
   /** Set only for SQL Server informational messages emitted by the backend. */
   server_message?: true;
-  /** Oracle-only manual-transaction UX marker: set on a manual-transaction result
-   *  whose statement DBX proved to be an ordinary top-level read. Absent for
-   *  every non-Oracle execution and every unproven Oracle statement. */
+  /** Manual-transaction UX marker for sticky proven-read-only dialects (Oracle,
+   *  OceanBase-Oracle, MySQL, PostgreSQL): set on a manual-transaction result
+   *  whose statement DBX proved to be an ordinary read by that dialect's strict
+   *  heuristic. Absent for unproven statements and non-participating dialects. */
   manual_transaction_proven_read_only?: true;
-  /** Oracle-only manual-transaction UX marker: set on the synthetic successful
-   *  result of an empty/whitespace/comments-only manual script. */
+  /** Manual-transaction UX marker for the same dialects: set on the synthetic
+   *  successful result of an empty/whitespace/comments-only manual script. */
   manual_transaction_no_statement?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
@@ -1442,6 +1499,9 @@ export interface TableStructureEditorDraft {
   activeTab: TableInfoTab;
   /** DDL as loaded from the database — the baseline `ddlDraft` is compared against. */
   ddlContent?: string;
+  /** Original DDL and display preference retained so restoring a draft cannot change its baseline. */
+  rawDdlContent?: string;
+  excludeDdlStorage?: boolean;
   /** Edited DDL script, or null/undefined when the DDL tab was left untouched. */
   ddlDraft?: string | null;
   newTableName: string;
@@ -1826,10 +1886,11 @@ export interface QueryTab {
   txnSessionId?: string;
   /** Set to true when a manual transaction was auto-rolled back due to inactivity */
   txnAutoRolledBack?: boolean;
-  /** Oracle-only, non-persisted: whether the current manual Oracle session has
-   *  executed at least one statement DBX cannot prove read-only. Commit/Rollback
-   *  actions are hidden while a session is clean. Never cleared by a later read. */
-  oracleTxnPossiblyDirty?: boolean;
+  /** Sticky proven-read-only dialects (Oracle/OceanBase-Oracle/MySQL/PostgreSQL),
+   *  not persisted: whether the current manual session has executed at least one
+   *  statement DBX cannot prove read-only. Commit/Rollback actions are hidden
+   *  while a session is clean. Never cleared by a later read. */
+  txnPossiblyDirty?: boolean;
 }
 
 export interface SavedSqlFolder {

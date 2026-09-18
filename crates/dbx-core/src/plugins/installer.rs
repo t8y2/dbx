@@ -12,7 +12,8 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{InstalledPlugin, InstalledPluginInfo, PluginManifest};
+use super::lifecycle::PluginUsageGuard;
+use super::{InstalledPlugin, InstalledPluginInfo, PluginLifecycle, PluginManifest};
 
 pub const DBXP_EXTENSION: &str = "dbxp";
 pub const PLUGIN_CHECKSUMS_FILE: &str = "checksums.json";
@@ -48,12 +49,14 @@ pub struct PluginInstallResult {
     pub previous_version: Option<String>,
     pub package_sha256: String,
     pub signature: PluginSignatureStatus,
+    _update_guard: Option<PluginUsageGuard>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PluginRollbackResult {
     pub plugin: InstalledPlugin,
     pub previous_version: String,
+    _update_guard: Option<PluginUsageGuard>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +138,7 @@ pub struct PluginPackageInstaller {
     root_dir: PathBuf,
     app_version: String,
     trust_store: Arc<PluginTrustStore>,
+    lifecycle: Option<PluginLifecycle>,
 }
 
 #[derive(Debug, Clone)]
@@ -255,12 +259,17 @@ fn read_trust_document(root_dir: &Path) -> Result<PluginTrustDocument, String> {
 
 impl PluginPackageInstaller {
     pub fn new(root_dir: PathBuf, app_version: impl Into<String>) -> Result<Self, String> {
-        let trust_store = PluginTrustStore::load(&root_dir)?;
-        Ok(Self { root_dir, app_version: app_version.into(), trust_store: Arc::new(trust_store) })
+        let trust_store = super::marketplace::package_install_trust_store(&root_dir)?;
+        Ok(Self { root_dir, app_version: app_version.into(), trust_store: Arc::new(trust_store), lifecycle: None })
     }
 
     pub fn with_trust_store(root_dir: PathBuf, app_version: impl Into<String>, trust_store: PluginTrustStore) -> Self {
-        Self { root_dir, app_version: app_version.into(), trust_store: Arc::new(trust_store) }
+        Self { root_dir, app_version: app_version.into(), trust_store: Arc::new(trust_store), lifecycle: None }
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: PluginLifecycle) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
     }
 
     pub fn install_file(
@@ -374,25 +383,43 @@ impl PluginPackageInstaller {
         }
         make_backend_executable(&compatibility.backend_executable)?;
 
+        let update_guard = self.lifecycle.as_ref().map(|lifecycle| lifecycle.begin_update(&manifest.id)).transpose()?;
         let container_dir = self.root_dir.join(&manifest.id);
         migrate_legacy_container(&container_dir)?;
         let versions_dir = container_dir.join(VERSIONS_DIR);
         let activations_dir = container_dir.join(ACTIVATIONS_DIR);
         std::fs::create_dir_all(&versions_dir).map_err(|error| error.to_string())?;
         std::fs::create_dir_all(&activations_dir).map_err(|error| error.to_string())?;
-        let version_dir = versions_dir.join(version.to_string());
-        if version_dir.exists() && !matches!(policy, PluginInstallPolicy::LocalDevelopment) {
+        let version_string = version.to_string();
+        let version_dir = versions_dir.join(&version_string);
+        let current = read_latest_activation(&container_dir)?;
+        // Only the version the newest activation record resolves to *and* that is still a usable
+        // install counts as "already installed". Directory existence alone is not enough: rollback
+        // deliberately retains the version it replaces as the next rollback target, so an
+        // installed-but-inactive directory has to stay replaceable, and a broken active directory
+        // (missing or unparsable manifest) has to stay replaceable so Update can repair it.
+        if !matches!(policy, PluginInstallPolicy::LocalDevelopment)
+            && version_dir.exists()
+            && current.as_ref().is_some_and(|record| record.version == version_string)
+            && version_dir_is_usable(&version_dir, &manifest.id, &version_string)
+        {
             return Err(format!("Plugin '{}' version {} is already installed", manifest.id, version));
         }
-        let current = read_latest_activation(&container_dir)?;
-        let version_string = version.to_string();
-        let previous_version = current.as_ref().and_then(|record| {
-            if record.version == version_string {
-                record.previous_version.clone()
-            } else {
-                Some(record.version.clone())
-            }
-        });
+        let previous_version = current
+            .as_ref()
+            .and_then(|record| {
+                if record.version == version_string {
+                    record.previous_version.clone()
+                } else {
+                    Some(record.version.clone())
+                }
+            })
+            // Never record a rollback target that cannot be rolled back to: `rollback_locked`
+            // requires versions/<version>/manifest.json to have the matching identity.
+            .filter(|previous| {
+                previous != &version_string
+                    && version_dir_is_usable(&versions_dir.join(previous), &manifest.id, previous)
+            });
         let replaced_version_dir = if version_dir.exists() {
             let mut backup = versions_dir.join(format!(".{version_string}.replaced"));
             let mut suffix = 0u32;
@@ -408,10 +435,13 @@ impl PluginPackageInstaller {
             None
         };
         if let Err(error) = std::fs::rename(&package_dir, &version_dir) {
+            let mut message = format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version);
             if let Some(backup) = &replaced_version_dir {
-                let _ = std::fs::rename(backup, &version_dir);
+                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                    message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
+                }
             }
-            return Err(format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version));
+            return Err(message);
         }
 
         let activation = PluginActivationRecord {
@@ -423,10 +453,13 @@ impl PluginPackageInstaller {
         };
         if let Err(error) = write_activation_record(&container_dir, &activation) {
             let _ = std::fs::remove_dir_all(&version_dir);
+            let mut message = error;
             if let Some(backup) = &replaced_version_dir {
-                let _ = std::fs::rename(backup, &version_dir);
+                if let Err(restore) = std::fs::rename(backup, &version_dir) {
+                    message.push_str(&format!("; previous copy kept at {}: {restore}", backup.display()));
+                }
             }
-            return Err(error);
+            return Err(message);
         }
         if let Some(backup) = replaced_version_dir {
             if let Err(error) = std::fs::remove_dir_all(backup) {
@@ -437,10 +470,11 @@ impl PluginPackageInstaller {
             log::warn!("Failed to prune plugin '{}' install history: {error}", manifest.id);
         }
         let plugin = InstalledPlugin::new(manifest, version_dir, &self.app_version);
-        Ok(PluginInstallResult { plugin, previous_version, package_sha256, signature })
+        Ok(PluginInstallResult { plugin, previous_version, package_sha256, signature, _update_guard: update_guard })
     }
 
     fn rollback_locked(&self, plugin_id: &str) -> Result<PluginRollbackResult, String> {
+        let update_guard = self.lifecycle.as_ref().map(|lifecycle| lifecycle.begin_update(plugin_id)).transpose()?;
         let container_dir = self.root_dir.join(plugin_id);
         let current = read_latest_activation(&container_dir)?
             .ok_or_else(|| format!("Plugin '{plugin_id}' does not have an active version"))?;
@@ -478,8 +512,33 @@ impl PluginPackageInstaller {
         if let Err(error) = prune_plugin_history(&container_dir, &activation) {
             log::warn!("Failed to prune plugin '{plugin_id}' rollback history: {error}");
         }
-        Ok(PluginRollbackResult { plugin, previous_version })
+        Ok(PluginRollbackResult { plugin, previous_version, _update_guard: update_guard })
     }
+}
+
+/// `migrate_legacy_container` stores a migrated flat container under a synthetic
+/// `0.0.0-legacy.<hash>` directory name while the manifest inside keeps its original version string, so
+/// for those directories the name carries no version identity to compare against. Treating them as
+/// unusable would drop them from `previous_version` and let `prune_plugin_history` delete the only copy
+/// of that version. The plugin id check still applies to them: only the version identity is synthetic.
+const LEGACY_STORAGE_VERSION_PREFIX: &str = "0.0.0-legacy.";
+
+fn is_legacy_storage_version(version: &str) -> bool {
+    version
+        .strip_prefix(LEGACY_STORAGE_VERSION_PREFIX)
+        .is_some_and(|suffix| suffix.len() == 12 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// True when `versions/<version>` has the manifest identity that this store location advertises.
+/// `rollback_locked` rejects a parsed manifest whose id or version differs, so the installer must
+/// not retain it as an active install or as a rollback target either. Legacy containers are the one
+/// exception: their directory name is synthetic, so only the plugin id is checked against them.
+fn version_dir_is_usable(version_dir: &Path, plugin_id: &str, version: &str) -> bool {
+    std::fs::read(version_dir.join("manifest.json")).is_ok_and(|raw| {
+        serde_json::from_slice::<PluginManifest>(&raw).is_ok_and(|manifest| {
+            manifest.id == plugin_id && (manifest.version == version || is_legacy_storage_version(version))
+        })
+    })
 }
 
 pub(super) fn resolve_active_plugin_dir(container_dir: &Path) -> Result<Option<PathBuf>, String> {
@@ -958,6 +1017,7 @@ fn sync_directory(_path: &Path) -> Result<(), String> {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Cursor, Write};
+    use std::path::Path;
 
     use base64::Engine;
     use ed25519_dalek::{Signer, SigningKey};
@@ -969,6 +1029,94 @@ mod tests {
         PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE, VERSIONS_DIR,
     };
     use crate::plugins::{PluginManifest, PluginRegistry};
+
+    #[test]
+    fn runtime_updates_and_rollbacks_preserve_active_connections_and_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        let lifecycle = registry.lifecycle();
+        let installer =
+            PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", PluginTrustStore::default())
+                .with_lifecycle(lifecycle.clone());
+        let first = package("1.0.0", None, false);
+        let second = package("1.1.0", None, false);
+        installer.install_bytes(&first, PluginInstallPolicy::LocalDevelopment).unwrap();
+        let connection = lifecycle.begin_connection("sample.hello", "My connection").unwrap();
+        for bytes in [&first, &second] {
+            let error = installer.install_bytes(bytes, PluginInstallPolicy::LocalDevelopment).unwrap_err();
+            assert!(error.contains("My connection"));
+            assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+        }
+        assert!(!root.path().join("sample.hello/versions/1.1.0").exists());
+        drop(connection);
+
+        let unrelated = lifecycle.begin_connection("other.plugin", "Unrelated connection").unwrap();
+        let installed = installer.install_bytes(&second, PluginInstallPolicy::LocalDevelopment).unwrap();
+        assert!(lifecycle.begin_connection("sample.hello", "New connection").is_err());
+        assert!(lifecycle.begin_operation("sample.hello").is_err());
+        drop(installed);
+        let connection = lifecycle.begin_connection("sample.hello", "My connection").unwrap();
+        assert!(installer.rollback("sample.hello").unwrap_err().contains("My connection"));
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
+        drop(connection);
+        let rollback = installer.rollback("sample.hello").unwrap();
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+        assert!(lifecycle.begin_operation("sample.hello").is_err());
+        drop(rollback);
+        assert!(lifecycle.begin_connection("sample.hello", "Reconnected").is_ok());
+        drop(unrelated);
+    }
+
+    #[test]
+    fn runtime_install_file_and_signed_packages_share_the_update_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        let lifecycle = registry.lifecycle();
+        let signer = SigningKey::from_bytes(&[23; 32]);
+        let trust = PluginTrustStore::from_base64_keys(BTreeMap::from([(
+            "test".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(signer.verifying_key().as_bytes()),
+        )]))
+        .unwrap();
+        let installer = PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", trust)
+            .with_lifecycle(lifecycle.clone());
+        installer
+            .install_bytes(&package("1.0.0", Some((&signer, "test")), false), PluginInstallPolicy::LocalSigned)
+            .unwrap();
+        let bytes = package("1.1.0", Some((&signer, "test")), false);
+        let package_path = root.path().join("update.dbxp");
+        std::fs::write(&package_path, &bytes).unwrap();
+        let operation = lifecycle.begin_operation("sample.hello").unwrap();
+        assert!(installer
+            .install_file(&package_path, PluginInstallPolicy::LocalSigned)
+            .unwrap_err()
+            .contains("active operations"));
+        let expectation = PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: "1.1.0".to_string(),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "test".to_string(),
+        };
+        assert!(installer.install_marketplace_bytes(&bytes, &expectation).unwrap_err().contains("active operations"));
+        drop(operation);
+        installer.install_marketplace_bytes(&bytes, &expectation).unwrap();
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
+    }
+
+    #[test]
+    fn failed_runtime_update_releases_the_admission_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let lifecycle = crate::plugins::PluginLifecycle::default();
+        let installer =
+            PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", PluginTrustStore::default())
+                .with_lifecycle(lifecycle.clone());
+        installer.install_bytes(&package("1.0.0", None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
+        assert!(installer.rollback("sample.hello").is_err());
+        assert!(lifecycle.begin_connection("sample.hello", "Retry").is_ok());
+        assert!(installer.install_bytes(&package("1.1.0", None, true), PluginInstallPolicy::LocalDevelopment).is_err());
+        assert!(lifecycle.begin_update("sample.hello").is_ok());
+    }
 
     #[test]
     fn installs_versioned_package_and_rolls_back_atomically() {
@@ -1086,6 +1234,48 @@ mod tests {
     }
 
     #[test]
+    fn retains_a_legacy_version_directory_when_the_legacy_version_is_not_semver() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join("sample.hello");
+        std::fs::create_dir_all(legacy.join("bin")).unwrap();
+        std::fs::write(legacy.join("bin/plugin"), b"legacy").unwrap();
+        std::fs::write(
+            legacy.join("manifest.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": "sample.hello",
+                "name": "Hello legacy",
+                "version": "0.9",
+                "protocol_version": 1,
+                "executable": "bin/plugin",
+                "drivers": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let installer =
+            PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", PluginTrustStore::default());
+        let installed =
+            installer.install_bytes(&package("1.0.0", None, false), PluginInstallPolicy::LocalDevelopment).unwrap();
+
+        // A non-semver legacy version is migrated under a synthetic `0.0.0-legacy.<hash>` directory that
+        // the manifest inside does not repeat, so the retained copy must still be recognised as the
+        // rollback target instead of being pruned away as an unknown version.
+        assert!(
+            installed.previous_version.is_some(),
+            "the migrated legacy version must be retained as the rollback target"
+        );
+        let container = root.path().join("sample.hello");
+        let versions = sorted_version_dirs(&container);
+        let legacy_storage_version = versions.iter().find(|version| version.as_str() != "1.0.0").unwrap();
+        assert_eq!(installed.previous_version.as_deref(), Some(legacy_storage_version.as_str()));
+        let mut expected = vec!["1.0.0".to_string(), legacy_storage_version.clone()];
+        expected.sort();
+        assert_eq!(versions, expected);
+        assert!(container.join(VERSIONS_DIR).join(legacy_storage_version).join("manifest.json").is_file());
+    }
+
+    #[test]
     fn strict_policy_requires_and_verifies_trusted_signature() {
         let root = tempfile::tempdir().unwrap();
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -1109,6 +1299,102 @@ mod tests {
         let signed = package("1.0.0", Some((&signing_key, "sample-key")), false);
         let result = installer.install_marketplace_bytes(&signed, &expectation).unwrap();
         assert_eq!(result.signature, PluginSignatureStatus::Trusted { key_id: "sample-key".to_string() });
+    }
+
+    #[test]
+    fn local_installer_loads_official_keys_without_persisting_them() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+
+        assert!(installer.trust_store.keys.contains_key("dbx-store-release-2026"));
+        assert!(installer.trust_store.keys.contains_key("dbx-store-preview-2026"));
+        assert!(PluginTrustStore::list_base64_keys(root.path()).unwrap().is_empty());
+        assert!(!root.path().join(".trust").exists());
+    }
+
+    #[test]
+    fn local_installer_rejects_forged_official_signatures() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+        let forged_key = SigningKey::from_bytes(&[11u8; 32]);
+        let package_path = root.path().join("forged.dbxp");
+        std::fs::write(&package_path, package("1.0.0", Some((&forged_key, "dbx-store-release-2026")), false)).unwrap();
+
+        for policy in [PluginInstallPolicy::LocalSigned, PluginInstallPolicy::LocalDevelopment] {
+            let error = installer.install_file(&package_path, policy).unwrap_err();
+            assert_eq!(error, "Plugin package signature verification failed");
+        }
+        assert!(!root.path().join("sample.hello").exists());
+    }
+
+    #[test]
+    fn local_installer_preserves_custom_key_trust() {
+        let root = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes());
+        PluginTrustStore::save_base64_key(root.path(), "sample-repository", &public_key).unwrap();
+        let installer = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+        let package_path = root.path().join("custom.dbxp");
+        std::fs::write(&package_path, package("1.0.0", Some((&signing_key, "sample-repository")), false)).unwrap();
+
+        let installed = installer.install_file(&package_path, PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(installed.signature, PluginSignatureStatus::Trusted { key_id: "sample-repository".to_string() });
+        assert!(installer.trust_store.keys.contains_key("dbx-store-release-2026"));
+        assert_eq!(PluginTrustStore::list_base64_keys(root.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn local_installer_rejects_unknown_signed_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+        let signing_key = SigningKey::from_bytes(&[9u8; 32]);
+        let package = package("1.0.0", Some((&signing_key, "unknown-release")), false);
+
+        for policy in [PluginInstallPolicy::LocalSigned, PluginInstallPolicy::LocalDevelopment] {
+            let error = installer.install_bytes(&package, policy).unwrap_err();
+            assert_eq!(error, "Plugin package is signed by untrusted key 'unknown-release'");
+        }
+        assert!(!root.path().join("sample.hello").exists());
+    }
+
+    #[test]
+    fn local_installer_rejects_official_key_conflicts() {
+        let root = tempfile::tempdir().unwrap();
+        let forged_key = SigningKey::from_bytes(&[11u8; 32]);
+        let public_key = base64::engine::general_purpose::STANDARD.encode(forged_key.verifying_key().as_bytes());
+        PluginTrustStore::save_base64_key(root.path(), "dbx-store-release-2026", &public_key).unwrap();
+
+        let error = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67")
+            .err()
+            .expect("a custom key must not override an official signing key");
+
+        assert!(error.contains("'dbx-store-release-2026' already exists with a different public key"));
+    }
+
+    #[test]
+    fn local_installer_accepts_matching_official_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+        let official_key = installer.trust_store.keys.get("dbx-store-release-2026").unwrap();
+        let public_key = base64::engine::general_purpose::STANDARD.encode(official_key.as_bytes());
+        PluginTrustStore::save_base64_key(root.path(), "dbx-store-release-2026", &public_key).unwrap();
+
+        let reloaded = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+
+        assert_eq!(reloaded.trust_store.keys.get("dbx-store-release-2026"), Some(official_key));
+        assert_eq!(PluginTrustStore::list_base64_keys(root.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn local_installer_enforces_unsigned_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let installer = PluginPackageInstaller::new(root.path().to_path_buf(), "0.5.67").unwrap();
+        let unsigned = package("1.0.0", None, false);
+
+        assert!(installer.install_bytes(&unsigned, PluginInstallPolicy::LocalSigned).is_err());
+        let installed = installer.install_bytes(&unsigned, PluginInstallPolicy::LocalDevelopment).unwrap();
+        assert_eq!(installed.signature, PluginSignatureStatus::Unsigned);
     }
 
     #[test]
@@ -1187,6 +1473,170 @@ mod tests {
             zip.finish().unwrap();
         }
         assert!(installer.install_bytes(output.get_ref(), PluginInstallPolicy::LocalDevelopment).is_err());
+    }
+
+    fn signed_installer(root: &Path, seed: [u8; 32]) -> (PluginPackageInstaller, SigningKey) {
+        let signing_key = SigningKey::from_bytes(&seed);
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "sample-key".to_string(),
+            base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes()),
+        );
+        let installer = PluginPackageInstaller::with_trust_store(
+            root.to_path_buf(),
+            "0.5.67",
+            PluginTrustStore::from_base64_keys(keys).unwrap(),
+        );
+        (installer, signing_key)
+    }
+
+    fn activation_record_count(container: &Path) -> usize {
+        std::fs::read_dir(container.join(ACTIVATIONS_DIR))
+            .unwrap()
+            .filter(|entry| entry.as_ref().is_ok_and(|entry| is_activation_record_file(&entry.path())))
+            .count()
+    }
+
+    fn sorted_version_dirs(container: &Path) -> Vec<String> {
+        let mut versions = std::fs::read_dir(container.join(VERSIONS_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        versions.sort();
+        versions
+    }
+
+    #[test]
+    fn reinstalls_retained_rollback_version_after_rollback_under_signed_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [13u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+        let expectation = |version: &str| PluginPackageExpectation {
+            id: "sample.hello".to_string(),
+            version: version.to_string(),
+            publisher: "sample".to_string(),
+            permissions: BTreeSet::from(["host.events".to_string()]),
+            signing_key_id: "sample-key".to_string(),
+        };
+
+        installer.install_marketplace_bytes(&signed("1.0.0"), &expectation("1.0.0")).unwrap();
+        installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0")).unwrap();
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+
+        // 1.1.0 is installed but inactive after the rollback: reinstalling it has to replace the
+        // retained directory instead of failing with "already installed".
+        let reinstalled = installer.install_marketplace_bytes(&signed("1.1.0"), &expectation("1.1.0")).unwrap();
+
+        assert_eq!(reinstalled.previous_version.as_deref(), Some("1.0.0"));
+        let container = root.path().join("sample.hello");
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0", "1.1.0"]);
+        assert_eq!(activation_record_count(&container), 2);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+    }
+
+    #[test]
+    fn rejects_reinstall_of_active_version_without_touching_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [19u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let error = installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap_err();
+
+        assert!(error.contains("is already installed"), "{error}");
+        let container = root.path().join("sample.hello");
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0"]);
+        assert_eq!(activation_record_count(&container), 1);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn reinstalls_active_version_whose_manifest_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [23u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let container = root.path().join("sample.hello");
+        let version_dir = container.join(VERSIONS_DIR).join("1.0.0");
+        std::fs::remove_file(version_dir.join("manifest.json")).unwrap();
+
+        let repaired = installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(repaired.previous_version, None);
+        assert!(version_dir.join("manifest.json").is_file());
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0"]);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn reinstalls_active_version_whose_manifest_identity_is_wrong() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [27u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let container = root.path().join("sample.hello");
+        let version_dir = container.join(VERSIONS_DIR).join("1.0.0");
+        let manifest_path = version_dir.join("manifest.json");
+        let mismatched_manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("\"version\": \"1.0.0\"", "\"version\": \"1.0.1\"");
+        std::fs::write(&manifest_path, mismatched_manifest).unwrap();
+
+        // A parseable manifest with the wrong identity cannot be activated or rolled back to, so
+        // it must be repaired rather than satisfying the already-installed guard.
+        let repaired = installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(repaired.previous_version, None);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn does_not_record_a_rollback_target_whose_directory_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [29u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        installer.install_bytes(&signed("1.1.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        assert_eq!(installer.rollback("sample.hello").unwrap().previous_version, "1.0.0");
+
+        let container = root.path().join("sample.hello");
+        std::fs::remove_dir_all(container.join(VERSIONS_DIR).join("1.0.0")).unwrap();
+
+        let recovered = installer.install_bytes(&signed("1.1.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(recovered.previous_version, None);
+        assert_eq!(sorted_version_dirs(&container), ["1.1.0"]);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.1.0");
+        assert!(installer.rollback("sample.hello").unwrap_err().contains("does not have a rollback version"));
+    }
+
+    #[test]
+    fn reinstalls_orphan_version_directory_without_activation_record() {
+        let root = tempfile::tempdir().unwrap();
+        let (installer, signing_key) = signed_installer(root.path(), [31u8; 32]);
+        let signed = |version: &str| package(version, Some((&signing_key, "sample-key")), false);
+
+        installer.install_bytes(&signed("1.0.0"), PluginInstallPolicy::LocalSigned).unwrap();
+        let container = root.path().join("sample.hello");
+        let orphan = container.join(VERSIONS_DIR).join("1.1.0");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("stale.txt"), b"interrupted").unwrap();
+
+        let installed = installer.install_bytes(&signed("1.1.0"), PluginInstallPolicy::LocalSigned).unwrap();
+
+        assert_eq!(installed.previous_version.as_deref(), Some("1.0.0"));
+        assert!(!orphan.join("stale.txt").exists());
+        assert_eq!(sorted_version_dirs(&container), ["1.0.0", "1.1.0"]);
+        assert_eq!(activation_record_count(&container), 2);
     }
 
     fn package(version: &str, signer: Option<(&SigningKey, &str)>, tamper: bool) -> Vec<u8> {

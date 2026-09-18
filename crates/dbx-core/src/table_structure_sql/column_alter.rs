@@ -4,7 +4,7 @@ use super::column_format::{
     original_mysql_generated_clause,
 };
 use super::columns::build_drop_column_sql;
-use super::comments::build_sqlserver_column_comment_sql;
+use super::comments::build_sqlserver_column_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, StructureDialect};
 use super::types::{EditableStructureColumn, SingleColumnAlterSqlOptions, TableStructureSqlResult};
 use super::util::{
@@ -124,6 +124,7 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             &options.column,
             options.schema.as_deref(),
             &options.table_name,
+            options.driver_profile.as_deref(),
             &mut warnings,
         )),
         StructureDialect::Sqlite => {
@@ -701,6 +702,7 @@ pub(super) fn build_sqlserver_existing_column_sql(
     column: &EditableStructureColumn,
     schema: Option<&str>,
     table_name: &str,
+    driver_profile: Option<&str>,
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
     let Some(original) = &column.original else {
@@ -777,12 +779,13 @@ pub(super) fn build_sqlserver_existing_column_sql(
 
     // Column comment changes via extended properties
     if clean(&column.comment) != original_comment(column) {
-        statements.extend(build_sqlserver_column_comment_sql(
+        statements.extend(build_sqlserver_column_comment_sql_for_profile(
             table,
             schema,
             table_name,
             &current_name,
             &column.comment,
+            driver_profile,
         ));
     }
 

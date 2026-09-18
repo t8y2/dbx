@@ -126,6 +126,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("completionTriggerMode");
   });
 
+  it("includes tableHoverLookupMode", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("tableHoverLookupMode");
+  });
+
   it("includes the SQL variable substitution master switch", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("sqlVariableSubstitutionEnabled");
   });

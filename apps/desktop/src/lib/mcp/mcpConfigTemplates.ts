@@ -123,3 +123,7 @@ export function buildMcpOpenCodeConfig(config?: McpLaunchConfig): string {
 export function buildMcpPiConfig(config?: McpLaunchConfig): string {
   return buildMcpJsonConfig(config);
 }
+
+export function buildMcpWorkBuddyConfig(config?: McpLaunchConfig): string {
+  return buildMcpJsonConfig(config);
+}

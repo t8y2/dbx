@@ -1,4 +1,4 @@
-use super::comments::build_sqlserver_index_comment_sql;
+use super::comments::build_sqlserver_index_comment_sql_for_profile;
 use super::dialect::{capabilities_for, database_label, database_type_for_dialect, dialect_label, StructureDialect};
 use super::types::{EditableStructureIndex, IndexInfo, TableStructureSqlOptions};
 use super::util::{clean, qualified_table, quote_ident, quote_new_ident, quote_string};
@@ -94,6 +94,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 or_replace,
                 capabilities.index_concurrent,
                 false,
+                options.driver_profile.as_deref(),
             ));
             continue;
         }
@@ -113,6 +114,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             false,
             capabilities.index_concurrent,
             false,
+            options.driver_profile.as_deref(),
         ));
     }
 
@@ -174,6 +176,7 @@ fn build_dameng_constraint_index_edit(
             false,
             concurrently_supported,
             false,
+            options.driver_profile.as_deref(),
         ));
         return statements;
     }
@@ -421,6 +424,7 @@ pub(super) fn build_drop_index_sql(
     format!("DROP INDEX {};", quote_ident(dialect, index_name))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_create_index_statements(
     database_type: Option<DatabaseType>,
     dialect: StructureDialect,
@@ -432,6 +436,7 @@ pub(super) fn build_create_index_statements(
     or_replace: bool,
     concurrently_supported: bool,
     for_new_table: bool,
+    driver_profile: Option<&str>,
 ) -> Vec<String> {
     let capabilities = capabilities_for(database_type_for_dialect(dialect), None);
     let name = clean(&index.name);
@@ -558,7 +563,14 @@ pub(super) fn build_create_index_statements(
     if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Postgres {
         statements.push(format!("COMMENT ON INDEX {} IS {};", quote_ident(dialect, &name), quote_string(&comment)));
     } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::SqlServer {
-        statements.extend(build_sqlserver_index_comment_sql(table, schema, table_name, &name, &comment));
+        statements.extend(build_sqlserver_index_comment_sql_for_profile(
+            table,
+            schema,
+            table_name,
+            &name,
+            &comment,
+            driver_profile,
+        ));
     } else if !comment.is_empty()
         && capabilities.index_comment
         && matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM)

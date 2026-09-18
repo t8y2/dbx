@@ -1520,6 +1520,7 @@ pub async fn list_tables(pool: &SqliteHandle, schema: &str) -> Result<Vec<TableI
                 TableInfo {
                     name: json_cell_text(&row, 0),
                     table_type: if table_type == "view" { "VIEW".to_string() } else { "BASE TABLE".to_string() },
+                    valid: None,
                     comment: None,
                     parent_schema: None,
                     parent_name: None,
@@ -1544,6 +1545,7 @@ pub async fn list_tables(pool: &SqliteHandle, schema: &str) -> Result<Vec<TableI
                     Ok(TableInfo {
                         name: row.get(0)?,
                         table_type: if table_type == "view" { "VIEW".to_string() } else { "BASE TABLE".to_string() },
+                        valid: None,
                         comment: None,
                         parent_schema: None,
                         parent_name: None,

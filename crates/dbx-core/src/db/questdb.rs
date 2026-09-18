@@ -65,6 +65,7 @@ async fn list_tables_new_version(pool: &Pool, _schema: &str) -> Result<Vec<Table
             TableInfo {
                 name: row.get::<_, String>(0),
                 table_type: table_type.to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -91,6 +92,7 @@ async fn list_tables_mat_view_version(pool: &Pool, _schema: &str) -> Result<Vec<
             TableInfo {
                 name: row.get::<_, String>(0),
                 table_type: table_type.to_string(),
+                valid: None,
                 comment: None,
                 parent_schema: None,
                 parent_name: None,
@@ -113,6 +115,7 @@ async fn list_tables_basic(pool: &Pool, _schema: &str) -> Result<Vec<TableInfo>,
         .map(|row| TableInfo {
             name: row.get::<_, String>(0),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

@@ -5029,6 +5029,7 @@ onUnmounted(() => {
                   @open-mcp-settings="openSettings('mcp')"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
                   @logout="handleWebLogout"
+                  @open-cc-switch-plugin-center="openPluginCenterPage({ pluginId: 'cc-switch' })"
                 />
               </AppTabBar>
               <DetachedTabHeader

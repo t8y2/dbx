@@ -3,6 +3,7 @@ pub mod ai;
 pub mod ai_multi_config;
 pub mod app_settings;
 pub mod background_image;
+pub mod cc_switch;
 pub mod cloud_sync;
 pub mod config_cmd;
 pub mod connection;

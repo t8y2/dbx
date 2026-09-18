@@ -9986,6 +9986,7 @@ LIMIT 100;</pre
                     </div>
                   </div>
                 </div>
+                <p class="border-t pt-3 text-xs text-muted-foreground">{{ t("settings.updateRestartHint") }}</p>
               </div>
 
               <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -10001,7 +10002,6 @@ LIMIT 100;</pre
                   </SelectContent>
                 </Select>
               </div>
-              <p class="text-xs text-muted-foreground">{{ t("settings.updateRestartHint") }}</p>
               <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
             </section>
 

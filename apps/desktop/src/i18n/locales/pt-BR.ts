@@ -7115,6 +7115,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_atSetDescription: "Expande as declarações de variáveis inline e substitui seus valores antes de executar.",
     autoAliasTables: "Adicionar alias de tabela automaticamente",
     autoAliasTablesDescription: "Ao escolher uma tabela em FROM ou JOIN, insere um alias gerado como order_items AS oi.",
+    sqlServerSpaceConfirmsCompletion: "Confirmar a conclusão com espaço (estilo SQL Server)",
+    sqlServerSpaceConfirmsCompletionDescription: "Com a lista de sugestões aberta, pressionar espaço aceita a palavra-chave, tabela ou coluna selecionada e mantém o espaço. Enter e Tab continuam iguais.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Modelos de busca de chave",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

@@ -7256,6 +7256,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_atSetDescription: "Satır içi değişken bildirimlerini genişlet ve çalıştırmadan önce değerlerini yerine koy.",
     autoAliasTables: "Tablo takma adlarını otomatik ekle",
     autoAliasTablesDescription: "FROM veya JOIN içinde bir tablo tamamlaması seçildiğinde order_items AS oi gibi üretilmiş bir takma ad ekle.",
+    sqlServerSpaceConfirmsCompletion: "Boşlukla tamamlamayı onayla (SQL Server tarzı)",
+    sqlServerSpaceConfirmsCompletionDescription: "Tamamlama listesi açıkken boşluk tuşuna basmak seçili anahtar sözcüğü, tabloyu veya sütunu onaylar ve boşluğu korur. Enter ve Tab aynı kalır.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Anahtar arama şablonları",
     redisKeyTemplatesPlaceholder: "Örnek:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

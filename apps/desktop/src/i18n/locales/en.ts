@@ -7601,6 +7601,8 @@ export default {
     sqlVariableSyntax_atSetDescription: "Expand inline variable declarations and substitute their values before running.",
     autoAliasTables: "Automatically add table aliases",
     autoAliasTablesDescription: "When selecting a table completion in FROM or JOIN, insert a generated alias such as order_items AS oi.",
+    sqlServerSpaceConfirmsCompletion: "Space confirms completion (SQL Server style)",
+    sqlServerSpaceConfirmsCompletionDescription: "While the completion list is open, pressing Space accepts the selected keyword, table, or column and keeps the trailing space. Enter and Tab behave as before.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Key search templates",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

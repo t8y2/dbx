@@ -7573,6 +7573,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_atSetDescription: "执行前展开内联变量声明并就地代入其值。",
     autoAliasTables: "自动添加表别名",
     autoAliasTablesDescription: "补全 FROM 或 JOIN 表名时自动添加别名。",
+    sqlServerSpaceConfirmsCompletion: "空格确认补全（SQL Server 习惯）",
+    sqlServerSpaceConfirmsCompletionDescription: "补全列表打开时，按空格直接采用选中的关键字、表名或列名，并保留空格。Enter 和 Tab 保持原有行为。",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Key 搜索模板",
     redisKeyTemplatesPlaceholder: "例如：\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

@@ -6438,6 +6438,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_atSetDescription: "執行前展開內聯變數宣告並就地代入其值。",
     autoAliasTables: "自動加入資料表別名",
     autoAliasTablesDescription: "在 FROM 或 JOIN 中選擇資料表補全時，自動插入類似 order_items AS oi 的資料表別名。",
+    sqlServerSpaceConfirmsCompletion: "空格確認補全（SQL Server 習慣）",
+    sqlServerSpaceConfirmsCompletionDescription: "補全清單開啟時，按空格直接採用選取的關鍵字、資料表或欄名，並保留空格。Enter 與 Tab 維持原本行為。",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "Key 搜尋模板",
     redisKeyTemplatesPlaceholder: "例如：\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

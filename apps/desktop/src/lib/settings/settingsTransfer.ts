@@ -83,6 +83,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showInsertValueHints",
     "autoAliasTables",
     "insertSpaceAfterCompletion",
+    "sqlServerSpaceConfirmsCompletion",
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",

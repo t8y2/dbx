@@ -6879,6 +6879,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_atSetDescription: "실행 전에 인라인 변수 선언을 확장하고 값을 치환합니다.",
     autoAliasTables: "자동으로 테이블 별칭 추가",
     autoAliasTablesDescription: "FROM이나 JOIN에서 테이블 완성을 선택할 때 order_items AS oi 같은 생성된 별칭을 삽입합니다.",
+    sqlServerSpaceConfirmsCompletion: "공백으로 완성 확정(SQL Server 방식)",
+    sqlServerSpaceConfirmsCompletionDescription: "완성 목록이 열려 있을 때 공백을 누르면 선택한 키워드, 테이블 또는 컬럼을 확정하고 공백을 유지합니다. Enter와 Tab은 기존과 동일하게 동작합니다.",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "키 검색 템플릿",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

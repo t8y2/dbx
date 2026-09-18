@@ -26,6 +26,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "autoAliasTables",
   "insertSpaceAfterCompletion",
+  "sqlServerSpaceConfirmsCompletion",
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",
   "wordWrap",

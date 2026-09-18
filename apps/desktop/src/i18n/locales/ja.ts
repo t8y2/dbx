@@ -7126,6 +7126,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_atSetDescription: "実行前にインライン変数宣言を展開し、その値をインライン化します。",
     autoAliasTables: "テーブル別名を自動追加",
     autoAliasTablesDescription: "FROM または JOIN でテーブル補完を選択すると、order_items AS oi のような生成済み別名を挿入します。",
+    sqlServerSpaceConfirmsCompletion: "スペースで補完を確定（SQL Server 方式）",
+    sqlServerSpaceConfirmsCompletionDescription: "補完リストの表示中にスペースを押すと、選択中のキーワード・テーブル・列を確定し、空白を保持します。Enter と Tab は従来どおり動作します。",
     redisKeyTemplatesSection: "Redis",
     redisKeyTemplates: "キー検索テンプレート",
     redisKeyTemplatesPlaceholder: "Example:\nuser:{'{'}$userId{'}'}\nv3:adui:{'{'}$positionID{'}'}",

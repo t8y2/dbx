@@ -100,18 +100,19 @@ const DATABASE_METHOD_HINTS: Record<string, string> = {
   getSiblingDB: "switch databases with `use <database>` and then run the command against db.<collection>",
   adminCommand: "use db.runCommand({ ... })",
   getCollectionNames: "collections are listed in the sidebar",
-  createCollection: 'collections are created on first insert, or use db.runCommand({ create: "name" })',
 };
 
 const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   version: { expects: "no arguments", roles: [] },
   stats: { expects: "no arguments", roles: [] },
   serverStatus: { expects: "no arguments", roles: [] },
+  dropDatabase: { expects: "no arguments", roles: [] },
+  createCollection: { expects: "a collection name and optional options", roles: ["name", "options"] },
   createUser: { expects: "a user document and optional write concern", roles: ["user", "writeConcern"] },
   runCommand: { expects: "one command document", roles: ["command"] },
 };
 
-const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createUser", "runCommand", "getCollection"];
+const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createCollection", "dropDatabase", "createUser", "runCommand", "getCollection"];
 
 const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
 
@@ -770,8 +771,33 @@ export function parseMongoCreateUserCommand(input: string): MongoCreateUserComma
 /** The shell's shorthand for the matching runCommand, so they share its execution path. */
 const DATABASE_STATUS_COMMANDS: Record<string, string> = { stats: "dbStats", serverStatus: "serverStatus" };
 
+/** `db.createCollection(name[, options])` is the create command; options pass through for the server to validate. */
+function parseMongoCreateCollectionCommand(source: string): MongoRunCommand | null {
+  const match = /^db\s*\.\s*createCollection\s*\(/i.exec(source);
+  if (!match) return null;
+  const openIndex = source.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  if (args.length < 1 || args.length > 2) return null;
+  const name = /^(["'])([^"'$]+)\1$/.exec(args[0]!.trim())?.[2]?.trim();
+  if (!name) return null;
+  const command: Record<string, unknown> = { create: name };
+  if (args[1]?.trim()) {
+    const optionsJson = parseMongoObjectArgument(args[1]);
+    if (!optionsJson) return null;
+    const options = JSON.parse(optionsJson) as Record<string, unknown>;
+    if ("create" in options) return null;
+    Object.assign(command, options);
+  }
+  return { commandJson: JSON.stringify(command) };
+}
+
 export function parseMongoRunCommand(input: string): MongoRunCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
+  if (/^db\s*\.\s*dropDatabase\s*\(\s*\)$/i.test(source)) return { commandJson: JSON.stringify({ dropDatabase: 1 }) };
+  const createCollection = parseMongoCreateCollectionCommand(source);
+  if (createCollection) return createCollection;
   for (const [method, command] of Object.entries(DATABASE_STATUS_COMMANDS)) {
     if (new RegExp(`^db\\s*\\.\\s*${method}\\s*\\(\\s*\\)$`, "i").test(source)) {
       return { commandJson: JSON.stringify({ [command]: 1 }) };

@@ -253,6 +253,8 @@ test("offers the newly supported count and database commands", () => {
   const dbLevel = labels("db.");
   assert.ok(dbLevel.includes("stats"));
   assert.ok(dbLevel.includes("serverStatus"));
+  assert.ok(dbLevel.includes("createCollection"));
+  assert.ok(dbLevel.includes("dropDatabase"));
   assert.ok(labels("").includes("db.stats"));
 });
 

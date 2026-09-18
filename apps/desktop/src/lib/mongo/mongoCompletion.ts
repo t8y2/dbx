@@ -149,6 +149,8 @@ const DATABASE_METHODS = [
   { label: "version", detail: "Show the MongoDB server version", apply: "version()" },
   { label: "stats", detail: "Show database statistics", apply: "stats()" },
   { label: "serverStatus", detail: "Show server status", apply: "serverStatus()" },
+  { label: "createCollection", detail: "Create a collection", apply: 'createCollection("${name}")' },
+  { label: "dropDatabase", detail: "Drop the current database", apply: "dropDatabase()" },
 ] as const;
 
 const CURSOR_METHODS = [

@@ -1367,6 +1367,30 @@ test("parseMongoCountDocumentsCommand reads estimatedDocumentCount as a metadata
   assert.equal(parseMongoCountDocumentsCommand("db.orders.count()")?.mode, "legacy");
 });
 
+test("parseMongoRunCommand reads db.dropDatabase() and db.createCollection() as run commands", () => {
+  assert.deepEqual(parseMongoRunCommand("db . dropDatabase ( ) ;"), { commandJson: '{"dropDatabase":1}' });
+  assert.deepEqual(parseMongoRunCommand('db.createCollection("events")'), { commandJson: '{"create":"events"}' });
+  assert.deepEqual(JSON.parse(parseMongoRunCommand("db.createCollection('logs', {capped: true, size: 1048576, max: 1000})")!.commandJson), {
+    create: "logs",
+    capped: true,
+    size: 1048576,
+    max: 1000,
+  });
+  assert.equal(parseMongoCommand("db.dropDatabase()")?.command.kind, "runCommand");
+
+  for (const [source, expected] of [
+    ["db.dropDatabase(1)", /dropDatabase\(\) expects no arguments/],
+    ["db.createCollection()", /createCollection\(\) expects a collection name and optional options/],
+    ["db.createCollection(1)", /expects a collection name/],
+    ['db.createCollection("a$b")', /expects a collection name/],
+    ['db.createCollection("a", {create: "b"})', /expects a collection name/],
+    ['db.createCollection("a").x()', /Unexpected text after createCollection/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
 test("parseMongoRunCommand reads db.stats() and db.serverStatus() as run commands", () => {
   assert.deepEqual(parseMongoRunCommand("db.stats()"), { commandJson: '{"dbStats":1}' });
   assert.deepEqual(parseMongoRunCommand("db . serverStatus ( ) ;"), { commandJson: '{"serverStatus":1}' });
@@ -1408,7 +1432,7 @@ test("describeMongoCommandParseFailure names unsupported methods and points at a
   assert.match(describeMongoCommandParseFailure('db["my-coll"].validate()'), /validate\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
 
-  assert.match(describeMongoCommandParseFailure('db.createCollection("c")'), /db\.createCollection\(\) is not supported; collections are created on first insert/);
+  assert.match(describeMongoCommandParseFailure("db.getCollectionNames()"), /db\.getCollectionNames\(\) is not supported; collections are listed in the sidebar/);
   assert.match(describeMongoCommandParseFailure('db.getSiblingDB("other").c.find({})'), /use <database>/);
   assert.match(describeMongoCommandParseFailure("db.adminCommand({ping: 1})"), /use db\.runCommand/);
   assert.match(describeMongoCommandParseFailure("show collections"), /listed in the sidebar/);

@@ -540,6 +540,37 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     // `db.stats()` and `db.serverStatus()` are the shell's shorthand for the
     // matching runCommand, so they execute through the same supported path.
+    // `db.dropDatabase()` is the shell's shorthand for the dropDatabase command; running it
+    // through runCommand keeps it on the supported path and classed as dangerous.
+    if let Some((args, tail)) = database_method_call(source, "dropDatabase") {
+        if !tail.is_empty() || !args.iter().all(|arg| arg.trim().is_empty()) {
+            return Err("MongoDB db.dropDatabase() takes no arguments.".to_string());
+        }
+        return Ok(MongoCommand::RunCommand { command_json: r#"{"dropDatabase":1}"#.to_string() });
+    }
+    // `db.createCollection(name[, options])` is the create command; options such as
+    // capped/size/max/validator pass through for the server to validate.
+    if let Some((args, tail)) = database_method_call(source, "createCollection") {
+        if !tail.is_empty() || !(1..=2).contains(&args.len()) {
+            return Err("MongoDB createCollection() requires a collection name and optional options.".to_string());
+        }
+        let name = parse_string_arg(&args[0])?;
+        if name.trim().is_empty() || name.contains('$') {
+            return Err("MongoDB createCollection() requires a valid collection name.".to_string());
+        }
+        let mut command = serde_json::Map::new();
+        command.insert("create".to_string(), Value::String(name));
+        if let Some(options) = args.get(1).filter(|arg| !arg.trim().is_empty()) {
+            let Some(Value::Object(options)) = parse_json_value(&normalized_json(options)?) else {
+                return Err("MongoDB createCollection() options must be a document.".to_string());
+            };
+            if options.contains_key("create") {
+                return Err("MongoDB createCollection() options must not contain create.".to_string());
+            }
+            command.extend(options);
+        }
+        return Ok(MongoCommand::RunCommand { command_json: Value::Object(command).to_string() });
+    }
     for (method, command) in [("stats", "dbStats"), ("serverStatus", "serverStatus")] {
         if let Some((args, tail)) = database_method_call(source, method) {
             if !tail.is_empty() || !args.iter().all(|arg| arg.trim().is_empty()) {
@@ -2267,6 +2298,41 @@ mod tests {
             (r#"db.orders.renameCollection("orders")"#, "must differ"),
             (r#"db.orders.renameCollection("x", true)"#, "dropTarget is not supported"),
             (r#"db.orders.renameCollection("x").y()"#, "requires the new collection name"),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
+    }
+
+    #[test]
+    fn parses_drop_database_and_create_collection_as_run_commands() {
+        let drop = parse("db . dropDatabase ( ) ;").unwrap();
+        assert_eq!(drop, MongoCommand::RunCommand { command_json: r#"{"dropDatabase":1}"#.to_string() });
+        assert!(drop.is_mutating() && drop.is_dangerous());
+
+        assert_eq!(
+            parse(r#"db.createCollection("events")"#).unwrap(),
+            MongoCommand::RunCommand { command_json: r#"{"create":"events"}"#.to_string() }
+        );
+        let MongoCommand::RunCommand { command_json } =
+            parse("db.createCollection('logs', {capped: true, size: 1048576, max: 1000})").unwrap()
+        else {
+            panic!("expected a run command");
+        };
+        assert_eq!(
+            parse_json_value(&command_json).unwrap(),
+            serde_json::json!({ "create": "logs", "capped": true, "size": 1048576, "max": 1000 })
+        );
+
+        for (source, expected) in [
+            ("db.dropDatabase(1)", "takes no arguments"),
+            ("db.createCollection()", "requires a collection name"),
+            ("db.createCollection(1)", "must be a string"),
+            (r#"db.createCollection("")"#, "valid collection name"),
+            (r#"db.createCollection("a$b")"#, "valid collection name"),
+            (r#"db.createCollection("a", [])"#, "options must be a document"),
+            (r#"db.createCollection("a", {create: "b"})"#, "must not contain create"),
+            (r#"db.createCollection("a").x()"#, "collection name and optional options"),
         ] {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");

@@ -7056,6 +7056,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "離線匯入完成，已安裝 {jreCount} 個 JRE",
     offlineImportWithJreSuccess: "離線匯入完成，已安裝 {jreCount} 個 JRE 和 {count} 個驅動程式",
     offlineImportFailed: "離線匯入失敗： {error}",
+    offlineImportPartial: "離線匯入部分完成：{failed} 項失敗，已安裝 {jreCount} 個 JRE 和 {count} 個驅動程式。{item}：{error}",
     driverImportSuccess: "{label} 驅動程式匯入成功",
     driverImportFailed: "{label} 驅動程式匯入失敗： {error}",
     chooseDriverJar: "選擇驅動程式檔案",

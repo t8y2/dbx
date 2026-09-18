@@ -7749,6 +7749,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "Importazione offline completata. Installato/i {jreCount} JRE.",
     offlineImportWithJreSuccess: "Importazione offline completata. Installato/i {jreCount} JRE e {count} driver.",
     offlineImportFailed: "Importazione offline non riuscita: {error}",
+    offlineImportPartial: "Importazione offline completata con problemi: {failed} elemento/i non riusciti, installati {jreCount} JRE e {count} driver. {item}: {error}",
     driverImportSuccess: "Driver {label} importato",
     driverImportFailed: "Importazione del driver {label} non riuscita: {error}",
     chooseDriverJar: "Scegli il file del driver",

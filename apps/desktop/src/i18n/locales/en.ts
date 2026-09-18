@@ -8214,6 +8214,7 @@ export default {
     offlineJreImportSuccess: "Offline import complete. Installed {jreCount} JRE(s).",
     offlineImportWithJreSuccess: "Offline import complete. Installed {jreCount} JRE(s) and {count} driver(s).",
     offlineImportFailed: "Offline import failed: {error}",
+    offlineImportPartial: "Offline import finished with problems: {failed} item(s) failed, installed {jreCount} JRE(s) and {count} driver(s). {item}: {error}",
     driverImportSuccess: "{label} driver imported",
     driverImportFailed: "Failed to import {label} driver: {error}",
     chooseDriverJar: "Choose driver file",

@@ -879,7 +879,7 @@ export async function importAgentsFromZip(fileOrPath: string | File, operationId
   });
   if (!res.ok) throw await backendResponseError(res);
   const result: AgentOfflineImportResult = await res.json();
-  return { count: result.count, jreCount: result.jreCount ?? 0 };
+  return { count: result.count, jreCount: result.jreCount ?? 0, failures: result.failures ?? [] };
 }
 
 export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {

@@ -29,6 +29,17 @@ const JRE_REMOVE_ATTEMPTS: usize = if cfg!(windows) { 6 } else { 1 };
 /// Exponential-ish backoff between retries. Total wait ≈ 1.55s on Windows.
 const JRE_REMOVE_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 400, 400];
 
+/// Attempts to unpack an archive before reporting a failure. On Windows an
+/// anti-virus/EDR scanner briefly holds a file it has just seen created, which
+/// surfaces as `Access is denied`/`sharing violation` while `tar` writes the
+/// archive contents. POSIX returns 1 — a failure there is not transient.
+const ARCHIVE_EXTRACT_ATTEMPTS: usize = if cfg!(windows) { 4 } else { 1 };
+
+/// Exponential-ish backoff between archive extraction retries. Total wait
+/// ≈ 0.85s on Windows: long enough to cover the AV scan window, short enough
+/// not to stall the import.
+const ARCHIVE_EXTRACT_BACKOFF_MS: &[u64] = &[100, 250, 500];
+
 /// Keep batch updates concurrent without allowing a large registry to exhaust
 /// the download server, local disk, or the application's file descriptors.
 const MAX_CONCURRENT_AGENT_UPDATES: usize = 4;
@@ -80,6 +91,40 @@ fn format_jre_dir_remove_error(path: &Path, os_err: &std::io::Error) -> String {
     } else {
         format!("Failed to remove the old JRE directory: {} (original error: {os_err})", path.display())
     }
+}
+
+/// Render an error together with the I/O failure it wrapped.
+///
+/// `tar` reports every failed entry as `failed to unpack \`<path>\`` and
+/// `zip` reports archive-level failures as `invalid Zip archive: …`; neither
+/// prints the OS error in `Display`. On Windows that hides whether the
+/// extraction was blocked by anti-virus (`Access is denied. (os error 5)`),
+/// by a scanner still holding the file (`The process cannot access the file …
+/// (os error 32)`), or by a full/quota-limited disk (`There is not enough
+/// space … (os error 112)`), which made offline-import failures impossible to
+/// diagnose from the UI. Append the deepest I/O cause — preferring one that
+/// carries an OS error code — so the OS error survives, without repeating the
+/// wrapper text `tar` already printed.
+fn describe_error(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut detail: Option<&std::io::Error> = None;
+    let mut cause = error.source();
+    while let Some(current) = cause {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            if io_error.raw_os_error().is_some() || detail.is_none() {
+                detail = Some(io_error);
+            }
+        }
+        cause = current.source();
+    }
+    if let Some(io_error) = detail {
+        let text = io_error.to_string();
+        if !text.is_empty() && !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+    }
+    message
 }
 
 /// Windows-only: rename the old JRE dir to a unique sibling so the install
@@ -2468,11 +2513,26 @@ pub struct OfflineImportProgress {
     pub db_type: Option<String>,
 }
 
+/// An offline-import item (managed JRE runtime or driver) that could not be
+/// installed. The import continues past it so a single blocked or corrupt
+/// item cannot abort the whole package.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OfflineImportFailure {
+    /// Managed JRE key (e.g. `21`) or driver key (e.g. `oracle`).
+    pub key: String,
+    /// True when the failed item is a managed JRE runtime rather than a driver.
+    pub is_jre: bool,
+    /// Failure text, including the underlying OS error when there is one.
+    pub error: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct OfflineImportResult {
     pub jre_installed: Vec<String>,
     pub drivers_installed: Vec<String>,
     pub drivers_skipped: Vec<String>,
+    /// Items that failed; reported to the user instead of failing the import.
+    pub failures: Vec<OfflineImportFailure>,
 }
 
 #[derive(Debug)]
@@ -2591,6 +2651,7 @@ async fn import_tar_zstd_jre_package(
         jre_installed: vec![info.key.clone()],
         drivers_installed: Vec::new(),
         drivers_skipped: Vec::new(),
+        failures: Vec::new(),
     })
 }
 
@@ -2642,8 +2703,12 @@ async fn import_tar_zstd_driver_package(
 ) -> Result<OfflineImportResult, String> {
     let _installation_guard = am.installation_operation_lock.write().await;
     let info = tar_zstd_driver_package_info(package_path)?;
-    let mut result =
-        OfflineImportResult { jre_installed: Vec::new(), drivers_installed: Vec::new(), drivers_skipped: Vec::new() };
+    let mut result = OfflineImportResult {
+        jre_installed: Vec::new(),
+        drivers_installed: Vec::new(),
+        drivers_skipped: Vec::new(),
+        failures: Vec::new(),
+    };
     if let Some(installed) = am.load_state().installed_drivers.get(&info.db_type) {
         if installed.version != "0.1.0-local"
             && installed.version != "local"
@@ -2824,8 +2889,8 @@ pub async fn import_offline_zip(
     // JRE installs, Upgrade All, and uninstall operations are serialised.
     let _installation_guard = am.installation_operation_lock.write().await;
 
-    let file = std::fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {e}"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid ZIP file: {e}"))?;
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("Failed to open ZIP file: {}", describe_error(&e)))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("Invalid ZIP file: {}", describe_error(&e)))?;
 
     let registry = read_registry_from_zip(&mut archive)?;
 
@@ -2837,11 +2902,15 @@ pub async fn import_offline_zip(
         return Err(format!("Offline package contains no drivers compatible with platform: {platform}"));
     }
     validate_offline_zip_preflight(&mut archive, &registry, &jre_entries, &driver_entries)?;
-    std::fs::create_dir_all(am.base_dir()).map_err(|e| format!("Failed to create agent directory: {e}"))?;
-    validate_offline_driver_entries(am, &mut archive, &driver_entries)?;
+    std::fs::create_dir_all(am.base_dir())
+        .map_err(|e| format!("Failed to create agent directory: {}", describe_error(&e)))?;
     let mut local_state = am.load_state();
-    let mut result =
-        OfflineImportResult { jre_installed: Vec::new(), drivers_installed: Vec::new(), drivers_skipped: Vec::new() };
+    let mut result = OfflineImportResult {
+        jre_installed: Vec::new(),
+        drivers_installed: Vec::new(),
+        drivers_skipped: Vec::new(),
+        failures: Vec::new(),
+    };
     let mut current: u32 = 0;
 
     for (jre_key, entry_name, format) in &jre_entries {
@@ -2860,36 +2929,51 @@ pub async fn import_offline_zip(
             db_type: None,
         });
 
-        let mut entry = archive.by_name(entry_name).map_err(|e| format!("Failed to read {entry_name}: {e}"))?;
-        let tmp_archive = am.base_dir().join(format!("jre-offline-{jre_key}{}", jre_archive_suffix(*format)));
-        {
-            let mut out =
-                std::fs::File::create(&tmp_archive).map_err(|e| format!("Failed to create temp file: {e}"))?;
-            std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to extract JRE archive: {e}"))?;
-        }
+        // A blocked write (anti-virus, disk quota) or an invalid archive must
+        // not abort the rest of the package: record the failure and continue so
+        // the drivers still install.
+        let outcome = (|| -> Result<(), String> {
+            let mut entry = archive
+                .by_name(entry_name)
+                .map_err(|e| format!("Failed to read {entry_name}: {}", describe_error(&e)))?;
+            let tmp_archive = am.base_dir().join(format!("jre-offline-{jre_key}{}", jre_archive_suffix(*format)));
+            {
+                let mut out = std::fs::File::create(&tmp_archive)
+                    .map_err(|e| format!("Failed to create temp file: {}", describe_error(&e)))?;
+                std::io::copy(&mut entry, &mut out)
+                    .map_err(|e| format!("Failed to extract JRE archive: {}", describe_error(&e)))?;
+            }
 
-        let jre_dir = am.jre_dir(jre_key);
-        let staging_dir = am.base_dir().join(format!(".jre-offline-import-{}", uuid::Uuid::new_v4()));
-        if let Err(error) = extract_jre_archive(&tmp_archive, &staging_dir, *format) {
-            std::fs::remove_dir_all(&staging_dir).ok();
+            let jre_dir = am.jre_dir(jre_key);
+            let staging_dir = am.base_dir().join(format!(".jre-offline-import-{}", uuid::Uuid::new_v4()));
+            if let Err(error) = extract_jre_archive(&tmp_archive, &staging_dir, *format) {
+                std::fs::remove_dir_all(&staging_dir).ok();
+                std::fs::remove_file(&tmp_archive).ok();
+                return Err(error);
+            }
+            if !jre_dir_contains_java(&staging_dir) {
+                std::fs::remove_dir_all(&staging_dir).ok();
+                std::fs::remove_file(&tmp_archive).ok();
+                return Err(format!("Offline JRE archive does not contain a Java executable: {entry_name}"));
+            }
+            let pending_cleanup = replace_imported_jre_dir(&staging_dir, &jre_dir)?;
             std::fs::remove_file(&tmp_archive).ok();
-            return Err(error);
-        }
-        if !jre_dir_contains_java(&staging_dir) {
-            std::fs::remove_dir_all(&staging_dir).ok();
-            std::fs::remove_file(&tmp_archive).ok();
-            return Err(format!("Offline JRE archive does not contain a Java executable: {entry_name}"));
-        }
-        let pending_cleanup = replace_imported_jre_dir(&staging_dir, &jre_dir)?;
-        std::fs::remove_file(&tmp_archive).ok();
-        if let Some(path) = pending_cleanup {
-            local_state.pending_jre_cleanup.push(path);
-        }
+            if let Some(path) = pending_cleanup {
+                local_state.pending_jre_cleanup.push(path);
+            }
 
-        if let Some(ver) = jre_version {
-            local_state.jre_versions.insert(jre_key.clone(), ver);
+            if let Some(ver) = jre_version {
+                local_state.jre_versions.insert(jre_key.clone(), ver);
+            }
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => result.jre_installed.push(jre_key.clone()),
+            Err(error) => {
+                log::warn!("Offline JRE import failed for {jre_key}: {error}");
+                result.failures.push(OfflineImportFailure { key: jre_key.clone(), is_jre: true, error });
+            }
         }
-        result.jre_installed.push(jre_key.clone());
     }
 
     for (db_type, entry_name, is_native) in &driver_entries {
@@ -2916,45 +3000,63 @@ pub async fn import_offline_zip(
         });
 
         let driver_path = if *is_native { am.driver_native_path(db_type) } else { am.driver_jar_path(db_type) };
-        if let Some(parent) = driver_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let mut entry = archive.by_name(entry_name).map_err(|e| format!("Failed to read {entry_name}: {e}"))?;
-        let parent = driver_path.parent().ok_or_else(|| format!("Invalid driver path: {}", driver_path.display()))?;
-        let staging_path = parent.join(format!(".offline-agent-import-{}", uuid::Uuid::new_v4()));
-        let mut out = std::fs::File::create(&staging_path).map_err(|e| format!("Failed to write driver: {e}"))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to copy driver: {e}"))?;
-        drop(out);
-        if *is_native {
-            if let Err(error) = validate_native_agent_binary(&staging_path) {
-                std::fs::remove_file(&staging_path).ok();
-                return Err(error);
+        // Same per-item isolation as the JRE loop: one unreadable or blocked
+        // driver must not stop the remaining drivers from installing.
+        let outcome = (|| -> Result<(), String> {
+            if let Some(parent) = driver_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create driver directory: {}", describe_error(&e)))?;
             }
-            mark_executable(&staging_path)?;
-        } else {
-            // Validate the staged JAR before replacing a working driver so a
-            // corrupt offline package cannot destroy the previous installation.
-            if !is_valid_agent_jar(&staging_path) {
-                std::fs::remove_file(&staging_path).ok();
-                return Err(format!("Offline agent jar is invalid or corrupt: {entry_name}"));
+            let mut entry = archive
+                .by_name(entry_name)
+                .map_err(|e| format!("Failed to read {entry_name}: {}", describe_error(&e)))?;
+            let parent =
+                driver_path.parent().ok_or_else(|| format!("Invalid driver path: {}", driver_path.display()))?;
+            let staging_path = parent.join(format!(".offline-agent-import-{}", uuid::Uuid::new_v4()));
+            let mut out = std::fs::File::create(&staging_path)
+                .map_err(|e| format!("Failed to write driver: {}", describe_error(&e)))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("Failed to copy driver: {}", describe_error(&e)))?;
+            drop(out);
+            if *is_native {
+                if let Err(error) = validate_native_agent_binary(&staging_path) {
+                    std::fs::remove_file(&staging_path).ok();
+                    return Err(error);
+                }
+                mark_executable(&staging_path)?;
+            } else {
+                // Validate the staged JAR before replacing a working driver so a
+                // corrupt offline package cannot destroy the previous installation.
+                if !is_valid_agent_jar(&staging_path) {
+                    std::fs::remove_file(&staging_path).ok();
+                    return Err(format!("Offline agent jar is invalid or corrupt: {entry_name}"));
+                }
+            }
+            replace_imported_agent_file(&staging_path, &driver_path)?;
+            if *is_native {
+                std::fs::remove_file(am.driver_jar_path(db_type)).ok();
+            } else {
+                std::fs::remove_file(am.driver_native_path(db_type)).ok();
+            }
+
+            let version =
+                registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
+            let jre_key =
+                registry.drivers.get(db_type).map(|d| d.jre.clone()).unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
+
+            local_state.installed_drivers.insert(
+                db_type.clone(),
+                InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
+            );
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => result.drivers_installed.push(db_type.clone()),
+            Err(error) => {
+                log::warn!("Offline driver import failed for {db_type}: {error}");
+                result.failures.push(OfflineImportFailure { key: db_type.clone(), is_jre: false, error });
             }
         }
-        replace_imported_agent_file(&staging_path, &driver_path)?;
-        if *is_native {
-            std::fs::remove_file(am.driver_jar_path(db_type)).ok();
-        } else {
-            std::fs::remove_file(am.driver_native_path(db_type)).ok();
-        }
-
-        let version = registry.drivers.get(db_type).map(|d| d.version.clone()).unwrap_or_else(|| "local".to_string());
-        let jre_key =
-            registry.drivers.get(db_type).map(|d| d.jre.clone()).unwrap_or_else(|| DEFAULT_JRE_KEY.to_string());
-
-        local_state.installed_drivers.insert(
-            db_type.clone(),
-            InstalledDriver { version, installed_at: chrono::Utc::now().to_rfc3339(), jre: jre_key },
-        );
-        result.drivers_installed.push(db_type.clone());
     }
 
     am.mutate_state(|state| {
@@ -3130,32 +3232,6 @@ fn validate_offline_zip_artifact(
     }
 }
 
-fn validate_offline_driver_entries(
-    am: &AgentManager,
-    archive: &mut zip::ZipArchive<std::fs::File>,
-    driver_entries: &[OfflineDriverEntry],
-) -> Result<(), String> {
-    for (_, entry_name, is_native) in driver_entries {
-        let staging_path = am.base_dir().join(format!(".offline-agent-validation-{}", uuid::Uuid::new_v4()));
-        let result = (|| {
-            let mut entry = archive.by_name(entry_name).map_err(|e| format!("Failed to read {entry_name}: {e}"))?;
-            let mut out = std::fs::File::create(&staging_path).map_err(|e| format!("Failed to write driver: {e}"))?;
-            std::io::copy(&mut entry, &mut out).map_err(|e| format!("Failed to copy driver: {e}"))?;
-            drop(out);
-            if *is_native {
-                validate_native_agent_binary(&staging_path)
-            } else if is_valid_agent_jar(&staging_path) {
-                Ok(())
-            } else {
-                Err(format!("Offline agent jar is invalid or corrupt: {entry_name}"))
-            }
-        })();
-        std::fs::remove_file(&staging_path).ok();
-        result?;
-    }
-    Ok(())
-}
-
 fn validate_offline_driver_key(db_type: &str) -> Result<(), String> {
     validate_offline_identifier(db_type, "driver")?;
     if agent_catalog::label_for_key(db_type).is_none() {
@@ -3251,11 +3327,35 @@ fn jre_archive_download_path(am: &AgentManager, jre_key: &str, format: Option<Ar
 }
 
 fn extract_jre_archive(archive: &Path, dest: &Path, format: Option<ArtifactFormat>) -> Result<(), String> {
+    let mut last_error: Option<String> = None;
+    for attempt in 0..ARCHIVE_EXTRACT_ATTEMPTS {
+        if attempt > 0 {
+            let delay_ms = ARCHIVE_EXTRACT_BACKOFF_MS.get(attempt - 1).copied().unwrap_or(500);
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
+        match extract_jre_archive_once(archive, dest, format) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                log::warn!(
+                    "JRE archive extraction ({}) attempt {}/{} failed: {error}",
+                    archive.display(),
+                    attempt + 1,
+                    ARCHIVE_EXTRACT_ATTEMPTS
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "Failed to extract JRE archive".to_string()))
+}
+
+fn extract_jre_archive_once(archive: &Path, dest: &Path, format: Option<ArtifactFormat>) -> Result<(), String> {
     match format {
         Some(ArtifactFormat::TarZstd) => {
-            let file = std::fs::File::open(archive).map_err(|e| format!("Failed to open JRE archive: {e}"))?;
-            let decoder =
-                zstd::stream::read::Decoder::new(file).map_err(|e| format!("Failed to open zstd JRE archive: {e}"))?;
+            let file = std::fs::File::open(archive)
+                .map_err(|e| format!("Failed to open JRE archive: {}", describe_error(&e)))?;
+            let decoder = zstd::stream::read::Decoder::new(file)
+                .map_err(|e| format!("Failed to open zstd JRE archive: {}", describe_error(&e)))?;
             extract_jre_tar(tar::Archive::new(decoder), dest)
         }
         None => extract_tar_gz(archive, dest),
@@ -3263,39 +3363,46 @@ fn extract_jre_archive(archive: &Path, dest: &Path, format: Option<ArtifactForma
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(archive).map_err(|e| format!("Failed to open JRE archive: {e}"))?;
+    let file =
+        std::fs::File::open(archive).map_err(|e| format!("Failed to open JRE archive: {}", describe_error(&e)))?;
     let decoder = flate2::read::GzDecoder::new(file);
     extract_jre_tar(tar::Archive::new(decoder), dest)
 }
 
 fn extract_jre_tar<R: Read>(mut archive: tar::Archive<R>, dest: &Path) -> Result<(), String> {
     let parent = dest.parent().ok_or_else(|| format!("Invalid JRE destination: {}", dest.display()))?;
-    std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create JRE directory: {e}"))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create JRE directory: {}", describe_error(&e)))?;
 
     let staging = tempfile::Builder::new()
         .prefix(".jre-extract-")
         .tempdir_in(parent)
-        .map_err(|e| format!("Failed to create JRE extraction directory: {e}"))?;
-    archive.unpack(staging.path()).map_err(|e| format!("Failed to extract JRE archive: {e}"))?;
+        .map_err(|e| format!("Failed to create JRE extraction directory: {}", describe_error(&e)))?;
+    archive.unpack(staging.path()).map_err(|e| format!("Failed to extract JRE archive: {}", describe_error(&e)))?;
 
     let mut roots = std::fs::read_dir(staging.path())
-        .map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {}", describe_error(&e)))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?;
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {}", describe_error(&e)))?;
     if roots.len() != 1 {
         return Err("Invalid JRE archive: expected a single top-level directory".to_string());
     }
 
     let root = roots.pop().expect("root count checked above");
-    if !root.file_type().map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?.is_dir() {
+    if !root
+        .file_type()
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {}", describe_error(&e)))?
+        .is_dir()
+    {
         return Err("Invalid JRE archive: expected a top-level directory".to_string());
     }
 
-    std::fs::create_dir_all(dest).map_err(|e| format!("Failed to create JRE directory: {e}"))?;
-    for entry in std::fs::read_dir(root.path()).map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))? {
-        let entry = entry.map_err(|e| format!("Failed to inspect extracted JRE archive: {e}"))?;
+    std::fs::create_dir_all(dest).map_err(|e| format!("Failed to create JRE directory: {}", describe_error(&e)))?;
+    for entry in std::fs::read_dir(root.path())
+        .map_err(|e| format!("Failed to inspect extracted JRE archive: {}", describe_error(&e)))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to inspect extracted JRE archive: {}", describe_error(&e)))?;
         std::fs::rename(entry.path(), dest.join(entry.file_name()))
-            .map_err(|e| format!("Failed to install extracted JRE: {e}"))?;
+            .map_err(|e| format!("Failed to install extracted JRE: {}", describe_error(&e)))?;
     }
     Ok(())
 }
@@ -3360,6 +3467,52 @@ mod jre_archive_tests {
 
         let error = extract_tar_gz(&archive_path, &temp.path().join("managed-jre")).unwrap_err();
         assert!(error.contains("single top-level directory"), "unexpected error: {error}");
+    }
+
+    /// `tar` prints only its own description and keeps the OS error one level
+    /// deeper in the source chain, which is the shape that hid Windows
+    /// anti-virus and disk failures from the offline-import UI.
+    #[derive(Debug)]
+    struct ArchiveLikeError {
+        description: String,
+        io: std::io::Error,
+    }
+
+    impl std::fmt::Display for ArchiveLikeError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.description)
+        }
+    }
+
+    impl std::error::Error for ArchiveLikeError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.io)
+        }
+    }
+
+    #[test]
+    fn describes_the_os_error_behind_an_archive_message() {
+        let error = std::io::Error::other(ArchiveLikeError {
+            description: "failed to unpack `dbx-jre/bin/api-ms-win-core-string-l1-1-0.dll`".to_string(),
+            io: std::io::Error::from_raw_os_error(5),
+        });
+
+        let message = describe_error(&error);
+
+        assert!(
+            message.starts_with("failed to unpack `dbx-jre/bin/api-ms-win-core-string-l1-1-0.dll`"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("os error 5"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn describes_a_message_that_already_carries_the_os_error_unchanged() {
+        let os_error = std::io::Error::from_raw_os_error(5);
+        let expected = os_error.to_string();
+        let error = std::io::Error::other(os_error);
+
+        assert_eq!(describe_error(&error), expected);
     }
 }
 

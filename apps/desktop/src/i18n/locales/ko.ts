@@ -7481,6 +7481,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "오프라인 가져오기 완료. JRE {jreCount}개 설치.",
     offlineImportWithJreSuccess: "오프라인 가져오기 완료. JRE {jreCount}개와 드라이버 {count}개 설치.",
     offlineImportFailed: "오프라인 가져오기 실패: {error}",
+    offlineImportPartial: "오프라인 가져오기가 일부 완료되었습니다: {failed}개 실패, JRE {jreCount}개와 드라이버 {count}개 설치됨. {item}: {error}",
     driverImportSuccess: "{label} 드라이버를 가져왔습니다",
     driverImportFailed: "{label} 드라이버 가져오기 실패: {error}",
     chooseDriverJar: "드라이버 파일 선택",

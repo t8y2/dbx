@@ -7801,6 +7801,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "オフラインインポートが完了しました。{jreCount}件のJREをインストールしました。",
     offlineImportWithJreSuccess: "オフラインインポートが完了しました。{jreCount}件のJREと{count}件のドライバーをインストールしました。",
     offlineImportFailed: "オフラインインポートに失敗しました: {error}",
+    offlineImportPartial: "オフラインインポートが一部完了しました：{failed}件が失敗し、{jreCount}件のJREと{count}件のドライバーをインストールしました。{item}: {error}",
     driverImportSuccess: "{label} ドライバーをインポートしました",
     driverImportFailed: "{label} ドライバーのインポートに失敗しました: {error}",
     chooseDriverJar: "ドライバーファイルを選択",

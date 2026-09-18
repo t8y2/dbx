@@ -206,6 +206,17 @@ export interface AgentOfflineExportResult {
 export interface AgentOfflineImportResult {
   count: number;
   jreCount: number;
+  /** Items the package could not install; the rest of the import still ran. */
+  failures: AgentOfflineImportFailure[];
+}
+
+export interface AgentOfflineImportFailure {
+  /** Managed JRE key (e.g. "21") or driver key (e.g. "oracle"). */
+  key: string;
+  /** True when the failed item is a managed JRE runtime rather than a driver. */
+  is_jre: boolean;
+  /** Failure text, including the underlying OS error when there is one. */
+  error: string;
 }
 
 export type JavaRuntimeMode = "managed" | "system" | "custom";

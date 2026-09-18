@@ -8186,6 +8186,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "离线导入完成，已安装 {jreCount} 个 JRE",
     offlineImportWithJreSuccess: "离线导入完成，已安装 {jreCount} 个 JRE 和 {count} 个驱动",
     offlineImportFailed: "离线导入失败: {error}",
+    offlineImportPartial: "离线导入部分完成：{failed} 项失败，已安装 {jreCount} 个 JRE 和 {count} 个驱动。{item}：{error}",
     driverImportSuccess: "{label} 驱动导入成功",
     driverImportFailed: "{label} 驱动导入失败: {error}",
     chooseDriverJar: "选择驱动文件",

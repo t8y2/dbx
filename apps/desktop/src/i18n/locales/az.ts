@@ -7979,6 +7979,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "Oflayn idxal tamamlandı. {jreCount} JRE quraşdırıldı.",
     offlineImportWithJreSuccess: "Oflayn idxal tamamlandı. {jreCount} JRE və {count} drayver quraşdırıldı.",
     offlineImportFailed: "Oflayn idxal uğursuz oldu: {error}",
+    offlineImportPartial: "Oflayn idxal qismən tamamlandı: {failed} element uğursuz oldu, {jreCount} JRE və {count} drayver quraşdırıldı. {item}: {error}",
     driverImportSuccess: "{label} drayveri idxal edildi",
     driverImportFailed: "{label} drayverini idxal etmək mümkün olmadı: {error}",
     chooseDriverJar: "Drayver faylını seç",

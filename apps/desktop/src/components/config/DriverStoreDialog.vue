@@ -18,7 +18,7 @@ import { uuid } from "@/lib/common/utils";
 import { countAvailableDriverUpdates } from "@/lib/connection/agentDriverUpdateBadge";
 import type { JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, JdbcPluginStatus } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import type { AgentDriverInfo, AgentOfflineExportPreview, DriverRuntimeInfo, DriverRuntimeSummary, DriverStoreUsage, JavaRuntimeConfig } from "@/lib/backend/api";
+import type { AgentDriverInfo, AgentOfflineExportPreview, AgentOfflineImportResult, DriverRuntimeInfo, DriverRuntimeSummary, DriverStoreUsage, JavaRuntimeConfig } from "@/lib/backend/api";
 import { formatRuntimeBytes, formatRuntimeCpu, formatRuntimeUptime, runtimeHealthClass, runtimeStatusClass, runtimeStatusDotClass } from "@/lib/connection/driverRuntimePresentation";
 import {
   addDriverInstallQueue,
@@ -745,7 +745,7 @@ async function importOfflineZip() {
   try {
     const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
     await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
-    toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
+    toastOfflineImportResult(result);
   } catch (e: any) {
     toast(t("driverStore.offlineImportFailed", { error: backendError(e) }));
   } finally {
@@ -753,6 +753,26 @@ async function importOfflineZip() {
     activeAgentOperationId.value = null;
     resetAgentInstallProgress();
   }
+}
+
+// An offline package keeps importing after one item fails (a blocked JRE
+// archive, a corrupt driver JAR), so surface what did install alongside the
+// per-item failure instead of reporting the whole import as failed.
+function toastOfflineImportResult(result: AgentOfflineImportResult) {
+  if (result.failures.length > 0) {
+    const [failure] = result.failures;
+    toast(
+      t("driverStore.offlineImportPartial", {
+        count: result.count,
+        jreCount: result.jreCount,
+        failed: result.failures.length,
+        item: failure.is_jre ? `JRE ${failure.key}` : driverLabel(failure.key),
+        error: failure.error,
+      }),
+    );
+    return;
+  }
+  toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
 }
 
 async function importDriverFile(driver: AgentDriverInfo) {
@@ -777,7 +797,7 @@ async function importDriverFile(driver: AgentDriverInfo) {
       try {
         const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
         await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
-        toast(t(result.jreCount > 0 ? (result.count > 0 ? "driverStore.offlineImportWithJreSuccess" : "driverStore.offlineJreImportSuccess") : "driverStore.offlineImportSuccess", { count: result.count, jreCount: result.jreCount }));
+        toastOfflineImportResult(result);
       } finally {
         activeAgentOperationId.value = null;
         resetAgentInstallProgress();

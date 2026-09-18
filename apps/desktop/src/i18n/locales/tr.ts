@@ -7834,6 +7834,7 @@ export default withEnglishFallback({
     offlineJreImportSuccess: "Çevrimdışı içe aktarma tamamlandı. {jreCount} JRE kuruldu.",
     offlineImportWithJreSuccess: "Çevrimdışı içe aktarma tamamlandı. {jreCount} JRE ve {count} sürücü kuruldu.",
     offlineImportFailed: "Çevrimdışı içe aktarma başarısız: {error}",
+    offlineImportPartial: "Çevrimdışı içe aktarma sorunlarla tamamlandı: {failed} öğe başarısız, {jreCount} JRE ve {count} sürücü kuruldu. {item}: {error}",
     driverImportSuccess: "{label} sürücüsü içe aktarıldı",
     driverImportFailed: "{label} sürücüsü içe aktarılamadı: {error}",
     chooseDriverJar: "Sürücü dosyasını seçin",

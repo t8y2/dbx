@@ -58,6 +58,8 @@ import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
   AI_PROVIDER_PARTNER_PRESETS,
+  CC_SWITCH_PROVIDER_ID,
+  CC_SWITCH_PROVIDER_PRESET,
   AI_OUTPUT_TOKENS_MAX,
   AI_OUTPUT_TOKENS_MIN,
   EDITOR_THEMES,
@@ -125,6 +127,7 @@ import { importClipboardApiKeyAfterConfirmation, type AiConfigDeepLinkDraft } fr
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
   aiTestConnection,
+  loadCcSwitchAiConfigs,
   checkMcpServerStatus,
   installMcpServer,
   uninstallMcpServer,
@@ -162,6 +165,7 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   listInstalledAgentsLocal,
+  listPlugins,
   type AppSupportInfo,
   type McpHttpServerSettings,
   type McpHttpServerStatus,
@@ -182,7 +186,7 @@ import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
-import { validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
+import { prepareImportedAiConfigs, validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
@@ -206,7 +210,8 @@ import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COL
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
-import type { DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
+import type { InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
+import { isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
@@ -388,6 +393,7 @@ const emit = defineEmits<{
   "update:open": [value: boolean];
   "check-updates": [];
   "ai-config-deep-link-handled": [];
+  "open-plugin-center": [];
 }>();
 
 const isSettingsPage = computed(() => props.variant === "page");
@@ -4181,6 +4187,7 @@ watch(snippetProvider, (provider) => {
 watch(activeSettingsTab, async (tab) => {
   void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (tab === "ai" && !isWeb) void refreshCcSwitchPluginAvailability();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
     void loadMaxAgentTurnsSetting();
@@ -4221,6 +4228,7 @@ watch(
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
+  if (!isWeb) void refreshCcSwitchPluginAvailability();
   checkLayoutDescTruncation();
   initTruncationObservers();
   void checkBackgroundImageFileExists();
@@ -4548,12 +4556,28 @@ async function saveWebSqlFileUploadMaxMbSetting() {
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
+const aiCcSwitchImporting = ref(false);
+const aiCcSwitchPlugins = ref<InstalledPlugin[]>([]);
+const aiCcSwitchPluginLoading = ref(false);
+const aiCcSwitchPluginAvailable = computed(() => isCcSwitchPluginAvailable(aiCcSwitchPlugins.value));
 
 const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const builtinAiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const partnerAiProviderOptions = computed(() => AI_PROVIDER_PARTNER_PRESETS.filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
+
+async function refreshCcSwitchPluginAvailability() {
+  if (isWeb || aiCcSwitchPluginLoading.value) return;
+  aiCcSwitchPluginLoading.value = true;
+  try {
+    aiCcSwitchPlugins.value = await listPlugins();
+  } catch {
+    aiCcSwitchPlugins.value = [];
+  } finally {
+    aiCcSwitchPluginLoading.value = false;
+  }
+}
 
 const aiEditProvider = ref<AiProvider>("claude");
 const aiEditProviderPresetId = ref("claude");
@@ -4591,6 +4615,7 @@ const aiEditQoderCliEnvRows = ref<AiEnvRow[]>([]);
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 const selectedAiProviderPreset = computed(() => getAiProviderPresetOption(aiEditProviderPresetId.value));
 const selectedAiPartnerPreset = computed(() => (isAiPartnerProviderPreset(selectedAiProviderPreset.value) ? selectedAiProviderPreset.value : null));
+const aiIsCcSwitchProvider = computed(() => aiEditProviderPresetId.value === CC_SWITCH_PROVIDER_ID);
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
@@ -4890,12 +4915,12 @@ function syncAiEditState() {
 function aiSelectProvider(presetId: string) {
   const preset = getAiProviderPresetOption(presetId);
   const provider = preset.provider;
-  if (isWeb && CLI_AI_PROVIDERS.has(provider)) return;
+  if (isWeb && (CLI_AI_PROVIDERS.has(provider) || presetId === CC_SWITCH_PROVIDER_ID)) return;
   if (presetId === aiEditProviderPresetId.value) return;
 
   syncAiEditState();
 
-  // Apply new provider's preset defaults to edit state
+  // CC-SWITCH is a UI-only preset; installation is initiated by its action buttons.
   aiEditProviderPresetId.value = presetId;
   aiEditProvider.value = provider;
   aiEditApiKey.value = "";
@@ -5104,6 +5129,51 @@ async function aiSetDefaultConfig(id: string) {
     await settingsStore.setDefaultAiConfig(id);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
+  }
+}
+
+function ccSwitchImportErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "ccSwitchNotInstalled") return t("ai.ccSwitchNotInstalled");
+  if (message === "ccSwitchPluginNotInstalled") return t("ai.ccSwitchPluginNotInstalled");
+  if (message === "ccSwitchInvalidDatabase") return t("ai.ccSwitchInvalidDatabase");
+  if (message === "ccSwitchImportDesktopOnly") return t("ai.ccSwitchImportDesktopOnly");
+  if (message.startsWith("ccSwitchHomeDirectoryFailed:")) return t("ai.ccSwitchHomeDirectoryFailed");
+  if (message.startsWith("ccSwitchOpenFailed:")) return t("ai.ccSwitchOpenFailed");
+  if (message.startsWith("ccSwitchReadFailed:")) return t("ai.ccSwitchReadFailed");
+  return message;
+}
+
+async function aiImportCcSwitchConfigs() {
+  if (isWeb || aiCcSwitchImporting.value) return;
+  aiCcSwitchImporting.value = true;
+  try {
+    const result = await loadCcSwitchAiConfigs();
+    const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs);
+    if (prepared.length === 0) {
+      toast(t("ai.ccSwitchNoNewConfigs"), 4000);
+      return;
+    }
+
+    const hadConfigs = settingsStore.aiConfigs.length > 0;
+    for (const [index, config] of prepared.entries()) {
+      await settingsStore.createAiConfig({
+        ...config,
+        id: generateId(),
+        isDefault: !hadConfigs && index === 0,
+      });
+    }
+    toast(
+      t(result.skipped.length > 0 ? "ai.ccSwitchImportPartial" : "ai.ccSwitchImportSuccess", {
+        count: prepared.length,
+        skipped: result.skipped.length,
+      }),
+      4000,
+    );
+  } catch (error) {
+    toast(ccSwitchImportErrorMessage(error), 5000);
+  } finally {
+    aiCcSwitchImporting.value = false;
   }
 }
 
@@ -8449,12 +8519,14 @@ LIMIT 100;</pre
             <section v-else-if="activeSettingsTab === 'ai'" data-settings-search-id="ai" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('ai')]">
               <!-- Config List View -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-4">
-                <div class="flex items-center justify-between">
+                <div class="flex flex-wrap items-center justify-between gap-2">
                   <h3 class="text-sm font-medium">{{ t("ai.configList") }}</h3>
-                  <Button type="button" size="sm" @click="aiEnterEditMode()">
-                    <Plus class="mr-1 h-3.5 w-3.5" />
-                    {{ t("ai.addConfig") }}
-                  </Button>
+                  <div class="flex flex-wrap items-center justify-end gap-2">
+                    <Button type="button" size="sm" @click="aiEnterEditMode()">
+                      <Plus class="mr-1 h-3.5 w-3.5" />
+                      {{ t("ai.addConfig") }}
+                    </Button>
+                  </div>
                 </div>
 
                 <div v-if="settingsStore.aiConfigs.length === 0" class="rounded-md border border-dashed p-6 text-center">
@@ -8496,6 +8568,20 @@ LIMIT 100;</pre
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div v-if="aiConfigListMode === 'list' && !isWeb && !aiCcSwitchPluginAvailable" class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-dashed border-primary/30 bg-primary/5 px-3 py-3">
+                <div class="flex min-w-0 items-start gap-3">
+                  <PackageSearch class="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  <div class="min-w-0 space-y-1">
+                    <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
+                    <p class="text-xs leading-relaxed text-muted-foreground">{{ t("ai.ccSwitchPluginNotInstalledStatus") }}</p>
+                  </div>
+                </div>
+                <Button type="button" size="sm" variant="outline" class="shrink-0" @click="emit('open-plugin-center')">
+                  <PackageSearch class="mr-1 h-3.5 w-3.5" />
+                  {{ t("toolbar.pluginCenter") }}
+                </Button>
               </div>
 
               <!-- Agent Turn Limit (list mode, global) -->
@@ -8774,7 +8860,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Config Name Input -->
-                <div class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.configName") }}</Label>
                   <Input v-model="aiEditConfigName" class="col-span-2 h-8 text-xs" :placeholder="t('ai.configNamePlaceholder')" />
                 </div>
@@ -8802,6 +8888,12 @@ LIMIT 100;</pre
                                 <span class="truncate">{{ provider.label }}</span>
                               </span>
                             </SelectItem>
+                            <SelectItem v-if="!isWeb && aiCcSwitchPluginAvailable" :value="CC_SWITCH_PROVIDER_ID">
+                              <span class="flex w-full min-w-0 items-center gap-2">
+                                <AiProviderLogo :provider="CC_SWITCH_PROVIDER_PRESET.provider" :label="CC_SWITCH_PROVIDER_PRESET.label" />
+                                <span class="truncate">{{ CC_SWITCH_PROVIDER_PRESET.label }}</span>
+                              </span>
+                            </SelectItem>
                           </SelectGroup>
                           <SelectGroup v-if="partnerAiProviderOptions.length" class="min-w-0 border-border/60 sm:border-l">
                             <SelectLabel>{{ t("ai.partnerProviders") }}</SelectLabel>
@@ -8827,8 +8919,44 @@ LIMIT 100;</pre
                   </div>
                 </div>
 
+                <div v-if="aiIsCcSwitchProvider && !isWeb && aiCcSwitchPluginAvailable" class="rounded-md border border-primary/20 bg-primary/5 px-3 py-3">
+                  <div class="flex items-start gap-3">
+                    <PackageSearch class="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                    <div class="min-w-0 space-y-1">
+                      <p class="text-sm font-medium">{{ t("ai.ccSwitchProvider") }}</p>
+                      <p class="text-xs leading-relaxed text-muted-foreground">{{ t("ai.ccSwitchProviderDescription") }}</p>
+                    </div>
+                  </div>
+                  <div class="mt-3 space-y-2 rounded-md border bg-background/70 px-3 py-2.5 text-xs">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div class="flex min-w-0 items-center gap-2 font-medium">
+                        <Loader2 v-if="aiCcSwitchPluginLoading" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                        <CheckCircle2 v-else class="h-3.5 w-3.5 shrink-0 text-green-600 dark:text-green-400" />
+                        <span class="truncate">
+                          {{ aiCcSwitchPluginLoading ? t("ai.ccSwitchPluginChecking") : t("ai.ccSwitchPluginReady") }}
+                        </span>
+                      </div>
+                      <Button type="button" size="sm" variant="ghost" class="h-7 shrink-0 px-2 text-xs" :disabled="aiCcSwitchPluginLoading" :title="t('ai.ccSwitchPluginRefresh')" :aria-label="t('ai.ccSwitchPluginRefresh')" @click="refreshCcSwitchPluginAvailability">
+                        <RefreshCw class="mr-1 h-3.5 w-3.5" />
+                        {{ t("ai.ccSwitchPluginRefresh") }}
+                      </Button>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <Button type="button" size="sm" variant="outline" :disabled="aiCcSwitchImporting" @click="aiImportCcSwitchConfigs">
+                        <Loader2 v-if="aiCcSwitchImporting" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                        <Upload v-else class="mr-1 h-3.5 w-3.5" />
+                        {{ aiCcSwitchImporting ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
                 <!-- CLI MCP Status -->
-                <div v-if="aiIsCliProvider && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCliMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
+                <div
+                  v-if="!aiIsCcSwitchProvider && aiIsCliProvider && !isWeb"
+                  class="rounded-md border px-3 py-2.5 text-xs"
+                  :class="aiCliMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'"
+                >
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div class="min-w-0 space-y-1">
                       <div class="flex min-w-0 items-center gap-2 font-medium">
@@ -8866,7 +8994,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Authentication -->
-                <div v-if="!aiIsCliProvider && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
                     <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
@@ -8880,7 +9008,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- API Key -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
                   <div class="col-span-2 flex min-w-0 items-center gap-2">
                     <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="min-w-0 flex-1" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
@@ -8892,7 +9020,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Endpoint -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">Endpoint</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
@@ -8903,7 +9031,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Custom HTTP headers for API gateways and tenant routing. -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.customHeaders") }}</Label>
                   <div class="col-span-2 space-y-2">
                     <div class="space-y-1.5">
@@ -8925,7 +9053,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- CLI Path -->
-                <div v-if="aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.cliPath", { provider: aiCliProviderLabel }) }}</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditCliPath" autocomplete="off" class="h-8 text-xs" :placeholder="aiCliCommandName" />
@@ -8944,7 +9072,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- CLI Env -->
-                <div v-if="aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.cliEnv") }}</Label>
                   <div class="col-span-2 space-y-2">
                     <div class="space-y-1.5">
@@ -8970,7 +9098,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- API Style -->
-                <div v-if="aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiSupportsApiStyle" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">API</Label>
                   <div class="col-span-2 flex gap-2">
                     <Button
@@ -9008,13 +9136,13 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Default Model -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.defaultModel") }}</Label>
                   <Input v-model="aiEditModel" autocomplete="off" class="col-span-2 h-8 text-xs" :placeholder="t('ai.manualModelPlaceholder')" />
                 </div>
 
                 <!-- Context Window -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
@@ -9024,7 +9152,7 @@ LIMIT 100;</pre
                   </div>
                 </div>
                 <!-- Maximum Output Tokens -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.maxOutputTokens") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditMaxOutputTokens" type="number" :min="AI_OUTPUT_TOKENS_MIN" :max="AI_OUTPUT_TOKENS_MAX" step="1000" class="h-8 text-xs" :placeholder="t('ai.maxOutputTokensAuto')" />
@@ -9035,7 +9163,7 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Proxy -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
                     <input v-model="aiEditProxyEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
@@ -9044,13 +9172,13 @@ LIMIT 100;</pre
                 </div>
 
                 <!-- Proxy URL -->
-                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCcSwitchProvider && !aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
                   <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
 
                 <!-- Skip TLS Verify -->
-                <div v-if="aiSupportsSkipTlsVerify" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCcSwitchProvider && aiSupportsSkipTlsVerify" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.sslVerification") }}</Label>
                   <div class="col-span-2">
                     <label class="flex items-center gap-2 text-xs text-muted-foreground">
@@ -10024,36 +10152,42 @@ LIMIT 100;</pre
               <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             </template>
             <template v-else>
-              <div class="flex min-w-0 flex-1 items-center gap-2">
-                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || !!aiHeadersValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim())" @click="aiTestConn">
-                  <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
-                  {{ t("connection.test") }}
-                </Button>
-                <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
-                  <span>{{ t("connection.testSuccess") }}</span>
-                  <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
-                </span>
-                <span v-else-if="aiTestResult === 'error'" class="flex min-w-0 max-w-lg items-center gap-1.5 text-xs text-destructive">
-                  <span class="min-w-0 select-text leading-4" :title="aiTestErrorDisplay">
-                    <span v-if="aiTestErrorPresentation.summary" class="block font-medium">{{ aiTestErrorPresentation.summary }}</span>
-                    <span class="block truncate text-destructive/80">{{ aiTestErrorPresentation.detail }}</span>
-                  </span>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
-                    :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
-                    :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
-                    @click="copyAiTestError"
-                  >
-                    <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
-                    <Copy v-else class="h-3.5 w-3.5" />
+              <template v-if="aiIsCcSwitchProvider">
+                <div class="flex-1" />
+                <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
+              </template>
+              <template v-else>
+                <div class="flex min-w-0 flex-1 items-center gap-2">
+                  <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || !!aiHeadersValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim())" @click="aiTestConn">
+                    <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
+                    {{ t("connection.test") }}
                   </Button>
-                </span>
-              </div>
-              <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
-              <Button :disabled="!aiEditConfigName.trim() || !!aiCliValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
+                  <span v-if="aiTestResult === 'success'" class="text-xs text-green-500 flex items-center gap-1.5">
+                    <span>{{ t("connection.testSuccess") }}</span>
+                    <span v-if="aiTestLatency != null" class="text-green-500/70">{{ aiTestLatency }}ms</span>
+                  </span>
+                  <span v-else-if="aiTestResult === 'error'" class="flex min-w-0 max-w-lg items-center gap-1.5 text-xs text-destructive">
+                    <span class="min-w-0 select-text leading-4" :title="aiTestErrorDisplay">
+                      <span v-if="aiTestErrorPresentation.summary" class="block font-medium">{{ aiTestErrorPresentation.summary }}</span>
+                      <span class="block truncate text-destructive/80">{{ aiTestErrorPresentation.detail }}</span>
+                    </span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      class="h-6 w-6 shrink-0 text-destructive/80 hover:text-destructive"
+                      :title="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                      :aria-label="aiTestErrorCopied ? t('ai.copied') : t('ai.copyTestResult')"
+                      @click="copyAiTestError"
+                    >
+                      <CheckCircle2 v-if="aiTestErrorCopied" class="h-3.5 w-3.5" />
+                      <Copy v-else class="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                </div>
+                <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
+                <Button :disabled="!aiEditConfigName.trim() || !!aiCliValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
+              </template>
             </template>
           </DialogFooter>
 

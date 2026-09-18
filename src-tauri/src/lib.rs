@@ -1766,6 +1766,7 @@ pub fn run() {
             commands::ai_multi_config::set_default_ai_config,
             commands::ai_multi_config::save_ai_config_item,
             commands::ai_multi_config::delete_ai_config,
+            commands::cc_switch::load_cc_switch_ai_configs,
             commands::prompt_template::load_prompt_templates,
             commands::prompt_template::save_prompt_template,
             commands::prompt_template::delete_prompt_template,

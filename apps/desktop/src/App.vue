@@ -3856,6 +3856,7 @@ onUnmounted(() => {
                   @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
                   @check-updates="checkUpdates()"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
+                  @open-plugin-center="openPluginCenterPage({ pluginId: 'cc-switch' })"
                 />
               </AppTabBar>
               <DetachedTabHeader

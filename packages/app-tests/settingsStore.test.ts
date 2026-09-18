@@ -966,7 +966,7 @@ test("API AI provider settings expose and persist a default model ID", () => {
   const modelControl = source.indexOf('<Input v-model="aiEditModel"');
 
   assert.ok(modelControl >= 0);
-  assert.match(source.slice(modelControl - 300, modelControl + 300), /v-if="!aiIsCliProvider"[\s\S]*t\("ai\.defaultModel"\)[\s\S]*t\('ai\.manualModelPlaceholder'\)/);
+  assert.match(source.slice(modelControl - 300, modelControl + 300), /v-if="!aiIsCcSwitchProvider && !aiIsCliProvider"[\s\S]*t\("ai\.defaultModel"\)[\s\S]*t\('ai\.manualModelPlaceholder'\)/);
   assert.match(source, /model:\s*aiEditModel\.value/);
 });
 

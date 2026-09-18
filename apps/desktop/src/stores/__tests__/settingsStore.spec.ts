@@ -2,12 +2,15 @@ import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
 import {
+  CC_SWITCH_PROVIDER_ID,
+  CC_SWITCH_PROVIDER_PRESET,
   AI_PROVIDER_PRESETS,
   DEFAULT_EDITOR_SETTINGS,
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   enforceRightSidebarPanelExclusivity,
   getAiProviderPresetDefaultEndpoint,
+  getAiProviderPresetOption,
   normalizeAiConfig,
   normalizeDesktopSettings,
   normalizeEditorSettings,
@@ -821,6 +824,20 @@ describe("settingsStore AI API key normalization", () => {
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "zh-CN")).toBe("https://open.bigmodel.cn/api/paas/v4");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "zh-TW")).toBe("https://api.z.ai/api/paas/v4");
     expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.zhipu, "en")).toBe("https://api.z.ai/api/paas/v4");
+  });
+
+  it("keeps the CC-SWITCH provider entry UI-only", () => {
+    const preset = getAiProviderPresetOption(CC_SWITCH_PROVIDER_ID);
+
+    expect(preset).toBe(CC_SWITCH_PROVIDER_PRESET);
+    expect(preset).toMatchObject({
+      id: CC_SWITCH_PROVIDER_ID,
+      label: "CC-SWITCH",
+      provider: "custom",
+      group: "builtin",
+      requiresApiKey: false,
+    });
+    expect(AI_PROVIDER_PRESETS).not.toHaveProperty(CC_SWITCH_PROVIDER_ID);
   });
 
   it("preserves saved MiniMax endpoints during normalization", () => {

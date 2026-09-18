@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addConfiguredAiModel, aiModelOptions, generateId } from "@/lib/ai/aiConfigList";
+import { addConfiguredAiModel, aiModelOptions, generateId, prepareImportedAiConfigs } from "@/lib/ai/aiConfigList";
 
 describe("generateId", () => {
   afterEach(() => {
@@ -60,5 +60,49 @@ describe("AI model options", () => {
     expect(aiModelOptions({ model: "", models: [{ name: "a-model" }] }, [])).toEqual([{ id: "a-model", displayName: undefined, supportedEffortLevels: undefined, effortCapability: undefined }]);
     expect(addConfiguredAiModel(undefined, "new-model")).toEqual([{ name: "new-model" }]);
     expect(addConfiguredAiModel([{ name: "existing" }], "   ")).toEqual([{ name: "existing" }]);
+  });
+});
+
+describe("CC-SWITCH imports", () => {
+  it("skips exact duplicates and gives conflicting names a source suffix", () => {
+    const config = {
+      id: "imported",
+      name: "Gateway",
+      provider: "openai-compatible" as const,
+      apiKey: "secret",
+      authMethod: "bearer" as const,
+      endpoint: "https://gateway.example",
+      model: "gpt-test",
+      apiStyle: "responses" as const,
+    };
+    const duplicate = { ...config, id: "duplicate" };
+    const sameNameDifferentConfig = { ...config, id: "different", apiKey: "other" };
+
+    expect(prepareImportedAiConfigs([config], [duplicate, sameNameDifferentConfig])).toEqual([
+      { ...sameNameDifferentConfig, name: "Gateway (CC-SWITCH)", isDefault: false },
+    ]);
+  });
+
+  it("keeps source suffixes consecutive for multiple same-name configs", () => {
+    const base = {
+      id: "base",
+      name: "Gateway",
+      provider: "openai-compatible" as const,
+      apiKey: "base-key",
+      authMethod: "bearer" as const,
+      endpoint: "https://gateway.example",
+      model: "gpt-test",
+      apiStyle: "responses" as const,
+    };
+
+    expect(
+      prepareImportedAiConfigs(
+        [base],
+        [
+          { ...base, id: "second", apiKey: "second-key" },
+          { ...base, id: "third", apiKey: "third-key" },
+        ],
+      ).map((config) => config.name),
+    ).toEqual(["Gateway (CC-SWITCH)", "Gateway (CC-SWITCH 2)"]);
   });
 });

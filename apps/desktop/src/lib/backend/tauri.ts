@@ -83,7 +83,7 @@ import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult, CcSwitchImportResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -684,6 +684,10 @@ export async function saveAiConfigItem(config: AiConfigItem): Promise<void> {
 
 export async function deleteAiConfig(configId: string): Promise<void> {
   return invoke("delete_ai_config", { configId });
+}
+
+export async function loadCcSwitchAiConfigs(): Promise<CcSwitchImportResult> {
+  return invoke("load_cc_switch_ai_configs");
 }
 
 export async function loadAiConfig(): Promise<AiConfig | null> {

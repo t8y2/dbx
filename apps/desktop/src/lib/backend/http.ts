@@ -2002,6 +2002,10 @@ export async function deleteAiConfig(configId: string): Promise<void> {
   return del(`/api/ai/config/${configId}`);
 }
 
+export async function loadCcSwitchAiConfigs(): Promise<import("@/types/ai").CcSwitchImportResult> {
+  throw new Error("ccSwitchImportDesktopOnly");
+}
+
 export async function loadDesktopSettings(): Promise<DesktopSettings> {
   try {
     const raw = safeLocalStorageGet(DESKTOP_SETTINGS_STORAGE_KEY);

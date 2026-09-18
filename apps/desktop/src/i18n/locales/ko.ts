@@ -1122,7 +1122,7 @@ export default withEnglishFallback({
     driverNotInstalled: "{driver} 드라이버가 설치되지 않았습니다. 드라이버 관리자에서 설치하세요.",
     phoenixDriverNotInstalled: "Apache Phoenix JDBC 드라이버가 설치되지 않았습니다. 드라이버 관리자에서 설치한 후 다시 시도하세요.",
     jreNotInstalled: "JRE {jre} 런타임이 설치되지 않았습니다. 드라이버 관리자에서 설치하세요.",
-    systemJavaNotFound: "PATH에서 시스템 Java 런타임을 찾을 수 없습니다. Java를 설치하거나 사용자 지정 Java 실행 파일을 선택하세요.",
+    systemJavaNotFound: "JAVA_HOME 또는 PATH에서 시스템 Java 런타임을 찾을 수 없습니다. Java를 설치하거나 사용자 지정 Java 실행 파일을 선택하세요.",
     customJavaPathEmpty: "사용자 지정 Java 런타임 경로가 비어 있습니다. Java 실행 파일을 선택하세요.",
     agentJavaTooOld: "이 드라이버는 Java 21이 필요합니다. DBX 관리 JRE 21을 사용하거나 드라이버 관리자에서 Java 21 실행 파일을 선택하세요.",
     agentDriverUpdateConnectionHint: "이 연결에 사용 가능한 내장 드라이버 업데이트가 있습니다. 연결 실패가 오래된 로컬 드라이버와 관련이 있을 수 있습니다. 드라이버 관리자에서 해당 드라이버를 업데이트한 후 다시 시도하세요.",

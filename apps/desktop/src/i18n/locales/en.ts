@@ -1244,7 +1244,7 @@ export default {
     driverNotInstalled: "{driver} driver is not installed. Please install it from the Driver Manager.",
     phoenixDriverNotInstalled: "The Apache Phoenix JDBC driver is not installed. Install it from the Driver Manager, then retry.",
     jreNotInstalled: "JRE {jre} runtime is not installed. Please install it from the Driver Manager.",
-    systemJavaNotFound: "System Java runtime was not found on PATH. Please install Java or choose a custom Java executable.",
+    systemJavaNotFound: "System Java runtime was not found in JAVA_HOME or PATH. Please install Java or choose a custom Java executable.",
     customJavaPathEmpty: "Custom Java runtime path is empty. Please choose a Java executable.",
     agentJavaTooOld: "This driver requires Java 21. Use DBX managed JRE 21 or select a Java 21 executable in Driver Manager.",
     agentDriverUpdateConnectionHint: "A built-in driver update is available for this connection. The connection failure may be related to an outdated local driver. Update the corresponding driver in Driver Manager, then retry.",

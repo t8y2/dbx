@@ -1092,7 +1092,7 @@ export default withEnglishFallback({
     driverNotInstalled: "{driver} sürücüsü kurulu değil. Lütfen Sürücü Yöneticisi'nden kurun.",
     phoenixDriverNotInstalled: "Apache Phoenix JDBC sürücüsü kurulu değil. Sürücü Yöneticisi'nden kurup tekrar deneyin.",
     jreNotInstalled: "JRE {jre} çalışma zamanı kurulu değil. Lütfen Sürücü Yöneticisi'nden kurun.",
-    systemJavaNotFound: "Sistem Java çalışma zamanı PATH üzerinde bulunamadı. Lütfen Java kurun veya özel bir Java çalıştırılabiliri seçin.",
+    systemJavaNotFound: "Sistem Java çalışma zamanı JAVA_HOME veya PATH üzerinde bulunamadı. Lütfen Java kurun veya özel bir Java çalıştırılabiliri seçin.",
     customJavaPathEmpty: "Özel Java çalışma zamanı yolu boş. Lütfen bir Java çalıştırılabiliri seçin.",
     agentJavaTooOld: "Bu sürücü Java 21 gerektirir. DBX tarafından yönetilen JRE 21'i kullanın veya Sürücü Yöneticisi'nde bir Java 21 çalıştırılabiliri seçin.",
     agentDriverUpdateConnectionHint: "Bu bağlantı için yerleşik bir sürücü güncellemesi mevcut. Bağlantı hatası, güncel olmayan yerel sürücüyle ilgili olabilir. Sürücü Yöneticisi'nde ilgili sürücüyü güncelleyip tekrar deneyin.",

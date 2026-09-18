@@ -1010,7 +1010,7 @@ export default withEnglishFallback({
     driverNotInstalled: "El controlador {driver} no está instalado. Instálelo desde el Administrador de controladores.",
     phoenixDriverNotInstalled: "El controlador JDBC de Apache Phoenix no está instalado. Instálelo desde el Administrador de controladores y vuelva a intentarlo.",
     jreNotInstalled: "El entorno JRE {jre} no está instalado. Instálelo desde el Administrador de controladores.",
-    systemJavaNotFound: "No se encontró Java en el PATH del sistema. Instale Java o elija un ejecutable personalizado.",
+    systemJavaNotFound: "No se encontró Java en JAVA_HOME ni en el PATH del sistema. Instale Java o elija un ejecutable personalizado.",
     customJavaPathEmpty: "La ruta de Java personalizada está vacía. Elija un ejecutable de Java.",
     agentJavaTooOld: "Este controlador requiere Java 21. Use el JRE 21 administrado por DBX o seleccione un ejecutable Java 21 en el Administrador de controladores.",
     agentDriverUpdateConnectionHint:

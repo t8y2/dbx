@@ -1090,7 +1090,7 @@ export default withEnglishFallback({
     driverNotInstalled: "{driver} drayveri quraşdırılmayıb. Onu drayver menecerindən quraşdırın.",
     phoenixDriverNotInstalled: "Apache Phoenix JDBC drayveri quraşdırılmayıb. Onu drayver menecerindən quraşdırın, sonra yenidən cəhd edin.",
     jreNotInstalled: "JRE {jre} icra mühiti quraşdırılmayıb. Onu drayver menecerindən quraşdırın.",
-    systemJavaNotFound: "Sistemin Java icra mühiti PATH-də tapılmadı. Java quraşdırın və ya xüsusi Java icra faylı seçin.",
+    systemJavaNotFound: "Sistemin Java icra mühiti JAVA_HOME və ya PATH-də tapılmadı. Java quraşdırın və ya xüsusi Java icra faylı seçin.",
     customJavaPathEmpty: "Xüsusi Java icra mühitinin yolu boşdur. Java icra faylı seçin.",
     agentJavaTooOld: "Bu drayver Java 21 tələb edir. DBX tərəfindən idarə olunan JRE 21-dən istifadə edin və ya drayver menecerində Java 21 icra faylı seçin.",
     agentDriverUpdateConnectionHint: "Bu əlaqə üçün daxili drayver yeniləməsi mövcuddur. Əlaqə xətası köhnəlmiş yerli drayverlə bağlı ola bilər. Drayver menecerində müvafiq drayveri yeniləyin, sonra yenidən cəhd edin.",

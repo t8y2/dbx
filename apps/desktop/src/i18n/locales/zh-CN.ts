@@ -1162,7 +1162,7 @@ export default withEnglishFallback({
     driverNotInstalled: "{driver} 驱动未安装，请在驱动管理器中安装。",
     phoenixDriverNotInstalled: "Apache Phoenix JDBC 驱动未安装，请在驱动管理器中安装后重试。",
     jreNotInstalled: "JRE {jre} 运行环境未安装，请在驱动管理器中安装。",
-    systemJavaNotFound: "未在 PATH 中找到系统 Java 运行环境，请安装 Java 或选择自定义 Java 可执行文件。",
+    systemJavaNotFound: "未在 JAVA_HOME 或 PATH 中找到系统 Java 运行环境，请安装 Java 或选择自定义 Java 可执行文件。",
     customJavaPathEmpty: "自定义 Java 运行环境路径为空，请选择 Java 可执行文件。",
     agentJavaTooOld: "该驱动需要 Java 21。请在驱动管理器中使用 DBX 托管 JRE 21，或选择 Java 21 可执行文件。",
     agentDriverUpdateConnectionHint: "当前连接使用的内置驱动有可用更新，连接失败可能与本地驱动版本过旧有关。请在「驱动管理」中更新对应驱动后重试。",

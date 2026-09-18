@@ -1010,7 +1010,7 @@ export default withEnglishFallback({
     driverNotInstalled: "O driver {driver} não está instalado. Instale-o pelo Gerenciador de Drivers.",
     phoenixDriverNotInstalled: "O driver JDBC do Apache Phoenix não está instalado. Instale-o pelo Gerenciador de Drivers e tente novamente.",
     jreNotInstalled: "O runtime JRE {jre} não está instalado. Instale-o pelo Gerenciador de Drivers.",
-    systemJavaNotFound: "O runtime Java do sistema não foi encontrado no PATH. Instale o Java ou escolha um executável Java personalizado.",
+    systemJavaNotFound: "O runtime Java do sistema não foi encontrado no JAVA_HOME nem no PATH. Instale o Java ou escolha um executável Java personalizado.",
     customJavaPathEmpty: "O caminho do runtime Java personalizado está vazio. Escolha um executável Java.",
     agentJavaTooOld: "Este driver requer Java 21. Use o JRE 21 gerenciado pelo DBX ou selecione um executável Java 21 no Gerenciador de Drivers.",
     agentDriverUpdateConnectionHint: "Há uma atualização de driver integrada disponível para esta conexão. A falha de conexão pode estar relacionada a um driver local desatualizado. Atualize o driver correspondente no Gerenciador de Drivers e tente novamente.",

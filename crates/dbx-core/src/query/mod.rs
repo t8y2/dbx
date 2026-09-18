@@ -1745,7 +1745,7 @@ async fn do_execute_typed(
             )
             .await?;
             let execution_cancel_token = if options.await_cancel_completion { None } else { cancel_token };
-            wait_for_result_opt(
+            let statement_result = wait_for_result_opt(
                 execution_cancel_token,
                 query_timeout,
                 db::mysql::execute_query_on_conn_with_limits(
@@ -1760,7 +1760,30 @@ async fn do_execute_typed(
                 ),
             )
             .await
-            .map(|result| result.result)
+            .map(|result| result.result);
+
+            // Client-session pools hold one connection for the whole tab and
+            // skip COM_RESET_CONNECTION on return so session state survives
+            // across executions. A single-statement BEGIN / START TRANSACTION
+            // would therefore leave its transaction open and pin the
+            // connection's REPEATABLE READ read view, so every later
+            // auto-commit query in the tab would keep reading the same stale
+            // snapshot until the connection was closed. Clear it here, exactly
+            // like the multi-statement MySQL path does, so each execution
+            // restores the auto-commit contract (ROLLBACK is a server no-op
+            // when no transaction is open).
+            if p.is_client_session_pool() {
+                if let Err(error) = db::mysql::rollback_open_transaction(&mut conn).await {
+                    log::warn!(
+                        "[query][mysql] trace_id={} open_txn_rollback_failed error={}",
+                        options.execution_id.as_deref().unwrap_or_default(),
+                        error
+                    );
+                    let _ = tokio::time::timeout(Duration::from_secs(5), conn.disconnect()).await;
+                    state.remove_pool_by_key(pool_key).await;
+                }
+            }
+            statement_result
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
@@ -3716,7 +3739,7 @@ async fn execute_multi_mysql(
     // server no-op, and a failure here only discards this connection.
     {
         let rollback_started_at = std::time::Instant::now();
-        match conn.query_drop("ROLLBACK").await {
+        match db::mysql::rollback_open_transaction(&mut conn).await {
             Ok(()) => {
                 if rollback_started_at.elapsed() > std::time::Duration::from_millis(5) {
                     log::info!(

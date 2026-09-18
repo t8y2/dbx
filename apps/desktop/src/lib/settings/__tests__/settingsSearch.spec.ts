@@ -71,6 +71,29 @@ describe("settings search", () => {
     expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
   });
 
+  it("only indexes SQL Server space confirmation when a SQL Server connection exists", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-sqlserver-space-completion");
+    expect(definition).toEqual(
+      expect.objectContaining({
+        id: "editor-sqlserver-space-completion",
+        category: "editor",
+        titleKey: "settings.sqlServerSpaceConfirmsCompletion",
+        descriptionKey: "settings.sqlServerSpaceConfirmsCompletionDescription",
+        targetId: "editor",
+        visible: expect.any(Function),
+      }),
+    );
+
+    const context = { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) };
+    const withoutSqlServer = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { ...context, hasSqlServerConnection: false }, translate, categoryLabels);
+    const withSqlServer = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { ...context, hasSqlServerConnection: true }, translate, categoryLabels);
+
+    expect(withoutSqlServer.map((entry) => entry.id)).not.toContain("editor-sqlserver-space-completion");
+    expect(withSqlServer.map((entry) => entry.id)).toContain("editor-sqlserver-space-completion");
+    expect(settingsDialogSource).toContain('const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));');
+    expect(settingsDialogSource).toContain('<div v-if="hasSqlServerConnection" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">');
+  });
+
   it("does not index connection or query timeout under editor settings", () => {
     expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-connect-timeout");
     expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");

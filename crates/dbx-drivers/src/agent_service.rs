@@ -107,6 +107,19 @@ fn format_jre_dir_remove_error(path: &Path, os_err: &std::io::Error) -> String {
 /// wrapper text `tar` already printed.
 fn describe_error(error: &dyn std::error::Error) -> String {
     let mut message = error.to_string();
+    if let Some(io_error) = deepest_io_error(error) {
+        let text = io_error.to_string();
+        if !text.is_empty() && !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+    }
+    message
+}
+
+/// Deepest `std::io::Error` in an error chain, preferring one that carries an
+/// OS error code over a generic wrapper.
+fn deepest_io_error(error: &dyn std::error::Error) -> Option<&std::io::Error> {
     let mut detail: Option<&std::io::Error> = None;
     let mut cause = error.source();
     while let Some(current) = cause {
@@ -117,14 +130,7 @@ fn describe_error(error: &dyn std::error::Error) -> String {
         }
         cause = current.source();
     }
-    if let Some(io_error) = detail {
-        let text = io_error.to_string();
-        if !text.is_empty() && !message.contains(&text) {
-            message.push_str(": ");
-            message.push_str(&text);
-        }
-    }
-    message
+    detail
 }
 
 /// Windows-only: rename the old JRE dir to a unique sibling so the install
@@ -3352,24 +3358,52 @@ fn extract_jre_archive(archive: &Path, dest: &Path, format: Option<ArtifactForma
 fn extract_jre_archive_once(archive: &Path, dest: &Path, format: Option<ArtifactFormat>) -> Result<(), String> {
     match format {
         Some(ArtifactFormat::TarZstd) => {
-            let file = std::fs::File::open(archive)
-                .map_err(|e| format!("Failed to open JRE archive: {}", describe_error(&e)))?;
-            let decoder = zstd::stream::read::Decoder::new(file)
-                .map_err(|e| format!("Failed to open zstd JRE archive: {}", describe_error(&e)))?;
-            extract_jre_tar(tar::Archive::new(decoder), dest)
+            let source = JreArchiveSource::TarZstd(archive);
+            extract_jre_tar(source.open()?, dest, source)
         }
         None => extract_tar_gz(archive, dest),
     }
 }
 
 fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
-    let file =
-        std::fs::File::open(archive).map_err(|e| format!("Failed to open JRE archive: {}", describe_error(&e)))?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    extract_jre_tar(tar::Archive::new(decoder), dest)
+    let source = JreArchiveSource::TarGzip(archive);
+    extract_jre_tar(source.open()?, dest, source)
 }
 
-fn extract_jre_tar<R: Read>(mut archive: tar::Archive<R>, dest: &Path) -> Result<(), String> {
+/// A JRE archive on disk and the codec needed to read it.
+///
+/// The path is kept next to the open stream because a failed extraction replays
+/// the archive once to report the entries that never reached the disk; see
+/// `diagnose_jre_extract_failure`.
+#[derive(Clone, Copy)]
+enum JreArchiveSource<'a> {
+    TarZstd(&'a Path),
+    TarGzip(&'a Path),
+}
+
+impl JreArchiveSource<'_> {
+    fn open(&self) -> Result<tar::Archive<Box<dyn Read>>, String> {
+        let path = match self {
+            Self::TarZstd(path) | Self::TarGzip(path) => *path,
+        };
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("Failed to open JRE archive: {}", describe_error(&error)))?;
+        let reader: Box<dyn Read> = match self {
+            Self::TarZstd(_) => Box::new(
+                zstd::stream::read::Decoder::new(file)
+                    .map_err(|error| format!("Failed to open zstd JRE archive: {}", describe_error(&error)))?,
+            ),
+            Self::TarGzip(_) => Box::new(flate2::read::GzDecoder::new(file)),
+        };
+        Ok(tar::Archive::new(reader))
+    }
+}
+
+fn extract_jre_tar(
+    mut archive: tar::Archive<Box<dyn Read>>,
+    dest: &Path,
+    source: JreArchiveSource<'_>,
+) -> Result<(), String> {
     let parent = dest.parent().ok_or_else(|| format!("Invalid JRE destination: {}", dest.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create JRE directory: {}", describe_error(&e)))?;
 
@@ -3377,7 +3411,25 @@ fn extract_jre_tar<R: Read>(mut archive: tar::Archive<R>, dest: &Path) -> Result
         .prefix(".jre-extract-")
         .tempdir_in(parent)
         .map_err(|e| format!("Failed to create JRE extraction directory: {}", describe_error(&e)))?;
-    archive.unpack(staging.path()).map_err(|e| format!("Failed to extract JRE archive: {}", describe_error(&e)))?;
+
+    // Restoring POSIX permissions and mtimes has no Windows equivalent: the
+    // emulation cannot express a real ACL and only adds ways for the extraction
+    // to fail (a file-system filter refusing attribute changes), while the
+    // read-only attribute it sets for 0444 entries later blocks removing a JRE
+    // that is being replaced. POSIX keeps the archive modes, which is what makes
+    // `bin/java` executable there.
+    if cfg!(windows) {
+        archive.set_preserve_permissions(false);
+        archive.set_preserve_mtime(false);
+    }
+
+    if let Err(error) = archive.unpack(staging.path()) {
+        return Err(format!(
+            "Failed to extract JRE archive: {}{}",
+            describe_error(&error),
+            diagnose_jre_extract_failure(source, staging.path(), &error)
+        ));
+    }
 
     let mut roots = std::fs::read_dir(staging.path())
         .map_err(|e| format!("Failed to inspect extracted JRE archive: {}", describe_error(&e)))?
@@ -3405,6 +3457,213 @@ fn extract_jre_tar<R: Read>(mut archive: tar::Archive<R>, dest: &Path) -> Result
             .map_err(|e| format!("Failed to install extracted JRE: {}", describe_error(&e)))?;
     }
     Ok(())
+}
+
+/// Bytes written by the extraction probe that classifies a failed entry:
+/// large enough to fail on a full or quota-limited disk, small enough to be
+/// harmless.
+const JRE_EXTRACT_PROBE_BYTES: usize = 64 * 1024;
+
+/// Explain a failed extraction in terms a support engineer can act on.
+///
+/// `tar` names the entry it failed on and nothing else, so the same message
+/// covered a full disk, a permission problem and a security product refusing a
+/// single file name. JRE archives ship ~30 `api-ms-win-*.dll` API-set stubs in
+/// `bin/`; droppers plant exactly that name for DLL hijacking, so endpoint
+/// security products are known to reject it — and closing the anti-virus UI does
+/// not remove the file-system filter behind it. Replaying the archive locates
+/// the entries that never reached the disk, and probing the failing folder
+/// separates "this folder is not writable" from "this file name is not
+/// writable".
+fn diagnose_jre_extract_failure(source: JreArchiveSource<'_>, staging: &Path, error: &dyn std::error::Error) -> String {
+    let mut diagnosis = String::new();
+    if let Some(hint) = deepest_io_error(error).and_then(|error| describe_extract_os_error(error.raw_os_error())) {
+        diagnosis.push_str(&format!("\nThe OS error means {hint}."));
+    }
+
+    let store_root = staging.parent().unwrap_or(staging);
+    match locate_unwritten_entries(source, staging) {
+        Err(replay_error) => {
+            diagnosis.push_str(&format!(
+                "\nExtraction check: the archive could not be replayed ({replay_error}), so the archive itself is \
+                 damaged or incomplete rather than the destination folder."
+            ));
+        }
+        Ok(scan) => match (scan.first_failed, scan.first_failed_path) {
+            (Some(name), Some(path)) => {
+                diagnosis.push_str(&format!(
+                    "\nExtraction check: {} file(s) are missing or incomplete; the first is `{name}`. {}",
+                    scan.failed_count,
+                    describe_unwritten_entry(&path, store_root, scan.first_failed_incomplete)
+                ));
+            }
+            _ if scan.entry_count > 0 => {
+                diagnosis.push_str(
+                    "\nExtraction check: every file entry of the archive is on disk, so the failure came from a \
+                     directory or link entry, or from moving the extracted JRE into place.",
+                );
+            }
+            _ => {}
+        },
+    }
+    diagnosis
+}
+
+/// Which entries a failed extraction left behind, from replaying the archive.
+#[derive(Default)]
+struct JreArchiveScan {
+    /// Archive-relative name of the first entry that is missing or incomplete.
+    first_failed: Option<String>,
+    /// Destination path of that entry.
+    first_failed_path: Option<PathBuf>,
+    /// Set when that entry exists but is shorter than the archive says.
+    first_failed_incomplete: bool,
+    failed_count: usize,
+    entry_count: usize,
+}
+
+impl JreArchiveScan {
+    fn record_failure(&mut self, relative: PathBuf, destination: PathBuf, incomplete: bool) {
+        self.failed_count += 1;
+        if self.first_failed.is_none() {
+            self.first_failed = Some(relative.to_string_lossy().replace('\\', "/"));
+            self.first_failed_path = Some(destination);
+            self.first_failed_incomplete = incomplete;
+        }
+    }
+}
+
+/// Replay the archive and report the file entries whose destination is missing
+/// or shorter than the archive says. Directories, links and metadata entries are
+/// skipped: only regular files carry a size that can be compared.
+fn locate_unwritten_entries(source: JreArchiveSource<'_>, staging: &Path) -> Result<JreArchiveScan, String> {
+    let mut archive = source.open()?;
+    let mut scan = JreArchiveScan::default();
+    let mut entries = archive.entries().map_err(|error| describe_error(&error))?;
+    for entry in &mut entries {
+        let entry = entry.map_err(|error| describe_error(&error))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let mut relative = PathBuf::new();
+        for component in entry.path().map_err(|error| describe_error(&error))?.components() {
+            match component {
+                std::path::Component::Normal(value) => relative.push(value),
+                std::path::Component::CurDir => {}
+                _ => return Err(format!("unsafe entry path: {}", relative.display())),
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        scan.entry_count += 1;
+        let destination = staging.join(&relative);
+        match std::fs::metadata(&destination).map(|metadata| metadata.len()) {
+            Ok(length) if length == entry.size() => {}
+            Ok(_) => scan.record_failure(relative, destination, true),
+            Err(_) => scan.record_failure(relative, destination, false),
+        }
+    }
+    Ok(scan)
+}
+
+fn describe_unwritten_entry(path: &Path, store_root: &Path, incomplete: bool) -> String {
+    let directory = path.parent().unwrap_or(store_root);
+    if incomplete {
+        return format!(
+            "The entry was created but is shorter than the archive says, so the write itself was interrupted — check \
+             the free disk space and any anti-virus, backup or quota filter for `{}`.",
+            directory.display()
+        );
+    }
+    classify_extract_blocker(directory, path.file_name(), store_root)
+}
+
+/// Tell apart the reasons a file cannot be created in the export directory by
+/// creating probes there: one with a random name, one with the failed name.
+fn classify_extract_blocker(directory: &Path, name: Option<&std::ffi::OsStr>, store_root: &Path) -> String {
+    let random_probe = probe_destination_write(directory, None);
+    let named_probe = name.map(|name| probe_destination_write(directory, Some(name)));
+    describe_extract_blocker(directory, store_root, random_probe, named_probe)
+}
+
+fn describe_extract_blocker(
+    directory: &Path,
+    store_root: &Path,
+    random_probe: std::io::Result<()>,
+    named_probe: Option<std::io::Result<()>>,
+) -> String {
+    match (random_probe, named_probe) {
+        (Err(error), _) => format!(
+            "Creating a test file in `{}` failed the same way ({error}), so the folder is not writable — check its \
+             permissions, the free disk space and any anti-virus, backup or quota filter.",
+            directory.display()
+        ),
+        (Ok(()), Some(Err(error))) if error.kind() == std::io::ErrorKind::AlreadyExists => format!(
+            "A test file can be created in `{}` and the entry exists now, so the failure looks transient — retry the \
+             import.",
+            directory.display()
+        ),
+        (Ok(()), Some(Err(_))) => format!(
+            "A differently named test file could be created in `{}`, but creating that exact file name failed the \
+             same way, so the file name itself is rejected on this machine — usually an endpoint-security file \
+             filter or a group policy. Whitelist `{}` or the dbx process and retry; closing the anti-virus UI alone \
+             does not remove such a filter.",
+            directory.display(),
+            store_root.display()
+        ),
+        _ => format!(
+            "Test files can be created in `{}` now, so the failure looks transient (a scanner, indexer or backup agent \
+             holding the file) — retry the import.",
+            directory.display()
+        ),
+    }
+}
+
+fn probe_destination_write(directory: &Path, name: Option<&std::ffi::OsStr>) -> std::io::Result<()> {
+    match name {
+        Some(name) => {
+            let probe = directory.join(name);
+            let result = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe).map(|_| ());
+            if result.is_ok() {
+                let _ = std::fs::remove_file(&probe);
+            }
+            result
+        }
+        None => {
+            let probe = directory.join(format!(".dbx-extract-probe-{}", uuid::Uuid::new_v4()));
+            let result = std::fs::File::create(&probe)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, &[0u8; JRE_EXTRACT_PROBE_BYTES]));
+            let _ = std::fs::remove_file(&probe);
+            result
+        }
+    }
+}
+
+/// Explain the well-known OS errors an extraction can hit, so support does not
+/// have to translate `os error 5` by hand.
+fn describe_extract_os_error(code: Option<i32>) -> Option<&'static str> {
+    let code = code?;
+    #[cfg(windows)]
+    {
+        match code {
+            112 => Some("the destination disk is full or the quota is exhausted"),
+            5 => Some("the file or folder is blocked by permissions, a security product or a group policy"),
+            32 | 33 => Some("another process is holding the file (a virus scanner, indexer or backup agent)"),
+            206 => Some("the path is longer than the file system allows"),
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match code {
+            28 => Some("the destination disk is full or the quota is exhausted"),
+            13 => Some("the file or folder is blocked by permissions, a security product or a group policy"),
+            11 | 16 => Some("another process is holding the file (a virus scanner, indexer or backup agent)"),
+            63 => Some("the path is longer than the file system allows"),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3488,6 +3747,110 @@ mod jre_archive_tests {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
             Some(&self.io)
         }
+    }
+
+    /// A failed extraction must name the entry that never reached the disk, not
+    /// just the `tar` description that stopped at the first bad write.
+    #[test]
+    fn reports_the_entry_that_never_reached_the_disk() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("jre.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        // The second entry cannot be created because its parent is a file.
+        append_file(&mut builder, "jdk-21/bin", b"not a directory", 0o644);
+        append_file(&mut builder, "jdk-21/bin/java", b"java", 0o755);
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let error = extract_tar_gz(&archive_path, &temp.path().join("managed-jre")).unwrap_err();
+
+        assert!(error.starts_with("Failed to extract JRE archive:"), "unexpected error: {error}");
+        assert!(error.contains("`jdk-21/bin/java`"), "unexpected error: {error}");
+        assert!(error.contains("1 file(s) are missing or incomplete"), "unexpected error: {error}");
+        assert!(error.contains("Extraction check:"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn reports_a_damaged_archive_instead_of_a_destination_problem() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive_path = temp.path().join("jre.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive_path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        append_file(&mut builder, "jdk-21/lib/modules", &vec![b'x'; 512 * 1024], 0o644);
+        builder.into_inner().unwrap().finish().unwrap();
+        let full = std::fs::read(&archive_path).unwrap();
+        std::fs::write(&archive_path, &full[..full.len() / 2]).unwrap();
+
+        let error = extract_tar_gz(&archive_path, &temp.path().join("managed-jre")).unwrap_err();
+
+        assert!(error.contains("could not be replayed"), "unexpected error: {error}");
+        assert!(error.contains("damaged or incomplete"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn classifies_a_rejected_file_name_as_a_security_filter() {
+        let temp = tempfile::tempdir().unwrap();
+        let denied = std::io::Error::from_raw_os_error(if cfg!(windows) { 5 } else { 13 });
+
+        let message = describe_extract_blocker(&temp.path().join("bin"), temp.path(), Ok(()), Some(Err(denied)));
+
+        assert!(message.contains("file name itself is rejected"), "unexpected message: {message}");
+        assert!(message.contains(&temp.path().display().to_string()), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn classifies_an_existing_entry_as_transient() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+
+        let message = describe_extract_blocker(&temp.path().join("bin"), temp.path(), Ok(()), Some(Err(existing)));
+
+        assert!(message.contains("transient"), "unexpected message: {message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classifies_an_unwritable_folder() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("bin");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let message = classify_extract_blocker(&directory, Some(std::ffi::OsStr::new("java")), temp.path());
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(message.contains("folder is not writable"), "unexpected message: {message}");
+    }
+
+    #[test]
+    fn classifies_a_writable_folder_as_transient_and_cleans_up_the_probes() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("bin");
+        std::fs::create_dir(&directory).unwrap();
+
+        let message = classify_extract_blocker(&directory, Some(std::ffi::OsStr::new("java")), temp.path());
+
+        assert!(message.contains("transient"), "unexpected message: {message}");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0, "probe files must not be left behind");
+    }
+
+    #[test]
+    fn explains_well_known_os_errors() {
+        let disk_full = if cfg!(windows) { 112 } else { 28 };
+        let denied = if cfg!(windows) { 5 } else { 13 };
+
+        assert!(describe_extract_os_error(Some(disk_full)).unwrap().contains("disk is full"));
+        assert!(describe_extract_os_error(Some(denied)).unwrap().contains("permissions"));
+        assert_eq!(describe_extract_os_error(Some(0)), None);
+        assert_eq!(describe_extract_os_error(None), None);
     }
 
     #[test]

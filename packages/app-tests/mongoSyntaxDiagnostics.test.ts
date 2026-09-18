@@ -39,9 +39,9 @@ test("underlines the update operator in a replaceOne replacement", () => {
 });
 
 test("underlines the command head for unsupported methods and wrong argument shapes", () => {
-  const [unsupported] = underlined('db.reports.renameCollection("x")');
-  assert.equal(unsupported?.text, "db.reports.renameCollection");
-  assert.match(unsupported!.message, /renameCollection\(\) is not supported/);
+  const [unsupported] = underlined('db.reports.mapReduce("x")');
+  assert.equal(unsupported?.text, "db.reports.mapReduce");
+  assert.match(unsupported!.message, /mapReduce\(\) is not supported/);
 
   const [shape] = underlined("db.reports.insertOne({a: 1}, {writeConcern: {w: 1}})");
   assert.equal(shape?.text, "db.reports.insertOne");

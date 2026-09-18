@@ -119,7 +119,7 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     try {
       const { ddl } = await loadObjectDdl(request, { force });
       const formatDialect = sqlFormatDialectForDbType(options.resolvedDatabaseType.value);
-      const unqualified = omitDdlDatabaseQualifier(ddl, formatDialect, options.resolvedDatabaseType.value, options.settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+      const unqualified = omitDdlDatabaseQualifier(ddl, formatDialect, options.resolvedDatabaseType.value, options.settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.tableMeta?.catalog);
       state.ddlContent.value = options.settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
     } catch (error: any) {
       state.ddlContent.value = `-- Error: ${error}`;

@@ -347,7 +347,7 @@ function scheduleDdlEditorInit() {
  * generated from the pending structure changes.
  */
 function formatDdlForDisplay(sql: string, dialect: SqlFormatDialect, generated = false): string {
-  const unqualified = omitDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+  const unqualified = omitDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
   if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
   return generated ? formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false) : omitDdlIdentifierQuotes(unqualified, dialect);
 }

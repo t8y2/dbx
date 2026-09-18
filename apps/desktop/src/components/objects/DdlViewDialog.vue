@@ -131,7 +131,7 @@ async function loadDdl(force = false) {
     );
     const formatDialect = props.formatDialect ?? props.dialect;
     const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
-    const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+    const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
     rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
   } catch (e: any) {
     ddlError.value = e?.message || String(e);

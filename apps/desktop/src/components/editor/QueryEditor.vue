@@ -3407,7 +3407,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
           // the aligned column layout from reformatHoverDdl.
           const isViewObject = objectMetadataRequest.objectType === "VIEW" || objectMetadataRequest.objectType === "MATERIALIZED_VIEW";
           const formatted = isViewObject ? await formatSqlForDisplay(rawDdl, formatDialect, settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
-          const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+          const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
           sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
         }
       } catch (error) {
@@ -3441,7 +3441,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         }
         if (fullColumns.length > 0) {
           sqlContent = buildHoverTableSql(quoteQualifiedName(hoverQualifiedName), fullColumns, fullIndexes, tableComment);
-          sqlContent = omitDdlDatabaseQualifier(sqlContent, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+          sqlContent = omitDdlDatabaseQualifier(sqlContent, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
           if (!settingsStore.editorSettings.generateSqlQuoteIdentifiers) sqlContent = omitDdlIdentifierQuotes(sqlContent, formatDialect);
           metadataLoadFailed = false;
         }

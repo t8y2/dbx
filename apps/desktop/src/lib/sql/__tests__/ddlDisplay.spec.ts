@@ -35,6 +35,19 @@ describe("omitDdlDatabaseQualifier", () => {
     expect(omitDdlDatabaseQualifier(ddl, "oracle", undefined, false)).toBe(ddl);
   });
 
+  it("keeps Doris and StarRocks external-catalog qualifiers", () => {
+    const dorisDdl = "ALTER TABLE `iceberg`.`analytics`.`events` ADD COLUMN `source` STRING;";
+    const starrocksDdl = "CREATE TABLE `hive`.`events` (`id` bigint);";
+
+    expect(omitDdlDatabaseQualifier(dorisDdl, "mysql", "doris", false, "iceberg")).toBe(dorisDdl);
+    expect(omitDdlDatabaseQualifier(starrocksDdl, "mysql", "starrocks", false, "hive")).toBe(starrocksDdl);
+  });
+
+  it("drops Doris and StarRocks internal-catalog database qualifiers", () => {
+    expect(omitDdlDatabaseQualifier("ALTER TABLE `analytics`.`events` ADD COLUMN `source` STRING;", "mysql", "doris", false, "internal")).toBe("ALTER TABLE `events` ADD COLUMN `source` STRING;");
+    expect(omitDdlDatabaseQualifier("CREATE TABLE `analytics`.`events` (`id` bigint);", "mysql", "starrocks", false, "internal")).toBe("CREATE TABLE `events` (`id` bigint);");
+  });
+
   it("leaves statements it does not understand untouched", () => {
     const ddl = "CREATE SEQUENCE SYSTEM.SEQ START WITH 1; SELECT SYSTEM.TEST.ID FROM SYSTEM.TEST;";
     expect(omitDdlDatabaseQualifier(ddl, "oracle", "oracle", false)).toBe(ddl);

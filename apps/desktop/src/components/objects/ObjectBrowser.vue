@@ -1189,7 +1189,7 @@ async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOp
     const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
     if (sidePanelGuard.isStale(epoch)) return;
     const formatDialect = sqlFormatDialectForDbType(effectiveDatabaseType.value);
-    const unqualified = omitDdlDatabaseQualifier(ddl, formatDialect, effectiveDatabaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+    const unqualified = omitDdlDatabaseQualifier(ddl, formatDialect, effectiveDatabaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
     rawTableDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
     loadedSuccessfully = true;
   } catch (e: any) {

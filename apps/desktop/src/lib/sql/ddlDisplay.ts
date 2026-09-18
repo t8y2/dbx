@@ -218,8 +218,8 @@ function collectDdlStatementQualifierRemovals(tokens: readonly SqlSemanticToken[
  * (#9421). Databases whose objects cannot be addressed without their qualifier
  * keep it, mirroring `dropsSchemaQualifier`.
  */
-export function omitDdlDatabaseQualifier(sql: string, dialect: SqlFormatDialect, databaseType: DatabaseType | undefined, includeDatabaseName: boolean): string {
-  if (!dropsSchemaQualifier(databaseType, includeDatabaseName)) return sql;
+export function omitDdlDatabaseQualifier(sql: string, dialect: SqlFormatDialect, databaseType: DatabaseType | undefined, includeDatabaseName: boolean, catalog?: string): string {
+  if (!dropsSchemaQualifier(databaseType, includeDatabaseName, catalog)) return sql;
   const tokens = tokenizeSqlSemantic(sql, dialect === "sqlserver" ? "sqlserver" : dialect);
   if (tokens.some((token) => token.closed === false)) return sql;
 

@@ -531,7 +531,7 @@ pub fn pick_legacy_postgres_like_database(databases: &[String]) -> Option<String
     let names: Vec<&str> = databases.iter().map(|name| name.trim()).filter(|name| !name.is_empty()).collect();
     let preferred =
         |wanted: &str| names.iter().find(|name| name.eq_ignore_ascii_case(wanted)).map(|name| (*name).to_string());
-    if let Some(database) = preferred("postgres").or_else(|| preferred("kingbase")) {
+    if let Some(database) = preferred("postgres").or_else(|| preferred("kingbase")).or_else(|| preferred("test")) {
         return Some(database);
     }
     names.iter().find(|name| !is_template_database(name)).or_else(|| names.first()).map(|name| (*name).to_string())
@@ -1019,6 +1019,9 @@ mod tests {
 
         let databases = vec!["SAMPLES".to_string(), "KingBase".to_string()];
         assert_eq!(pick_legacy_postgres_like_database(&databases).as_deref(), Some("KingBase"));
+
+        let databases = vec!["security".to_string(), "test".to_string()];
+        assert_eq!(pick_legacy_postgres_like_database(&databases).as_deref(), Some("test"));
     }
 
     #[test]

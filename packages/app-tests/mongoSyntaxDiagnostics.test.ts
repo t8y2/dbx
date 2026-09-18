@@ -61,12 +61,20 @@ test("warns about writes with no effective filter and about dropping a collectio
   assert.match(arbitrary!.message, /an arbitrary document in reports/);
   assert.match(underlined("db.reports.replaceOne({_id: {$exists: true}}, {a: 1})")[0]!.message, /replace .* arbitrary document/);
   assert.match(underlined("db.reports.drop()")[0]!.message, /drops the reports collection/);
+  assert.equal(underlined('db.getCollection("my-coll").drop()')[0]?.text, 'db.getCollection("my-coll").drop');
 
   assert.match(underlined("db.reports.bulkWrite([{ insertOne: { document: { a: 1 } } }, { deleteMany: { filter: {} } }])")[0]!.message, /bulkWrite contains an operation with no effective filter/);
+
+  // Wrapping the command in getSiblingDB() does not hide it.
+  const [sibling] = underlined('db.getSiblingDB("archive").reports.deleteMany({})');
+  assert.equal(sibling?.severity, "warning");
+  assert.equal(sibling?.text, 'db.getSiblingDB("archive").reports.deleteMany');
+  assert.match(sibling!.message, /every document in reports/);
 
   // A bounded write is not a warning.
   assert.deepEqual(buildMongoSyntaxDiagnostics("db.reports.deleteMany({status: 'stale'})"), []);
   assert.deepEqual(buildMongoSyntaxDiagnostics("db.reports.bulkWrite([{ deleteMany: { filter: { status: 'stale' } } }])"), []);
+  assert.deepEqual(buildMongoSyntaxDiagnostics('db.getSiblingDB("archive").reports.deleteMany({status: "stale"})'), []);
 });
 
 test("warns about find-and-modify commands with no effective filter", () => {

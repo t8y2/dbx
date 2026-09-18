@@ -13,8 +13,12 @@ import { bulkWriteFilters, describeMongoCommandParseFailure, mongoFilterIsEffect
 
 const UNCLOSED_MESSAGE = "MongoDB command has unclosed parentheses, brackets, braces, or strings.";
 
-/** `db.<collection>.<method>` / `db["…"].<method>` / `db.getCollection("…").<method>` / `db.<method>` — the part worth underlining by default. */
-const COMMAND_HEAD = /^\s*db\s*(?:\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\]|\.\s*getCollection\s*\([^)]*\))*(?:\s*\.\s*[A-Za-z_$][\w$]*)?/;
+/**
+ * `db.<collection>.<method>` / `db["…"].<method>` / `db.getCollection("…").<method>` /
+ * `db.getSiblingDB("…").<collection>.<method>` / `db.<method>` — the part worth underlining by default.
+ * Call forms come first so `.getCollection("x")` is consumed whole instead of stopping at the name.
+ */
+const COMMAND_HEAD = /^\s*db\s*(?:\.\s*(?:getCollection|getSiblingDB)\s*\([^)]*\)|\.\s*[A-Za-z_$][\w$]*|\[[^\]]*\])*(?:\s*\.\s*[A-Za-z_$][\w$]*)?/;
 
 export function buildMongoSyntaxDiagnostics(source: string, cursor = -1): SqlSemanticDiagnostic[] {
   const diagnostics: SqlSemanticDiagnostic[] = [];
@@ -90,6 +94,9 @@ function describeMongoWriteRisk(command: MongoCommand): string | null {
       return bulkWriteFilters(command.operations).some(mongoFilterIsEffectivelyUnbounded) ? `This bulkWrite contains an operation with no effective filter, which can affect every document in ${command.collection}.` : null;
     case "dropCollection":
       return `This drops the ${command.collection} collection and all of its documents.`;
+    case "inDatabase":
+      // db.getSiblingDB("x").coll.deleteMany({}) is just as destructive as the unwrapped form.
+      return describeMongoWriteRisk(command.command);
     default:
       return null;
   }

@@ -3651,6 +3651,8 @@ fn describe_extract_os_error(code: Option<i32>) -> Option<&'static str> {
             5 => Some("the file or folder is blocked by permissions, a security product or a group policy"),
             32 | 33 => Some("another process is holding the file (a virus scanner, indexer or backup agent)"),
             206 => Some("the path is longer than the file system allows"),
+            225 => Some("a security product rejected the file while it was written"),
+            226 => Some("a security product deleted the file right after it was written"),
             _ => None,
         }
     }
@@ -3851,6 +3853,16 @@ mod jre_archive_tests {
         assert!(describe_extract_os_error(Some(denied)).unwrap().contains("permissions"));
         assert_eq!(describe_extract_os_error(Some(0)), None);
         assert_eq!(describe_extract_os_error(None), None);
+
+        // A security product that blocks the write itself reports these
+        // Windows codes; POSIX has no counterpart.
+        if cfg!(windows) {
+            assert!(describe_extract_os_error(Some(225)).unwrap().contains("rejected the file"));
+            assert!(describe_extract_os_error(Some(226)).unwrap().contains("deleted the file"));
+        } else {
+            assert_eq!(describe_extract_os_error(Some(225)), None);
+            assert_eq!(describe_extract_os_error(Some(226)), None);
+        }
     }
 
     #[test]

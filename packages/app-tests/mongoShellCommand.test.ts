@@ -6,6 +6,7 @@ import {
   evaluateMongoWriteSafety,
   mongoAggregateWriteStage,
   listChainedCalls,
+  MONGO_SHELL_COMMAND_HINT,
   parseMongoFindExplainCommand,
   mongoBulkWriteToQueryResult,
   mongoCollectionStatsToQueryResult,
@@ -358,6 +359,45 @@ test("parseMongoFindCommand does not rewrite constructor text inside strings", (
   const command = parseMongoFindCommand(`db.orders.find({label: "new Date()", note: 'ObjectId()'})`);
   assert.ok(command);
   assert.deepEqual(JSON.parse(command.filter), { label: "new Date()", note: "ObjectId()" });
+});
+
+test("parseMongoCommand wraps db.getSiblingDB() commands with the target database", () => {
+  // The exact command from #3936.
+  const parsed = parseMongoCommand(`db.getSiblingDB("iam_account").getCollection("user")
+    .find({_id: NumberLong('144115205316939462')})
+    .sort({phone: 1})
+    .limit(21);`);
+  assert.ok(parsed && parsed.command.kind === "inDatabase");
+  assert.equal(parsed.command.database, "iam_account");
+  assert.equal(parsed.command.command.kind, "find");
+  assert.equal((parsed.command.command as { limit: number }).limit, 21);
+  assert.equal((parsed.command.command as { collection: string }).collection, "user");
+
+  assert.equal(parseMongoCommand("db.getSiblingDB('other').orders.updateOne({a: 1}, {$set: {b: 2}})")?.command.kind, "inDatabase");
+  assert.equal(parseMongoCommand('db . getSiblingDB( "x" ) . stats()')?.command.kind, "inDatabase");
+  // A sibling command is one statement in a batch, and a plain one after it is unaffected.
+  assert.deepEqual(
+    splitMongoCommandRanges('db.getSiblingDB("a").c.find({});\ndb.d.find({})').map((range) => range.command.kind),
+    ["inDatabase", "find"],
+  );
+  // A command that parses is not a failure, even when asked directly.
+  assert.equal(describeMongoCommandParseFailure('db.getSiblingDB("other").c.find({})'), MONGO_SHELL_COMMAND_HINT);
+});
+
+test("parseMongoCommand rejects malformed db.getSiblingDB() with a specific reason", () => {
+  for (const [source, expected] of [
+    ['db.getSiblingDB("x")', /requires a database name string followed by a command/],
+    ['db.getSiblingDB("").c.find({})', /requires a database name string/],
+    ["db.getSiblingDB(1).c.find({})", /requires a database name string/],
+    ['db.getSiblingDB("x", "y").c.find({})', /requires a database name string/],
+    ['db.getSiblingDB("x").getSiblingDB("y").c.find({})', /cannot be chained/],
+    // Errors inside the wrapped command are reported as they would be without the prefix.
+    ['db.getSiblingDB("x").c.replaceOne({a: 1}, {$set: {b: 2}})', /must not contain update operators such as \$set/],
+    ['db.getSiblingDB("x").c.bogus()', /Collection method bogus\(\) is not supported/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
 });
 
 test('parseMongoCommand accepts db["name"] bracket collection accessors', () => {
@@ -745,6 +785,25 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
     update: '{"$set": {"stock": 3}}',
     many: false,
   });
+});
+
+test("parseMongoWriteCommand reads renameCollection", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.orders.renameCollection("orders_2024");'), { kind: "renameCollection", collection: "orders", newName: "orders_2024" });
+  assert.equal(parseMongoWriteCommand("db[\"a-b\"].renameCollection('c')")?.kind, "renameCollection");
+  assert.equal(parseMongoWriteCommand('db.getCollection("a").renameCollection("b")')?.kind, "renameCollection");
+
+  for (const [source, expected] of [
+    ["db.orders.renameCollection()", /expects the new collection name/],
+    ["db.orders.renameCollection(1)", /expects the new collection name/],
+    ['db.orders.renameCollection("")', /requires a valid collection name/],
+    ['db.orders.renameCollection("a$b")', /requires a valid collection name/],
+    ['db.orders.renameCollection("orders")', /must differ from the current name/],
+    ['db.orders.renameCollection("x", true)', /dropTarget is not supported; drop the target collection first/],
+    ['db.orders.renameCollection("x").y()', /Unexpected text after renameCollection/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
 });
 
 test("parseMongoWriteCommand reads bulkWrite with every operation kind", () => {
@@ -1348,6 +1407,30 @@ test("parseMongoCountDocumentsCommand reads estimatedDocumentCount as a metadata
   assert.equal(parseMongoCountDocumentsCommand("db.orders.count()")?.mode, "legacy");
 });
 
+test("parseMongoRunCommand reads db.dropDatabase() and db.createCollection() as run commands", () => {
+  assert.deepEqual(parseMongoRunCommand("db . dropDatabase ( ) ;"), { commandJson: '{"dropDatabase":1}' });
+  assert.deepEqual(parseMongoRunCommand('db.createCollection("events")'), { commandJson: '{"create":"events"}' });
+  assert.deepEqual(JSON.parse(parseMongoRunCommand("db.createCollection('logs', {capped: true, size: 1048576, max: 1000})")!.commandJson), {
+    create: "logs",
+    capped: true,
+    size: 1048576,
+    max: 1000,
+  });
+  assert.equal(parseMongoCommand("db.dropDatabase()")?.command.kind, "runCommand");
+
+  for (const [source, expected] of [
+    ["db.dropDatabase(1)", /dropDatabase\(\) expects no arguments/],
+    ["db.createCollection()", /createCollection\(\) expects a collection name and optional options/],
+    ["db.createCollection(1)", /expects a collection name/],
+    ['db.createCollection("a$b")', /expects a collection name/],
+    ['db.createCollection("a", {create: "b"})', /expects a collection name/],
+    ['db.createCollection("a").x()', /Unexpected text after createCollection/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
 test("parseMongoRunCommand reads db.stats() and db.serverStatus() as run commands", () => {
   assert.deepEqual(parseMongoRunCommand("db.stats()"), { commandJson: '{"dbStats":1}' });
   assert.deepEqual(parseMongoRunCommand("db . serverStatus ( ) ;"), { commandJson: '{"serverStatus":1}' });
@@ -1383,14 +1466,14 @@ test("describeMongoCommandParseFailure explains the argument shape a known metho
 });
 
 test("describeMongoCommandParseFailure names unsupported methods and points at alternatives", () => {
-  const rename = describeMongoCommandParseFailure('db.c.renameCollection("d")');
-  assert.match(rename, /^Collection method renameCollection\(\) is not supported\. Supported collection methods: find, findOne/);
+  const mapReduce = describeMongoCommandParseFailure("db.c.mapReduce()");
+  assert.match(mapReduce, /^Collection method mapReduce\(\) is not supported\. Supported collection methods: find, findOne/);
   // Bracket and getCollection targets are recognised too.
-  assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
+  assert.match(describeMongoCommandParseFailure('db["my-coll"].validate()'), /validate\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
 
-  assert.match(describeMongoCommandParseFailure('db.createCollection("c")'), /db\.createCollection\(\) is not supported; collections are created on first insert/);
-  assert.match(describeMongoCommandParseFailure('db.getSiblingDB("other").c.find({})'), /use <database>/);
+  assert.match(describeMongoCommandParseFailure("db.getCollectionNames()"), /db\.getCollectionNames\(\) is not supported; collections are listed in the sidebar/);
+  assert.match(describeMongoCommandParseFailure("db.currentOp()"), /db\.currentOp\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure("db.adminCommand({ping: 1})"), /use db\.runCommand/);
   assert.match(describeMongoCommandParseFailure("show collections"), /listed in the sidebar/);
 

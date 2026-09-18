@@ -48,7 +48,7 @@ import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, compressSqlText, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
@@ -87,6 +87,8 @@ import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shoul
 import { driverProfileHasCompletionCandidates } from "@/lib/database/driverProfileExtensions";
 import { sqlCompletionContextFromSemantic, sqlSemanticSelectStarIsOnlyProjection, sqlSemanticSelectStarQualifierSql, sqlSemanticSelectStarTableSources } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
+import { findCteColumnResolution, findCteReferenceAt, resolveCteColumnOrigins, type CteColumnOrigin } from "@/lib/sql/semantic/cteNavigation";
+import type { SqlSemanticModel, SqlSemanticRowSource } from "@/lib/sql/semantic/types";
 import { mergeSqlSemanticReferenceAnalysis, resolveSqlSemanticNavigationTarget } from "@/lib/sql/semantic/references";
 import {
   buildElasticsearchCompletionItemsFromContext,
@@ -162,7 +164,7 @@ import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignm
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
-import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
+import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, completionReplacementTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
 import { buildSqlShortcutExecutionSql, enabledSqlShortcutActions, resolveSqlShortcutForDatabase, uniqueSqlShortcutBindings } from "@/lib/sql/sqlShortcutActions";
@@ -217,6 +219,7 @@ import {
 } from "@/lib/sql/semantic/diagnostics";
 import { resolveSqlDialectId, sqlReferenceAnalysisDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
+import { buildMongoSyntaxDiagnostics } from "@/lib/mongo/mongoSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionReferencedTable, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import type { CompletionAssistantObjectKind, ColumnInfo, DatabaseType, IndexInfo, SqlReferenceAnalysis, SqlServerCompletionContext, SqlTableReference, SqlTextSpan } from "@/types/database";
@@ -920,6 +923,43 @@ function getEditorSqlCompletionContext(sql: string, position: number, editorStat
   return context;
 }
 
+// CTE definition metadata is cursor-independent, but hover/ctrl-click models still carry the
+// position; memoize per (Text node, position, dialect, state) so hover and click at the same
+// position share one parse. Any edit swaps the Text node, invalidating the cache for free.
+let editorSemanticModelCache: {
+  doc: Text;
+  editorState: EditorState | undefined;
+  position: number;
+  databaseType: DatabaseType | undefined;
+  dialect: string | undefined;
+  model: SqlSemanticModel;
+} | null = null;
+
+function getEditorSemanticModel(sql: string, position: number, editorState = view.value?.state): SqlSemanticModel | null {
+  if (!SEMANTIC_SQL_COMPLETION_ENABLED) return null;
+  const dialect = sqlBehaviorDialect();
+  const doc = editorState?.doc;
+  if (doc && editorSemanticModelCache?.doc === doc && editorSemanticModelCache.editorState === editorState && editorSemanticModelCache.position === position && editorSemanticModelCache.databaseType === props.databaseType && editorSemanticModelCache.dialect === dialect) {
+    return editorSemanticModelCache.model;
+  }
+  const model = buildSqlSemanticModel(sql, position, {
+    databaseType: props.databaseType,
+    dialect,
+    editorState,
+  });
+  if (doc) {
+    editorSemanticModelCache = {
+      doc,
+      editorState,
+      position,
+      databaseType: props.databaseType,
+      dialect,
+      model,
+    };
+  }
+  return model;
+}
+
 function usesOracleSessionCompletionColumns(schema?: string | null): boolean {
   return shouldUseOracleSessionCompletionColumns({
     databaseType: props.databaseType,
@@ -1297,6 +1337,23 @@ function focusErrorPosition(offset: number) {
   currentView.dispatch({
     selection: { anchor: errorPos },
     effects: [editorViewModule.EditorView.scrollIntoView(errorPos, { y: "center" })],
+  });
+  currentView.focus();
+}
+
+/** CTE Ctrl/Cmd+click: select a small target (name/column/star token) while highlighting the whole CTE definition. */
+function jumpToCteRange(target: { from: number; to: number }, highlight: { from: number; to: number }) {
+  const currentView = view.value;
+  if (!currentView || !editorViewModule || !setResultSourceRangeEffect) return;
+  const docLength = currentView.state.doc.length;
+  const targetFrom = Math.max(0, Math.min(target.from, docLength));
+  const targetTo = Math.max(targetFrom, Math.min(target.to, docLength));
+  const highlightFrom = Math.max(0, Math.min(highlight.from, docLength));
+  const highlightTo = Math.max(highlightFrom, Math.min(highlight.to, docLength));
+  if (targetFrom >= targetTo) return;
+  currentView.dispatch({
+    selection: { anchor: targetFrom, head: targetTo },
+    effects: [setResultSourceRangeEffect.of({ from: highlightFrom, to: highlightTo }), editorViewModule.EditorView.scrollIntoView(targetFrom, { y: "center" })],
   });
   currentView.focus();
 }
@@ -3264,6 +3321,45 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   };
 }
 
+/** Maps a semantic row source (from a CTE body) to the shape ensureColumnsForTable accepts. */
+function referencedTableLikeFromSemanticSource(source: SqlSemanticRowSource) {
+  const identifierParts = source.qualifiedName?.parts ?? [];
+  return {
+    name: source.name,
+    nameQuoted: !!identifierParts[identifierParts.length - 1]?.quote,
+    database: source.metadataTarget?.database,
+    schema: source.qualifierParts[source.qualifierParts.length - 1],
+    schemaQuoted: source.qualifierParts.length > 0 ? !!identifierParts[identifierParts.length - 2]?.quote : undefined,
+  };
+}
+
+/**
+ * Hovers a column that the outer query receives from a CTE: trace the CTE lineage to its
+ * physical table column and reuse the shared column cache (and comment/type metadata).
+ * Returns null for expressions, untraceable bodies or metadata misses so callers fall back.
+ */
+async function resolveCteColumnHoverColumn(semanticModel: SqlSemanticModel, columnName: string, qualifier?: string): Promise<SqlCompletionColumn | null> {
+  try {
+    const hit = findCteColumnResolution(semanticModel, columnName, qualifier);
+    if (!hit) return null;
+    const origins: CteColumnOrigin[] = resolveCteColumnOrigins(semanticModel, hit, columnName);
+    if (origins.length === 0) return null;
+    // Fetch all candidate origins concurrently (same pattern as expandSelectStar);
+    // origin order still decides which match wins.
+    const matched = await Promise.all(
+      origins.map(async (origin) => {
+        const reference = referencedTableLikeFromSemanticSource(origin.source);
+        await ensureColumnsForTable(reference, reference);
+        const columns = cachedColumnsByTable.get(completionCacheKey(reference));
+        return columns?.find((candidate) => candidate.name.toLowerCase() === origin.column.toLowerCase()) ?? null;
+      }),
+    );
+    return matched.find((column) => column != null) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) {
   if (!props.connectionId || props.database == null || contextMenuOpen.value) return null;
 
@@ -3278,7 +3374,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   let semanticModel: ReturnType<typeof buildSqlSemanticModel> | null = null;
   if (SEMANTIC_SQL_COMPLETION_ENABLED) {
     try {
-      semanticModel = buildSqlSemanticModel(sql, pos, sqlCompletionDialectOptions());
+      semanticModel = getEditorSemanticModel(sql, pos, currentView.state);
     } catch (error) {
       semanticModel = null;
       console.warn(`[DBX] Failed to build semantic model for hover tooltip:`, error);
@@ -3288,6 +3384,19 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
   const semanticQualifierIsRowSource = !!qualifier && !!semanticTarget && (semanticTarget.alias?.toLowerCase() === qualifier.toLowerCase() || semanticTarget.source.name.toLowerCase() === qualifier.toLowerCase());
   const tableLookupName = semanticTarget && !semanticQualifierIsRowSource ? semanticTarget.name : name;
   const qualifiedTableLookup = semanticTarget?.schema ? `${semanticTarget.schema}.${semanticTarget.name}` : identifier;
+
+  // CTE-derived columns: trace to the physical column and show its type/source/comment before
+  // the generic table/column fallback (which cannot see inside a CTE body).
+  if (semanticModel) {
+    const cteColumn = await resolveCteColumnHoverColumn(semanticModel, name, qualifier);
+    if (cteColumn) {
+      return {
+        pos: range.from,
+        end: range.to,
+        create: () => createHoverDom(cteColumn.name, cteColumn.dataType || "column", undefined, [cteColumn.schema ? `${cteColumn.schema}.${cteColumn.table}` : cteColumn.table, ...(cteColumn.comment?.trim() ? [cteColumn.comment.trim()] : [])]),
+      };
+    }
+  }
 
   const lookup = resolveHoverTableLookupTarget({
     database: props.database,
@@ -3407,7 +3516,8 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
           // the aligned column layout from reformatHoverDdl.
           const isViewObject = objectMetadataRequest.objectType === "VIEW" || objectMetadataRequest.objectType === "MATERIALIZED_VIEW";
           const formatted = isViewObject ? await formatSqlForDisplay(rawDdl, formatDialect, settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
-          sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, formatDialect);
+          const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+          sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
         }
       } catch (error) {
         console.warn(`[DBX] Failed to load table DDL for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
@@ -3440,6 +3550,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         }
         if (fullColumns.length > 0) {
           sqlContent = buildHoverTableSql(quoteQualifiedName(hoverQualifiedName), fullColumns, fullIndexes, tableComment);
+          sqlContent = omitDdlDatabaseQualifier(sqlContent, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
           if (!settingsStore.editorSettings.generateSqlQuoteIdentifiers) sqlContent = omitDdlIdentifierQuotes(sqlContent, formatDialect);
           metadataLoadFailed = false;
         }
@@ -3570,7 +3681,7 @@ function invalidateSemanticDiagnosticsForDocumentChange() {
 }
 
 function shouldSkipSqlSemanticDiagnostics() {
-  return props.databaseType === "victoriametrics" || (props.databaseType !== "redis" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
+  return props.databaseType === "victoriametrics" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 }
 
 function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {
@@ -3712,8 +3823,14 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "mongodb" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "victoriametrics") {
+  if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "victoriametrics") {
     setSemanticDiagnostics([]);
+    return;
+  }
+  if (props.databaseType === "mongodb") {
+    // Shell commands have no SQL semantics; surface the parser's own diagnosis instead of waiting for Run.
+    const cursor = currentView.state.selection.main.head;
+    setSemanticDiagnostics(buildMongoSyntaxDiagnostics(sql, cursor));
     return;
   }
   if (props.databaseType === "redis") {
@@ -4089,6 +4206,7 @@ interface BatchColumnSelectionSession {
   from: number;
   to: number;
   replaceClosingQuote?: SqlCompletionItem["replaceClosingQuote"];
+  replaceSelectWildcard?: true;
   candidates: BatchColumnSelectionCandidate[];
   selectedKeys: Set<string>;
   completionOptions: Map<string, QueryCompletionOption>;
@@ -4288,6 +4406,7 @@ function prepareBatchColumnSelectionSession(items: SqlCompletionItem[], document
       from,
       to,
       replaceClosingQuote: selectableItems[0]!.replaceClosingQuote,
+      replaceSelectWildcard: selectableItems[0]!.replaceSelectWildcard,
       candidates,
       selectedKeys: new Set(),
       completionOptions: new Map(),
@@ -4532,10 +4651,12 @@ function applyBatchColumnSelection(view: EditorViewType, item: BatchColumnSelect
     session.qualifier,
   );
   let replaceTo = batchColumnSelectionReplaceTo({
+    from,
     to,
     mode: session.mode,
     nextCharacter: view.state.sliceDoc(to, to + 1),
     replaceClosingQuote: session.replaceClosingQuote,
+    replaceSelectWildcard: session.replaceSelectWildcard,
   });
   let insert = columns;
   if (session.mode === "insert") {
@@ -4740,7 +4861,14 @@ function completionOptionForItem(item: QueryCompletionItem | BatchColumnSelectio
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
         markCompletionAccepted(item);
-        const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
+        const nextCharacter = view.state.sliceDoc(to, to + 1);
+        const replaceTo = completionReplacementTo({
+          from,
+          to,
+          nextCharacter,
+          replaceClosingQuote: "replaceClosingQuote" in item ? item.replaceClosingQuote : undefined,
+          replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
+        });
         if (typeof originalApply === "function") {
           originalApply(view, completionItem as never, from, replaceTo);
         } else {
@@ -4770,7 +4898,14 @@ function completionOptionForItem(item: QueryCompletionItem | BatchColumnSelectio
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
       markCompletionAccepted(item);
-      const replaceTo = "replaceClosingQuote" in item && item.replaceClosingQuote === view.state.sliceDoc(to, to + 1) ? to + 1 : to;
+      const nextCharacterAtCursor = view.state.sliceDoc(to, to + 1);
+      const replaceTo = completionReplacementTo({
+        from,
+        to,
+        nextCharacter: nextCharacterAtCursor,
+        replaceClosingQuote: "replaceClosingQuote" in item ? item.replaceClosingQuote : undefined,
+        replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
+      });
       const insert = appendSqlCompletionSpace(item.apply ?? item.label, {
         enabled: ("appendSpace" in item && item.appendSpace === true) || (shouldInsertSqlCompletionSpace() && settingsStore.editorSettings.insertSpaceAfterCompletion),
         itemType: item.type,
@@ -7052,6 +7187,30 @@ onMounted(async () => {
                   target,
                 );
 
+              // 0. CTE (WITH ... AS) in-editor navigation — jump within the editor instead of
+              //    opening metadata for a name that does not exist as a physical table.
+              if (SEMANTIC_SQL_COMPLETION_ENABLED) {
+                try {
+                  const cteModel = getEditorSemanticModel(doc, pos, currentView.state);
+                  if (cteModel) {
+                    const referenceHit = findCteReferenceAt(cteModel, pos);
+                    if (referenceHit?.definition.nameSpan) {
+                      jumpToCteRange({ from: referenceHit.definition.nameSpan.start, to: referenceHit.definition.nameSpan.end }, { from: referenceHit.definition.sourceSpan.start, to: referenceHit.definition.sourceSpan.end });
+                      return;
+                    }
+                    const clickQualifier = identity.parts.length >= 2 ? identity.parts[identity.parts.length - 2]?.value : undefined;
+                    const columnHit = findCteColumnResolution(cteModel, identity.name, clickQualifier);
+                    const columnTargetSpan = columnHit?.output?.jumpSpan ?? columnHit?.stars?.[0]?.starSpan;
+                    if (columnHit && columnTargetSpan) {
+                      jumpToCteRange({ from: columnTargetSpan.start, to: columnTargetSpan.end }, { from: columnHit.definition.sourceSpan.start, to: columnHit.definition.sourceSpan.end });
+                      return;
+                    }
+                  }
+                } catch (error) {
+                  console.warn("[DBX] CTE ctrl+click resolution failed:", error);
+                }
+              }
+
               // 1. Local table lookup with the resolved scope (do not trust stale editor cache alone —
               // completion/hover may have filled cachedTables with the current schema only).
               const localScopedTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, tableLookup.database, tableLookupFilter, MAX_COMPLETION_TABLES, tableLookupSchema, props.catalog);
@@ -7696,7 +7855,7 @@ watch(
 watch(
   () => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled,
   (enabled) => {
-    if (props.databaseType === "redis" || props.databaseType === "victoriametrics") return;
+    if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "victoriametrics") return;
     if (!shouldSkipSqlSemanticDiagnostics() && enabled) {
       scheduleSemanticDiagnostics(0);
       return;

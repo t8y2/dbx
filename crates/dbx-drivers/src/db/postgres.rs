@@ -1179,6 +1179,10 @@ fn pg_text_fallback_value_with_spatial(
                 .unwrap_or_else(|| (serde_json::Value::String(normalize_pg_temporal_text(value)), None, false))
         }
         Some(PgColType::Temporal { .. }) => (serde_json::Value::String(normalize_pg_temporal_text(value)), None, false),
+        Some(PgColType::Bool) => match parse_pg_bool_text(value) {
+            Some(parsed) => (serde_json::Value::Bool(parsed), None, false),
+            None => (serde_json::Value::String(value.to_string()), None, false),
+        },
         Some(_) => (serde_json::Value::String(value.to_string()), None, false),
         None => decode_pg_text_wkb(value)
             .map(|geometry| (serde_json::Value::String(geometry.wkt), geometry.srid, true))
@@ -7101,6 +7105,17 @@ fn decode_bool_candidates(raw: Option<&[u8]>, standard: Option<bool>) -> Option<
     raw.and_then(decode_bool_bytes).or(standard)
 }
 
+/// Parse the text spellings of a boolean into a typed value so text-protocol
+/// rows decode the same way as binary rows ('t'/'f' is the server's text
+/// rendering, 'true'/'false' its input literal form).
+fn parse_pg_bool_text(value: &str) -> Option<bool> {
+    match value {
+        "t" | "true" | "1" | "yes" | "YES" => Some(true),
+        "f" | "false" | "0" | "no" | "NO" => Some(false),
+        _ => None,
+    }
+}
+
 /// Read a boolean column from a PostgreSQL row, tolerating databases that
 /// encode booleans as integers (0/1) or text ('t'/'f') instead of the standard
 /// `bool` OID.  Returns `None` when the column is NULL or truly unreadable.
@@ -7118,11 +7133,7 @@ fn pg_row_try_bool(row: &Row, idx: usize) -> Option<bool> {
         return Some(v != 0);
     }
     if let Ok(Some(v)) = row.try_get::<_, Option<String>>(idx) {
-        match v.as_str() {
-            "t" | "true" | "1" | "yes" | "YES" => return Some(true),
-            "f" | "false" | "0" | "no" | "NO" => return Some(false),
-            _ => return None,
-        }
+        return parse_pg_bool_text(v.as_str());
     }
     None
 }
@@ -10945,6 +10956,23 @@ mod tests {
             assert_eq!(pg_text_fallback_value(value, None), (serde_json::json!(value), None));
         }
         assert_eq!(pg_text_fallback_value("SRID=4326;point(1 2)", None), (serde_json::json!("point(1 2)"), Some(4326)));
+    }
+
+    #[test]
+    fn postgres_text_fallback_decodes_bool_columns_as_typed_values() {
+        // A query forced onto the text protocol by another column (for example
+        // a temporal one) carries booleans as the server's 't'/'f' text; they
+        // must still decode to typed booleans like the binary protocol would.
+        for (text, expected) in [("t", true), ("true", true), ("f", false), ("false", false)] {
+            assert_eq!(pg_text_fallback_value(text, Some(PgColType::Bool)), (serde_json::json!(expected), None));
+        }
+    }
+
+    #[test]
+    fn postgres_text_fallback_keeps_unrecognized_bool_text_as_string() {
+        assert_eq!(pg_text_fallback_value("maybe", Some(PgColType::Bool)), (serde_json::json!("maybe"), None));
+        // Without a classified column type nothing is coerced.
+        assert_eq!(pg_text_fallback_value("f", None), (serde_json::json!("f"), None));
     }
 
     #[test]

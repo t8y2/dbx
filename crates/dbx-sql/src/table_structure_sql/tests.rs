@@ -1208,6 +1208,50 @@ fn oracle_timestamp_default_precedes_nullability_in_modify_sql() {
 }
 
 #[test]
+fn oracle_create_table_places_default_before_not_null() {
+    // Oracle's column grammar is `col type [DEFAULT expr] [NOT NULL]`. Cloning a table whose
+    // NOT NULL column carries a default used to emit `NOT NULL DEFAULT ...`, which the server
+    // rejects with ORA-00907 (t8y2/dbx#9477).
+    let mut id = column("ID");
+    id.data_type = "NUMBER(10)".to_string();
+    id.is_primary_key = true;
+    let mut status = column("STATUS");
+    status.data_type = "VARCHAR2(1 BYTE)".to_string();
+    status.is_nullable = false;
+    status.default_value = "'A'".to_string();
+    let mut created_at = column("CREATED_AT");
+    created_at.data_type = "DATE".to_string();
+    created_at.is_nullable = false;
+    created_at.default_value = "SYSDATE".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        driver_profile: None,
+        schema: Some("APP".to_string()),
+        table_name: "ORDERS_COPY".to_string(),
+        columns: vec![id, status, created_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(
+        result.statements[0].contains("\"STATUS\" VARCHAR2(1 BYTE) DEFAULT 'A' NOT NULL"),
+        "ddl: {}",
+        result.statements[0]
+    );
+    assert!(result.statements[0].contains("CREATED_AT DATE DEFAULT SYSDATE NOT NULL"), "ddl: {}", result.statements[0]);
+    assert!(!result.statements[0].contains("NOT NULL DEFAULT"), "ddl: {}", result.statements[0]);
+}
+
+#[test]
 fn oracle_create_table_preserves_character_length_units() {
     let mut byte_col = column("BYTE_COL");
     byte_col.data_type = "VARCHAR2(12 BYTE)".to_string();

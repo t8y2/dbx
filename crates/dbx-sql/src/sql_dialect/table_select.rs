@@ -76,13 +76,17 @@ fn large_value_preview_kind(
                 None
             } else if base == "bytea" {
                 Some(LargeValuePreviewKind::Binary)
-            } else if matches!(base.as_str(), "char" | "character" | "varchar" | "text" | "citext" | "name" | "xml")
+            } else if matches!(base.as_str(), "char" | "character" | "varchar" | "text" | "citext" | "name")
                 || normalized.starts_with("character varying")
             {
                 Some(LargeValuePreviewKind::Text)
             } else if base == "vector" {
                 Some(LargeValuePreviewKind::Vector)
-            } else if matches!(base.as_str(), "json" | "jsonb" | "tsvector") {
+            } else if matches!(base.as_str(), "json" | "jsonb" | "tsvector" | "xml") {
+                // `xml` must be cast to text: there is no `left(xml, int)`
+                // overload and no implicit xml -> text cast, so the preview
+                // would otherwise fail with
+                // `function left(xml, integer) does not exist`.
                 Some(LargeValuePreviewKind::TextCast)
             } else {
                 None

@@ -2632,7 +2632,7 @@ fn sqlserver_schema_name_predicate(schema: &str, schema_name_expression: &str) -
     format!("{schema_name_expression} = N'{}'", schema.replace('\'', "''"))
 }
 
-fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
+pub fn sqlserver_object_id_expression(schema: &str, table: &str) -> String {
     let table = table.replace('\'', "''");
     if schema.trim().is_empty() {
         return format!("OBJECT_ID(QUOTENAME(N'{table}'))");

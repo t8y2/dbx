@@ -8996,15 +8996,32 @@ fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
 }
 
 pub fn sqlserver_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
-    format!(
-        "SELECT m.definition FROM sys.sql_modules m \
-         JOIN sys.objects o ON o.object_id = m.object_id \
-         JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         WHERE s.name = {} AND o.name = {} AND o.type IN ({})",
-        sql_string(schema),
-        sql_string(name),
-        sqlserver_object_type_filter(kind)
-    )
+    let object_type_filter = sqlserver_object_type_filter(kind);
+    if schema.trim().is_empty() {
+        // 保持历史语义：空 schema 不做“按默认 schema 解析”（OBJECT_ID 单参数形式），
+        // 仍然走 schema+name 文本等值，空字符串 schema 不可能匹配 sys.schemas，结果为空。
+        // 前端在打开源码前已用数据库名兜底 schema，因此调用方不会依赖默认 schema 解析。
+        format!(
+            "SELECT m.definition FROM sys.sql_modules m \
+             JOIN sys.objects o ON o.object_id = m.object_id \
+             JOIN sys.schemas s ON s.schema_id = o.schema_id \
+             WHERE s.name = {} AND o.name = {} AND o.type IN ({})",
+            sql_string(schema),
+            sql_string(name),
+            object_type_filter
+        )
+    } else {
+        // 用 OBJECT_ID 解析限定名得到稳定 object_id 再关联 sys.sql_modules（与 DBeaver
+        // `sys.sql_modules WHERE object_id = ...` 模式一致），避免文本等值谓词依赖
+        // collation / 同名前缀对象的身份判定。schema 为空时不做默认 schema 解析。
+        format!(
+            "SELECT m.definition FROM sys.sql_modules m \
+             JOIN sys.objects o ON o.object_id = m.object_id \
+             WHERE o.object_id = {} AND o.type IN ({})",
+            db::sqlserver::sqlserver_object_id_expression(schema, name),
+            object_type_filter
+        )
+    }
 }
 
 pub fn postgres_object_source_sql(
@@ -10420,10 +10437,68 @@ mod object_source_tests {
     }
 
     #[test]
+    fn builds_sqlserver_object_source_sql_from_object_id_identity() {
+        // 同名前缀对象：请求名原样进入 QUOTENAME 限定名，由 OBJECT_ID 解析为单一
+        // object_id，杜绝 F_GetEnumName / F_GetEnumName1 / F_GetEnumName10 这类
+        // 名称互为前缀的对象被文本谓词误匹配。
+        for name in ["F_GetEnumName", "F_GetEnumName1", "F_GetEnumName10"] {
+            assert_eq!(
+                sqlserver_object_source_sql("dbo", name, &ObjectSourceKind::Function),
+                format!(
+                    "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id \
+                     WHERE o.object_id = OBJECT_ID(QUOTENAME(N'dbo') + N'.' + QUOTENAME(N'{name}')) \
+                     AND o.type IN ('FN','IF','TF','FS','FT')"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn builds_sqlserver_object_source_sql_for_schema_scoped_routines() {
         assert_eq!(
             sqlserver_object_source_sql("dbo", "refresh_cache", &ObjectSourceKind::Procedure),
-            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = 'dbo' AND o.name = 'refresh_cache' AND o.type IN ('P')"
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id WHERE o.object_id = OBJECT_ID(QUOTENAME(N'dbo') + N'.' + QUOTENAME(N'refresh_cache')) AND o.type IN ('P')"
+        );
+    }
+
+    #[test]
+    fn sqlserver_object_source_sql_keeps_object_type_filter_per_kind() {
+        assert_eq!(
+            sqlserver_object_source_sql("dbo", "active_users", &ObjectSourceKind::View),
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id WHERE o.object_id = OBJECT_ID(QUOTENAME(N'dbo') + N'.' + QUOTENAME(N'active_users')) AND o.type IN ('V')"
+        );
+        assert_eq!(
+            sqlserver_object_source_sql("dbo", "trg_audit", &ObjectSourceKind::Trigger),
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id WHERE o.object_id = OBJECT_ID(QUOTENAME(N'dbo') + N'.' + QUOTENAME(N'trg_audit')) AND o.type IN ('TR')"
+        );
+    }
+
+    #[test]
+    fn sqlserver_object_source_sql_scopes_identity_by_schema() {
+        // 相同对象名、不同 schema 必须解析到不同 identity（schema 进入限定名）。
+        assert_eq!(
+            sqlserver_object_source_sql("other_schema", "F_GetEnumName1", &ObjectSourceKind::Function),
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id WHERE o.object_id = OBJECT_ID(QUOTENAME(N'other_schema') + N'.' + QUOTENAME(N'F_GetEnumName1')) AND o.type IN ('FN','IF','TF','FS','FT')"
+        );
+    }
+
+    #[test]
+    fn sqlserver_object_source_sql_keeps_historical_empty_schema_semantics() {
+        // 空 schema 不落入 OBJECT_ID 的单参数形式（那会按用户默认 schema 解析）：
+        // 保持 schema+name 文本等值，空字符串 schema 不可能存在于 sys.schemas，
+        // 因此结果恒为“未找到”，与历史行为一致，不引入默认 schema 解析。
+        assert_eq!(
+            sqlserver_object_source_sql("", "refresh_cache", &ObjectSourceKind::Procedure),
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = '' AND o.name = 'refresh_cache' AND o.type IN ('P')"
+        );
+    }
+
+    #[test]
+    fn sqlserver_object_source_sql_escapes_object_identity_literals() {
+        // 单引号在 SQL literal 中双写；] 等 identifier 特殊字符交由 QUOTENAME 处理。
+        assert_eq!(
+            sqlserver_object_source_sql("schema'with-quote", "function]name", &ObjectSourceKind::Function),
+            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id WHERE o.object_id = OBJECT_ID(QUOTENAME(N'schema''with-quote') + N'.' + QUOTENAME(N'function]name')) AND o.type IN ('FN','IF','TF','FS','FT')"
         );
     }
 

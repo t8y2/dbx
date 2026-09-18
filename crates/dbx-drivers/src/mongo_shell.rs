@@ -78,12 +78,22 @@ pub enum MongoCommand {
     DropIndexes { collection: String, indexes: Option<String>, single: bool },
     #[serde(rename = "dropCollection")]
     DropCollection { collection: String },
+    #[serde(rename = "renameCollection")]
+    RenameCollection {
+        collection: String,
+        #[serde(rename = "newName")]
+        new_name: String,
+    },
     #[serde(rename = "findOneAndUpdate")]
     FindOneAndUpdate { collection: String, filter: String, update: String, options: Option<String> },
     #[serde(rename = "findOneAndReplace")]
     FindOneAndReplace { collection: String, filter: String, replacement: String, options: Option<String> },
     #[serde(rename = "findOneAndDelete")]
     FindOneAndDelete { collection: String, filter: String, options: Option<String> },
+    /// `db.getSiblingDB("name").<command>`: the wrapped command, run against `database`
+    /// instead of the session's current database, for this command only.
+    #[serde(rename = "inDatabase")]
+    InDatabase { database: String, command: Box<MongoCommand> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +105,18 @@ pub enum MongoSafetyError {
 }
 
 impl MongoCommand {
+    /// The database this command explicitly targets, when it does not use the current one.
+    pub fn target_database(&self) -> Option<&str> {
+        match self {
+            Self::InDatabase { database, .. } => Some(database),
+            _ => None,
+        }
+    }
+
     pub fn is_mutating(&self) -> bool {
+        if let Self::InDatabase { command, .. } = self {
+            return command.is_mutating();
+        }
         matches!(
             self,
             Self::RunCommand { .. }
@@ -108,6 +129,7 @@ impl MongoCommand {
                 | Self::CreateIndex { .. }
                 | Self::DropIndexes { .. }
                 | Self::DropCollection { .. }
+                | Self::RenameCollection { .. }
                 | Self::FindOneAndUpdate { .. }
                 | Self::FindOneAndReplace { .. }
                 | Self::FindOneAndDelete { .. }
@@ -115,6 +137,9 @@ impl MongoCommand {
     }
 
     pub fn is_dangerous(&self) -> bool {
+        if let Self::InDatabase { command, .. } = self {
+            return command.is_dangerous();
+        }
         matches!(self, Self::RunCommand { .. } | Self::CreateUser { .. } | Self::DropCollection { .. })
             || matches!(self, Self::DropIndexes { indexes: None, single: false, .. })
             || matches!(self, Self::Aggregate { pipeline, .. } if aggregate_writes(pipeline))
@@ -122,6 +147,7 @@ impl MongoCommand {
 
     pub fn has_empty_filter(&self) -> bool {
         match self {
+            Self::InDatabase { command, .. } => command.has_empty_filter(),
             Self::Update { filter, .. }
             | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
@@ -137,6 +163,7 @@ impl MongoCommand {
 
     pub fn has_effectively_unbounded_filter(&self) -> bool {
         match self {
+            Self::InDatabase { command, .. } => command.has_effectively_unbounded_filter(),
             Self::Update { filter, .. }
             | Self::Replace { filter, .. }
             | Self::Delete { filter, .. }
@@ -531,8 +558,59 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     if let Some(database) = parse_use_database(source) {
         return Ok(MongoCommand::Use { database });
     }
+    if source.starts_with("db")
+        && source[2..].trim_start().starts_with('.')
+        && source[2..].trim_start()[1..]
+            .trim_start()
+            .strip_prefix("getSiblingDB")
+            .is_some_and(|after| after.trim_start().starts_with('('))
+        && split_sibling_db_prefix(source).is_none()
+    {
+        return Err("MongoDB getSiblingDB() requires a database name string followed by a command, for example db.getSiblingDB(\"app\").orders.find({}).".to_string());
+    }
+    if let Some((database, rest)) = split_sibling_db_prefix(source) {
+        let command = parse(&format!("db{rest}"))?;
+        return match command {
+            MongoCommand::InDatabase { .. } => Err("MongoDB getSiblingDB() cannot be chained.".to_string()),
+            MongoCommand::Use { .. } | MongoCommand::ShowDatabases => {
+                Err("MongoDB getSiblingDB() must be followed by a collection or database method.".to_string())
+            }
+            command => Ok(MongoCommand::InDatabase { database, command: Box::new(command) }),
+        };
+    }
     // `db.stats()` and `db.serverStatus()` are the shell's shorthand for the
     // matching runCommand, so they execute through the same supported path.
+    // `db.dropDatabase()` is the shell's shorthand for the dropDatabase command; running it
+    // through runCommand keeps it on the supported path and classed as dangerous.
+    if let Some((args, tail)) = database_method_call(source, "dropDatabase") {
+        if !tail.is_empty() || !args.iter().all(|arg| arg.trim().is_empty()) {
+            return Err("MongoDB db.dropDatabase() takes no arguments.".to_string());
+        }
+        return Ok(MongoCommand::RunCommand { command_json: r#"{"dropDatabase":1}"#.to_string() });
+    }
+    // `db.createCollection(name[, options])` is the create command; options such as
+    // capped/size/max/validator pass through for the server to validate.
+    if let Some((args, tail)) = database_method_call(source, "createCollection") {
+        if !tail.is_empty() || !(1..=2).contains(&args.len()) {
+            return Err("MongoDB createCollection() requires a collection name and optional options.".to_string());
+        }
+        let name = parse_string_arg(&args[0])?;
+        if name.trim().is_empty() || name.contains('$') {
+            return Err("MongoDB createCollection() requires a valid collection name.".to_string());
+        }
+        let mut command = serde_json::Map::new();
+        command.insert("create".to_string(), Value::String(name));
+        if let Some(options) = args.get(1).filter(|arg| !arg.trim().is_empty()) {
+            let Some(Value::Object(options)) = parse_json_value(&normalized_json(options)?) else {
+                return Err("MongoDB createCollection() options must be a document.".to_string());
+            };
+            if options.contains_key("create") {
+                return Err("MongoDB createCollection() options must not contain create.".to_string());
+            }
+            command.extend(options);
+        }
+        return Ok(MongoCommand::RunCommand { command_json: Value::Object(command).to_string() });
+    }
     for (method, command) in [("stats", "dbStats"), ("serverStatus", "serverStatus")] {
         if let Some((args, tail)) = database_method_call(source, method) {
             if !tail.is_empty() || !args.iter().all(|arg| arg.trim().is_empty()) {
@@ -863,6 +941,27 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             single: false,
         });
     }
+    if let Some((args, tail)) = method_call(source, prefix_end, "renameCollection") {
+        if !tail.is_empty() || args.is_empty() {
+            return Err("MongoDB renameCollection() requires the new collection name.".to_string());
+        }
+        if args.len() > 1 {
+            // The second argument is dropTarget, which would delete an existing collection
+            // of the new name; reject it rather than silently ignore it.
+            return Err(
+                "MongoDB renameCollection() dropTarget is not supported; drop the target collection first.".to_string()
+            );
+        }
+        let new_name = parse_string_arg(&args[0])?;
+        if new_name.trim().is_empty() || new_name.contains('$') {
+            return Err("MongoDB renameCollection() requires a valid collection name.".to_string());
+        }
+        if new_name == collection {
+            return Err("MongoDB renameCollection() new name must differ from the current name.".to_string());
+        }
+        return Ok(MongoCommand::RenameCollection { collection, new_name });
+    }
+
     if let Some((args, tail)) = method_call(source, prefix_end, "drop") {
         if !tail.is_empty() || !args.is_empty() {
             return Err("Invalid MongoDB drop() command.".to_string());
@@ -1520,6 +1619,30 @@ fn legacy_update_options(value: Option<&String>) -> Result<(Option<String>, bool
         Some(serde_json::to_string(&Value::Object(options)).map_err(|error| error.to_string())?)
     };
     Ok((options, many))
+}
+
+/// `db.getSiblingDB("name")` prefix: the database name and the text after the call,
+/// which must continue with `.` so the rest reads as a normal `db.` command.
+fn split_sibling_db_prefix(source: &str) -> Option<(String, &str)> {
+    let rest = source.strip_prefix("db")?.trim_start().strip_prefix('.')?.trim_start().strip_prefix("getSiblingDB")?;
+    let rest = rest.trim_start();
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let close = matching_paren(rest, 0)?;
+    let args = split_top_level(&rest[1..close]);
+    if args.len() != 1 {
+        return None;
+    }
+    let database = parse_string_arg(&args[0]).ok()?;
+    if database.is_empty() {
+        return None;
+    }
+    let after = &rest[close + 1..];
+    if !after.trim_start().starts_with('.') {
+        return None;
+    }
+    Some((database, after))
 }
 
 fn parse_use_database(source: &str) -> Option<String> {
@@ -2217,6 +2340,118 @@ mod tests {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
         }
+    }
+
+    #[test]
+    fn parses_rename_collection() {
+        let command = parse(r#"db.orders.renameCollection("orders_2024");"#).unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::RenameCollection { collection: "orders".to_string(), new_name: "orders_2024".to_string() }
+        );
+        assert!(command.is_mutating());
+        assert!(!command.is_dangerous());
+        assert_eq!(serde_json::to_value(&command).unwrap()["newName"], "orders_2024");
+        assert!(matches!(parse(r#"db["a-b"].renameCollection('c')"#).unwrap(), MongoCommand::RenameCollection { .. }));
+
+        for (source, expected) in [
+            ("db.orders.renameCollection()", "requires the new collection name"),
+            ("db.orders.renameCollection(1)", "must be a string"),
+            (r#"db.orders.renameCollection("")"#, "valid collection name"),
+            (r#"db.orders.renameCollection("a$b")"#, "valid collection name"),
+            (r#"db.orders.renameCollection("orders")"#, "must differ"),
+            (r#"db.orders.renameCollection("x", true)"#, "dropTarget is not supported"),
+            (r#"db.orders.renameCollection("x").y()"#, "requires the new collection name"),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
+    }
+
+    #[test]
+    fn parses_drop_database_and_create_collection_as_run_commands() {
+        let drop = parse("db . dropDatabase ( ) ;").unwrap();
+        assert_eq!(drop, MongoCommand::RunCommand { command_json: r#"{"dropDatabase":1}"#.to_string() });
+        assert!(drop.is_mutating() && drop.is_dangerous());
+
+        assert_eq!(
+            parse(r#"db.createCollection("events")"#).unwrap(),
+            MongoCommand::RunCommand { command_json: r#"{"create":"events"}"#.to_string() }
+        );
+        let MongoCommand::RunCommand { command_json } =
+            parse("db.createCollection('logs', {capped: true, size: 1048576, max: 1000})").unwrap()
+        else {
+            panic!("expected a run command");
+        };
+        assert_eq!(
+            parse_json_value(&command_json).unwrap(),
+            serde_json::json!({ "create": "logs", "capped": true, "size": 1048576, "max": 1000 })
+        );
+
+        for (source, expected) in [
+            ("db.dropDatabase(1)", "takes no arguments"),
+            ("db.createCollection()", "requires a collection name"),
+            ("db.createCollection(1)", "must be a string"),
+            (r#"db.createCollection("")"#, "valid collection name"),
+            (r#"db.createCollection("a$b")"#, "valid collection name"),
+            (r#"db.createCollection("a", [])"#, "options must be a document"),
+            (r#"db.createCollection("a", {create: "b"})"#, "must not contain create"),
+            (r#"db.createCollection("a").x()"#, "collection name and optional options"),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
+    }
+
+    #[test]
+    fn parses_get_sibling_db_as_a_database_override() {
+        // The exact command from #3936.
+        let command = parse(
+            r#"db.getSiblingDB("iam_account").getCollection("user").find({_id: NumberLong('144115205316939462')}).sort({phone: 1}).limit(21);"#,
+        )
+        .unwrap();
+        let MongoCommand::InDatabase { database, command: inner } = &command else {
+            panic!("expected an InDatabase wrapper");
+        };
+        assert_eq!(database, "iam_account");
+        assert!(matches!(**inner, MongoCommand::Find { limit: 21, .. }));
+        assert_eq!(command.target_database(), Some("iam_account"));
+        assert!(!command.is_mutating());
+
+        // Database-level commands and odd spacing work too; safety delegates to the wrapped command.
+        assert!(matches!(parse(r#"db . getSiblingDB( "x" ) . stats()"#).unwrap(), MongoCommand::InDatabase { .. }));
+        let delete = parse(r#"db.getSiblingDB('x').c.deleteMany({})"#).unwrap();
+        assert!(delete.is_mutating());
+        assert!(delete.has_empty_filter() && delete.has_effectively_unbounded_filter());
+        assert_eq!(validate_safety(&delete, true, false, false), Err(MongoSafetyError::EmptyFilter));
+
+        let serialized = serde_json::to_value(parse(r#"db.getSiblingDB("x").c.find({})"#).unwrap()).unwrap();
+        assert_eq!(serialized["kind"], "inDatabase");
+        assert_eq!(serialized["database"], "x");
+        assert_eq!(serialized["command"]["kind"], "find");
+    }
+
+    #[test]
+    fn rejects_malformed_get_sibling_db() {
+        for (source, expected) in [
+            (r#"db.getSiblingDB("x")"#, "followed by a command"),
+            (r#"db.getSiblingDB("x").getSiblingDB("y").c.find({})"#, "cannot be chained"),
+            (r#"db.getSiblingDB("").c.find({})"#, "requires a database name string"),
+            (r#"db.getSiblingDB(1).c.find({})"#, "requires a database name string"),
+            (r#"db.getSiblingDB("x", "y").c.find({})"#, "requires a database name string"),
+            (r#"db.getSiblingDB("x").use y"#, "collection method is required"),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
+    }
+
+    #[test]
+    fn does_not_misreport_get_sibling_db_prefixed_methods() {
+        // A method whose name merely starts with `getSiblingDB` must fall through
+        // to the generic unsupported-method error, not the wrapper-specific one.
+        let error = parse(r#"db.getSiblingDBX("x").c.find({})"#).unwrap_err();
+        assert!(!error.contains("getSiblingDB()"), "got: {error}");
     }
 
     #[test]

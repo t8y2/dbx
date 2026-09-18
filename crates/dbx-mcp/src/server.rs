@@ -2180,14 +2180,19 @@ fn validate_mongo_command_with_groups(
             ),
         )
     })?;
-    if matches!(command, MongoCommand::RunCommand { .. }) {
+    let (target_database, command_to_validate) = match &command {
+        MongoCommand::InDatabase { database, command } => (database.as_str(), command.as_ref()),
+        command => (database, command),
+    };
+    ensure_database_in_scope(database_scope, target_database)?;
+    if matches!(command_to_validate, MongoCommand::RunCommand { .. }) {
         return Err(tool_error(
             "SQL_BLOCKED",
             "MongoDB runCommand is not available through MCP; review and execute it manually in DBX.",
         ));
     }
-    if let MongoCommand::Aggregate { pipeline, .. } = &command {
-        dbx_core::mcp_policy::ensure_mongo_database_execution_scope(policy, &connection.id, database, pipeline)
+    if let MongoCommand::Aggregate { pipeline, .. } = command_to_validate {
+        dbx_core::mcp_policy::ensure_mongo_database_execution_scope(policy, &connection.id, target_database, pipeline)
             .map_err(|error| {
                 let (code, message) = error
                     .strip_prefix("QUERY_ERROR: ")
@@ -2196,21 +2201,24 @@ fn validate_mongo_command_with_groups(
                     });
                 tool_error(code, message)
             })?;
-        for target_database in mongo_aggregate_target_databases(pipeline, database)? {
-            ensure_database_in_scope(database_scope, &target_database)?;
+        for output_database in mongo_aggregate_target_databases(pipeline, target_database)? {
+            ensure_database_in_scope(database_scope, &output_database)?;
         }
     }
-    let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, database);
+    let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, target_database);
     let permissions = mcp_permissions(connection, &effective_policy);
-    let production_database = match &command {
+    let production_database = match command_to_validate {
         MongoCommand::Aggregate { pipeline, .. } => {
-            mongo_pipeline_targets_production_database(connection, database, pipeline)
+            mongo_pipeline_targets_production_database(connection, target_database, pipeline)
         }
-        _ => is_production_database(connection, database),
+        _ => is_production_database(connection, target_database),
     };
-    if let Err(error) =
-        mongo::validate_safety(&command, permissions.allow_writes, permissions.allow_dangerous, production_database)
-    {
+    if let Err(error) = mongo::validate_safety(
+        command_to_validate,
+        permissions.allow_writes,
+        permissions.allow_dangerous,
+        production_database,
+    ) {
         return Err(match error {
             MongoSafetyError::WritesDisabled => tool_error(
                 if effective_policy.read_only { "MCP_READ_ONLY" } else { "CONNECTION_READ_ONLY" },
@@ -3336,6 +3344,109 @@ mod tests {
             assert!(result_text(&error).contains("SQL_BLOCKED"));
             assert!(result_text(&error).contains("runCommand"));
         }
+    }
+
+    #[test]
+    fn mongo_sibling_database_run_command_is_never_exposed_through_mcp() {
+        let mongo = connection("mongo", "mongo", "mongodb", "operations");
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            ..Default::default()
+        };
+
+        let error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::All,
+            "operations",
+            r#"db.getSiblingDB("staging").runCommand({ping: 1})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("SQL_BLOCKED"));
+        assert!(result_text(&error).contains("runCommand"));
+    }
+
+    #[test]
+    fn mongo_sibling_database_honors_target_scope_and_read_only_policy() {
+        let mongo = connection("mongo", "mongo", "mongodb", "operations");
+        let policy = McpGlobalPolicy {
+            connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
+                connection_id: "mongo".to_string(),
+                read_only: false,
+                allow_dangerous_sql: true,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: McpDatabaseScope::Selected,
+                allowed_databases: vec!["operations".to_string(), "reporting".to_string()],
+                database_policies: vec![
+                    dbx_core::storage::McpDatabasePolicy {
+                        database_name: "operations".to_string(),
+                        read_only: false,
+                        allow_dangerous_sql: true,
+                    },
+                    dbx_core::storage::McpDatabasePolicy {
+                        database_name: "reporting".to_string(),
+                        read_only: true,
+                        allow_dangerous_sql: false,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let read_only_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string(), "reporting".to_string()]),
+            "operations",
+            r#"db.getSiblingDB("reporting").users.deleteMany({_id: 1})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&read_only_error).contains("MCP_READ_ONLY"));
+
+        let scope_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string()]),
+            "operations",
+            r#"db.getSiblingDB("reporting").users.find({})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&scope_error).contains("DATABASE_OUT_OF_SCOPE"));
+    }
+
+    #[test]
+    fn mongo_sibling_database_aggregate_honors_output_scope_and_production_protection() {
+        let mut mongo = connection("mongo", "mongo", "mongodb", "operations");
+        mongo.production_databases = vec!["production".to_string()];
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            ..Default::default()
+        };
+
+        let production_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::All,
+            "operations",
+            r#"db.getSiblingDB("staging").items.aggregate([{"$out":{"db":"production","coll":"archive"}}])"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&production_error).contains("PRODUCTION_WRITE_BLOCKED"));
+
+        let scope_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string(), "staging".to_string()]),
+            "operations",
+            r#"db.getSiblingDB("staging").items.aggregate([{"$merge":{"into":{"db":"archive","coll":"items"}}}])"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&scope_error).contains("DATABASE_OUT_OF_SCOPE"));
     }
 
     #[test]

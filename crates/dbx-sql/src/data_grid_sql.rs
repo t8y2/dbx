@@ -134,8 +134,14 @@ pub struct DataGridCopyInsertStatementOptions {
     pub exclude_primary_keys: bool,
     #[serde(default)]
     pub include_computed_columns: bool,
+    #[serde(default = "default_include_database_name")]
+    pub include_database_name: bool,
     #[serde(default)]
     pub insert_mode: DataGridCopyInsertMode,
+}
+
+fn default_include_database_name() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,10 +525,53 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     let table = options.table_meta.as_ref().map_or_else(
         || "table_name".to_string(),
         |meta| {
+            // This copy option controls every namespace prefix, including
+            // SQLite's main schema and external catalogs.
+            if !options.include_database_name {
+                return data_grid_identifier(
+                    options.database_type,
+                    &meta.table_name,
+                    options.identifier_quote.as_deref(),
+                );
+            }
+            // MySQL-compatible engines can store the database in either field.
+            let use_database_fallback = match options.database_type {
+                Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::ClickHouse) => true,
+                Some(DatabaseType::Doris | DatabaseType::StarRocks) => meta
+                    .catalog
+                    .as_deref()
+                    .is_none_or(|catalog| catalog.trim().is_empty() || catalog.trim() == "internal"),
+                _ => false,
+            };
+            // MySQL table tabs store the namespace in `database` without a
+            // schema. Explicit schemas still take priority for cross-database
+            // sources; schema-based engines must not use this fallback.
+            let schema = if use_database_fallback {
+                meta.schema
+                    .as_deref()
+                    .filter(|schema| !schema.trim().is_empty())
+                    .or_else(|| meta.database.as_deref().filter(|database| !database.trim().is_empty()))
+            } else {
+                meta.schema.as_deref()
+            };
+            // ClickHouse uses a database qualifier rather than SQL schemas.
+            if options.database_type == Some(DatabaseType::ClickHouse) {
+                if let Some(database) = schema {
+                    return format!(
+                        "{}.{}",
+                        data_grid_identifier(options.database_type, database, options.identifier_quote.as_deref()),
+                        data_grid_identifier(
+                            options.database_type,
+                            &meta.table_name,
+                            options.identifier_quote.as_deref()
+                        ),
+                    );
+                }
+            }
             data_grid_qualified_table_name(
                 options.database_type,
                 meta.catalog.as_deref(),
-                meta.schema.as_deref(),
+                schema,
                 meta.database.as_deref(),
                 &meta.table_name,
                 options.identifier_quote.as_deref(),
@@ -4016,6 +4065,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
@@ -4067,6 +4117,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("Ada")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4113,6 +4164,7 @@ mod tests {
             rows: vec![vec![json!("A-1"), json!("A-1"), json!("Ada")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
@@ -4169,6 +4221,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("Ada"), json!("ADA")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`label`) VALUES ('Ada');"));
@@ -4238,6 +4291,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("2026-08-18"), json!("sweater")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
@@ -4282,6 +4336,7 @@ mod tests {
             rows: vec![vec![json!("AD"), json!("Andorra")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
@@ -4311,6 +4366,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("ada")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`id`, `login_name`) VALUES (1, 'ada');"));
@@ -4328,6 +4384,7 @@ mod tests {
             rows: vec![vec![json!(7), json!(true), json!(r#"{"name":"Ada","roles":["admin"]}"#)]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4349,6 +4406,7 @@ mod tests {
             rows: vec![vec![json!([1, 2, 3])]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4367,6 +4425,7 @@ mod tests {
             rows: vec![vec![json!([])]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4385,6 +4444,7 @@ mod tests {
             rows: vec![vec![json!({"a": 1})]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4498,6 +4558,7 @@ mod tests {
             rows: vec![vec![json!("ada"), json!("Ada")]],
             exclude_primary_keys: true,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4526,6 +4587,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::RowByRow,
         });
         assert_eq!(
@@ -4555,6 +4617,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4587,6 +4650,7 @@ mod tests {
             rows: rows.clone(),
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(
@@ -4654,6 +4718,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -4679,6 +4744,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -6697,6 +6763,7 @@ mod tests {
             rows: vec![vec![json!(1), json!("login")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
 
@@ -8571,6 +8638,7 @@ mod tests {
             rows: vec![vec![json!(2), json!("new")]],
             exclude_primary_keys: false,
             include_computed_columns: false,
+            include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
         assert_eq!(

@@ -42,8 +42,131 @@ fn partially_deserialized_options_use_the_canonical_defaults() {
     assert!(!options.sql.skip_generated_columns);
     assert_eq!(options.sql.insert_mode, crate::data_grid_sql::DataGridCopyInsertMode::Merged);
     assert!(!options.sql.exclude_primary_keys_from_insert);
+    assert!(options.sql.include_database_name);
     assert!(options.json.pretty);
     assert!(!options.json.camel_case_field_names);
+}
+
+#[test]
+fn insert_database_name_option_handles_engine_namespaces() {
+    use crate::data_grid_sql::DataGridCopyInsertMode;
+    use crate::sql_dialect::uses_single_row_insert_statements;
+
+    for (database_type, catalog, schema, qualified, unqualified) in [
+        (DatabaseType::Mysql, None, "a`b", "`a``b`.`users`", "`users`"),
+        (DatabaseType::Goldendb, None, "app", "`app`.`users`", "`users`"),
+        (DatabaseType::Doris, Some("internal"), "app", "`app`.`users`", "`users`"),
+        (DatabaseType::StarRocks, None, "app", "`app`.`users`", "`users`"),
+        (DatabaseType::Sqlite, None, "main", "\"main\".\"users\"", "\"users\""),
+        (DatabaseType::Sqlite, None, "attached", "\"attached\".\"users\"", "\"users\""),
+        (DatabaseType::DuckDb, None, "main", "\"main\".\"users\"", "\"users\""),
+        (DatabaseType::Oracle, None, "APP", "\"APP\".\"users\"", "\"users\""),
+        (DatabaseType::Dameng, None, "APP", "\"APP\".\"users\"", "\"users\""),
+        (DatabaseType::Kingbase, None, "audit", "\"audit\".\"users\"", "\"users\""),
+        (DatabaseType::Gaussdb, None, "audit", "\"audit\".\"users\"", "\"users\""),
+        (DatabaseType::OpenGauss, None, "audit", "\"audit\".\"users\"", "\"users\""),
+        (DatabaseType::Db2, None, "APP", "\"APP\".\"users\"", "\"users\""),
+        (DatabaseType::StarRocks, Some("iceberg"), "app", "`iceberg`.`app`.`users`", "`users`"),
+        (DatabaseType::Postgres, None, "audit", "\"audit\".\"users\"", "\"users\""),
+        (DatabaseType::SqlServer, Some("app"), "audit", "[app].[audit].[users]", "[users]"),
+        (DatabaseType::Doris, Some("iceberg"), "app", "`iceberg`.`app`.`users`", "`users`"),
+    ] {
+        for include_database_name in [true, false] {
+            for insert_mode in [DataGridCopyInsertMode::Merged, DataGridCopyInsertMode::RowByRow] {
+                let mut request = request(DataGridExtractorId::SqlInserts);
+                request.database_type = Some(database_type);
+                request.table_meta = Some(DataGridTableMeta {
+                    catalog: catalog.map(str::to_owned),
+                    database: Some("app".to_owned()),
+                    schema: Some(schema.to_owned()),
+                    table_name: "users".to_owned(),
+                    primary_keys: vec![],
+                    columns: None,
+                });
+                request.options.sql.include_database_name = include_database_name;
+                request.options.sql.insert_mode = insert_mode;
+                // Exercise the same camelCase contract sent by the frontend.
+                let request = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+                let result = extract_data_grid_selection(request).unwrap();
+                let table = if include_database_name { qualified } else { unqualified };
+                let statements: Vec<_> = result.text.split(";\n").collect();
+                let expected_statement_count = if insert_mode == DataGridCopyInsertMode::RowByRow
+                    || uses_single_row_insert_statements(database_type)
+                {
+                    2
+                } else {
+                    1
+                };
+                assert_eq!(statements.len(), expected_statement_count);
+                for statement in statements {
+                    assert!(statement.starts_with(&format!("INSERT INTO {table} (")), "{statement}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn insert_database_name_option_uses_database_when_schema_is_absent() {
+    use crate::data_grid_sql::DataGridCopyInsertMode;
+
+    for database_type in [DatabaseType::Mysql, DatabaseType::Goldendb, DatabaseType::Doris, DatabaseType::StarRocks] {
+        for (database, schema, qualified) in [
+            (Some("a`b"), None, "`a``b`.`users`"),
+            (Some("app"), Some(""), "`app`.`users`"),
+            (Some("app"), Some("  "), "`app`.`users`"),
+            (Some("app"), Some("other"), "`other`.`users`"),
+            (None, Some("other"), "`other`.`users`"),
+            (None, None, "`users`"),
+            (Some("  "), None, "`users`"),
+        ] {
+            for include_database_name in [true, false] {
+                for insert_mode in [DataGridCopyInsertMode::Merged, DataGridCopyInsertMode::RowByRow] {
+                    let mut request = request(DataGridExtractorId::SqlInserts);
+                    request.database_type = Some(database_type);
+                    request.table_meta = Some(DataGridTableMeta {
+                        catalog: None,
+                        database: database.map(str::to_owned),
+                        schema: schema.map(str::to_owned),
+                        table_name: "users".to_owned(),
+                        primary_keys: vec![],
+                        columns: None,
+                    });
+                    request.options.sql.include_database_name = include_database_name;
+                    request.options.sql.insert_mode = insert_mode;
+                    let request = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+                    let result = extract_data_grid_selection(request).unwrap();
+                    let table = if include_database_name { qualified } else { "`users`" };
+                    for statement in result.text.split(";\n") {
+                        assert!(statement.starts_with(&format!("INSERT INTO {table} (")), "{statement}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn postgres_insert_can_omit_schema_namespace() {
+    for schema in [Some("dbx_dst_ccfebf6b"), None] {
+        for include_database_name in [true, false] {
+            let mut request = request(DataGridExtractorId::SqlInserts);
+            request.database_type = Some(DatabaseType::Postgres);
+            request.table_meta = Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("app".to_owned()),
+                schema: schema.map(str::to_owned),
+                table_name: "users".to_owned(),
+                primary_keys: vec![],
+                columns: None,
+            });
+            request.options.sql.include_database_name = include_database_name;
+            let result = extract_data_grid_selection(request).unwrap();
+            let table =
+                if include_database_name && schema.is_some() { r#""dbx_dst_ccfebf6b"."users""# } else { r#""users""# };
+            assert!(result.text.starts_with(&format!("INSERT INTO {table} (")), "{}", result.text);
+        }
+    }
 }
 
 #[test]

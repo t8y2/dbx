@@ -240,6 +240,60 @@ describe("PluginContributionsPanel batch source validation", () => {
   });
 });
 
+describe("PluginContributionsPanel installed plugin pin controls", () => {
+  it("renders selection and pin actions as sibling native buttons", async () => {
+    state.batchMode = false;
+    await nextTick();
+
+    const pinButton = [...host.querySelectorAll<HTMLElement>("[title]")].find((element) => element.title.startsWith("pluginPlatform.pinPlugin:"));
+    expect(pinButton).toBeInstanceOf(HTMLButtonElement);
+    expect(pinButton?.parentElement?.tagName).toBe("DIV");
+    expect(pinButton?.parentElement?.querySelectorAll(":scope > button")).toHaveLength(2);
+    expect(pinButton?.parentElement?.querySelector("button [role='button']")).toBeNull();
+    expect(pinButton?.getAttribute("aria-pressed")).toBe("false");
+    expect(pinButton?.getAttribute("aria-label")).toBe(pinButton?.title);
+
+    state.batchMode = true;
+    await nextTick();
+    expect(host.querySelector("[title^='pluginPlatform.pinPlugin:'], [title^='pluginPlatform.unpinPlugin:']")).toBeNull();
+    expect(host.querySelector("[data-plugin-id='a']")?.querySelectorAll(":scope > button")).toHaveLength(1);
+  });
+
+  it("keeps pin click and keyboard activation isolated from row selection", async () => {
+    state.batchMode = false;
+    state.selectedPluginId = "a";
+    await nextTick();
+
+    const row = host.querySelector<HTMLElement>("[data-plugin-id='b']")!;
+    const [selectButton, pinButton] = [...row.querySelectorAll<HTMLButtonElement>(":scope > button")];
+    expect(selectButton).toBeInstanceOf(HTMLButtonElement);
+    expect(pinButton).toBeInstanceOf(HTMLButtonElement);
+    expect(selectButton.tabIndex).toBe(0);
+    expect(pinButton.tabIndex).toBe(0);
+
+    pinButton.click();
+    await nextTick();
+    expect(state.selectedPluginId).toBe("a");
+    expect(localStorage.getItem("dbx-plugin-pinned-ids")).toBe('["b"]');
+    expect(pinButton.getAttribute("aria-pressed")).toBe("true");
+
+    pinButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(state.selectedPluginId).toBe("a");
+    expect(localStorage.getItem("dbx-plugin-pinned-ids")).toBe("[]");
+
+    pinButton.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(state.selectedPluginId).toBe("a");
+    expect(localStorage.getItem("dbx-plugin-pinned-ids")).toBe('["b"]');
+
+    selectButton.click();
+    await nextTick();
+    expect(state.selectedPluginId).toBe("b");
+    expect(localStorage.getItem("dbx-plugin-pinned-ids")).toBe('["b"]');
+  });
+});
+
 const batches = ["install", "uninstall"] as const;
 type Batch = (typeof batches)[number];
 const singles = ["marketplace", "uninstall", "rollback", "package", "url"] as const;

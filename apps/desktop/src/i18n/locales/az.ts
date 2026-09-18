@@ -1754,6 +1754,7 @@ export default withEnglishFallback({
     copyExtractorSkipComputed: "Hesablanan sütunları ötür",
     copyExtractorSkipGenerated: "Avtomatik yaradılan sütunları ötür",
     copyExtractorExcludePrimaryKeys: "Əsas açarları istisna et",
+    copyExtractorIncludeDatabaseName: "Verilənlər bazasının adını daxil et",
     copyExtractorInsertMode: "INSERT əmrləri",
     copyExtractorInsertMerged: "Sətirləri birləşdir",
     copyExtractorInsertRowByRow: "Hər sətir üçün bir əmr",

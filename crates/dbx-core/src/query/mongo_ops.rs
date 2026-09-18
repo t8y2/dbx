@@ -95,7 +95,23 @@ pub async fn mongo_rename_collection_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::rename_collection(client, database, collection, new_name).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support rename collection".to_string()),
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoRenameCollection) {
+                return Err(
+                    "MongoDB Legacy Agent does not support renameCollection; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
+            let _: serde_json::Value = client
+                .mongo_rename_collection(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "new_name": new_name,
+                }))
+                .await?;
+            Ok(())
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1033,6 +1049,9 @@ pub async fn execute_mongo_command_core(
             .await
             .map(|version| scalar_query_result("version", Value::String(version))),
         MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
+        MongoCommand::InDatabase { database, command } => {
+            Box::pin(execute_mongo_command_core(state, connection_id, database, command, max_rows)).await
+        }
         MongoCommand::ShowDatabases => {
             let result = mongo_show_databases_core(state, connection_id).await?;
             mongo_show_databases_query_result(result.documents, max_rows)
@@ -1199,6 +1218,10 @@ pub async fn execute_mongo_command_core(
         MongoCommand::DropCollection { collection } => {
             mongo_drop_collection_core(state, connection_id, database, collection).await?;
             Ok(affected_query_result(1))
+        }
+        MongoCommand::RenameCollection { collection, new_name } => {
+            mongo_rename_collection_core(state, connection_id, database, collection, new_name).await?;
+            Ok(scalar_query_result("renamed", Value::String(format!("{collection} -> {new_name}"))))
         }
         MongoCommand::FindOneAndUpdate { collection, filter, update, options } => {
             let result = mongo_find_one_and_update_core(

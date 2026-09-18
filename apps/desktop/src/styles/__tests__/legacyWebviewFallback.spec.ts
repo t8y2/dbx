@@ -24,6 +24,9 @@ const changelogPanelSource = readFileSync(new URL("../../components/settings/Cha
 const editorSettingsDialogSource = readFileSync(new URL("../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const switchSource = readFileSync(new URL("../../components/ui/switch/Switch.vue", import.meta.url), "utf8");
 const aiAssistantSource = readFileSync(new URL("../../components/editor/AiAssistant.vue", import.meta.url), "utf8");
+const dataGridSource = readFileSync(new URL("../../components/grid/DataGrid.vue", import.meta.url), "utf8");
+const dataGridTableInfoPanelsSource = readFileSync(new URL("../../components/grid/DataGridTableInfoPanels.vue", import.meta.url), "utf8");
+const tableStructureEditorSource = readFileSync(new URL("../../components/structure/TableStructureEditor.vue", import.meta.url), "utf8");
 const desktopIndexSource = readFileSync(new URL("../../../index.html", import.meta.url), "utf8");
 const connectionDialogLegacyCss = readFileSync(new URL("../../../public/connection-dialog-legacy.css", import.meta.url), "utf8");
 const legacyWebViewSource = readFileSync(new URL("../../lib/ui/legacyWebView.ts", import.meta.url), "utf8");
@@ -291,6 +294,52 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(hover.indexOf("background: rgba(82, 82, 82, 0.45);")).toBeLessThan(hover.indexOf("background: color-mix(in oklch, var(--foreground) 45%, transparent);"));
     expect(aiAssistantSource).toContain("background: rgba(212, 212, 216, 0.28);");
     expect(aiAssistantSource).toContain("background: rgba(212, 212, 216, 0.45);");
+  });
+
+  it("keeps structure and table-info scrollbars visible without OKLab color mixing", () => {
+    const sources = [dataGridSource, dataGridTableInfoPanelsSource, tableStructureEditorSource];
+    const thumbRules = sources.flatMap((source) => [...source.matchAll(/[^{}]+::-webkit-scrollbar-thumb(?:\)|)\s*\{[^{}]+\}/g)].map((match) => match[0])).filter((rule) => rule.includes("color-mix(in oklab, var(--foreground) 30%, transparent)"));
+    const hoverRules = sources.flatMap((source) => [...source.matchAll(/[^{}]+::-webkit-scrollbar-thumb:hover(?:\)|)\s*\{[^{}]+\}/g)].map((match) => match[0])).filter((rule) => rule.includes("color-mix(in oklab, var(--foreground) 48%, transparent)"));
+
+    expect(thumbRules).toHaveLength(6);
+    expect(hoverRules).toHaveLength(6);
+    for (const rule of thumbRules) {
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeGreaterThan(-1);
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeLessThan(rule.indexOf("background: color-mix(in oklab, var(--foreground) 30%, transparent);"));
+    }
+    for (const rule of hoverRules) {
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeGreaterThan(-1);
+      expect(rule.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeLessThan(rule.indexOf("background: color-mix(in oklab, var(--foreground) 48%, transparent);"));
+    }
+
+    const horizontalThumbStart = tableStructureEditorSource.indexOf(".structure-horizontal-scrollbar__thumb {");
+    const horizontalHoverStart = tableStructureEditorSource.indexOf(".structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,", horizontalThumbStart);
+    const horizontalThumb = tableStructureEditorSource.slice(horizontalThumbStart, horizontalHoverStart);
+    const horizontalHover = tableStructureEditorSource.slice(horizontalHoverStart, tableStructureEditorSource.indexOf("/* Editable values", horizontalHoverStart));
+    expect(horizontalThumb.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeGreaterThan(-1);
+    expect(horizontalThumb.indexOf("background: rgba(82, 82, 82, 0.3);")).toBeLessThan(horizontalThumb.indexOf("background: color-mix(in oklab, var(--foreground) 30%, transparent);"));
+    expect(horizontalHover.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeGreaterThan(-1);
+    expect(horizontalHover.indexOf("background: rgba(82, 82, 82, 0.48);")).toBeLessThan(horizontalHover.indexOf("background: color-mix(in oklab, var(--foreground) 48%, transparent);"));
+
+    expect(dataGridSource).toMatch(/html\.dbx-legacy-webview\.dark \.ddl-code::-webkit-scrollbar-thumb\s*\{\s*background: rgba\(212, 212, 216, 0\.3\);/);
+    expect(dataGridSource).toMatch(/html\.dbx-legacy-webview\.dark \.ddl-code::-webkit-scrollbar-thumb:hover\s*\{\s*background: rgba\(212, 212, 216, 0\.48\);/);
+    expect(dataGridTableInfoPanelsSource).toMatch(/html\.dbx-legacy-webview\.dark \.table-info-scroller::-webkit-scrollbar-thumb\s*\{\s*background: rgba\(212, 212, 216, 0\.3\);/);
+    expect(dataGridTableInfoPanelsSource).toMatch(/html\.dbx-legacy-webview\.dark \.table-info-scroller::-webkit-scrollbar-thumb:hover\s*\{\s*background: rgba\(212, 212, 216, 0\.48\);/);
+    const structureLegacyThumbStart = tableStructureEditorSource.indexOf("html.dbx-legacy-webview.dark .structure-ddl-editor .cm-scroller::-webkit-scrollbar-thumb,");
+    const structureLegacyHoverStart = tableStructureEditorSource.indexOf("html.dbx-legacy-webview.dark .structure-ddl-editor .cm-scroller::-webkit-scrollbar-thumb:hover,", structureLegacyThumbStart);
+    const structureLegacyThumb = tableStructureEditorSource.slice(structureLegacyThumbStart, structureLegacyHoverStart);
+    const structureLegacyHover = tableStructureEditorSource.slice(structureLegacyHoverStart);
+    expect(structureLegacyThumbStart).toBeGreaterThan(-1);
+    expect(structureLegacyHoverStart).toBeGreaterThan(structureLegacyThumbStart);
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-card-scroller::-webkit-scrollbar-thumb,");
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-table-scroller::-webkit-scrollbar-thumb,");
+    expect(structureLegacyThumb).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar__thumb");
+    expect(structureLegacyThumb).toContain("background: rgba(212, 212, 216, 0.3);");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-card-scroller::-webkit-scrollbar-thumb:hover,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-table-scroller::-webkit-scrollbar-thumb:hover,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar:hover .structure-horizontal-scrollbar__thumb,");
+    expect(structureLegacyHover).toContain("html.dbx-legacy-webview.dark .structure-horizontal-scrollbar--dragging .structure-horizontal-scrollbar__thumb");
+    expect(structureLegacyHover).toContain("background: rgba(212, 212, 216, 0.48);");
   });
 
   it("keeps selected tiles readable in WebViews without color-mix support", () => {

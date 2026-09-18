@@ -110,6 +110,19 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
                 parts.push(format!("COLLATE {}", quote_ident(dialect, &column.collation)));
             }
         }
+        // Oracle's column grammar is `col type [DEFAULT expr] [inline constraint ...]`, so the
+        // DEFAULT clause has to precede NOT NULL. Emitting `NOT NULL DEFAULT ...` leaves the
+        // parser looking for the closing parenthesis of the column list and fails with
+        // ORA-00907 (t8y2/dbx#9477). Scoped to Oracle: every other engine keeps the historical
+        // NOT NULL-then-DEFAULT order.
+        let default_value = normalize_default(Some(&column.default_value));
+        let default_clause = (!default_value.is_empty() && dialect != StructureDialect::ManticoreSearch)
+            .then(|| format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        if dialect == StructureDialect::Oracle {
+            if let Some(clause) = default_clause.clone() {
+                parts.push(clause);
+            }
+        }
         if dialect == StructureDialect::Sqlite
             && column.is_primary_key
             && column.extra.as_ref().is_some_and(|e| e.auto_increment.unwrap_or(false))
@@ -130,9 +143,10 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
         if let Some(extra_clause) = column_extra_clause(dialect, column) {
             parts.push(extra_clause);
         }
-        let default_value = normalize_default(Some(&column.default_value));
-        if !default_value.is_empty() && dialect != StructureDialect::ManticoreSearch {
-            parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
+        if dialect != StructureDialect::Oracle {
+            if let Some(clause) = default_clause {
+                parts.push(clause);
+            }
         }
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
             if on_update && dialect == StructureDialect::Mysql {

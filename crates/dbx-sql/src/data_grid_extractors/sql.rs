@@ -72,6 +72,7 @@ pub(super) fn write_sql_inserts(
         rows: data.rows,
         exclude_primary_keys: context.request.options.sql.exclude_primary_keys_from_insert,
         include_computed_columns: !context.request.options.sql.skip_computed_columns,
+        include_database_name: context.request.options.sql.include_database_name,
         insert_mode: context.request.options.sql.insert_mode,
     })
     .ok_or_else(|| {

@@ -280,6 +280,11 @@ async function flushUi() {
   for (let index = 0; index < 4; index++) {
     await Promise.resolve();
     await nextTick();
+    // The mount chain (ensureConnected → load → render) spans more than a fixed
+    // number of microtask rounds once a real timer is in it, and DocumentBrowser
+    // renders from state those steps produce. Yielding to the macrotask queue
+    // lets each of them settle instead of leaving the component half-loaded.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
 

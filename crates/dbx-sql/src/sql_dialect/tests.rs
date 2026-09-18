@@ -1034,6 +1034,28 @@ fn builds_pgvector_table_data_preview_with_compatible_text_cast() {
 }
 
 #[test]
+fn postgres_xml_preview_casts_to_text() {
+    // `left(xml, int)` does not exist and xml has no implicit cast to text,
+    // so an uncast preview breaks table data reads with
+    // `function left(xml, integer) does not exist`.
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Postgres),
+        schema: Some("public".to_string()),
+        table_name: "documents".to_string(),
+        primary_keys: vec!["id".to_string()],
+        columns: vec!["id".to_string(), "xml_value".to_string()],
+        column_types: vec!["integer".to_string(), "xml".to_string()],
+        large_value_preview_size: Some(8192),
+        limit: Some(100),
+        ..Default::default()
+    });
+
+    assert!(sql.contains("left(\"xml_value\"::text, 8193) AS \"xml_value\""), "sql was: {sql}");
+    assert!(sql.contains("'T:8192' AS \"__DBX_LARGE_VALUE_BYTES_T_1\""), "sql was: {sql}");
+    assert!(!sql.contains("left(\"xml_value\","), "sql was: {sql}");
+}
+
+#[test]
 fn table_data_preview_requires_stable_keys_and_parallel_types() {
     let base = TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Postgres),

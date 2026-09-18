@@ -94,6 +94,7 @@ pub struct DataGridSqlExtractorOptions {
     pub skip_generated_columns: bool,
     pub insert_mode: DataGridCopyInsertMode,
     pub exclude_primary_keys_from_insert: bool,
+    pub include_database_name: bool,
 }
 
 impl Default for DataGridSqlExtractorOptions {
@@ -103,6 +104,7 @@ impl Default for DataGridSqlExtractorOptions {
             skip_generated_columns: DEFAULT_SQL_SKIP_GENERATED_COLUMNS,
             insert_mode: DataGridCopyInsertMode::Merged,
             exclude_primary_keys_from_insert: false,
+            include_database_name: true,
         }
     }
 }

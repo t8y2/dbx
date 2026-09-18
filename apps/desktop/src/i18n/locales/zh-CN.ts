@@ -1444,6 +1444,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} 列",
       insertSelectedColumns: "插入已选字段（{count}）",
       insertSelectedColumnsDetail: "勾选字段后一次性插入",
+      selectAllColumns: "全选字段",
+      selectAllColumnsDetail: "一键勾选全部字段",
+      deselectAllColumns: "取消全选",
       selectColumnsBeforeInsert: "请至少选择一个字段",
       tableAlias: "表别名",
       functionDescriptions: {

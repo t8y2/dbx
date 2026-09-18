@@ -1514,6 +1514,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count}列",
       insertSelectedColumns: "選択した列を挿入（{count}）",
       insertSelectedColumnsDetail: "チェックした列をまとめて挿入します",
+      selectAllColumns: "すべての列を選択",
+      selectAllColumnsDetail: "すべてのフィールドをまとめてチェック",
+      deselectAllColumns: "選択をすべて解除",
       selectColumnsBeforeInsert: "少なくとも 1 列選択してください",
       tableAlias: "テーブルエイリアス",
       functionDescriptions: {

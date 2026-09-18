@@ -1378,6 +1378,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} sütun",
       insertSelectedColumns: "Seçilmiş sütunları daxil et ({count})",
       insertSelectedColumnsDetail: "Seçim xanaları ilə sütunları seçin, sonra onları birlikdə daxil edin",
+      selectAllColumns: "Bütün sütunları seç",
+      selectAllColumnsDetail: "Bütün sahələri bir dəfə seç",
+      deselectAllColumns: "Seçimi təmizlə",
       selectColumnsBeforeInsert: "Əvvəlcə ən azı bir sütun seçin",
       tableAlias: "Cədvəlin ləqəbi",
       functionDescriptions: {

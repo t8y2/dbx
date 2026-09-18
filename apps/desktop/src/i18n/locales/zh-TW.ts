@@ -1497,6 +1497,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} 欄",
       insertSelectedColumns: "插入已選欄位（{count}）",
       insertSelectedColumnsDetail: "勾選欄位後一次插入",
+      selectAllColumns: "全選欄位",
+      selectAllColumnsDetail: "一鍵勾選全部欄位",
+      deselectAllColumns: "取消全選",
       selectColumnsBeforeInsert: "請至少選擇一個欄位",
       tableAlias: "資料表別名",
       functionDescriptions: {

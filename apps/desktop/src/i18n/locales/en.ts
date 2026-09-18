@@ -1529,6 +1529,9 @@ export default {
       starExpansionColumns: "{count} columns",
       insertSelectedColumns: "Insert selected columns ({count})",
       insertSelectedColumnsDetail: "Choose columns with the checkboxes, then insert them together",
+      selectAllColumns: "Select all columns",
+      selectAllColumnsDetail: "Check every field at once",
+      deselectAllColumns: "Deselect all",
       selectColumnsBeforeInsert: "Select at least one column first",
       tableAlias: "Table alias",
       functionDescriptions: {

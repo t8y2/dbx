@@ -1414,6 +1414,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count}개 컬럼",
       insertSelectedColumns: "선택한 열 삽입 ({count})",
       insertSelectedColumnsDetail: "열을 선택한 후 한 번에 삽입합니다",
+      selectAllColumns: "모든 열 선택",
+      selectAllColumnsDetail: "모든 필드를 한 번에 선택",
+      deselectAllColumns: "전체 선택 해제",
       selectColumnsBeforeInsert: "먼저 하나 이상의 열을 선택하세요",
       tableAlias: "테이블 별칭",
       functionDescriptions: {

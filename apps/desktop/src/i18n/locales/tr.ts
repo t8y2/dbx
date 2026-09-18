@@ -1380,6 +1380,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} sütun",
       insertSelectedColumns: "Seçili sütunları ekle ({count})",
       insertSelectedColumnsDetail: "Onay kutularıyla sütunları seçip birlikte ekleyin",
+      selectAllColumns: "Tüm sütunları seç",
+      selectAllColumnsDetail: "Tüm alanları tek seferde işaretle",
+      deselectAllColumns: "Tüm seçimi kaldır",
       selectColumnsBeforeInsert: "Önce en az bir sütun seçin",
       tableAlias: "Tablo takma adı",
       functionDescriptions: {

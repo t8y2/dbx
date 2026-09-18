@@ -1496,6 +1496,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} columnas",
       insertSelectedColumns: "Insertar columnas seleccionadas ({count})",
       insertSelectedColumnsDetail: "Selecciona columnas y, después, insértalas juntas",
+      selectAllColumns: "Seleccionar todas las columnas",
+      selectAllColumnsDetail: "Marcar todos los campos a la vez",
+      deselectAllColumns: "Desmarcar todo",
       selectColumnsBeforeInsert: "Selecciona al menos una columna primero",
       tableAlias: "Alias de tabla",
       functionDescriptions: {

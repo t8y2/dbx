@@ -2255,9 +2255,19 @@ impl AppState {
             Ok(databases) => {
                 let resolved = pick_legacy_postgres_like_database(&databases);
                 match &resolved {
-                    Some(database) => log::info!(
-                        "Resolved legacy default database '{database}' for '{connection_id}' from {databases:?}"
-                    ),
+                    Some(database) => {
+                        log::info!(
+                            "Resolved legacy default database '{database}' for '{connection_id}' from {databases:?}"
+                        );
+                        // Write the discovered database back so the legacy record stops relying on
+                        // the `postgres` default and later starts skip the probe. Temporary
+                        // connection-test ids are not persisted and are simply ignored.
+                        if let Err(error) = self.save_connection_database(connection_id, database).await {
+                            log::warn!(
+                                "Failed to persist the resolved legacy default database '{database}' for '{connection_id}': {error}"
+                            );
+                        }
+                    }
                     None => log::warn!(
                         "No usable database found for the legacy default database of '{connection_id}' (candidates: {databases:?})"
                     ),
@@ -4770,6 +4780,16 @@ impl AppState {
             }
             None => Ok(None),
         }
+    }
+
+    /// Persist the database resolved for a legacy empty-database connection and keep the
+    /// runtime config in sync so peer pool creations reuse the discovered database.
+    pub async fn save_connection_database(&self, connection_id: &str, database: &str) -> Result<(), String> {
+        self.storage.save_connection_database(connection_id, database).await?;
+        if let Some(config) = self.configs.write().await.get_mut(connection_id) {
+            config.database = Some(database.to_string());
+        }
+        Ok(())
     }
 
     pub async fn save_connection_database_info(

@@ -3597,6 +3597,36 @@ impl Storage {
         .await
     }
 
+    /// Update only the persisted `database` of one saved connection.
+    ///
+    /// Unlike `save_connections`, this is an in-place update for a value DBX discovered
+    /// while connecting (a legacy KingbaseES/Vastbase connection without a database) and
+    /// must not replace the saved connection list or touch separately stored secrets.
+    /// Returns `false` when the connection is not persisted, for example a temporary
+    /// connection-test id.
+    pub async fn save_connection_database(&self, connection_id: &str, database: &str) -> Result<bool, String> {
+        let connection_id = connection_id.to_string();
+        let database = database.to_string();
+        self.with_conn(move |conn| {
+            let json = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let Some(json) = json else {
+                return Ok(false);
+            };
+            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            config.database = Some(database);
+            let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
+                .map(|_| true)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     /// Update only the persisted MQTT saved-topic metadata for one connection.
     ///
     /// Unlike `save_connections`, this is an in-place update and must not replace
@@ -6595,6 +6625,26 @@ mod tests {
         assert_eq!(target.driver_profile.as_deref(), Some("mongodb-legacy"));
         assert_eq!(target.driver_label.as_deref(), Some("MongoDB (Legacy)"));
         assert_eq!(mq_token(target), Some("target-secret"));
+        assert_eq!(loaded.iter().find(|config| config.id == "untouched"), Some(&untouched));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connection_database_updates_only_the_target_and_preserves_secrets() {
+        let path = temp_db_path("connection-database");
+        let storage = Storage::open(&path).await.unwrap();
+        let target = mq_connection("target", "target-secret");
+        let untouched = mq_connection("untouched", "untouched-secret");
+        storage.save_connections(&[target.clone(), untouched.clone()]).await.unwrap();
+
+        assert!(storage.save_connection_database("target", "dbx_demo").await.unwrap());
+        assert!(!storage.save_connection_database("missing", "dbx_demo").await.unwrap());
+
+        let loaded = storage.load_connections().await.unwrap();
+        let stored_target = loaded.iter().find(|config| config.id == "target").unwrap();
+        assert_eq!(stored_target.database.as_deref(), Some("dbx_demo"));
+        assert_eq!(mq_token(stored_target), Some("target-secret"));
         assert_eq!(loaded.iter().find(|config| config.id == "untouched"), Some(&untouched));
 
         let _ = std::fs::remove_file(path);

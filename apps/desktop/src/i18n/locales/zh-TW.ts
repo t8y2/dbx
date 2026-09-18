@@ -7163,7 +7163,7 @@ export default withEnglishFallback({
     saving: "儲存中……",
     customJavaPathPlaceholder: "/path/to/java 或 /path/to/jdk",
     choose: "選擇",
-    systemJavaHint: "使用目前環境 PATH 中的 java。",
+    systemJavaHint: "優先使用 JAVA_HOME，其次為 PATH 中的 java。",
     jreRuntimeTitle: "JRE {jre} 執行環境",
     notInstalled: "未安裝",
     reinstalling: "重新安裝中",

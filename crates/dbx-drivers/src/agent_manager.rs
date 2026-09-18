@@ -297,11 +297,56 @@ mod tests {
     #[test]
     fn resolves_system_java_runtime_from_path() {
         let manager = test_manager("system");
-        let system_java = manager.base_dir().join("bin").join(if cfg!(windows) { "java.exe" } else { "java" });
+        let system_java = manager.base_dir().join("bin").join(java_executable_name());
         touch(&system_java);
         let path = std::env::join_paths([system_java.parent().unwrap()]).unwrap();
 
-        assert_eq!(resolve_system_java_path(Some(path.as_os_str())).unwrap(), system_java);
+        assert_eq!(resolve_system_java_path(None, Some(path.as_os_str())).unwrap(), system_java);
+    }
+
+    #[test]
+    fn resolves_system_java_runtime_from_java_home() {
+        let manager = test_manager("system-home");
+        let java_home = manager.base_dir().join("jdk");
+        let system_java = java_home.join("bin").join(java_executable_name());
+        touch(&system_java);
+        // PATH deliberately points somewhere else: JAVA_HOME is the explicit
+        // declaration and must win.
+        let other_bin = manager.base_dir().join("other-bin");
+        let other_java = other_bin.join(java_executable_name());
+        touch(&other_java);
+        let path = std::env::join_paths([&other_bin]).unwrap();
+
+        assert_eq!(resolve_system_java_path(Some(java_home.as_os_str()), Some(path.as_os_str())).unwrap(), system_java);
+    }
+
+    #[test]
+    fn stale_java_home_falls_back_to_path() {
+        let manager = test_manager("system-stale-home");
+        let system_java = manager.base_dir().join("bin").join(java_executable_name());
+        touch(&system_java);
+        let path = std::env::join_paths([system_java.parent().unwrap()]).unwrap();
+        let dangling = manager.base_dir().join("removed-jdk");
+
+        assert_eq!(resolve_system_java_path(Some(dangling.as_os_str()), Some(path.as_os_str())).unwrap(), system_java);
+        assert!(resolve_system_java_path(Some(dangling.as_os_str()), None).is_none());
+        assert!(resolve_system_java_path(Some(OsStr::new("")), None).is_none());
+    }
+
+    #[test]
+    fn system_java_missing_error_names_the_checked_sources() {
+        let dangling = std::env::temp_dir().join("dbx-missing-jdk");
+        let path = std::env::join_paths([std::env::temp_dir()]).unwrap();
+
+        let message = system_java_missing_error(Some(dangling.as_os_str()), Some(path.as_os_str()));
+        assert!(message.contains(&dangling.display().to_string()), "{message}");
+        assert!(message.contains(java_executable_name()), "{message}");
+        assert!(message.contains("no java in the 1 PATH entries checked"), "{message}");
+        assert!(message.contains("restart dbx"), "{message}");
+
+        let unset = system_java_missing_error(None, None);
+        assert!(unset.contains("JAVA_HOME is not set"), "{unset}");
+        assert!(unset.contains("PATH is not set"), "{unset}");
     }
 
     #[tokio::test]
@@ -1042,10 +1087,12 @@ impl AgentManager {
                 }
                 Ok(self.jre_java_path(jre_key))
             }
-            JavaRuntimeMode::System => resolve_system_java_path(None).ok_or_else(|| {
-                "System Java runtime was not found on PATH. Please install Java or choose a custom Java executable."
-                    .to_string()
-            }),
+            JavaRuntimeMode::System => {
+                let java_home = std::env::var_os(JAVA_HOME_ENV);
+                let path_var = std::env::var_os(PATH_ENV);
+                resolve_system_java_path(java_home.as_deref(), path_var.as_deref())
+                    .ok_or_else(|| system_java_missing_error(java_home.as_deref(), path_var.as_deref()))
+            }
             JavaRuntimeMode::Custom => {
                 let path = state
                     .java_runtime
@@ -1238,30 +1285,79 @@ fn java_executable_name() -> &'static str {
     }
 }
 
-fn resolve_custom_java_path(path: &str) -> Result<PathBuf, String> {
-    let raw = PathBuf::from(path);
-    if is_executable_file(&raw) {
-        return Ok(raw);
+/// Locate `java` under a JDK/JRE root. Accepts the conventional `bin/java`
+/// layout, a macOS bundle (`Contents/Home/bin/java`), and a path that already
+/// points at the executable itself.
+fn resolve_java_under_root(root: &Path) -> Option<PathBuf> {
+    if is_executable_file(root) {
+        return Some(root.to_path_buf());
     }
 
-    let flat = raw.join("bin").join(java_executable_name());
+    let flat = root.join("bin").join(java_executable_name());
     if is_executable_file(&flat) {
-        return Ok(flat);
+        return Some(flat);
     }
 
-    let macos = raw.join("Contents").join("Home").join("bin").join(java_executable_name());
+    let macos = root.join("Contents").join("Home").join("bin").join(java_executable_name());
     if is_executable_file(&macos) {
-        return Ok(macos);
+        return Some(macos);
     }
 
-    Err(format!("Custom Java runtime does not exist or is not a Java executable: {}", raw.display()))
+    None
 }
 
-fn resolve_system_java_path(path_var: Option<&OsStr>) -> Option<PathBuf> {
-    let path_var = path_var.map(|p| p.to_owned()).or_else(|| std::env::var_os("PATH"))?;
-    std::env::split_paths(&path_var)
+fn resolve_custom_java_path(path: &str) -> Result<PathBuf, String> {
+    let raw = PathBuf::from(path);
+    resolve_java_under_root(&raw)
+        .ok_or_else(|| format!("Custom Java runtime does not exist or is not a Java executable: {}", raw.display()))
+}
+
+const JAVA_HOME_ENV: &str = "JAVA_HOME";
+const PATH_ENV: &str = "PATH";
+
+/// Resolve the "system" Java runtime from the user's own environment:
+/// `JAVA_HOME` first (their explicit declaration), then the first `java` on
+/// `PATH`. A `JAVA_HOME` that no longer contains a usable `java` is skipped
+/// instead of reported, so a stale value cannot shadow a working `PATH` entry
+/// (see the dangling-`JAVA_HOME` report in #5517).
+///
+/// The caller passes the environment explicitly so the tests stay hermetic.
+fn resolve_system_java_path(java_home: Option<&OsStr>, path_var: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(home) = java_home.filter(|value| !value.is_empty()) {
+        if let Some(java) = resolve_java_under_root(Path::new(home)) {
+            return Some(java);
+        }
+    }
+
+    let path_var = path_var.filter(|value| !value.is_empty())?;
+    std::env::split_paths(path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
         .map(|dir| dir.join(java_executable_name()))
         .find(|candidate| is_executable_file(candidate))
+}
+
+/// Report where the "system" Java runtime was looked for. Users who configured
+/// `JAVA_HOME`/`PATH` can still be running with the environment dbx was
+/// launched with, so name the exact values that were checked instead of only
+/// saying "not found".
+fn system_java_missing_error(java_home: Option<&OsStr>, path_var: Option<&OsStr>) -> String {
+    let java_home_detail = match java_home.filter(|value| !value.is_empty()) {
+        Some(value) => format!(
+            "JAVA_HOME={} does not contain {}",
+            value.to_string_lossy(),
+            Path::new(value).join("bin").join(java_executable_name()).display()
+        ),
+        None => "JAVA_HOME is not set".to_string(),
+    };
+    let path_detail = match path_var.filter(|value| !value.is_empty()) {
+        Some(value) => format!("no java in the {} PATH entries checked", std::env::split_paths(value).count()),
+        None => "PATH is not set".to_string(),
+    };
+    format!(
+        "System Java runtime was not found: {java_home_detail}; {path_detail}. \
+         Point JAVA_HOME at a JDK/JRE directory, add java to PATH, or choose a custom Java executable. \
+         dbx uses the environment it was started with, so restart dbx after changing environment variables."
+    )
 }
 
 fn is_executable_file(path: &Path) -> bool {

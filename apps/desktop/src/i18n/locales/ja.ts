@@ -7908,7 +7908,7 @@ export default withEnglishFallback({
     saving: "保存中...",
     customJavaPathPlaceholder: "/path/to/java or /path/to/jdk",
     choose: "選択",
-    systemJavaHint: "現在のPATHからJavaを使用します。",
+    systemJavaHint: "JAVA_HOME を優先し、次に PATH の Java を使用します。",
     jreRuntimeTitle: "JRE {jre} ランタイム",
     notInstalled: "未インストール",
     reinstalling: "再インストール中",

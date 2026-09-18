@@ -7588,7 +7588,7 @@ export default withEnglishFallback({
     saving: "저장 중...",
     customJavaPathPlaceholder: "/path/to/java 또는 /path/to/jdk",
     choose: "선택",
-    systemJavaHint: "현재 PATH의 java를 사용합니다.",
+    systemJavaHint: "JAVA_HOME을 우선 사용하고, 없으면 PATH의 java를 사용합니다.",
     jreRuntimeTitle: "JRE {jre} 런타임",
     notInstalled: "설치되지 않음",
     reinstalling: "다시 설치 중",

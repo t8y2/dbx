@@ -8321,7 +8321,7 @@ export default {
     saving: "Saving...",
     customJavaPathPlaceholder: "/path/to/java or /path/to/jdk",
     choose: "Choose",
-    systemJavaHint: "Use java from the current PATH.",
+    systemJavaHint: "Resolve java from JAVA_HOME first, then PATH.",
     jreRuntimeTitle: "JRE {jre} Runtime",
     notInstalled: "Not installed",
     reinstalling: "Reinstalling",

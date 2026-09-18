@@ -8086,7 +8086,7 @@ export default withEnglishFallback({
     saving: "Yadda saxlanılır...",
     customJavaPathPlaceholder: "/path/to/java və ya /path/to/jdk",
     choose: "Seç",
-    systemJavaHint: "Cari PATH-dəki java-dan istifadə et.",
+    systemJavaHint: "Əvvəlcə JAVA_HOME, sonra PATH-dəki java-dan istifadə et.",
     jreRuntimeTitle: "JRE {jre} icra mühiti",
     notInstalled: "Quraşdırılmayıb",
     reinstalling: "Yenidən quraşdırılır",

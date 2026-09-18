@@ -8293,7 +8293,7 @@ export default withEnglishFallback({
     saving: "保存中...",
     customJavaPathPlaceholder: "/path/to/java 或 /path/to/jdk",
     choose: "选择",
-    systemJavaHint: "使用当前环境 PATH 中的 java。",
+    systemJavaHint: "优先使用 JAVA_HOME，其次为 PATH 中的 java。",
     jreRuntimeTitle: "JRE {jre} 运行时",
     notInstalled: "未安装",
     reinstalling: "重装中",

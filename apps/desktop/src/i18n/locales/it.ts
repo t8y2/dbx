@@ -7856,7 +7856,7 @@ export default withEnglishFallback({
     saving: "Salvataggio...",
     customJavaPathPlaceholder: "/percorso/per/java o /percorso/per/jdk",
     choose: "Scegli",
-    systemJavaHint: "Usa java dal PATH corrente.",
+    systemJavaHint: "Usa java da JAVA_HOME, poi dal PATH.",
     jreRuntimeTitle: "Runtime JRE {jre}",
     notInstalled: "Non installato",
     reinstalling: "Reinstallazione in corso",

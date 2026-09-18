@@ -7941,7 +7941,7 @@ export default withEnglishFallback({
     saving: "Kaydediliyor...",
     customJavaPathPlaceholder: "/path/to/java veya /path/to/jdk",
     choose: "Seç",
-    systemJavaHint: "Geçerli PATH üzerindeki java'yı kullan.",
+    systemJavaHint: "Önce JAVA_HOME, sonra PATH üzerindeki java'yı kullan.",
     jreRuntimeTitle: "JRE {jre} Çalışma Zamanı",
     notInstalled: "Kurulu değil",
     reinstalling: "Yeniden kuruluyor",

@@ -40,6 +40,7 @@ const props = withDefaults(
     pluginUpdates?: MarketplacePluginListing[];
     componentUpdatesLoading?: boolean;
     componentUpdatesError?: string;
+    componentUpdatesUpdating?: boolean;
     updatingComponent?: ComponentUpdateCategory | null;
     isUpdatingAll?: boolean;
   }>(),
@@ -50,6 +51,7 @@ const props = withDefaults(
     pluginUpdates: () => [],
     componentUpdatesLoading: false,
     componentUpdatesError: "",
+    componentUpdatesUpdating: false,
     updatingComponent: null,
     isUpdatingAll: false,
   },
@@ -94,7 +96,7 @@ const selectedCategoryHasUpdate = computed(() => {
   return false;
 });
 const isUpdatingSelectedCategory = computed(() => selectedCategory.value !== null && props.updatingComponent === selectedCategory.value);
-const isAnyComponentUpdating = computed(() => props.updatingComponent !== null);
+const isAnyComponentUpdating = computed(() => props.componentUpdatesUpdating || props.updatingComponent !== null);
 const isCloseBlocked = computed(() => props.isInstallingUpdate || isUpdatingSelectedCategory.value);
 const blocksImplicitDismiss = computed(() => isCloseBlocked.value);
 const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady && !props.isUpdatingAll);
@@ -180,7 +182,7 @@ watch(
             <span>{{ t("updates.centerTitle") }}</span>
             <span v-if="totalUpdateCount > 0" class="rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("updates.centerAvailable", { count: totalUpdateCount }) }}</span>
           </DialogTitle>
-          <Button v-if="hasComponentUpdates" type="button" size="sm" class="h-8 shrink-0" :disabled="props.isUpdatingAll || props.checkingUpdates || props.isDownloadingUpdate || props.isInstallingUpdate || props.updatingComponent !== null" @click="emit('update-all')">
+          <Button v-if="hasComponentUpdates" type="button" size="sm" class="h-8 shrink-0" :disabled="props.isUpdatingAll || props.checkingUpdates || props.isDownloadingUpdate || props.isInstallingUpdate || isAnyComponentUpdating" @click="emit('update-all')">
             <Loader2 v-if="props.isUpdatingAll" class="h-3.5 w-3.5 animate-spin" />
             <RefreshCw v-else class="h-3.5 w-3.5" />
             {{ t("updates.updateAll") }}

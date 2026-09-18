@@ -45,6 +45,14 @@ const pluginUpdate = {
   name: "Example plugin",
 };
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   Object.assign(settings.editorSettings, {
@@ -89,6 +97,28 @@ describe("useComponentUpdates", () => {
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledWith({ repositoryId: "official", pluginId: "example", version: "1.1.0" });
     expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
+  });
+
+  it("shares one update operation between automatic and manual callers", async () => {
+    const jdbcInstall = deferred<{ installed: boolean; update_available: boolean }>();
+    mocks.installJdbcPlugin.mockReturnValue(jdbcInstall.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const automatic = updates.autoUpdateEnabledComponents();
+    await vi.waitFor(() => expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce());
+    const manual = updates.installCategory("jdbc");
+
+    expect(updates.updating.value).toBe(true);
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+
+    jdbcInstall.resolve({ installed: true, update_available: false });
+    const [automaticResult, manualResult] = await Promise.all([automatic, manual]);
+
+    expect(manualResult).toEqual(automaticResult);
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(updates.updating.value).toBe(false);
   });
 
   it("still detects updates but does not install disabled categories", async () => {

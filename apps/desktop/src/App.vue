@@ -24,10 +24,11 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
-import { useAppUpdater } from "@/composables/useAppUpdater";
+import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useAppUpdater";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useComponentUpdates, type ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge } from "@/lib/updates/updateBadges";
+import { markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
@@ -1209,27 +1210,68 @@ function handleToolbarUpdateClick() {
   if (!toolbarHasUpdateAvailable.value && !checkingAllUpdates.value) void checkAllUpdates();
 }
 
-async function installComponentUpdates(category: ComponentUpdateCategory) {
-  const result = await componentUpdates.installCategory(category);
+function reportComponentUpdateResult(result: Awaited<ReturnType<typeof componentUpdates.installCategory>>) {
   const updatedComponents = [result.drivers > 0 ? t("settings.updateDrivers") : "", result.jdbc ? t("settings.updateJdbc") : "", result.mcp ? t("settings.updateMcp") : "", result.plugins > 0 ? t("settings.updatePlugins") : ""].filter(Boolean);
   if (updatedComponents.length) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
   if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
   if (result.failed.length) toast(t("updates.componentsAutoUpdateFailed", { count: result.failed.length }), 6000);
 }
 
+async function rememberComponentUpdatesForRestartedApp() {
+  const fromVersion = appVersion.value || updateInfo.value?.current_version || (await api.getAppVersion().catch(() => ""));
+  return markPendingComponentUpdatesAfterAppUpdate(fromVersion, updateInfo.value?.latest_version || "");
+}
+
+async function consumePendingComponentUpdatesAfterRestart() {
+  const currentVersion = await api.getAppVersion().catch(() => "");
+  if (currentVersion && !appVersion.value) appVersion.value = currentVersion;
+  const pending = takePendingComponentUpdatesAfterAppRestart(currentVersion);
+  if (!pending) return;
+  reportComponentUpdateResult(await componentUpdates.autoUpdateEnabledComponents());
+}
+
+async function installDownloadedUpdateWithComponentUpdates() {
+  await rememberComponentUpdatesForRestartedApp();
+  await installDownloadedUpdate();
+}
+
+async function restartAppWithComponentUpdates() {
+  await rememberComponentUpdatesForRestartedApp();
+  await restartApp();
+}
+
+function installComponentUpdates(category: ComponentUpdateCategory) {
+  return componentUpdates.installCategory(category).then(reportComponentUpdateResult);
+}
+
+function availableComponentUpdateCategories(): ComponentUpdateCategory[] {
+  const categories: ComponentUpdateCategory[] = [];
+  if (toolbarDriverUpdateCount.value > 0) categories.push("drivers");
+  if (toolbarJdbcUpdateAvailable.value) categories.push("jdbc");
+  if (toolbarMcpUpdateAvailable.value) categories.push("mcp");
+  if (componentUpdates.pluginUpdateCount.value > 0) categories.push("plugins");
+  return categories;
+}
+
 async function updateAllAvailable() {
   if (updatingAllUpdates.value) return;
   updatingAllUpdates.value = true;
   showUpdateDialog.value = true;
-  const appUpdate = hasUpdateAvailable.value && isDesktop ? downloadUpdateInBackground() : Promise.resolve();
   try {
-    const categories: ComponentUpdateCategory[] = [];
-    if (toolbarDriverUpdateCount.value > 0) categories.push("drivers");
-    if (toolbarJdbcUpdateAvailable.value) categories.push("jdbc");
-    if (toolbarMcpUpdateAvailable.value) categories.push("mcp");
-    if (componentUpdates.pluginUpdateCount.value > 0) categories.push("plugins");
-    for (const category of categories) await installComponentUpdates(category);
-    await appUpdate;
+    const categories = availableComponentUpdateCategories();
+    const action = resolveUpdateAllAction({
+      hasAppUpdate: hasUpdateAvailable.value && isDesktop,
+      appUpdateCanInstall: canDownloadAndInstallUpdate(updateInfo.value, isDesktop),
+      appUpdatePrepared: updateDownloaded.value || updateReady.value,
+      hasComponentUpdates: categories.length > 0,
+    });
+    if (action === "none") return;
+    if (action === "update-components") {
+      reportComponentUpdateResult(await componentUpdates.installCategories(categories));
+      return;
+    }
+    if (action === "download-app") await downloadUpdateInBackground();
+    if (updateDownloaded.value || updateReady.value) await rememberComponentUpdatesForRestartedApp();
   } finally {
     updatingAllUpdates.value = false;
   }
@@ -3587,12 +3629,7 @@ async function initApp() {
       await initializeUpdatePreparation();
       await initializeUpdater();
       if (!isDetachedWindowContext) {
-        void componentUpdates.autoUpdateEnabledComponents().then((result) => {
-          const updatedComponents = [result.drivers > 0 ? t("settings.updateDrivers") : "", result.jdbc ? t("settings.updateJdbc") : "", result.plugins > 0 ? t("settings.updatePlugins") : "", result.mcp ? t("settings.updateMcp") : ""].filter(Boolean);
-          if (updatedComponents.length > 0) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
-          if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
-          if (result.failed.length > 0) toast(t("updates.componentsAutoUpdateFailed", { count: result.failed.length }), 6000);
-        });
+        void consumePendingComponentUpdatesAfterRestart();
       }
     }
 
@@ -3908,7 +3945,7 @@ onUnmounted(() => {
                   :ai-config-request-id="settingsAiConfigRequestId"
                   :app-version="appVersion"
                   :checking-updates="checkingAllUpdates"
-                  :updating-all-updates="updatingAllUpdates"
+                  :updating-all-updates="updatingAllUpdates || componentUpdates.updating.value"
                   :app-update-available="hasUpdateAvailable"
                   :app-update-version="updateInfo?.latest_version"
                   :driver-update-count="toolbarDriverUpdateCount"
@@ -4269,14 +4306,15 @@ onUnmounted(() => {
           :plugin-updates="componentUpdates.pluginUpdates.value"
           :component-updates-loading="componentUpdates.loading.value"
           :component-updates-error="componentUpdates.lastError.value"
+          :component-updates-updating="componentUpdates.updating.value"
           :updating-component="componentUpdates.updatingCategory.value"
-          :is-updating-all="updatingAllUpdates"
+          :is-updating-all="updatingAllUpdates || componentUpdates.updating.value"
           @open-latest-release="openLatestRelease"
           @change-download-source="changeUpdateDownloadSource"
           @download-in-background="downloadUpdateInBackground"
           @cancel-download="cancelDownload"
-          @install-downloaded="installDownloadedUpdate"
-          @restart="restartApp"
+          @install-downloaded="installDownloadedUpdateWithComponentUpdates"
+          @restart="restartAppWithComponentUpdates"
           @ignore-version="ignoreCurrentVersion"
           @install-component-updates="installComponentUpdates"
           @update-all="updateAllAvailable"

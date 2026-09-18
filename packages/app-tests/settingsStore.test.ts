@@ -411,10 +411,17 @@ test("defaults update notifications to enabled", () => {
   assert.equal(normalizeEditorSettings({}).autoUpdateJdbc, true);
   assert.equal(normalizeEditorSettings({}).autoUpdateMcp, true);
   assert.equal(normalizeEditorSettings({}).autoUpdatePlugins, true);
-  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).updateNotificationsEnabled, true);
-  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateApp, true);
-  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateDrivers, true);
-  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateJdbc, true);
+  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).updateNotificationsEnabled, false);
+  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateApp, false);
+  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateDrivers, false);
+  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateJdbc, false);
+  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdateMcp, false);
+  assert.equal(normalizeEditorSettings({ updateNotificationsEnabled: false } as any).autoUpdatePlugins, false);
+  assert.equal(normalizeEditorSettings({ autoDownloadUpdates: false }).autoUpdateApp, false);
+  assert.equal(normalizeEditorSettings({ autoDownloadUpdates: false }).autoUpdateDrivers, true);
+  assert.equal(normalizeEditorSettings({ autoDownloadUpdates: false }).autoUpdateJdbc, true);
+  assert.equal(normalizeEditorSettings({ autoDownloadUpdates: false }).autoUpdateMcp, true);
+  assert.equal(normalizeEditorSettings({ autoDownloadUpdates: false }).autoUpdatePlugins, true);
   assert.equal(normalizeEditorSettings({ autoUpdateApp: false }).updateNotificationsEnabled, false);
   assert.equal(normalizeEditorSettings({ autoUpdateApp: false }).autoUpdateApp, false);
   assert.equal(normalizeEditorSettings({ autoUpdateApp: false }).autoUpdateDrivers, true);
@@ -434,7 +441,7 @@ test("centralized automatic updates default on while explicit category opt-outs 
       mcp: migrated.autoUpdateMcp,
       plugins: migrated.autoUpdatePlugins,
     },
-    { app: true, drivers: true, jdbc: true, mcp: true, plugins: true },
+    { app: false, drivers: false, jdbc: false, mcp: false, plugins: false },
   );
 
   const explicitlyConfigured = normalizeEditorSettings({

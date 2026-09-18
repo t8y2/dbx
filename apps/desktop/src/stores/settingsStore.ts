@@ -1457,15 +1457,17 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const normalizedExtractorOptions = normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions);
   const isLegacyExtractorOptions = typeof savedExtractorMigrationVersion !== "number" || savedExtractorMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
   const dataGridExtractorOptions = isLegacyExtractorOptions && normalizedExtractorOptions.dsv.nullText === "NULL" ? { ...normalizedExtractorOptions, dsv: { ...normalizedExtractorOptions.dsv, nullText: "" } } : normalizedExtractorOptions;
-  // The previous release exposed a single, default-off download preference. The
-  // centralized update page treats automatic updates as the default, while still
-  // accepting the legacy fields when reading old settings files.
-  const autoUpdateApp = typeof settings.autoUpdateApp === "boolean" ? settings.autoUpdateApp : DEFAULT_EDITOR_SETTINGS.autoUpdateApp;
+  // Preserve the explicit intent behind the legacy update controls. Disabling
+  // update reminders was a full opt-out; disabling automatic downloads only
+  // opted out of downloading the DBX package itself.
+  const legacyUpdateOptOut = settings.updateNotificationsEnabled === false;
+  const legacyAutoDownload = typeof settings.autoDownloadUpdates === "boolean" ? settings.autoDownloadUpdates : undefined;
+  const autoUpdateApp = typeof settings.autoUpdateApp === "boolean" ? settings.autoUpdateApp : legacyUpdateOptOut ? false : (legacyAutoDownload ?? DEFAULT_EDITOR_SETTINGS.autoUpdateApp);
   const autoDownloadUpdates = autoUpdateApp;
-  const autoUpdateDrivers = typeof settings.autoUpdateDrivers === "boolean" ? settings.autoUpdateDrivers : DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
-  const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
-  const autoUpdateMcp = typeof settings.autoUpdateMcp === "boolean" ? settings.autoUpdateMcp : DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
-  const autoUpdatePlugins = typeof settings.autoUpdatePlugins === "boolean" ? settings.autoUpdatePlugins : DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
+  const autoUpdateDrivers = typeof settings.autoUpdateDrivers === "boolean" ? settings.autoUpdateDrivers : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
+  const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
+  const autoUpdateMcp = typeof settings.autoUpdateMcp === "boolean" ? settings.autoUpdateMcp : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
+  const autoUpdatePlugins = typeof settings.autoUpdatePlugins === "boolean" ? settings.autoUpdatePlugins : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,

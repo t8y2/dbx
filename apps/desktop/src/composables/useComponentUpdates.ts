@@ -30,6 +30,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   const mcpStatus = ref<McpServerStatus | null>(null);
   const pluginListings = ref<MarketplacePluginListing[]>([]);
   const loading = ref(false);
+  const updating = ref(false);
   const updatingCategory = ref<ComponentUpdateCategory | null>(null);
   const lastError = ref("");
 
@@ -42,6 +43,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   const totalUpdateCount = computed(() => driverUpdateCount.value + (jdbcUpdateAvailable.value ? 1 : 0) + (mcpUpdateAvailable.value ? 1 : 0) + pluginUpdateCount.value);
 
   let refreshPromise: Promise<boolean> | null = null;
+  let activeUpdatePromise: Promise<ComponentUpdateResult> | null = null;
 
   function refresh() {
     if (!options.isDesktop) return Promise.resolve(false);
@@ -151,57 +153,61 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     }
   }
 
-  async function installCategory(category: ComponentUpdateCategory): Promise<ComponentUpdateResult> {
-    const result = emptyResult();
-    if (!options.isDesktop || updatingCategory.value) return result;
+  function categoryLabel(category: ComponentUpdateCategory): string {
+    return category === "jdbc" ? "JDBC" : category === "mcp" ? "MCP" : category;
+  }
+
+  async function runCategory(category: ComponentUpdateCategory, result: ComponentUpdateResult) {
     updatingCategory.value = category;
     try {
       if (category === "drivers") await updateDrivers(result);
       else if (category === "jdbc") await updateJdbc(result);
       else if (category === "mcp") await updateMcp(result);
       else await updatePlugins(result);
-      await refresh();
-      if (lastError.value) result.failed.push(lastError.value);
     } catch (error) {
-      const label = category === "jdbc" ? "JDBC" : category === "mcp" ? "MCP" : category;
-      result.failed.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      updatingCategory.value = null;
+      result.failed.push(`${categoryLabel(category)}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return result;
   }
 
-  async function autoUpdateEnabledComponents(): Promise<ComponentUpdateResult> {
+  async function runUpdateOperation(categories: ComponentUpdateCategory[]): Promise<ComponentUpdateResult> {
     const result = emptyResult();
     if (!options.isDesktop) return result;
-    await refresh();
-    const initialCheckError = lastError.value;
-    if (initialCheckError) result.failed.push(initialCheckError);
-    if (settingsStore.editorSettings.autoUpdateDrivers) {
-      try {
-        await updateDrivers(result);
-      } catch (error) {
-        result.failed.push(`drivers: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    if (activeUpdatePromise) return activeUpdatePromise;
+    updating.value = true;
+    const operation = (async () => {
+      await refresh();
+      const initialCheckError = lastError.value;
+      if (initialCheckError) result.failed.push(initialCheckError);
+      for (const category of categories) await runCategory(category, result);
+      await refresh();
+      if (lastError.value && lastError.value !== initialCheckError) result.failed.push(lastError.value);
+      return result;
+    })();
+    activeUpdatePromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (activeUpdatePromise === operation) activeUpdatePromise = null;
+      updating.value = false;
+      updatingCategory.value = null;
     }
-    if (settingsStore.editorSettings.autoUpdateJdbc) {
-      try {
-        await updateJdbc(result);
-      } catch (error) {
-        result.failed.push(`JDBC: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    if (settingsStore.editorSettings.autoUpdateMcp) {
-      try {
-        await updateMcp(result);
-      } catch (error) {
-        result.failed.push(`MCP: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    if (settingsStore.editorSettings.autoUpdatePlugins) await updatePlugins(result);
-    await refresh();
-    if (lastError.value && lastError.value !== initialCheckError) result.failed.push(lastError.value);
-    return result;
+  }
+
+  function installCategory(category: ComponentUpdateCategory): Promise<ComponentUpdateResult> {
+    return runUpdateOperation([category]);
+  }
+
+  function installCategories(categories: ComponentUpdateCategory[]): Promise<ComponentUpdateResult> {
+    return runUpdateOperation([...new Set(categories)]);
+  }
+
+  function autoUpdateEnabledComponents(): Promise<ComponentUpdateResult> {
+    const categories: ComponentUpdateCategory[] = [];
+    if (settingsStore.editorSettings.autoUpdateDrivers) categories.push("drivers");
+    if (settingsStore.editorSettings.autoUpdateJdbc) categories.push("jdbc");
+    if (settingsStore.editorSettings.autoUpdateMcp) categories.push("mcp");
+    if (settingsStore.editorSettings.autoUpdatePlugins) categories.push("plugins");
+    return runUpdateOperation(categories);
   }
 
   return {
@@ -212,6 +218,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     pluginListings,
     pluginUpdates,
     loading,
+    updating,
     updatingCategory,
     lastError,
     driverUpdateCount,
@@ -221,6 +228,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     totalUpdateCount,
     refresh,
     installCategory,
+    installCategories,
     autoUpdateEnabledComponents,
   };
 }

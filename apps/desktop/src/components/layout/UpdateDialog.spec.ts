@@ -387,6 +387,22 @@ describe("UpdateDialog aggregate update center", () => {
     expect(buttonWithText("Ignore this version")).toBeUndefined();
   });
 
+  it("disables component actions while an automatic update is active", async () => {
+    await mountDialog(0, {}, undefined, {
+      componentUpdatesUpdating: true,
+      driverUpdates: [{ db_type: "mysql", label: "MySQL", version: "9.0.0", installed_version: "8.0.0", update_available: true }],
+    });
+
+    expect(buttonWithText("Update all")?.disabled).toBe(true);
+
+    const driversTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="drivers"]');
+    driversTab?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+    driversTab?.click();
+    await flushDialog();
+
+    expect(buttonWithText("Update Now")?.disabled).toBe(true);
+  });
+
   it("organizes component updates into tabs and installs the selected category", async () => {
     const installComponentUpdates = vi.fn();
     const updateAll = vi.fn();

@@ -19,7 +19,8 @@ use crate::agent_connection::{
     agent_connect_params, agent_connect_params_with_role, h2_file_path_from_jdbc_url, hive_uses_zookeeper_discovery,
     is_h2_file_connection, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
     oracle_alternate_connect_config_labels, oracle_alternate_connect_configs, oracle_error_with_driver_hint,
-    should_retry_mongo_with_legacy_driver, trino_like_jdbc_connection_string, AgentSessionRole,
+    pick_legacy_postgres_like_database, should_retry_mongo_with_legacy_driver, trino_like_jdbc_connection_string,
+    AgentSessionRole,
 };
 use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
@@ -964,6 +965,19 @@ fn metadata_pool_database<'a>(config: Option<&ConnectionConfig>, database: Optio
     } else {
         database
     }
+}
+
+/// Always-present KingbaseES/Vastbase catalog used to discover a default database for
+/// legacy connections that were saved without one (see issue #9491).
+const LEGACY_POSTGRES_LIKE_PROBE_DATABASE: &str = "template1";
+const LEGACY_POSTGRES_LIKE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Whether a connection relies on the historical `postgres` default that
+/// `ConnectionConfig::default_database()` applies to KingbaseES/Vastbase connections
+/// saved without an explicit database.
+fn needs_legacy_postgres_like_database_probe(config: &ConnectionConfig) -> bool {
+    matches!(config.db_type, DatabaseType::Kingbase | DatabaseType::Vastbase)
+        && config.database.as_deref().is_none_or(|database| database.trim().is_empty())
 }
 
 pub fn sqlserver_legacy_driver_error(agent_error: &str) -> String {
@@ -2184,6 +2198,81 @@ impl AppState {
         .await
     }
 
+    /// `KingbaseES`/`Vastbase` do not guarantee the `postgres` database that
+    /// `ConnectionConfig::default_database()` assumes for saved connections without an
+    /// explicit database (see issue #9491). When such a connection is opened — an
+    /// upgraded legacy record or a cleared "default database" — probe the
+    /// always-present `template1` catalog and open a database that actually exists
+    /// instead of failing the whole connection with `database "postgres" does not exist`.
+    async fn resolve_legacy_postgres_like_database(
+        &self,
+        connection_id: &str,
+        db_config: &ConnectionConfig,
+    ) -> Option<String> {
+        if !needs_legacy_postgres_like_database_probe(db_config) {
+            return None;
+        }
+        // Reuse the metadata pool machinery: it applies the active session credentials and
+        // the connection's transport layers, and it is cached by pool key, so repeated
+        // connects and the object browser share one probe connection. The pool stays
+        // registered so a concurrent reader of the object browser is never torn down;
+        // `remove_connection_pools` closes it together with the connection's other pools.
+        //
+        // The probe always passes `template1` explicitly, so the resolver cannot re-enter
+        // itself; `Box::pin` only satisfies the compiler's async-recursion requirement.
+        let pool_key = match Box::pin(self.get_or_create_metadata_pool_for_session(
+            connection_id,
+            Some(LEGACY_POSTGRES_LIKE_PROBE_DATABASE),
+            None,
+        ))
+        .await
+        {
+            Ok(pool_key) => pool_key,
+            Err(error) => {
+                log::warn!(
+                    "Failed to open a '{LEGACY_POSTGRES_LIKE_PROBE_DATABASE}' probe connection for '{connection_id}' while resolving a legacy default database: {error}"
+                );
+                return None;
+            }
+        };
+        let databases = {
+            let pool_handle = self.pool_handle(&pool_key).await;
+            let client = pool_handle.as_ref().and_then(|pool| match pool {
+                PoolKind::Agent(client) => Some(client.clone()),
+                _ => None,
+            });
+            match client {
+                Some(client) => client
+                    .lock()
+                    .await
+                    .list_databases::<Vec<db::DatabaseInfo>>(Some(LEGACY_POSTGRES_LIKE_PROBE_TIMEOUT))
+                    .await
+                    .map(|databases| databases.into_iter().map(|database| database.name).collect::<Vec<String>>()),
+                None => Err("Legacy default database probe pool is not an Agent pool".to_string()),
+            }
+        };
+        match databases {
+            Ok(databases) => {
+                let resolved = pick_legacy_postgres_like_database(&databases);
+                match &resolved {
+                    Some(database) => log::info!(
+                        "Resolved legacy default database '{database}' for '{connection_id}' from {databases:?}"
+                    ),
+                    None => log::warn!(
+                        "No usable database found for the legacy default database of '{connection_id}' (candidates: {databases:?})"
+                    ),
+                }
+                resolved
+            }
+            Err(error) => {
+                log::warn!(
+                    "Failed to list databases for '{connection_id}' while resolving a legacy default database: {error}"
+                );
+                None
+            }
+        }
+    }
+
     async fn get_or_create_pool_for_session_inner(
         &self,
         connection_id: &str,
@@ -2239,6 +2328,9 @@ impl AppState {
         if let Err(err) = self.ensure_current_connection_attempt(connection_id, connection_attempt).await {
             self.reset_connection_transport_for_config(connection_id, &db_config).await;
             return Err(err);
+        }
+        if let Some(database) = self.resolve_legacy_postgres_like_database(connection_id, &db_config).await {
+            db_config.database = Some(database);
         }
         if db_config.db_type != DatabaseType::Plugin {
             probe_connection_endpoint(&db_config, &host, port).await?;
@@ -7871,6 +7963,32 @@ mod tests {
             super::base_pool_key_for(Some(DatabaseType::MongoDb), "mongo-conn", Some("shop"), false),
             "mongo-conn:shop"
         );
+    }
+
+    #[test]
+    fn legacy_postgres_like_database_probe_only_applies_to_unconfigured_kingbase() {
+        let mut config = mysql_config(Some("SAMPLES"));
+        config.db_type = DatabaseType::Kingbase;
+        assert!(!super::needs_legacy_postgres_like_database_probe(&config));
+
+        config.database = None;
+        assert!(super::needs_legacy_postgres_like_database_probe(&config));
+
+        config.database = Some("   ".to_string());
+        assert!(super::needs_legacy_postgres_like_database_probe(&config));
+
+        config.database = Some("application".to_string());
+        assert!(!super::needs_legacy_postgres_like_database_probe(&config));
+
+        config.database = None;
+        config.db_type = DatabaseType::Vastbase;
+        assert!(super::needs_legacy_postgres_like_database_probe(&config));
+
+        config.db_type = DatabaseType::Postgres;
+        assert!(!super::needs_legacy_postgres_like_database_probe(&config));
+
+        config.db_type = DatabaseType::Mysql;
+        assert!(!super::needs_legacy_postgres_like_database_probe(&config));
     }
 
     #[test]

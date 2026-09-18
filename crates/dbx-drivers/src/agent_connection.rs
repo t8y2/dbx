@@ -521,6 +521,26 @@ fn postgres_like_agent_database<'a>(config: &'a ConnectionConfig, database: &'a 
     config.effective_database().unwrap_or("")
 }
 
+/// Picks the database to open for a legacy KingbaseES/Vastbase connection that was
+/// saved without an explicit database. Both vendor servers may lack the `postgres`
+/// database that `ConnectionConfig::default_database()` falls back to, so the caller
+/// probes the always-present `template1` catalog and hands the found databases here.
+/// The historical `postgres` default still wins when it exists so upgraded
+/// connections keep their previous behavior.
+pub fn pick_legacy_postgres_like_database(databases: &[String]) -> Option<String> {
+    let names: Vec<&str> = databases.iter().map(|name| name.trim()).filter(|name| !name.is_empty()).collect();
+    let preferred =
+        |wanted: &str| names.iter().find(|name| name.eq_ignore_ascii_case(wanted)).map(|name| (*name).to_string());
+    if let Some(database) = preferred("postgres").or_else(|| preferred("kingbase")) {
+        return Some(database);
+    }
+    names.iter().find(|name| !is_template_database(name)).or_else(|| names.first()).map(|name| (*name).to_string())
+}
+
+fn is_template_database(name: &str) -> bool {
+    name.eq_ignore_ascii_case("template0") || name.eq_ignore_ascii_case("template1")
+}
+
 pub fn oracle_alternate_connect_config(config: &ConnectionConfig, err: &str) -> Option<ConnectionConfig> {
     oracle_alternate_connect_configs(config, err).into_iter().next()
 }
@@ -990,6 +1010,30 @@ mod tests {
 
         assert_eq!(params["database"], "application");
         assert_eq!(params["connection_string"], "jdbc:kingbase8://kingbase.example.com:54321/application");
+    }
+
+    #[test]
+    fn legacy_postgres_like_database_prefers_postgres_then_kingbase() {
+        let databases = vec!["SAMPLES".to_string(), "kingbase".to_string(), "postgres".to_string()];
+        assert_eq!(pick_legacy_postgres_like_database(&databases).as_deref(), Some("postgres"));
+
+        let databases = vec!["SAMPLES".to_string(), "KingBase".to_string()];
+        assert_eq!(pick_legacy_postgres_like_database(&databases).as_deref(), Some("KingBase"));
+    }
+
+    #[test]
+    fn legacy_postgres_like_database_skips_templates_and_blank_names() {
+        let databases =
+            vec!["  ".to_string(), "TEMPLATE0".to_string(), "template1".to_string(), "dbx_demo".to_string()];
+        assert_eq!(pick_legacy_postgres_like_database(&databases).as_deref(), Some("dbx_demo"));
+    }
+
+    #[test]
+    fn legacy_postgres_like_database_falls_back_to_templates_then_none() {
+        let databases = vec!["template1".to_string(), "TEMPLATE0".to_string()];
+        assert_eq!(pick_legacy_postgres_like_database(&databases).as_deref(), Some("template1"));
+        assert_eq!(pick_legacy_postgres_like_database(&[]), None);
+        assert_eq!(pick_legacy_postgres_like_database(&["".to_string()]), None);
     }
 
     #[test]

@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import UpdateDialog from "@/components/layout/UpdateDialog.vue";
 
+const runtimeState = vi.hoisted(() => ({ tauri: true }));
+
 vi.mock("@/lib/backend/tauriRuntime", () => ({
-  isTauriRuntime: () => true,
+  isTauriRuntime: () => runtimeState.tauri,
 }));
 
 const mountedApps: App[] = [];
@@ -135,8 +137,23 @@ async function clickOutside() {
 }
 
 afterEach(() => {
+  runtimeState.tauri = true;
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
+});
+
+describe("UpdateDialog web runtime", () => {
+  it("keeps web updates as Docker instructions without desktop install controls", async () => {
+    runtimeState.tauri = false;
+
+    await mountDialog(0);
+
+    expect(document.body.textContent).toContain("Docker users should run");
+    expect(document.body.textContent).toContain("docker compose pull && docker compose up -d");
+    expect(buttonWithText("Open Release")).toBeDefined();
+    expect(downloadButton()).toBeUndefined();
+    expect(installDownloadedButton()).toBeUndefined();
+  });
 });
 
 describe("UpdateDialog active task guard", () => {

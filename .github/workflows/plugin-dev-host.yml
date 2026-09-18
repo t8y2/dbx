@@ -32,6 +32,7 @@ jobs:
       - run: npm run lint --prefix plugins/sdk/dev-host
       - run: npm run fmt:check --prefix plugins/sdk/dev-host
       - run: npm test --prefix plugins/sdk/dev-host
+        timeout-minutes: 5
       - run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
       - run: npm test --prefix packages/plugin-cli
       - run: node scripts/verify-plugin-cli-package.mjs

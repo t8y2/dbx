@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -16,6 +16,8 @@ use dbx_core::{
     agent_tools::{format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow},
     database_manifest,
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
+    history::HistoryEntry,
+    models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
@@ -423,6 +425,38 @@ impl DbxMcpServer {
                 .await;
         }
     }
+
+    async fn save_mcp_sql_history(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+        started_at: Instant,
+        success: bool,
+        error: Option<String>,
+        affected_rows: Option<i64>,
+    ) {
+        let entry = HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            connection_id: connection.id.clone(),
+            connection_name: connection.name.clone(),
+            database: database.to_string(),
+            sql: sql.to_string(),
+            executed_at: chrono::Utc::now().to_rfc3339(),
+            execution_time_ms: started_at.elapsed().as_millis(),
+            success,
+            error,
+            activity_kind: mcp_sql_activity_kind(sql, connection.db_type).to_string(),
+            operation: mcp_sql_operation(sql, connection.db_type),
+            target: String::new(),
+            affected_rows,
+            rollback_sql: None,
+            details_json: Some(r#"{"source":"mcp"}"#.to_string()),
+        };
+        if let Err(error) = self.backend.save_history_entry(&entry).await {
+            log::warn!("failed to save MCP SQL history for connection {}: {error}", connection.id);
+        }
+    }
 }
 
 #[tool_router]
@@ -729,6 +763,7 @@ impl DbxMcpServer {
             Ok(permissions) => permissions,
             Err(error) => return error,
         };
+        let history_sql = request.sql.clone();
         let mut arguments = json!({ "sql": request.sql, "limit": 100 });
         if let Some(schema) = self.scope.schema.as_deref() {
             arguments["schema"] = json!(schema);
@@ -750,8 +785,12 @@ impl DbxMcpServer {
         if let Some(secs) = resolved.policy.query_timeout_secs {
             arguments["timeout_secs"] = json!(secs);
         }
+        let started_at = Instant::now();
         let result =
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        let success = !result.is_error;
+        let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
+        self.save_mcp_sql_history(connection, &database, &history_sql, started_at, success, error, None).await;
         agent_result(result)
     }
 
@@ -922,6 +961,7 @@ impl DbxMcpServer {
         // regeneration.
         options.timeout_secs = resolved.policy.query_timeout_secs;
         let schema = self.scope.schema.as_deref();
+        let started_at = Instant::now();
         let execution = self.backend.execute_batch(connection, &database, schema, sql, options).await;
         if let Some(client_session_id) = ephemeral_client_session_id.as_deref() {
             if let Err(error) = self.backend.close_client_session(&connection.id, &database, client_session_id).await {
@@ -941,6 +981,30 @@ impl DbxMcpServer {
                     results[0].merged = true;
                     results[0].statement_index = None;
                 }
+                let failures = results
+                    .iter()
+                    .filter(|result| result.execution_error)
+                    .map(|result| {
+                        result.error_message.clone().unwrap_or_else(|| match result.statement_index {
+                            Some(index) => format!("Statement {} failed", index + 1),
+                            None => "Batch execution failed".to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let success = failures.is_empty();
+                let affected_rows = success.then(|| {
+                    results.iter().map(|result| result.result.affected_rows).sum::<u64>().min(i64::MAX as u64) as i64
+                });
+                self.save_mcp_sql_history(
+                    connection,
+                    &database,
+                    sql,
+                    started_at,
+                    success,
+                    (!failures.is_empty()).then(|| failures.join("; ")),
+                    affected_rows,
+                )
+                .await;
                 let markdown = format_batch_results(&results);
                 // Issue #7548 requires structured per-statement results so callers do not
                 // parse concatenated text. MCP requires structuredContent to be an object,
@@ -949,7 +1013,11 @@ impl DbxMcpServer {
                 tool_result.structured_content = Some(serde_json::json!({ "results": results }));
                 tool_result
             }
-            Err(error) => backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error),
+            Err(error) => {
+                self.save_mcp_sql_history(connection, &database, sql, started_at, false, Some(error.clone()), None)
+                    .await;
+                backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error)
+            }
         }
     }
 
@@ -1866,6 +1934,33 @@ fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool 
 /// bounded.
 const BATCH_MAX_ROWS: usize = 100;
 
+fn mcp_sql_activity_kind(sql: &str, database_type: DatabaseType) -> &'static str {
+    let risks = dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
+        .statements
+        .into_iter()
+        .filter_map(|statement| classify_sql_risk_for_database(&statement, database_type).ok())
+        .collect::<Vec<_>>();
+    if risks.iter().any(|risk| *risk == SqlRisk::Ddl) {
+        "schema_change"
+    } else if risks.iter().any(|risk| *risk == SqlRisk::Write) {
+        "data_change"
+    } else {
+        "query"
+    }
+}
+
+fn mcp_sql_operation(sql: &str, database_type: DatabaseType) -> String {
+    dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
+        .statements
+        .first()
+        .map(|statement| dbx_core::query_execution_sql::strip_sql_comments(statement))
+        .and_then(|statement| statement.split_whitespace().next().map(str::to_string))
+        .map(|operation| operation.trim_matches(|character: char| !character.is_ascii_alphabetic()).to_string())
+        .filter(|operation| !operation.is_empty())
+        .map(|operation| operation.to_ascii_uppercase())
+        .unwrap_or_else(|| "SQL".to_string())
+}
+
 /// Render a multi-statement batch result as one Markdown text block per
 /// statement. Each statement is labelled by its index so callers can see which
 /// statement failed, how many rows each affected, or what each returned. A
@@ -2443,6 +2538,7 @@ mod tests {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        history: std::sync::Mutex<Vec<dbx_core::history::HistoryEntry>>,
         closed_sessions: std::sync::Mutex<Vec<String>>,
         pinned_sessions: std::sync::Mutex<HashSet<String>>,
         close_failures_remaining: std::sync::Mutex<usize>,
@@ -2454,6 +2550,7 @@ mod tests {
                 connections: Vec::new(),
                 policy: McpGlobalPolicy::default(),
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
+                history: std::sync::Mutex::new(Vec::new()),
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
                 pinned_sessions: std::sync::Mutex::new(HashSet::new()),
                 close_failures_remaining: std::sync::Mutex::new(0),
@@ -2499,6 +2596,10 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for FakeBackend {
+        async fn save_history_entry(&self, entry: &dbx_core::history::HistoryEntry) -> Result<(), String> {
+            self.history.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
             Ok(self.policy.clone())
         }
@@ -2515,6 +2616,8 @@ mod tests {
             arguments: serde_json::Value,
             _permissions: dbx_core::agent_tools::AgentSqlPermissions,
         ) -> dbx_core::agent_events::ToolResult {
+            let is_error = tool_name == "execute_query"
+                && arguments["sql"].as_str().is_some_and(|sql| sql.contains("FAIL_MCP_TEST"));
             if let Some(client_session_id) =
                 arguments.get("client_session_id").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty())
             {
@@ -2524,8 +2627,8 @@ mod tests {
             dbx_core::agent_events::ToolResult {
                 tool_call_id: "test".to_string(),
                 tool_name: tool_name.to_string(),
-                content: "ok".to_string(),
-                is_error: false,
+                content: if is_error { "Error: query failed" } else { "ok" }.to_string(),
+                is_error,
                 explain_data: None,
             }
         }
@@ -2617,6 +2720,8 @@ mod tests {
                     "client_session_id": client_session_id,
                 }),
             ));
+            let execution_error = sql.contains("FAIL_MCP_TEST") || sql.contains("FAIL_MCP_NO_MESSAGE_TEST");
+
             Ok(vec![crate::backend::BatchStatementResult {
                 result: dbx_core::db::QueryResult {
                     columns: vec![],
@@ -2633,9 +2738,9 @@ mod tests {
                     elasticsearch_raw_body: None,
                     messages: vec![],
                 },
-                execution_error: false,
+                execution_error,
                 statement_index: Some(0),
-                error_message: None,
+                error_message: sql.contains("FAIL_MCP_TEST").then(|| "statement failed".to_string()),
                 merged: false,
             }])
         }
@@ -3938,6 +4043,114 @@ mod tests {
             }))
             .await;
         assert!(result_text(&result).contains("SQL_BATCH_EMPTY"));
+    }
+
+    #[tokio::test]
+    async fn executed_mcp_query_is_saved_with_source_and_failure_status() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let query = |sql: &str| ExecuteQueryRequest {
+            selector: selector("pg"),
+            database: None,
+            sql: sql.to_string(),
+            session_id: None,
+            cell_char_offset: None,
+            cell_char_limit: None,
+        };
+        let success = server.execute_query(Parameters(query("SELECT 1"))).await;
+        let failure = server.execute_query(Parameters(query("SELECT 1 /* FAIL_MCP_TEST */"))).await;
+        assert_ne!(success.is_error, Some(true));
+        assert_eq!(failure.is_error, Some(true));
+
+        let history = backend.history.lock().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].connection_id, "pg");
+        assert_eq!(history[0].connection_name, "Reporting");
+        assert_eq!(history[0].database, "app");
+        assert_eq!(history[0].sql, "SELECT 1");
+        assert!(history[0].success);
+        assert_eq!(history[0].details_json.as_deref(), Some(r#"{"source":"mcp"}"#));
+        assert!(!history[1].success);
+        assert!(history[1].error.as_deref().unwrap_or_default().contains("query failed"));
+    }
+
+    #[tokio::test]
+    async fn mcp_batch_failure_is_recorded_once_without_claiming_success() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let sql = "SELECT 1 /* FAIL_MCP_TEST */; SELECT 2";
+        let result = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: sql.to_string(),
+                session_id: None,
+                continue_on_error: Some(true),
+                use_transaction: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("failed"));
+        let history = backend.history.lock().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].sql, sql);
+        assert!(!history[0].success);
+        assert!(history[0].error.as_deref().unwrap_or_default().contains("statement failed"));
+    }
+
+    #[tokio::test]
+    async fn mcp_batch_error_without_message_is_still_recorded_as_failed() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 /* FAIL_MCP_NO_MESSAGE_TEST */".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("failed"));
+        let history = backend.history.lock().unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].success);
+        assert_eq!(history[0].error.as_deref(), Some("Statement 1 failed"));
+    }
+
+    #[tokio::test]
+    async fn preflight_rejection_does_not_enter_execution_history() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: " ".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(backend.history.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_history_metadata_handles_comments_and_mixed_batches() {
+        assert_eq!(mcp_sql_operation("-- context\nSELECT 1", DatabaseType::Postgres), "SELECT");
+        assert_eq!(
+            mcp_sql_activity_kind(
+                "UPDATE accounts SET active = true; CREATE INDEX active_idx ON accounts(active)",
+                DatabaseType::Postgres
+            ),
+            "schema_change"
+        );
     }
 
     #[tokio::test]

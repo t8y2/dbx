@@ -51,10 +51,11 @@ test("development credentials cannot be placed inside UI resources", async (t) =
 });
 
 test("closing development host terminates its UI watcher and releases its port", async (t) => {
+  let host;
+  t.after(() => host?.close());
   const options = await project(t),
     pidFile = join(options.project, "watcher.pid");
-  const host = await startDevelopment({ ...options, commands: { watch: [process.execPath, "-e", 'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)', pidFile] } });
-  t.after(() => host.close());
+  host = await startDevelopment({ ...options, commands: { watch: [process.execPath, "-e", 'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)', pidFile] } });
   let pid;
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
@@ -71,9 +72,10 @@ test("closing development host terminates its UI watcher and releases its port",
 });
 
 test("watcher success markers trigger reload only after a complete line", async (t) => {
+  let host;
+  t.after(() => host?.close());
   const options = await project(t);
-  const host = await startDevelopment({ ...options, commands: { watch: [process.execPath, "-e", 'process.stdout.write("x".repeat(1100)+"DBX_UI_BUILD_SUCCESS\\n"); process.stdout.write("DBX_UI_BUILD_"); setTimeout(() => process.stdout.write("SUCCESS\\n"), 100); setInterval(() => {}, 1000)'] } });
-  t.after(() => host.close());
+  host = await startDevelopment({ ...options, commands: { watch: [process.execPath, "-e", 'process.stdout.write("x".repeat(1100)+"DBX_UI_BUILD_SUCCESS\\n"); process.stdout.write("DBX_UI_BUILD_"); setTimeout(() => process.stdout.write("SUCCESS\\n"), 100); setInterval(() => {}, 1000)'] } });
   let revision = 0;
   for (let i = 0; i < 100 && !revision; i++) {
     await delay(20);

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { findDataGridReplacementMatches, replaceDataGridText } from "@/lib/dataGrid/dataGridReplace";
+import { describe, expect, it, vi } from "vitest";
+import { findDataGridReplacementMatches, prepareDataGridCellReplacements, replaceDataGridText } from "@/lib/dataGrid/dataGridReplace";
 
 describe("data grid searched text replacement", () => {
   it("replaces repeated JSON fragments without changing the rest of the value", () => {
@@ -41,5 +41,47 @@ describe("data grid searched text replacement", () => {
     expect(findDataGridReplacementMatches({ rows, search: "hit", canReplaceCell: (rowId, col) => rowId !== 7 && col !== 1, isTruncated: (rowId, col) => rowId === 2 && col === 4 })).toEqual([{ rowId: 2, col: 0, value: "hit" }]);
     expect(findDataGridReplacementMatches({ rows, search: "hit", includesCell: () => false })).toEqual([]);
     expect(findDataGridReplacementMatches({ rows, search: "" })).toEqual([]);
+  });
+
+  it("loads complete large values once and replaces the complete text", async () => {
+    const resolveValues = vi.fn(async () => new Map([[7, new Map([[0, "prefix pujiang-pujiang suffix"]])]]));
+
+    await expect(
+      prepareDataGridCellReplacements({
+        matches: [{ rowId: 7, col: 0, value: "prefix pujiang-pujiang…" }],
+        search: "pujiang-pujiang",
+        replacement: "test-pj-charge",
+        caseSensitive: false,
+        needsResolution: () => true,
+        resolveValues,
+      }),
+    ).resolves.toEqual([
+      {
+        rowId: 7,
+        col: 0,
+        sourceValue: "prefix pujiang-pujiang…",
+        previousValue: "prefix pujiang-pujiang suffix",
+        value: "prefix test-pj-charge suffix",
+      },
+    ]);
+    expect(resolveValues).toHaveBeenCalledWith([7], [0]);
+  });
+
+  it("revalidates resolved values and skips stale preview matches", async () => {
+    const resolveValues = vi.fn(async () => new Map([[7, new Map([[0, "value changed on reload"]])]]));
+
+    await expect(
+      prepareDataGridCellReplacements({
+        matches: [
+          { rowId: 7, col: 0, value: "preview hit" },
+          { rowId: 2, col: 1, value: "ordinary hit" },
+        ],
+        search: "hit",
+        replacement: "done",
+        caseSensitive: false,
+        needsResolution: (rowId) => rowId === 7,
+        resolveValues,
+      }),
+    ).resolves.toEqual([{ rowId: 2, col: 1, previousValue: "ordinary hit", value: "ordinary done" }]);
   });
 });

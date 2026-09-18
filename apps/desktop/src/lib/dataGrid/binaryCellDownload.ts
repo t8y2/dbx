@@ -221,6 +221,51 @@ export function binaryCellUtf8Text(value: unknown, columnType?: string, database
   return binaryCellUtf8TextBytes(bytes, columnType);
 }
 
+/** 单元格详情里「以文本查看」可选的字符集。 */
+export type BinaryCellTextEncoding = "utf8" | "gbk";
+
+export const BINARY_CELL_TEXT_ENCODINGS: BinaryCellTextEncoding[] = ["utf8", "gbk"];
+
+/**
+ * 显式文本预览（「以文本查看」）的失败原因，调用方据此给出不同文案：
+ *
+ * - `notBinary`：值不是 binary canonical form（含 hex 已被截断、列类型非 binary 的情况）；
+ * - `incomplete`：大值预览闸门截断了原始值，bytes 不完整，继续解码会把残缺内容当成文本；
+ * - `undecodable`：bytes 完整，但严格解码失败（非法序列，或图片/压缩包等二进制的控制字符）。
+ */
+export type BinaryCellTextPreviewError = "notBinary" | "incomplete" | "undecodable";
+
+export type BinaryCellTextPreviewResult = { ok: true; text: string; encoding: BinaryCellTextEncoding; byteLength: number } | { ok: false; error: BinaryCellTextPreviewError };
+
+/**
+ * issue #9505：把 binary canonical value（`0x<hex>`）按用户显式选择的字符集解码成**只读**文本。
+ *
+ * 与「下载为 UTF-8/GBK」共用同一套 bytes primitive（{@link parseBinaryCellBytes} +
+ * `binaryPreviewBytes`），但刻意不复用 `binaryCellDownloadPayload` 的宽松 `TextDecoder`：
+ * 预览必须走严格解码（见 {@link binaryCellUtf8TextBytes} / {@link printableGbkText}），
+ * 否则图片头等真实二进制会被替换字符伪装成「正常文本」。
+ *
+ * 与 `binaryCellUtf8Text` 的区别是**不做数据库白名单**：MySQL BLOB 的自动文本预览只对 mysql
+ * 连接开启（显示/编辑语义需要一致），而这里由用户在单元格详情里显式点击，属于只读 presentation，
+ * 因此任何被 `isBinaryCellColumnType()` 识别的 binary 列（BLOB/TINYBLOB/MEDIUMBLOB/LONGBLOB、
+ * BINARY/VARBINARY、BYTEA、BYTES、IMAGE、RAW/LONG RAW…）都可查看，且不参与解码闸门之外的任何写回路径。
+ * 入口可见性完全复用 `isBinaryCellColumnType()`，本次不为未知类型名称放宽该闸门。
+ *
+ * 返回值只用于展示：原始 `0x<hex>`、`detail.value` / `rawValue`、编辑草稿和数据库 bytes 都不受影响。
+ */
+export function binaryCellTextPreview(value: unknown, encoding: BinaryCellTextEncoding, columnType?: string, databaseType?: DatabaseType, incomplete?: boolean): BinaryCellTextPreviewResult {
+  if (incomplete) return { ok: false, error: "incomplete" };
+  if (!isBinaryCellColumnType(columnType)) return { ok: false, error: "notBinary" };
+  // 大值闸门会把 `0x<hex>` 本身截成 `0x...`，此时可解析的前缀不是完整 bytes，不能拿去解码。
+  if (typeof value === "string" && TRUNCATED_HEX_VALUE_RE.test(value.trim())) return { ok: false, error: "notBinary" };
+  const bytes = parseBinaryCellBytes(value, columnType, databaseType);
+  if (!bytes) return { ok: false, error: "notBinary" };
+  const preview = binaryPreviewBytes(bytes, columnType);
+  const text = encoding === "gbk" ? printableGbkText(preview) : printableUtf8Text(preview);
+  if (text === null) return { ok: false, error: "undecodable" };
+  return { ok: true, text, encoding, byteLength: bytes.length };
+}
+
 // 复制到剪贴板时，把「文本型」MySQL VARBINARY 单元格还原成其原始字符串。
 // DBX 后端为保留任意 bytes，把该值统一序列化成 `0x<hex>`；前端只有在严格 UTF-8 解码、
 // 无控制字符且重新编码后与原 bytes 完全一致时，才把 payload（如 token）复制为文本；

@@ -121,8 +121,9 @@ function installBridge(channel) {
       const asset = await request("ui.readAsset", { path });
       return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
     },
-    openWorkbench: (contributionId, context) => request("host.openWorkbench", { contributionId, context }),
+    openWorkbench: (contributionId, context, options) => request("host.openWorkbench", { contributionId, context, forceNew: !!(options && options.forceNew) }),
     openFilesystem: (providerId, context) => request("host.openFilesystem", { providerId, context }),
+    reopenConnection: (connectionId) => request("host.reopenConnection", { connectionId }),
     copy: (text) => request("host.copy", { text }),
     onContext: (fn) => listen("context", fn),
     onEvent: (fn) => listen("event", fn),

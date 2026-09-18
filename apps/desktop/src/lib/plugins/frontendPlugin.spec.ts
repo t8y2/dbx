@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { InstalledPlugin, PluginConnectionProviderContribution, PluginFormFieldValue } from "@/types/database";
-import { buildPluginConnectionConfig, createFrontendPluginRegistry, initialPluginFormValues, parsePluginConnectionProviderOptionValue, pluginConnectionActionsForDialog, pluginConnectionFormValues, pluginConnectionProviderIcon, pluginConnectionProviderOptionValue } from "./frontendPlugin";
+import {
+  buildPluginConnectionConfig,
+  createFrontendPluginRegistry,
+  initialPluginFormValues,
+  parsePluginConnectionProviderOptionValue,
+  pluginConnectionActionsForDialog,
+  pluginConnectionConnectTimeoutDefault,
+  pluginConnectionFormValues,
+  pluginConnectionProviderIcon,
+  pluginConnectionProviderOptionValue,
+} from "./frontendPlugin";
 
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
@@ -68,6 +78,28 @@ describe("FrontendPluginRegistry", () => {
 
     const transient = buildPluginConnectionConfig("example.plugin", provider, {}, { ...defaultConfig, save_password: false });
     expect(transient.save_password).toBe(false);
+  });
+
+  it("materializes the provider's connect_timeout_secs default into the typed timeout", () => {
+    const provider = connectionProvider({
+      fields: [{ key: "connect_timeout_secs", label: "Connect timeout", type: "number", default: 30 }],
+    });
+    expect(pluginConnectionConnectTimeoutDefault(provider)).toBe(30);
+    expect(buildPluginConnectionConfig("example.plugin", provider, {}).connect_timeout_secs).toBe(30);
+    // An advanced-form value the user tuned is mirrored into the typed field too.
+    expect(buildPluginConnectionConfig("example.plugin", provider, { connect_timeout_secs: 60 }).connect_timeout_secs).toBe(60);
+
+    // Once the provider declares the field, its resolved value is the single
+    // source of truth: a stale typed value from before the declaration is
+    // healed to the declared default.
+    const existing = buildPluginConnectionConfig("example.plugin", connectionProvider({ fields: [] }), {});
+    existing.connect_timeout_secs = 7;
+    expect(buildPluginConnectionConfig("example.plugin", provider, {}, existing).connect_timeout_secs).toBe(30);
+
+    // Providers without the well-known field keep the generic 10s default.
+    const generic = connectionProvider({ fields: [] });
+    expect(pluginConnectionConnectTimeoutDefault(generic)).toBeUndefined();
+    expect(buildPluginConnectionConfig("example.plugin", generic, {}).connect_timeout_secs).toBe(10);
   });
 
   it("round-trips plugin connection provider picker values", () => {

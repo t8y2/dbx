@@ -241,6 +241,10 @@ export async function createMockHost(options) {
         requirePermission(manifest, "host.workbench");
         return { mockHostOpenFrame: await serialize(() => openFrame(session, p.context?.connectionId || frame.connectionId, p.contributionId, p.context)) };
       }
+      case "host.reopenConnection": {
+        if (typeof p.connectionId !== "string" || !p.connectionId) throw new Error("connectionId is invalid");
+        return { ok: true, mockReopenConnection: p.connectionId };
+      }
       default:
         throw new Error(`Unsupported mock host method: ${input.method}`);
     }

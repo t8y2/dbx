@@ -66,6 +66,10 @@ pub struct EsClient {
     /// 该集群能否用 PIT + `search_after` 深分页。用 `Arc` 是因为连接池里的实例会被
     /// `clone()` 出去执行每次查询，探测结果必须回流到同一个连接上。
     pit_search_supported: Arc<AtomicBool>,
+    /// 该集群的 `_sql` 端点是否只接受 PUT。ES 6.x 的 `_sql` 只注册了 GET/PUT，
+    /// POST 会返回 405（`allowed: [GET, PUT, HEAD, DELETE]`）；ES 7/8 反过来只认
+    /// GET/POST。默认先按 POST 发，命中 405 后按连接改记 PUT。
+    sql_endpoint_uses_put: Arc<AtomicBool>,
 }
 
 impl EsClient {
@@ -131,6 +135,7 @@ impl EsClient {
             connectivity_check_disabled,
             index_grouping,
             pit_search_supported: Arc::new(AtomicBool::new(true)),
+            sql_endpoint_uses_put: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -231,6 +236,14 @@ impl EsClient {
     fn disable_pit_search(&self) {
         self.pit_search_supported.store(false, Ordering::Relaxed);
     }
+
+    fn sql_endpoint_uses_put(&self) -> bool {
+        self.sql_endpoint_uses_put.load(Ordering::Relaxed)
+    }
+
+    fn mark_sql_endpoint_uses_put(&self) {
+        self.sql_endpoint_uses_put.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Clone for EsClient {
@@ -246,6 +259,7 @@ impl Clone for EsClient {
             index_grouping: self.index_grouping.clone(),
             // 共享标记而不是复制值：探测结果要对整个连接生效。
             pit_search_supported: Arc::clone(&self.pit_search_supported),
+            sql_endpoint_uses_put: Arc::clone(&self.sql_endpoint_uses_put),
         }
     }
 }
@@ -1019,17 +1033,43 @@ async fn close_es_scroll(client: &EsClient, scroll_id: &str) -> Result<(), Strin
 }
 
 async fn close_es_sql_cursor(client: &EsClient, cursor: &str) -> Result<(), String> {
-    let resp = client
-        .post("/_sql/close")
-        .json(&serde_json::json!({ "cursor": cursor }))
-        .send()
-        .await
-        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let resp = send_es_sql_request(client, "/_sql/close", &serde_json::json!({ "cursor": cursor })).await?;
     if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
         return Err(format!("Elasticsearch error: {body}"));
     }
     Ok(())
+}
+
+/// Sends a body to an Elasticsearch SQL endpoint, adapting to the cluster's
+/// accepted HTTP method.
+///
+/// ES 7/8 register `GET`/`POST` on `_sql`, while ES 6.x only registers
+/// `GET`/`PUT` and answers a POST with `405 Method Not Allowed` (issue #9484).
+/// Start from POST — the method every supported version accepts the body form
+/// of on 7/8 — and switch the whole connection to PUT once a 405 proves the
+/// cluster rejects POST, so only the first query pays for the probe.
+async fn send_es_sql_request(
+    client: &EsClient,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<reqwest::Response, String> {
+    let use_put = client.sql_endpoint_uses_put();
+    let send = |use_put: bool| {
+        let builder = if use_put { client.put(path) } else { client.post(path) };
+        builder.json(body).send()
+    };
+
+    let response = send(use_put).await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if use_put || client.response_status(&response).as_u16() != 405 {
+        return Ok(response);
+    }
+
+    let retried = send(true).await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if client.response_status(&retried).as_u16() != 405 {
+        client.mark_sql_endpoint_uses_put();
+    }
+    Ok(retried)
 }
 
 /// Close a previously returned ES cursor. Supports DBX-wrapped paged cursors,
@@ -2759,8 +2799,7 @@ async fn execute_sql_query(
         (serde_json::json!({ "query": query, "fetch_size": fetch_size }), None)
     };
 
-    let resp =
-        client.post("/_sql").json(&body).send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    let resp = send_es_sql_request(client, "/_sql", &body).await?;
     let status = client.response_status(&resp);
     let mut response_body: serde_json::Value = resp.json().await.unwrap_or_else(|_| serde_json::Value::Null);
 
@@ -4412,6 +4451,99 @@ mod tests {
         assert_eq!(second.columns, vec!["name"]);
         assert_eq!(second.rows, vec![vec![json!("second")]]);
         assert!(!second.has_more);
+    }
+
+    /// ES 6.x 的 `_sql` 只注册了 GET/PUT，POST 会返回 405（#9484）。
+    fn es6_method_not_allowed_body() -> String {
+        r#"{"error":"Incorrect HTTP method for uri [/_sql] and method [POST], allowed: [GET, PUT, HEAD, DELETE]","status":405}"#
+            .to_string()
+    }
+
+    fn es_sql_rows_body(row: &str) -> String {
+        format!(r#"{{"columns":[{{"name":"name","type":"keyword"}}],"rows":[["{row}"]]}}"#)
+    }
+
+    #[tokio::test]
+    async fn es6_sql_endpoint_retries_with_put_after_method_not_allowed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server =
+            serve_responses(listener, vec![(405, es6_method_not_allowed_body()), (200, es_sql_rows_body("es6-row"))])
+                .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "SELECT name FROM products").await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert!(requests[0].starts_with("POST /_sql "), "{}", requests[0]);
+        assert!(requests[1].starts_with("PUT /_sql "), "{}", requests[1]);
+        assert!(
+            requests[1].ends_with(r#"{"query":"SELECT name FROM products","fetch_size":10000}"#),
+            "{}",
+            requests[1]
+        );
+        assert_eq!(result.rows, vec![vec![json!("es6-row")]]);
+
+        // 探测结果按连接保存：后续查询直接走 PUT，不再多打一次 POST。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(listener, vec![(200, es_sql_rows_body("es6-row-2"))]).await;
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        client.mark_sql_endpoint_uses_put();
+        super::execute_rest_query(&client, "SELECT name FROM products").await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("PUT /_sql "), "{}", requests[0]);
+    }
+
+    #[tokio::test]
+    async fn es6_sql_cursor_close_uses_the_learned_put_method() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (405, es6_method_not_allowed_body()),
+                (
+                    200,
+                    r#"{"columns":[{"name":"name","type":"keyword"}],"rows":[["es6-row"]],"cursor":"raw-1"}"#
+                        .to_string(),
+                ),
+                (200, r#"{"succeeded":true}"#.to_string()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "SELECT name FROM products").await.unwrap();
+        super::close_cursor(&client, &result.session_id.expect("cursor returned")).await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert!(requests[1].starts_with("PUT /_sql "), "{}", requests[1]);
+        assert!(requests[2].starts_with("PUT /_sql/close "), "{}", requests[2]);
+        assert!(requests[2].ends_with(r#"{"cursor":"raw-1"}"#), "{}", requests[2]);
+    }
+
+    #[tokio::test]
+    async fn es78_sql_endpoint_keeps_posting_when_put_is_rejected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (405, es6_method_not_allowed_body()),
+                (405, r#"{"error":"Incorrect HTTP method for uri [/_sql] and method [PUT], allowed: [GET, POST, HEAD, DELETE]","status":405}"#.to_string()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let error = super::execute_rest_query(&client, "SELECT name FROM products").await.unwrap_err();
+        let requests = server.await.unwrap();
+
+        assert!(requests[1].starts_with("PUT /_sql "), "{}", requests[1]);
+        assert!(error.contains("405"), "{error}");
+        // 两次都是 405 时不锁定 PUT，避免把只认 POST 的集群永久改坏。
+        assert!(!client.sql_endpoint_uses_put());
     }
 
     #[tokio::test]

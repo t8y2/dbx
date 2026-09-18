@@ -3343,15 +3343,17 @@ async function resolveCteColumnHoverColumn(semanticModel: SqlSemanticModel, colu
     if (!hit) return null;
     const origins: CteColumnOrigin[] = resolveCteColumnOrigins(semanticModel, hit, columnName);
     if (origins.length === 0) return null;
-    const matched: SqlCompletionColumn[] = [];
-    for (const origin of origins) {
-      const reference = referencedTableLikeFromSemanticSource(origin.source);
-      await ensureColumnsForTable(reference, reference);
-      const columns = cachedColumnsByTable.get(completionCacheKey(reference));
-      const column = columns?.find((candidate) => candidate.name.toLowerCase() === origin.column.toLowerCase());
-      if (column) matched.push(column);
-    }
-    return matched[0] ?? null;
+    // Fetch all candidate origins concurrently (same pattern as expandSelectStar);
+    // origin order still decides which match wins.
+    const matched = await Promise.all(
+      origins.map(async (origin) => {
+        const reference = referencedTableLikeFromSemanticSource(origin.source);
+        await ensureColumnsForTable(reference, reference);
+        const columns = cachedColumnsByTable.get(completionCacheKey(reference));
+        return columns?.find((candidate) => candidate.name.toLowerCase() === origin.column.toLowerCase()) ?? null;
+      }),
+    );
+    return matched.find((column) => column != null) ?? null;
   } catch {
     return null;
   }

@@ -139,11 +139,12 @@ export function findCteColumnResolution(model: SqlSemanticModel, columnName: str
   for (const reference of cteReferenceSources(model)) {
     const definition = findCteDefinition(model, reference.name);
     if (!definition || seenDefinitionIds.has(definition.id)) continue;
-    // Only a CTE declared before the cursor *and* referenced at the cursor's nesting level can own
-    // a bare column; otherwise an unrelated query block (typically a CTE declared further down)
-    // hijacks the name and click/hover lands on that far-away CTE.
+    // Only a CTE declared before the cursor *and* referenced in the cursor's own query block can
+    // own a bare column; otherwise an unrelated query block (typically a CTE declared further
+    // down, or one referenced only from a deeper subquery) hijacks the name and click/hover
+    // lands on that far-away CTE.
     if (definition.sourceSpan.start > model.cursor) continue;
-    if (nestingDepthAt(model, reference.sourceSpan.start) < cursorDepth) continue;
+    if (nestingDepthAt(model, reference.sourceSpan.start) !== cursorDepth) continue;
     seenDefinitionIds.add(definition.id);
     const hit = resolveCteOutputOrStars(definition, columnName);
     if (hit) hits.push(hit);

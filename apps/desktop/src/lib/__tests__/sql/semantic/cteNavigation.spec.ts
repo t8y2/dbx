@@ -148,6 +148,19 @@ describe("findCteColumnResolution", () => {
     expect(findCteColumnResolution(outer, "id")?.definition.name).toBe("later");
   });
 
+  it("does not let a CTE referenced only from a deeper subquery claim an outer bare column", () => {
+    const sql = "WITH w AS (SELECT x FROM a) SELECT q FROM real_t, (SELECT x FROM w) s";
+    const outerQ = sql.indexOf("SELECT q FROM real_t") + "SELECT ".length;
+    const model = buildSqlSemanticModel(sql, outerQ + 1);
+
+    // `w` is only referenced inside the derived table; it must not own the outer bare `q`.
+    expect(findCteColumnResolution(model, "q")).toBeNull();
+    // Inside the subquery that references `w`, its own column still resolves.
+    const innerX = sql.indexOf("x FROM w") + 1;
+    const inner = buildSqlSemanticModel(sql, innerX);
+    expect(findCteColumnResolution(inner, "x")?.definition.name).toBe("w");
+  });
+
   it("keeps bare columns of a CTE body on the CTE that body references", () => {
     const sql = "WITH a AS (SELECT id FROM orders), b AS (SELECT id FROM a) SELECT id FROM b";
     const bodyId = sql.indexOf("SELECT id FROM a") + "SELECT ".length;

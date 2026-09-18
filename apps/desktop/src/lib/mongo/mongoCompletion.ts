@@ -108,6 +108,7 @@ const COLLECTION_METHODS = [
   { label: "createIndex", detail: "Create an index", apply: "createIndex({ ${field}: 1 })" },
   { label: "dropIndex", detail: "Drop one index", apply: 'dropIndex("${indexName}")' },
   { label: "dropIndexes", detail: "Drop collection indexes", apply: "dropIndexes()" },
+  { label: "renameCollection", detail: "Rename the collection", apply: 'renameCollection("${newName}")' },
   { label: "drop", detail: "Drop the collection", apply: "drop()" },
 ] as const;
 
@@ -136,6 +137,7 @@ const COLLECTION_METHOD_BOOST: Record<(typeof COLLECTION_METHODS)[number]["label
   dataSize: 75,
   storageSize: 70,
   totalIndexSize: 65,
+  renameCollection: 55,
   dropIndex: 50,
   dropIndexes: 45,
   drop: 30,

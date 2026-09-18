@@ -747,6 +747,25 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand reads renameCollection", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.orders.renameCollection("orders_2024");'), { kind: "renameCollection", collection: "orders", newName: "orders_2024" });
+  assert.equal(parseMongoWriteCommand("db[\"a-b\"].renameCollection('c')")?.kind, "renameCollection");
+  assert.equal(parseMongoWriteCommand('db.getCollection("a").renameCollection("b")')?.kind, "renameCollection");
+
+  for (const [source, expected] of [
+    ["db.orders.renameCollection()", /expects the new collection name/],
+    ["db.orders.renameCollection(1)", /expects the new collection name/],
+    ['db.orders.renameCollection("")', /requires a valid collection name/],
+    ['db.orders.renameCollection("a$b")', /requires a valid collection name/],
+    ['db.orders.renameCollection("orders")', /must differ from the current name/],
+    ['db.orders.renameCollection("x", true)', /dropTarget is not supported; drop the target collection first/],
+    ['db.orders.renameCollection("x").y()', /Unexpected text after renameCollection/],
+  ] as const) {
+    assert.equal(parseMongoCommand(source), null, source);
+    assert.match(describeMongoCommandParseFailure(source), expected, source);
+  }
+});
+
 test("parseMongoWriteCommand reads bulkWrite with every operation kind", () => {
   const command = parseMongoWriteCommand(`db.orders.bulkWrite([
     { insertOne: { document: { sku: "A1", stock: 1 } } },
@@ -1383,10 +1402,10 @@ test("describeMongoCommandParseFailure explains the argument shape a known metho
 });
 
 test("describeMongoCommandParseFailure names unsupported methods and points at alternatives", () => {
-  const rename = describeMongoCommandParseFailure('db.c.renameCollection("d")');
-  assert.match(rename, /^Collection method renameCollection\(\) is not supported\. Supported collection methods: find, findOne/);
+  const mapReduce = describeMongoCommandParseFailure("db.c.mapReduce()");
+  assert.match(mapReduce, /^Collection method mapReduce\(\) is not supported\. Supported collection methods: find, findOne/);
   // Bracket and getCollection targets are recognised too.
-  assert.match(describeMongoCommandParseFailure('db["my-coll"].renameCollection("x")'), /renameCollection\(\) is not supported/);
+  assert.match(describeMongoCommandParseFailure('db["my-coll"].validate()'), /validate\(\) is not supported/);
   assert.match(describeMongoCommandParseFailure('db.getCollection("my-coll").watch()'), /watch\(\) is not supported/);
 
   assert.match(describeMongoCommandParseFailure('db.createCollection("c")'), /db\.createCollection\(\) is not supported; collections are created on first insert/);

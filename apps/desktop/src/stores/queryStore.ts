@@ -33,6 +33,7 @@ import {
   mongoUseToQueryResult,
   mongoVersionToQueryResult,
   mongoBulkWriteToQueryResult,
+  mongoScalarToQueryResult,
   mongoWriteToQueryResult,
   splitMongoCommandRanges,
   type MongoAggregateSafetyOptions,
@@ -6745,6 +6746,7 @@ export const useQueryStore = defineStore("query", () => {
               case "createUser":
               case "dropIndex":
               case "dropIndexes":
+              case "renameCollection":
               case "dropCollection": {
                 if (options?.mongoSafety) {
                   const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
@@ -6782,6 +6784,9 @@ export const useQueryStore = defineStore("query", () => {
                   } finally {
                     await refreshLoadedMongoIndexesAfterMutation(executionConnectionId, currentDatabase, mongoCommand.collection, traceId);
                   }
+                } else if (mongoCommand.kind === "renameCollection") {
+                  await api.mongoRenameCollection(executionConnectionId, currentDatabase, mongoCommand.collection, mongoCommand.newName);
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoScalarToQueryResult("renamed", `${mongoCommand.collection} -> ${mongoCommand.newName}`, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "dropCollection") {
                   await api.mongoDropCollection(executionConnectionId, currentDatabase, mongoCommand.collection);
                   allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(1, performance.now() - commandStartedAt))));

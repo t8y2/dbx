@@ -1388,6 +1388,34 @@ class MongoAgentTest {
     }
 
     @Test
+    void renameCollectionMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"rename_collection\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"new_name\":\"orders_2024\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(13, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_RENAME_COLLECTION));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_RENAME_COLLECTION));
+    }
+
+    @Test
+    void rejectsUnrenameableCollectionNames() {
+        MongoAgent.requireRenameableCollectionNames("orders", "orders_2024");
+        for (String[] item : new String[][] {
+            {"", "x", "Collection name is required"},
+            {"orders", "", "New collection name is required"},
+            {"orders", "orders", "must differ"},
+            {"system.users", "x", "System collections cannot be renamed"},
+            {"orders", "system.x", "System collections cannot be renamed"},
+        }) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> MongoAgent.requireRenameableCollectionNames(item[0], item[1]));
+            assertTrue(error.getMessage().contains(item[2]), error.getMessage());
+        }
+    }
+
+    @Test
     void parsesBulkWriteOptions() {
         assertTrue(MongoAgent.bulkWriteOptionsForWrite(null).isOrdered());
         assertTrue(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":true}").isOrdered());

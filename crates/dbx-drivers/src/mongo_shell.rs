@@ -78,6 +78,12 @@ pub enum MongoCommand {
     DropIndexes { collection: String, indexes: Option<String>, single: bool },
     #[serde(rename = "dropCollection")]
     DropCollection { collection: String },
+    #[serde(rename = "renameCollection")]
+    RenameCollection {
+        collection: String,
+        #[serde(rename = "newName")]
+        new_name: String,
+    },
     #[serde(rename = "findOneAndUpdate")]
     FindOneAndUpdate { collection: String, filter: String, update: String, options: Option<String> },
     #[serde(rename = "findOneAndReplace")]
@@ -108,6 +114,7 @@ impl MongoCommand {
                 | Self::CreateIndex { .. }
                 | Self::DropIndexes { .. }
                 | Self::DropCollection { .. }
+                | Self::RenameCollection { .. }
                 | Self::FindOneAndUpdate { .. }
                 | Self::FindOneAndReplace { .. }
                 | Self::FindOneAndDelete { .. }
@@ -863,6 +870,27 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             single: false,
         });
     }
+    if let Some((args, tail)) = method_call(source, prefix_end, "renameCollection") {
+        if !tail.is_empty() || args.is_empty() {
+            return Err("MongoDB renameCollection() requires the new collection name.".to_string());
+        }
+        if args.len() > 1 {
+            // The second argument is dropTarget, which would delete an existing collection
+            // of the new name; reject it rather than silently ignore it.
+            return Err(
+                "MongoDB renameCollection() dropTarget is not supported; drop the target collection first.".to_string()
+            );
+        }
+        let new_name = parse_string_arg(&args[0])?;
+        if new_name.trim().is_empty() || new_name.contains('$') {
+            return Err("MongoDB renameCollection() requires a valid collection name.".to_string());
+        }
+        if new_name == collection {
+            return Err("MongoDB renameCollection() new name must differ from the current name.".to_string());
+        }
+        return Ok(MongoCommand::RenameCollection { collection, new_name });
+    }
+
     if let Some((args, tail)) = method_call(source, prefix_end, "drop") {
         if !tail.is_empty() || !args.is_empty() {
             return Err("Invalid MongoDB drop() command.".to_string());
@@ -2213,6 +2241,32 @@ mod tests {
                 "db.orders.bulkWrite([{ deleteOne: { filter: {} } }]).limit(1)",
                 "array of operations and optional options",
             ),
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
+        }
+    }
+
+    #[test]
+    fn parses_rename_collection() {
+        let command = parse(r#"db.orders.renameCollection("orders_2024");"#).unwrap();
+        assert_eq!(
+            command,
+            MongoCommand::RenameCollection { collection: "orders".to_string(), new_name: "orders_2024".to_string() }
+        );
+        assert!(command.is_mutating());
+        assert!(!command.is_dangerous());
+        assert_eq!(serde_json::to_value(&command).unwrap()["newName"], "orders_2024");
+        assert!(matches!(parse(r#"db["a-b"].renameCollection('c')"#).unwrap(), MongoCommand::RenameCollection { .. }));
+
+        for (source, expected) in [
+            ("db.orders.renameCollection()", "requires the new collection name"),
+            ("db.orders.renameCollection(1)", "must be a string"),
+            (r#"db.orders.renameCollection("")"#, "valid collection name"),
+            (r#"db.orders.renameCollection("a$b")"#, "valid collection name"),
+            (r#"db.orders.renameCollection("orders")"#, "must differ"),
+            (r#"db.orders.renameCollection("x", true)"#, "dropTarget is not supported"),
+            (r#"db.orders.renameCollection("x").y()"#, "requires the new collection name"),
         ] {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");

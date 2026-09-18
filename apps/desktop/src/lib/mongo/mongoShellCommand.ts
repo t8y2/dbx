@@ -50,6 +50,7 @@ const COLLECTION_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   updateMany: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
   replaceOne: { expects: "a filter, a replacement document, and optional options", roles: ["filter", "replacement", "options"] },
   bulkWrite: { expects: "an array of operations and optional options", roles: ["operations", "options"] },
+  renameCollection: { expects: "the new collection name", roles: ["newName"] },
   deleteOne: { expects: "a filter", roles: ["filter"] },
   deleteMany: { expects: "a filter", roles: ["filter"] },
   findOneAndUpdate: { expects: "a filter, an update, and optional options", roles: ["filter", "update", "options"] },
@@ -80,6 +81,7 @@ const SUPPORTED_COLLECTION_METHODS = [
   "updateMany",
   "replaceOne",
   "bulkWrite",
+  "renameCollection",
   "deleteOne",
   "deleteMany",
   "findOneAndUpdate",
@@ -168,6 +170,12 @@ function diagnoseMongoCommand(source: string): string | null {
     return `${method}() returns a result, not a cursor, so nothing can be chained after it: "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
   }
   if (tail) return `Unexpected text after ${method}(...): "${tail.length > 40 ? `${tail.slice(0, 40)}…` : tail}".`;
+  if (method === "renameCollection") {
+    if (args.length > 1) return "renameCollection() dropTarget is not supported; drop the target collection first.";
+    const newName = args[0] ? /^(["'])([^"']*)\1$/.exec(args[0].trim())?.[2] : undefined;
+    if (newName !== undefined && (!newName.trim() || newName.includes("$"))) return "renameCollection() requires a valid collection name.";
+    if (newName !== undefined && shape.groups?.collection === newName) return "renameCollection() new name must differ from the current name.";
+  }
   if (method === "bulkWrite" && args[0]) {
     const operations = normalizeJsonArgument(args[0]);
     const problem = operations ? validateBulkWriteOperations(operations) : null;
@@ -287,7 +295,7 @@ export interface MongoDistinctCommand {
   filter?: string;
 }
 
-type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "bulkWrite" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
+type MongoWriteKind = "runCommand" | "insert" | "update" | "replace" | "bulkWrite" | "delete" | "createIndex" | "createUser" | "dropIndex" | "dropIndexes" | "dropCollection" | "renameCollection" | "findOneAndUpdate" | "findOneAndReplace" | "findOneAndDelete";
 
 export type MongoCommand =
   | ({ kind: "find" } & MongoFindCommand)
@@ -312,6 +320,7 @@ export type MongoCommand =
   | { kind: "dropIndex"; collection: string; index: string }
   | { kind: "dropIndexes"; collection: string; indexes?: string }
   | { kind: "dropCollection"; collection: string }
+  | { kind: "renameCollection"; collection: string; newName: string }
   | { kind: "findOneAndUpdate"; collection: string; filter: string; update: string; options?: string }
   | { kind: "findOneAndReplace"; collection: string; filter: string; replacement: string; options?: string }
   | { kind: "findOneAndDelete"; collection: string; filter: string; options?: string };
@@ -889,6 +898,17 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
     return indexes !== null ? { kind: "dropIndexes", collection: dropIndexes.collection, ...(indexes ? { indexes } : {}) } : null;
   }
 
+  const renameCollection = parseCollectionMethodTarget(source, "renameCollection");
+  if (renameCollection) {
+    const args = parseMethodArgs(source, renameCollection.methodCallIndex);
+    // A second argument would be dropTarget, which deletes an existing collection of the
+    // new name; it is rejected (see the diagnostics) rather than silently ignored.
+    if (!args || args.length !== 1) return null;
+    const newName = /^(["'])([^"'$]+)\1$/.exec(args[0]!.trim())?.[2]?.trim();
+    if (!newName || newName === renameCollection.collection) return null;
+    return { kind: "renameCollection", collection: renameCollection.collection, newName };
+  }
+
   const dropCollection = parseCollectionMethodTarget(source, "drop");
   if (dropCollection) {
     const args = parseMethodArgs(source, dropCollection.methodCallIndex);
@@ -1180,6 +1200,15 @@ export function mongoUseToQueryResult(database: string, executionTimeMs: number)
     columns: ["message"],
     rows: [[`switched to db ${database}`]],
     affected_rows: 0,
+    execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
+  };
+}
+
+export function mongoScalarToQueryResult(column: string, value: string, executionTimeMs: number): QueryResult {
+  return {
+    columns: [column],
+    rows: [[value]],
+    affected_rows: 1,
     execution_time_ms: Math.max(0, Math.round(executionTimeMs)),
   };
 }

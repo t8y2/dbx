@@ -2020,6 +2020,20 @@ impl DbxBackend for WebBackend {
                     .collect::<Vec<_>>();
                 Ok(mongo_drop_indexes_query_result(dropped_names, failures, affected_rows_from_value(&value)))
             }
+            MongoCommand::RenameCollection { collection, new_name } => {
+                self.request(
+                    reqwest::Method::POST,
+                    "/api/mongo/rename-collection",
+                    Some(json!({
+                        "connectionId": connection_id,
+                        "database": database,
+                        "collection": collection,
+                        "newName": new_name,
+                    })),
+                )
+                .await?;
+                Ok(scalar_query_result("renamed", Value::String(format!("{collection} -> {new_name}"))))
+            }
             MongoCommand::DropCollection { collection } => {
                 self.request(
                     reqwest::Method::POST,

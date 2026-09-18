@@ -4485,10 +4485,11 @@ export const useConnectionStore = defineStore("connection", () => {
    * sidecar's config goes stale; this is the plugin's way to request a fresh
    * connection/connect with the updated config.
    */
-  async function reopenPluginConnection(connectionId: string): Promise<void> {
+  async function reopenPluginConnection(connectionId: string, pluginId: string): Promise<void> {
     const config = getConfig(connectionId);
     if (!config) throw new Error("Connection config not found");
     if (config.db_type !== "plugin") throw new Error("Connection is not plugin-backed");
+    if (config.plugin_id !== pluginId) throw new Error("Connection is owned by another plugin");
     await ensureConnected(connectionId, { activate: false, forceReconnect: true });
   }
 

@@ -75,7 +75,7 @@ function createBridge() {
       readAsset: api.readPluginUiAsset,
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
-      reopenConnection: (connectionId) => useConnectionStore().reopenPluginConnection(connectionId),
+      reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
       closeTab: () => emit("closeTab"),
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       copyText: (_pluginId, text) => copyToClipboard(text),

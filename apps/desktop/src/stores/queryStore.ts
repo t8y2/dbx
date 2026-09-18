@@ -3498,15 +3498,20 @@ export const useQueryStore = defineStore("query", () => {
 
     // Termius-style session numbering: the first same-plugin + same-connection
     // tab keeps the bare connection name; each additional one gets " (n)"
-    // where n is the count of existing sibling tabs (second tab → (1)). Numbers
-    // are assigned at creation and never backfilled after a close — stable
-    // titles beat dense numbering (no title drift).
-    const siblingCount = tabs.value.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && pluginTabConnectionId(tab) === connectionId).length;
+    // where n advances beyond the highest live suffix (second tab → (1)).
+    // Numbers are assigned at creation and never backfilled after a close —
+    // stable titles beat dense numbering, while live titles stay unique.
+    const siblingTabs = tabs.value.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && pluginTabConnectionId(tab) === connectionId);
+    const nextSessionNumber =
+      siblingTabs.reduce((highest, tab) => {
+        const suffix = / \((\d+)\)$/.exec(tab.title);
+        return suffix ? Math.max(highest, Number(suffix[1])) : highest;
+      }, 0) + 1;
     const baseTitle = options.title || contributionId;
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: siblingCount >= 1 ? `${baseTitle} (${siblingCount})` : baseTitle,
+      title: siblingTabs.length >= 1 ? `${baseTitle} (${nextSessionNumber})` : baseTitle,
       connectionId,
       database: options.database || "",
       sql: "",

@@ -69,10 +69,6 @@ describe("PluginHostBridge", () => {
     });
     const ready = () => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
 
-    expect(ready()).toBe(true);
-    await vi.waitFor(() => expect(messages).toHaveLength(1));
-    expect(messages[0]).toMatchObject({ type: "init" });
-
     const order: string[] = [];
     bridge.onReinit = () =>
       new Promise<void>((resolve) => {
@@ -86,11 +82,11 @@ describe("PluginHostBridge", () => {
     };
 
     expect(ready()).toBe(true);
-    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
     expect(order).toEqual(["reinit", "init"]);
   });
 
-  it("invokes onReinit on every ready, including the first", async () => {
+  it("initializes only once when ready is repeated for the same bridge", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
     const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
@@ -106,9 +102,9 @@ describe("PluginHostBridge", () => {
     ready();
     await vi.waitFor(() => expect(messages).toHaveLength(1));
     ready();
-    await vi.waitFor(() => expect(messages).toHaveLength(2));
 
-    expect(onReinit).toHaveBeenCalledTimes(2);
+    expect(onReinit).toHaveBeenCalledTimes(1);
+    expect(messages).toHaveLength(1);
   });
 
   it("snapshots nested Vue reactive context values before sending them to the plugin", () => {
@@ -234,7 +230,7 @@ describe("PluginHostBridge", () => {
 
     request("reopen", { connectionId: "9f1c2a34-0000-4000-8000-abcdef012345" });
     await vi.waitFor(() => expect(messages).toHaveLength(1));
-    expect(reopenConnection).toHaveBeenCalledWith("9f1c2a34-0000-4000-8000-abcdef012345");
+    expect(reopenConnection).toHaveBeenCalledWith("sample", "9f1c2a34-0000-4000-8000-abcdef012345");
     expect(messages[0]).toMatchObject({ id: "reopen", result: { ok: true } });
 
     // Missing/invalid connectionId is rejected before reaching the host.

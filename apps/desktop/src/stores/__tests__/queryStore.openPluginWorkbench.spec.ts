@@ -124,9 +124,8 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect([titles[firstId], titles[secondId], titles[thirdId]]).toEqual(["SSH server222", "SSH server222 (1)", "SSH server222 (2)"]);
 
     // Closing tab (1) must not renumber (2): existing titles stay stable (no
-    // backfill, no drift). The next tab follows the count rule (2 remaining
-    // same-connection tabs → (2)) — number reuse after a close is the accepted
-    // trade-off of never renumbering live tabs. (Removed directly: the stubbed
+    // backfill, no drift). The next tab advances beyond the highest live suffix
+    // so two open sessions never share a title. (Removed directly: the stubbed
     // window in this harness lacks the timers closeTab's cleanup needs.)
     queryStore.tabs = queryStore.tabs.filter((tab) => tab.id !== secondId);
     const fourthId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", {
@@ -136,7 +135,18 @@ describe("queryStore openPluginWorkbench reuse", () => {
       forceNew: true,
     });
     expect(queryStore.tabs.find((tab) => tab.id === thirdId)?.title).toBe("SSH server222 (2)");
-    expect(queryStore.tabs.find((tab) => tab.id === fourthId)?.title).toBe("SSH server222 (2)");
+    expect(queryStore.tabs.find((tab) => tab.id === fourthId)?.title).toBe("SSH server222 (3)");
+
+    // Closing the highest suffix may reuse that now-free number, but must not
+    // collide with any session that remains open.
+    queryStore.tabs = queryStore.tabs.filter((tab) => tab.id !== fourthId);
+    const fifthId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", {
+      title: "SSH server222",
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", workbenchId: "wb-5" },
+      forceNew: true,
+    });
+    expect(queryStore.tabs.find((tab) => tab.id === fifthId)?.title).toBe("SSH server222 (3)");
   });
 
   it("numbers sessions independently per connection and reads bridge-style context-only connection ids", async () => {

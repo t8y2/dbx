@@ -40,8 +40,8 @@ export interface PluginHostBridgeApi {
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
-  /** Explicit user-triggered reconnect of a plugin connection (full flow, interactive password prompt allowed). */
-  reopenConnection?(connectionId: string): Promise<void>;
+  /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
+  reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
@@ -65,16 +65,7 @@ export class PluginHostBridge {
   private locale: string;
   private theme?: PluginBridgeTheme;
 
-  /**
-   * Invoked on every plugin `ready` — first load and every reload alike,
-   * because realistic reload paths (webview reload, tab refresh) rebuild the
-   * bridge instance, so no per-bridge "already initialized" state survives to
-   * tell them apart. Awaited before the `init` message is posted, so handlers
-   * like a connection-config re-push land before the plugin acts on the new
-   * init. Handlers must be cheap no-ops when no healing is needed (the first
-   * load right after the sidebar open already pushed the config). Errors are
-   * logged and never block the init.
-   */
+  /** Invoked once before each iframe load generation sends its init message. */
   onReinit?: () => Promise<void> | void;
 
   constructor(
@@ -109,34 +100,38 @@ export class PluginHostBridge {
   }
 
   private handleReady(): void {
-    if (this.onReinit) {
-      // Serialize every init (including the frame-load fallback in the host
-      // component) behind the re-push so the plugin only acts on its fresh
-      // init after the sidecar registry has been repopulated.
-      this.reinitInFlight = (async () => {
-        try {
-          await this.onReinit?.();
-        } catch (error) {
-          console.warn("[DBX][plugin-bridge:reinit]", error);
-        }
-      })();
-      void this.reinitInFlight.finally(() => {
-        this.reinitInFlight = null;
-      });
-    }
-    this.sendInit();
+    this.requestInit("ready");
   }
 
   sendInit(): void {
-    const pending = this.reinitInFlight;
-    if (pending) {
-      void pending.then(() => {
-        // A rebuilt bridge supersedes this one; never post a stale init.
-        if (!this.disposed) this.postInit();
-      });
+    this.requestInit("load");
+  }
+
+  private requestInit(signal: "load" | "ready"): void {
+    if ((this.initSignals.load && this.initSignals.ready) || (signal === "load" && this.initSignals.load)) {
+      this.initGeneration += 1;
+      this.initSignals = { load: false, ready: false };
+      this.initStarted = false;
+    }
+    if (this.initSignals[signal]) return;
+    this.initSignals[signal] = true;
+    if (this.initStarted) return;
+    this.initStarted = true;
+    const generation = this.initGeneration;
+    const reinit = this.onReinit;
+    if (!reinit) {
+      if (!this.disposed && generation === this.initGeneration) this.postInit();
       return;
     }
-    this.postInit();
+    void (async () => {
+      try {
+        await reinit();
+      } catch (error) {
+        console.warn("[DBX][plugin-bridge:reinit]", error);
+      }
+      // A newer load generation supersedes this one; never post a stale init.
+      if (!this.disposed && generation === this.initGeneration) this.postInit();
+    })();
   }
 
   /** Stop future posts (queued inits after an async reinit) for a torn-down bridge. */
@@ -145,7 +140,9 @@ export class PluginHostBridge {
   }
 
   private disposed = false;
-  private reinitInFlight: Promise<void> | null = null;
+  private initGeneration = 0;
+  private initSignals = { load: false, ready: false };
+  private initStarted = false;
 
   private postInit(): void {
     this.post({
@@ -245,7 +242,7 @@ export class PluginHostBridge {
     if (method === "host.reopenConnection") {
       if (!this.api.reopenConnection) throw new Error("Connection reopen is unavailable");
       const input = requireRecord(params, "host.reopenConnection params");
-      await this.api.reopenConnection(requireProtocolName(input.connectionId, "connectionId"));
+      await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
     }
     if (method === "host.openFilesystem") {

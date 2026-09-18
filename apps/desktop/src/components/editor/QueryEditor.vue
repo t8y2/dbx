@@ -219,7 +219,7 @@ import {
 } from "@/lib/sql/semantic/diagnostics";
 import { resolveSqlDialectId, sqlReferenceAnalysisDialectFor } from "@/lib/sql/semantic/dialect";
 import { buildRedisSyntaxDiagnostics, shouldRunRedisDiagnostics } from "@/lib/redis/redisSyntaxDiagnostics";
-import { buildMongoSyntaxDiagnostics, shouldRunMongoDiagnostics } from "@/lib/mongo/mongoSyntaxDiagnostics";
+import { buildMongoSyntaxDiagnostics } from "@/lib/mongo/mongoSyntaxDiagnostics";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject, SqlCompletionReferencedTable, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import type { CompletionAssistantObjectKind, ColumnInfo, DatabaseType, IndexInfo, SqlReferenceAnalysis, SqlServerCompletionContext, SqlTableReference, SqlTextSpan } from "@/types/database";
@@ -3830,12 +3830,6 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
   if (props.databaseType === "mongodb") {
     // Shell commands have no SQL semantics; surface the parser's own diagnosis instead of waiting for Run.
     const cursor = currentView.state.selection.main.head;
-    if (!shouldRunMongoDiagnostics(sql, cursor)) {
-      scheduleSemanticDiagnostics(900, {
-        preserveOutsideRanges: options.preserveOutsideRanges,
-      });
-      return;
-    }
     setSemanticDiagnostics(buildMongoSyntaxDiagnostics(sql, cursor));
     return;
   }

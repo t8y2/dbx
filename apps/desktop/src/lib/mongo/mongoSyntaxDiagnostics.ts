@@ -79,6 +79,13 @@ function describeMongoWriteRisk(command: MongoCommand): string | null {
     }
     case "replace":
       return mongoFilterIsEffectivelyUnbounded(command.filter) ? `This replace has no effective filter and will replace an arbitrary document in ${command.collection}.` : null;
+    case "findOneAndUpdate":
+    case "findOneAndReplace":
+    case "findOneAndDelete": {
+      if (!mongoFilterIsEffectivelyUnbounded(command.filter)) return null;
+      const verb = command.kind === "findOneAndUpdate" ? "update" : command.kind === "findOneAndReplace" ? "replace" : "delete";
+      return `This ${command.kind} has no effective filter and will ${verb} an arbitrary document in ${command.collection}.`;
+    }
     case "bulkWrite":
       return bulkWriteFilters(command.operations).some(mongoFilterIsEffectivelyUnbounded) ? `This bulkWrite contains an operation with no effective filter, which can affect every document in ${command.collection}.` : null;
     case "dropCollection":

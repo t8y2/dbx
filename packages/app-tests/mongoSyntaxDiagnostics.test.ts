@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { buildMongoSyntaxDiagnostics, shouldRunMongoDiagnostics } from "../../apps/desktop/src/lib/mongo/mongoSyntaxDiagnostics";
 
@@ -68,6 +69,22 @@ test("warns about writes with no effective filter and about dropping a collectio
   assert.deepEqual(buildMongoSyntaxDiagnostics("db.reports.bulkWrite([{ deleteMany: { filter: { status: 'stale' } } }])"), []);
 });
 
+test("warns about find-and-modify commands with no effective filter", () => {
+  for (const [source, action] of [
+    ["db.reports.findOneAndUpdate({}, {$set: {status: 'archived'}})", "update"],
+    ["db.reports.findOneAndReplace({}, {status: 'archived'})", "replace"],
+    ["db.reports.findOneAndDelete({})", "delete"],
+  ] as const) {
+    const [diagnostic] = underlined(source);
+    assert.equal(diagnostic?.severity, "warning", source);
+    assert.match(diagnostic!.message, new RegExp(`${action} an arbitrary document in reports`), source);
+  }
+
+  for (const source of ["db.reports.findOneAndUpdate({_id: 1}, {$set: {status: 'archived'}})", "db.reports.findOneAndReplace({_id: 1}, {status: 'archived'})", "db.reports.findOneAndDelete({_id: 1})"]) {
+    assert.deepEqual(buildMongoSyntaxDiagnostics(source), [], source);
+  }
+});
+
 test("reports each statement separately", () => {
   const diagnostics = underlined("db.a.find({});\ndb.b.foo();\ndb.c.find({})");
   assert.equal(diagnostics.length, 1);
@@ -86,4 +103,20 @@ test("does not flag a command the cursor is still typing", () => {
   assert.equal(left?.severity, "error");
   assert.match(left!.message, /unclosed/i);
   assert.equal(shouldRunMongoDiagnostics("", 0), false);
+});
+
+test("keeps completed diagnostics while the cursor is in an unfinished command", () => {
+  const source = "db.a.deleteMany({});\ndb.b.find({";
+  const [diagnostic] = underlined(source, source.length);
+  assert.equal(diagnostic?.severity, "warning");
+  assert.equal(diagnostic?.text, "db.a.deleteMany");
+  assert.match(diagnostic!.message, /every document in a/);
+
+  const unfinished = underlined(source, 0).find((diagnostic) => diagnostic.severity === "error");
+  assert.match(unfinished!.message, /unclosed/i);
+
+  const queryEditorSource = readFileSync("apps/desktop/src/components/editor/QueryEditor.vue", "utf8");
+  const mongoBranch = queryEditorSource.slice(queryEditorSource.indexOf('if (props.databaseType === "mongodb")'), queryEditorSource.indexOf('if (props.databaseType === "redis")'));
+  assert.doesNotMatch(mongoBranch, /shouldRunMongoDiagnostics/);
+  assert.match(mongoBranch, /setSemanticDiagnostics\(buildMongoSyntaxDiagnostics\(sql, cursor\)\)/);
 });

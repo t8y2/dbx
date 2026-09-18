@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useComponentUpdates } from "@/composables/useComponentUpdates";
+import { runPendingComponentUpdatePlan, type PendingComponentUpdates } from "@/lib/updates/componentUpdateOrchestration";
 
 const mocks = vi.hoisted(() => ({
   listInstalledAgents: vi.fn(),
@@ -138,6 +139,47 @@ describe("useComponentUpdates", () => {
     expect(mocks.installMcpServer).not.toHaveBeenCalled();
     expect(mocks.installMarketplacePlugin).not.toHaveBeenCalled();
     expect(result).toEqual({ drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [] });
+  });
+
+  it("installs every manually selected category when no DBX update exists and automatic updates are disabled", async () => {
+    Object.assign(settings.editorSettings, {
+      autoUpdateDrivers: false,
+      autoUpdateJdbc: false,
+      autoUpdateMcp: false,
+      autoUpdatePlugins: false,
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategories(["drivers", "jdbc", "mcp", "plugins"]);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
+  });
+
+  it("resumes a persisted manual update-all plan after restart while automatic updates are disabled", async () => {
+    Object.assign(settings.editorSettings, {
+      autoUpdateDrivers: false,
+      autoUpdateJdbc: false,
+      autoUpdateMcp: false,
+      autoUpdatePlugins: false,
+    });
+    const updates = useComponentUpdates({ isDesktop: true });
+    const pending: PendingComponentUpdates = {
+      fromVersion: "0.6.16",
+      targetVersion: "0.6.17",
+      plan: { kind: "manual", categories: ["drivers", "jdbc", "mcp", "plugins"] },
+    };
+
+    const result = await runPendingComponentUpdatePlan(pending, updates);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
   });
 
   it("skips blocked agent updates while allowing other component updates", async () => {

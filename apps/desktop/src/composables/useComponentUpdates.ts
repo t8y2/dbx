@@ -5,10 +5,11 @@ import { buildMarketplacePluginListings, type MarketplacePluginListing } from "@
 import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isUpdatePreviewMockEnabled, previewDriverUpdates, previewJdbcUpdate, previewMcpUpdate, previewPluginUpdates } from "@/lib/updates/updatePreviewMock";
+import type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
 import type { AgentDriverInfo, McpServerStatus } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
 
-export type ComponentUpdateCategory = "drivers" | "jdbc" | "mcp" | "plugins";
+export type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
 
 export interface ComponentUpdateResult {
   drivers: number;

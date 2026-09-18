@@ -28,7 +28,7 @@ import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useApp
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useComponentUpdates, type ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge } from "@/lib/updates/updateBadges";
-import { markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
+import { markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, takePendingComponentUpdatesAfterAppRestart, type PendingComponentUpdatePlan } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
@@ -1217,9 +1217,9 @@ function reportComponentUpdateResult(result: Awaited<ReturnType<typeof component
   if (result.failed.length) toast(t("updates.componentsAutoUpdateFailed", { count: result.failed.length }), 6000);
 }
 
-async function rememberComponentUpdatesForRestartedApp() {
+async function rememberComponentUpdatesForRestartedApp(plan: PendingComponentUpdatePlan = { kind: "auto" }) {
   const fromVersion = appVersion.value || updateInfo.value?.current_version || (await api.getAppVersion().catch(() => ""));
-  return markPendingComponentUpdatesAfterAppUpdate(fromVersion, updateInfo.value?.latest_version || "");
+  return markPendingComponentUpdatesAfterAppUpdate(fromVersion, updateInfo.value?.latest_version || "", plan);
 }
 
 async function consumePendingComponentUpdatesAfterRestart() {
@@ -1227,7 +1227,7 @@ async function consumePendingComponentUpdatesAfterRestart() {
   if (currentVersion && !appVersion.value) appVersion.value = currentVersion;
   const pending = takePendingComponentUpdatesAfterAppRestart(currentVersion);
   if (!pending) return;
-  reportComponentUpdateResult(await componentUpdates.autoUpdateEnabledComponents());
+  reportComponentUpdateResult(await runPendingComponentUpdatePlan(pending, componentUpdates));
 }
 
 async function installDownloadedUpdateWithComponentUpdates() {
@@ -1271,7 +1271,7 @@ async function updateAllAvailable() {
       return;
     }
     if (action === "download-app") await downloadUpdateInBackground();
-    if (updateDownloaded.value || updateReady.value) await rememberComponentUpdatesForRestartedApp();
+    if (updateDownloaded.value || updateReady.value) await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
   } finally {
     updatingAllUpdates.value = false;
   }

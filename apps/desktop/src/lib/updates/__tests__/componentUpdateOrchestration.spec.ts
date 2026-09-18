@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
-import { beforeEach, describe, expect, it } from "vitest";
-import { clearPendingComponentUpdatesAfterAppUpdate, markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { clearPendingComponentUpdatesAfterAppUpdate, markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
 
 describe("component update orchestration", () => {
   beforeEach(() => {
@@ -13,7 +13,7 @@ describe("component update orchestration", () => {
 
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.16")).toBeNull();
     expect(takePendingComponentUpdatesAfterAppRestart("v0.6.16")).toBeNull();
-    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).toEqual({ fromVersion: "0.6.16", targetVersion: "0.6.17" });
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).toEqual({ fromVersion: "0.6.16", targetVersion: "0.6.17", plan: { kind: "auto" } });
   });
 
   it("consumes a successful restart exactly once", () => {
@@ -41,6 +41,39 @@ describe("component update orchestration", () => {
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).not.toBeNull();
   });
 
+  it("preserves explicit update-all categories across restart", () => {
+    markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17", { kind: "manual", categories: ["drivers", "plugins"] });
+
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).toEqual({
+      fromVersion: "0.6.16",
+      targetVersion: "0.6.17",
+      plan: { kind: "manual", categories: ["drivers", "plugins"] },
+    });
+  });
+
+  it("does not replace a manual update-all plan with the automatic restart plan", () => {
+    markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17", { kind: "manual", categories: ["jdbc"] });
+    markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17");
+
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")?.plan).toEqual({ kind: "manual", categories: ["jdbc"] });
+  });
+
+  it("retains a manual plan after a failed update and consumes it once after retry", () => {
+    markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17", { kind: "manual", categories: ["plugins"] });
+
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.16")).toBeNull();
+    markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17");
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.16")).toBeNull();
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")?.plan).toEqual({ kind: "manual", categories: ["plugins"] });
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).toBeNull();
+  });
+
+  it("treats pending state from the previous implementation as an automatic plan", () => {
+    localStorage.setItem("dbx:updates:pending-components-after-restart", JSON.stringify({ fromVersion: "0.6.16", targetVersion: "0.6.17" }));
+
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")?.plan).toEqual({ kind: "auto" });
+  });
+
   it("downloads DBX before deferring component updates", () => {
     expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: false, hasComponentUpdates: true })).toBe("download-app");
     expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: true, hasComponentUpdates: true })).toBe("defer-components");
@@ -60,5 +93,17 @@ describe("component update orchestration", () => {
     clearPendingComponentUpdatesAfterAppUpdate();
 
     expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")).toBeNull();
+  });
+
+  it("dispatches automatic and manual plans to their matching installers", async () => {
+    const installCategories = vi.fn().mockResolvedValue("manual");
+    const autoUpdateEnabledComponents = vi.fn().mockResolvedValue("auto");
+    const updates = { installCategories, autoUpdateEnabledComponents };
+
+    await expect(runPendingComponentUpdatePlan({ fromVersion: "0.6.16", targetVersion: "0.6.17", plan: { kind: "manual", categories: ["jdbc"] } }, updates)).resolves.toBe("manual");
+    await expect(runPendingComponentUpdatePlan({ fromVersion: "0.6.16", targetVersion: "0.6.17", plan: { kind: "auto" } }, updates)).resolves.toBe("auto");
+
+    expect(installCategories).toHaveBeenCalledWith(["jdbc"]);
+    expect(autoUpdateEnabledComponents).toHaveBeenCalledOnce();
   });
 });

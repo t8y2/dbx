@@ -1409,10 +1409,23 @@ FROM orders;`;
     expect(range?.sql).toBe("SELECT 1");
   });
 
-  it("skips MySQL delimiter commands when resolving the cursor statement", () => {
+  it("resolves MySQL delimiter command lines to the nearest executable statement", () => {
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     expect(statementRangeAtCursor(sql, indexOf(sql, "COUNT", 2), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
-    expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")).toBeNull();
+    // A caret on a leading `delimiter ;;` line targets the statement it introduces.
+    expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter"), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
+    // A trailing `delimiter ;` has nothing after it, so it targets the statement above.
+    expect(statementRangeAtCursor(sql, indexOf(sql, "delimiter", 2), "mysql")?.sql.trim()).toBe("select COUNT(1) FROM your_table;");
+  });
+
+  it("targets the surrounding MySQL statements for delimiter lines in a routine script", () => {
+    const routine = mysqlDelimitedRoutineFixture.slice(mysqlDelimitedRoutineFixture.indexOf("CREATE PROCEDURE"), mysqlDelimitedRoutineFixture.indexOf(" //\nDELIMITER"));
+    expect(statementRangeAtCursor(mysqlDelimitedRoutineFixture, indexOf(mysqlDelimitedRoutineFixture, "DELIMITER"), "mysql")?.sql.trim()).toBe(routine);
+    expect(statementRangeAtCursor(mysqlDelimitedRoutineFixture, indexOf(mysqlDelimitedRoutineFixture, "DELIMITER", 2), "mysql")?.sql.trim()).toBe("CALL sp_insert_random_users(100)");
+  });
+
+  it("returns null for a MySQL script made only of delimiter commands", () => {
+    expect(statementRangeAtCursor("delimiter //\n", 0, "mysql")).toBeNull();
   });
 
   it("returns the full MySQL routine block for cursors inside nested statements", () => {
@@ -1853,6 +1866,13 @@ WHERE t2.product_name = '12345'
     const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
     const candidates = buildExecutionCandidates(sql, indexOf(sql, "COUNT", 2), "mysql");
     expect(candidateSummaries(candidates)).toEqual(["cursor:select COUNT(1) FROM your_table;", "all:select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;"]);
+  });
+
+  it("builds a cursor candidate for a MySQL delimiter command line (issue #9485)", () => {
+    const sql = "select COUNT(1) FROM your_table;\ndelimiter ;;\nselect COUNT(1) FROM your_table;\n\n;;\ndelimiter ;";
+    const candidates = buildExecutionCandidates(sql, indexOf(sql, "delimiter"), "mysql");
+    expect(candidateKinds(candidates)).toEqual(["cursor", "all"]);
+    expect(candidates[0].sql).toBe("select COUNT(1) FROM your_table;");
   });
 
   it("uses the current SQL Server batch for cursor candidates", () => {

@@ -579,6 +579,9 @@ const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dat
 const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
+const editTableOpenSortMode = ref(settingsStore.editorSettings.tableOpenSortMode);
+const editTableDatabaseSortDirection = ref(settingsStore.editorSettings.tableDatabaseSortDirection);
+const editTableLocalSortDirection = ref(settingsStore.editorSettings.tableLocalSortDirection);
 const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
 const editQueryResultMaxRows = ref(settingsStore.editorSettings.queryResultMaxRows);
 const editExternalSqlEditorMaxMb = ref(settingsStore.editorSettings.externalSqlEditorMaxMb);
@@ -887,6 +890,9 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridShowWhitespace: editDataGridShowWhitespace.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
+    tableOpenSortMode: editTableOpenSortMode.value,
+    tableDatabaseSortDirection: editTableDatabaseSortDirection.value,
+    tableLocalSortDirection: editTableLocalSortDirection.value,
     queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled.value,
     queryResultMaxRows: editQueryResultMaxRows.value,
     externalSqlEditorMaxMb: editExternalSqlEditorMaxMb.value,
@@ -1516,6 +1522,9 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridShowWhitespace.value = settingsStore.editorSettings.dataGridShowWhitespace;
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
+  editTableOpenSortMode.value = settingsStore.editorSettings.tableOpenSortMode;
+  editTableDatabaseSortDirection.value = settingsStore.editorSettings.tableDatabaseSortDirection;
+  editTableLocalSortDirection.value = settingsStore.editorSettings.tableLocalSortDirection;
   editQueryResultMaxRowsEnabled.value = settingsStore.editorSettings.queryResultMaxRowsEnabled;
   editQueryResultMaxRows.value = settingsStore.editorSettings.queryResultMaxRows;
   editExternalSqlEditorMaxMb.value = settingsStore.editorSettings.externalSqlEditorMaxMb;
@@ -1634,6 +1643,9 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridCrosshairHighlight: editDataGridCrosshairHighlight,
   pageSize: editPageSize,
   tableOpenPageSize: editTableOpenPageSize,
+  tableOpenSortMode: editTableOpenSortMode,
+  tableDatabaseSortDirection: editTableDatabaseSortDirection,
+  tableLocalSortDirection: editTableLocalSortDirection,
   queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled,
   queryResultMaxRows: editQueryResultMaxRows,
   externalSqlEditorMaxMb: editExternalSqlEditorMaxMb,
@@ -2118,6 +2130,9 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+    editTableOpenSortMode.value = DEFAULT_EDITOR_SETTINGS.tableOpenSortMode;
+    editTableDatabaseSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableDatabaseSortDirection;
+    editTableLocalSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableLocalSortDirection;
     editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
     editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
@@ -2212,6 +2227,9 @@ function resetAllDefaults() {
   editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+  editTableOpenSortMode.value = DEFAULT_EDITOR_SETTINGS.tableOpenSortMode;
+  editTableDatabaseSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableDatabaseSortDirection;
+  editTableLocalSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableLocalSortDirection;
   editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
   editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
   editExternalSqlEditorMaxMb.value = DEFAULT_EDITOR_SETTINGS.externalSqlEditorMaxMb;
@@ -4413,7 +4431,7 @@ function globalInstructionsTooLong(): boolean {
 }
 
 // Agent turn limit for DBX's API-backed agent loop. CLI providers enforce their own limits.
-// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
+// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/ai/agent_loop.rs —
 // keep in sync; the backend clamp on save/load is the actual source of truth.
 const editMaxAgentTurns = ref<number | undefined>(undefined);
 const maxAgentTurnsSaving = ref(false);
@@ -7334,6 +7352,35 @@ onUnmounted(() => {
                     :aria-invalid="hasBlockingQueryResultRowLimit"
                     @update:model-value="updatePageSizeDraft"
                   />
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="tableOpenSortMode">{{ t("settings.tableOpenSortMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.tableOpenSortDescription") }}</p>
+                  </div>
+                  <select id="tableOpenSortMode" v-model="editTableOpenSortMode" class="h-8 rounded-md border bg-background px-2 text-xs">
+                    <option value="none">{{ t("settings.tableSortUnchanged") }}</option>
+                    <option value="database">{{ t("settings.tableSortDatabase") }}</option>
+                    <option value="local">{{ t("settings.tableSortLocal") }}</option>
+                  </select>
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="tableDatabaseSortDirection">{{ t("settings.tableDatabaseSortDirection") }}</Label>
+                  </div>
+                  <select id="tableDatabaseSortDirection" v-model="editTableDatabaseSortDirection" class="h-8 rounded-md border bg-background px-2 text-xs">
+                    <option value="asc">{{ t("settings.tableSortAscending") }}</option>
+                    <option value="desc">{{ t("settings.tableSortDescending") }}</option>
+                  </select>
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="tableLocalSortDirection">{{ t("settings.tableLocalSortDirection") }}</Label>
+                  </div>
+                  <select id="tableLocalSortDirection" v-model="editTableLocalSortDirection" class="h-8 rounded-md border bg-background px-2 text-xs">
+                    <option value="asc">{{ t("settings.tableSortAscending") }}</option>
+                    <option value="desc">{{ t("settings.tableSortDescending") }}</option>
+                  </select>
                 </div>
                 <div data-settings-search-id="default-auto-keep-results" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('default-auto-keep-results')]">
                   <div class="min-w-0 space-y-1">

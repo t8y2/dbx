@@ -35,6 +35,14 @@ RUN dpkg --add-architecture arm64 \
 # This layer is cached by GHA as long as Cargo.toml/Cargo.lock don't change.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/dbx-core/Cargo.toml crates/dbx-core/
+COPY crates/dbx-platform/Cargo.toml crates/dbx-platform/
+COPY crates/dbx-types/Cargo.toml crates/dbx-types/
+COPY crates/dbx-sql/Cargo.toml crates/dbx-sql/
+COPY crates/dbx-formats/Cargo.toml crates/dbx-formats/
+COPY crates/dbx-ai-provider/Cargo.toml crates/dbx-ai-provider/
+COPY crates/dbx-plugin-runtime/Cargo.toml crates/dbx-plugin-runtime/
+COPY crates/dbx-drivers/Cargo.toml crates/dbx-drivers/
+COPY crates/dbx-sqlite-worker/Cargo.toml crates/dbx-sqlite-worker/
 COPY crates/dbx-web/Cargo.toml crates/dbx-web/
 COPY crates/dbx-mcp/Cargo.toml crates/dbx-mcp/
 COPY crates/dbx-cli/Cargo.toml crates/dbx-cli/
@@ -42,6 +50,10 @@ COPY src-tauri/Cargo.toml src-tauri/
 # Copy every vendored crate: root Cargo.toml [patch.crates-io] points at
 # vendor/{ctor,rumqttc,dirs-sys,pageant,wry}; omitting any breaks the offline build.
 COPY vendor/ vendor/
+RUN for crate in dbx-platform dbx-types dbx-sql dbx-formats dbx-ai-provider dbx-plugin-runtime dbx-drivers dbx-sqlite-worker; do \
+      mkdir -p "crates/$crate/src" && printf "" > "crates/$crate/src/lib.rs"; \
+    done \
+    && echo 'fn main() {}' > crates/dbx-sqlite-worker/src/main.rs
 RUN mkdir -p crates/dbx-core/src && echo '' > crates/dbx-core/src/lib.rs \
     && mkdir -p crates/dbx-web/src && echo 'fn main() {}' > crates/dbx-web/src/main.rs \
     && mkdir -p crates/dbx-mcp/src && echo '' > crates/dbx-mcp/src/lib.rs && echo 'fn main() {}' > crates/dbx-mcp/src/main.rs \
@@ -64,7 +76,7 @@ RUN case "$TARGETARCH" in \
 
 # Copy real sources and rebuild (only application code recompiles)
 COPY crates/ crates/
-# dbx-core's build.rs embeds plugins/dialects (SQL dialects) and
+# dbx-sql/build.rs embeds plugins/dialects; dbx-types/build.rs embeds
 # plugins/connection-types (database manifest + DatabaseType enum);
 # either directory missing makes the build script panic.
 COPY plugins/dialects/ plugins/dialects/

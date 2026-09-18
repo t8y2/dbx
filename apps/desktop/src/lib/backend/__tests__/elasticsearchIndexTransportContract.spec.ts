@@ -6,7 +6,7 @@ const http = readFileSync(new URL("../http.ts", import.meta.url), "utf8");
 const api = readFileSync(new URL("../api.ts", import.meta.url), "utf8");
 const tauriRegistry = readFileSync(new URL("../../../../../../src-tauri/src/lib.rs", import.meta.url), "utf8");
 const webRegistry = readFileSync(new URL("../../../../../../crates/dbx-web/src/main.rs", import.meta.url), "utf8");
-const coreOps = readFileSync(new URL("../../../../../../crates/dbx-core/src/document_ops.rs", import.meta.url), "utf8");
+const coreOps = readFileSync(new URL("../../../../../../crates/dbx-core/src/query/document_ops.rs", import.meta.url), "utf8");
 
 function functionBody(source: string, operation: string): string {
   const start = source.indexOf(`export async function ${operation}(`);

@@ -128,7 +128,7 @@ const patterns: [RegExp, string][] = [
   // SSH keyboard-interactive prompts (for example JumpServer TOTP).
   [/^(?:SSH layer \d+ failed:\s*)?SSH keyboard-interactive authentication was cancelled$/, "connection.sshTotpCancelled"],
 
-  // Query result export limits (crates/dbx-core/src/query_result_export.rs)
+  // Query result export limits (crates/dbx-core/src/data/query_result_export.rs)
   [/^Streaming export is unsupported for this query\. Simplify it or use a supported driver\.$/, "exportProgress.streamingUnsupported"],
   // MongoDB Legacy agent failures: messages raised by the agent arrive wrapped in "Agent RPC
   // error (<code>): ", and the import path prefixes the row a batch-level failure belongs to.
@@ -146,7 +146,7 @@ const patterns: [RegExp, string][] = [
   // Legacy bundled DuckDB error kept for compatibility with older backends.
   [/^The previous DuckDB query is still stopping\. Please try again shortly\.$/, "editor.duckdbDraining"],
 
-  // Driver / JRE management (crates/dbx-core/src/agent_service.rs, routes/agents.rs)
+  // Driver / JRE management (crates/dbx-drivers/src/agent_service.rs, routes/agents.rs)
   // The Windows variant is multi-line, so it must be tried before the single-line one.
   [/^Failed to remove the old JRE directory: (.+)\nPossible causes:[\s\S]*\(original error: ([\s\S]+)\)$/, "driverStore.jreDirRemoveFailedWindows"],
   [/^Failed to remove the old JRE directory: (.+) \(original error: ([\s\S]+)\)$/, "driverStore.jreDirRemoveFailed"],
@@ -154,7 +154,7 @@ const patterns: [RegExp, string][] = [
   [/^agent-registry\.json not found in the ZIP; not a valid offline driver package\.$/, "driverStore.offlinePackageRegistryMissing"],
   [/^Close these database connections before updating drivers: (.+)$/, "driverStore.driverUpdateBlocked"],
 
-  // Message queues (crates/dbx-core/src/mq/adapters/kafka.rs)
+  // Message queues (crates/dbx-core/src/admin/mq/adapters/kafka.rs)
   [/^Kafka does not support unloading topics$/, "mqClients.unloadTopicUnsupportedKafka"],
 
   // Filesystem (src-tauri/src/commands/fs_open.rs)

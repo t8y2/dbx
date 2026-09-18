@@ -19,7 +19,7 @@ const VECTOR_DB_TYPES: ReadonlySet<DatabaseType> = new Set([
   "milvus",
   "weaviate",
   "chromadb",
-  // If modifying this, also update is_vector_db() in crates/dbx-core/src/agent_tools.rs.
+  // If modifying this, also update is_vector_db() in crates/dbx-core/src/ai/agent_tools.rs.
 ]);
 
 export function isVectorDbType(dbType: DatabaseType): boolean {

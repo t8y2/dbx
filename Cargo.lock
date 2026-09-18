@@ -2077,6 +2077,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-ai-provider"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "dbx-platform",
+ "futures",
+ "httpdate",
+ "log",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "dbx-cli"
 version = "0.4.90"
 dependencies = [
@@ -2096,11 +2114,9 @@ version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
- "anyhow",
  "arc-swap",
  "argon2",
  "async-trait",
- "aws-sdk-dynamodb",
  "base64 0.22.1",
  "bytes",
  "calamine",
@@ -2108,31 +2124,27 @@ dependencies = [
  "chrono",
  "crc",
  "csv",
- "dbx-sqlite-worker",
+ "dbx-ai-provider",
+ "dbx-drivers",
+ "dbx-formats",
+ "dbx-platform",
+ "dbx-plugin-runtime",
+ "dbx-sql",
+ "dbx-types",
  "deadpool-postgres",
- "ed25519-dalek 2.2.0",
  "encoding_rs",
  "flate2",
  "font-kit",
- "fs2",
  "futures",
- "httpdate",
- "insta",
- "json5",
  "jsonwebtoken",
- "libsqlite3-hotbundle",
  "log",
  "minijinja",
  "mongodb",
  "mysql_async",
- "mysql_common",
  "nix",
  "notify",
- "openssl",
- "pageant",
  "percent-encoding",
  "portpicker",
- "postgres-openssl",
  "prometheus-parse",
  "quick-xml 0.37.5",
  "rayon",
@@ -2141,20 +2153,69 @@ dependencies = [
  "reqwest 0.12.28",
  "rumqttc",
  "rusqlite",
- "russh",
- "rust_decimal",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
- "semver",
  "serde",
  "serde_json",
- "serde_yaml",
  "serde_yaml_ng",
  "sha1 0.10.7",
  "sha2 0.10.9",
  "sqlparser",
  "ssfmt",
  "sysinfo",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tokio-util",
+ "uuid",
+ "webpki-roots 0.26.11",
+ "windows-sys 0.61.2",
+ "zip",
+ "zstd",
+]
+
+[[package]]
+name = "dbx-drivers"
+version = "0.1.0"
+dependencies = [
+ "aws-sdk-dynamodb",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "crc",
+ "csv",
+ "dbx-platform",
+ "dbx-sql",
+ "dbx-sqlite-worker",
+ "dbx-types",
+ "deadpool-postgres",
+ "flate2",
+ "futures",
+ "json5",
+ "libsqlite3-hotbundle",
+ "log",
+ "mongodb",
+ "mysql_async",
+ "mysql_common",
+ "nix",
+ "openssl",
+ "pageant",
+ "percent-encoding",
+ "portpicker",
+ "postgres-openssl",
+ "redis",
+ "regex",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "russh",
+ "rust_decimal",
+ "rustls 0.23.43",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlparser",
  "tar",
  "tempfile",
  "tiberius",
@@ -2165,15 +2226,24 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "unicode-ident",
- "unicode-width",
- "utoipa",
  "uuid",
  "webpki-roots 0.26.11",
  "windows-sys 0.61.2",
- "winnow 1.0.4",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "dbx-formats"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -2202,6 +2272,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-platform"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "nix",
+ "reqwest 0.12.28",
+ "serde",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-plugin-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dbx-platform",
+ "dbx-types",
+ "ed25519-dalek 2.2.0",
+ "fs2",
+ "futures",
+ "log",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "dbx-sql"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-types",
+ "encoding_rs",
+ "insta",
+ "log",
+ "notify",
+ "percent-encoding",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sqlparser",
+ "tempfile",
+ "tokio",
+ "unicode-ident",
+ "unicode-width",
+ "utoipa",
+ "winnow 1.0.4",
+]
+
+[[package]]
 name = "dbx-sqlite-worker"
 version = "0.1.1"
 dependencies = [
@@ -2209,6 +2341,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlparser",
+]
+
+[[package]]
+name = "dbx-types"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]

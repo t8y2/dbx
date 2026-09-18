@@ -1789,6 +1789,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
+    physicalPrimaryKeys?: string[];
   };
   tableMetaUpdatedAt?: number;
   /** 该 tab 的 tableMeta 是哪个连接元数据代次下写入的：disconnect / 关闭数据库 /

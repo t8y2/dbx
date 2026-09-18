@@ -34,6 +34,7 @@
     "check": "node scripts/run-check.mjs",
     "db:env": "node scripts/database-env.mjs",
     "test:db-env": "node --test scripts/database-env.test.mjs",
+    "test:architecture": "node --test scripts/core-architecture.test.mjs",
     "test:ai-html-canary": "node scripts/ai-html-runtime-canary.mjs",
     "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
     "bench:mongodb-count": "node scripts/bench/mongodb-count.mjs",

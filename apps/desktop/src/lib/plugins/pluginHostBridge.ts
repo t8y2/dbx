@@ -302,7 +302,7 @@ export class PluginHostBridge {
 /**
  * Parse `host.network:<origin>` permission entries into CSP connect-src
  * origins. Must stay aligned with `parse_host_network_permission` in
- * crates/dbx-core/src/plugins/manifest.rs.
+ * crates/dbx-plugin-runtime/src/plugins/manifest.rs.
  */
 export function pluginNetworkOrigins(permissions: readonly string[] | undefined): string[] {
   const origins = new Set<string>();

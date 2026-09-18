@@ -1,0 +1,78 @@
+[package]
+name = "dbx-drivers"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+default = []
+duckdb-sidecar = ["dbx-sql/duckdb-sidecar"]
+dynamodb = ["dep:aws-sdk-dynamodb"]
+mq-admin = ["dbx-types/mq-admin"]
+sqlite-bundled = ["rusqlite/bundled"]
+sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]
+test-support = ["dbx-platform/test-support"]
+
+[dependencies]
+dbx-types = { path = "../dbx-types", default-features = false }
+dbx-sql = { path = "../dbx-sql", default-features = false }
+dbx-platform = { path = "../dbx-platform", features = ["host-prompts", "downloads"] }
+dbx-sqlite-worker = { path = "../dbx-sqlite-worker", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+json5 = "0.4"
+regex = "1"
+percent-encoding = "2"
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
+tokio-postgres-rustls = "0.13"
+postgres-openssl = "0.5"
+openssl = { version = "0.10", features = ["vendored"] }
+webpki-roots = "0.26"
+rusqlite = { version = "0.32", default-features = false, features = ["load_extension", "backup", "functions", "column_decltype"] }
+libsqlite3-hotbundle = { git = "https://github.com/zipg/libsqlite3-hotbundle.git", rev = "7f12f203b4f4694a273410bd9b02d77f82b6114e", features = ["cipher-sqlcipher"], optional = true }
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tls-rustls-insecure", "tokio-rustls-comp", "sentinel", "cluster-async"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2.2"
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls", "sql-browser-tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "json", "stream", "rustls-tls", "socks"] }
+futures = "0.3"
+mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
+aws-sdk-dynamodb = { version = "=1.104.0", optional = true }
+russh = "0.60"
+pageant = "0.2"
+portpicker = "0.1.1"
+csv = "1"
+base64 = "0.22"
+sha2 = "0.10"
+bytes = "1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+flate2 = "1"
+crc = "3"
+tar = "0.4"
+zstd = "0.13"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+
+[dev-dependencies]
+dbx-platform = { path = "../dbx-platform", features = ["test-support"] }
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false }
+tokio = { version = "1", features = ["test-util"] }
+tokio-openssl = "0.6"
+
+[target.'cfg(all(unix, not(target_os = "redox")))'.dev-dependencies]
+nix = { version = "0.31.3", features = ["user"] }

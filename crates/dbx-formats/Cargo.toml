@@ -1,0 +1,17 @@
+[package]
+name = "dbx-formats"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
+chrono = { version = "0.4", features = ["serde"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
+calamine = { version = "0.30.1", features = ["dates"] }
+tempfile = "3"

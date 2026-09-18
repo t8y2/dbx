@@ -793,6 +793,9 @@ export interface EditorSettings {
   appLayout: "separated" | "classic";
   pageSize: number;
   tableOpenPageSize: number;
+  tableOpenSortMode: "none" | "database" | "local";
+  tableDatabaseSortDirection: "asc" | "desc";
+  tableLocalSortDirection: "asc" | "desc";
   queryResultMaxRowsEnabled: boolean;
   queryResultMaxRows: number;
   externalSqlEditorMaxMb: number;
@@ -1038,6 +1041,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   appLayout: "classic",
   pageSize: 100,
   tableOpenPageSize: 100,
+  tableOpenSortMode: "none",
+  tableDatabaseSortDirection: "asc",
+  tableLocalSortDirection: "asc",
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: DEFAULT_QUERY_RESULT_MAX_ROWS,
   externalSqlEditorMaxMb: 64,
@@ -1522,6 +1528,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
+    tableOpenSortMode: settings.tableOpenSortMode === "database" || settings.tableOpenSortMode === "local" ? settings.tableOpenSortMode : "none",
+    tableDatabaseSortDirection: settings.tableDatabaseSortDirection === "desc" ? "desc" : "asc",
+    tableLocalSortDirection: settings.tableLocalSortDirection === "desc" ? "desc" : "asc",
     queryResultMaxRowsEnabled: settings.queryResultMaxRowsEnabled !== false,
     queryResultMaxRows: normalizeQueryResultMaxRows(settings.queryResultMaxRows),
     externalSqlEditorMaxMb: normalizeExternalSqlEditorMaxMb(settings.externalSqlEditorMaxMb),
@@ -2289,6 +2298,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);
+    if (partial.tableOpenSortMode !== undefined) editorSettings.value.tableOpenSortMode = partial.tableOpenSortMode === "database" || partial.tableOpenSortMode === "local" ? partial.tableOpenSortMode : "none";
+    if (partial.tableDatabaseSortDirection !== undefined) editorSettings.value.tableDatabaseSortDirection = partial.tableDatabaseSortDirection === "desc" ? "desc" : "asc";
+    if (partial.tableLocalSortDirection !== undefined) editorSettings.value.tableLocalSortDirection = partial.tableLocalSortDirection === "desc" ? "desc" : "asc";
     if (partial.queryResultMaxRowsEnabled !== undefined) editorSettings.value.queryResultMaxRowsEnabled = Boolean(partial.queryResultMaxRowsEnabled);
     if (partial.queryResultMaxRows !== undefined) editorSettings.value.queryResultMaxRows = normalizeQueryResultMaxRows(partial.queryResultMaxRows, editorSettings.value.queryResultMaxRows);
     if (partial.externalSqlEditorMaxMb !== undefined) editorSettings.value.externalSqlEditorMaxMb = normalizeExternalSqlEditorMaxMb(partial.externalSqlEditorMaxMb);

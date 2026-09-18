@@ -220,7 +220,7 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
 
   it("classifies a JDBC-agent-routed timeout (SAP HANA/Oracle/DB2/SQL Server) as timed-out, not failed, even though its message has no timeout wording", async () => {
     const { feature } = runtime("");
-    // AgentCallError::Timeout carries no `detail` (crates/dbx-core/src/backend_error.rs),
+    // AgentCallError::Timeout carries no `detail` (crates/dbx-drivers/src/backend_error.rs),
     // so BackendErrorException.message degrades to a generic fallback with no
     // "timed out" text — only the structured backendError distinguishes it.
     const agentTimeoutError = {

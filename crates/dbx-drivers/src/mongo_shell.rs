@@ -560,7 +560,10 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     if source.starts_with("db")
         && source[2..].trim_start().starts_with('.')
-        && source[2..].trim_start()[1..].trim_start().starts_with("getSiblingDB")
+        && source[2..].trim_start()[1..]
+            .trim_start()
+            .strip_prefix("getSiblingDB")
+            .is_some_and(|after| after.trim_start().starts_with('('))
         && split_sibling_db_prefix(source).is_none()
     {
         return Err("MongoDB getSiblingDB() requires a database name string followed by a command, for example db.getSiblingDB(\"app\").orders.find({}).".to_string());
@@ -2441,6 +2444,14 @@ mod tests {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source}\n  expected: {expected}\n  got: {error}");
         }
+    }
+
+    #[test]
+    fn does_not_misreport_get_sibling_db_prefixed_methods() {
+        // A method whose name merely starts with `getSiblingDB` must fall through
+        // to the generic unsupported-method error, not the wrapper-specific one.
+        let error = parse(r#"db.getSiblingDBX("x").c.find({})"#).unwrap_err();
+        assert!(!error.contains("getSiblingDB()"), "got: {error}");
     }
 
     #[test]

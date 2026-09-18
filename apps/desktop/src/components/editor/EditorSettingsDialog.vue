@@ -524,6 +524,7 @@ const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValu
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
 const editSqlServerSpaceConfirmsCompletion = ref(settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion);
+const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
@@ -2731,6 +2732,7 @@ const settingsSearchEntries = computed(() =>
     {
       isWeb,
       hasSqlServerConnection: hasSqlServerConnection.value,
+      sqlServerSpaceConfirmsCompletionEnabled: settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value,
       visibleCategories: new Set(settingsCategoryNav.value.map((category) => category.value)),
     },
     translateWithExecuteShortcut,
@@ -5983,7 +5985,7 @@ onUnmounted(() => {
                   <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
                 </div>
 
-                <div v-if="hasSqlServerConnection" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div v-if="showSqlServerSpaceConfirmsCompletion" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-sqlserver-space-confirms-completion">{{ t("settings.sqlServerSpaceConfirmsCompletion") }}</Label>
                     <p class="text-xs text-muted-foreground">

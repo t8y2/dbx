@@ -2706,10 +2706,16 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
 }
 
 function acceptSqlServerCompletionOnSpace(view: EditorViewType): boolean {
+  if (isEditorComposing(view)) return false;
   if (props.databaseType !== "sqlserver" || !settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion) return false;
   if (codeMirrorCompletionStatus?.(view.state) !== "active") return false;
-  const completionType = codeMirrorSelectedCompletion?.(view.state)?.type;
+  // A non-empty selection belongs to block editing, not word completion.
+  if (!view.state.selection.main.empty) return false;
+  const selected = codeMirrorSelectedCompletion?.(view.state) as QueryCompletionOption | null | undefined;
+  const completionType = selected?.type;
   if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
+  // Batch-selection rows own Space for checkbox toggling; this Prec.highest binding outranks their keymap.
+  if (selected?.dbxBatchColumnSelection || selected?.dbxBatchColumnSelectionAction) return false;
   if (!(codeMirrorAcceptCompletion?.(view) ?? false)) return false;
 
   const selection = view.state.selection.main;

@@ -206,8 +206,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     const lower = message.toLowerCase();
     if (lower.includes("cancel")) return t("updates.downloadCanceled");
     if (lower.includes("403") || lower.includes("rate limit")) return t("updates.rateLimited");
+    // A blocked update cache is a local write problem, not a download problem.
+    if (lower.includes("update cache")) return t("updates.cacheWriteFailed", { error: message });
     if (["stalled", "timeout", "all available mirrors", "error sending request", "failed to download"].some((part) => lower.includes(part))) return t("updates.networkOrMirrorFailed");
     return t("updates.downloadFailed", { error: message });
+  }
+  function formatInstallError(message: string): string {
+    if (message.toLowerCase().includes("powershell")) return t("updates.portableHelperFailed", { error: message });
+    return t("updates.installFailed", { error: message });
   }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
     if (disposed || isIgnoringUpdate.value) return;
@@ -393,7 +399,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       failed = true;
       phase.value = installed ? "restart" : "ready";
       updateCheckFailed.value = true;
-      updateCheckMessage.value = t(installed ? "updates.restartFailed" : "updates.installFailed", { error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      updateCheckMessage.value = installed ? t("updates.restartFailed", { error: message }) : formatInstallError(message);
     } finally {
       // Successful handoff must keep every window frozen until the process exits.
       if (failed) {

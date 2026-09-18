@@ -23,7 +23,7 @@ test("fast checks run format and contracts before graph resolution or compilatio
 
 test("Agent and Rust matrices are bounded and do not cancel sibling failures", () => {
   for (const [name, output, parallel] of [["rust-test", "rust_matrix", 3], ["agent-rust", "agent_rust", 2],
-    ["agent-go", "agent_go", 4], ["agent-integration", "agent_integration", 4]]) {
+    ["agent-go", "agent_go", 8], ["agent-integration", "agent_integration", 8]]) {
     const content = job(name);
     assert.match(content, /fail-fast: false/);
     assert.ok(content.includes(`max-parallel: ${parallel}`));

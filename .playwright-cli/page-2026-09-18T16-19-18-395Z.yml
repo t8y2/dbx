@@ -1,0 +1,269 @@
+- generic:
+  - generic:
+    - generic:
+      - generic:
+        - generic [aria-hidden]:
+          - button:
+            - generic: 新建连接
+          - button:
+            - generic: 新建查询
+          - button:
+            - generic: 数据传输
+          - button:
+            - generic: 驱动管理
+          - button:
+            - generic: 插件中心
+          - button:
+            - generic: 更多
+          - generic:
+            - button
+            - button
+            - button
+            - button
+            - button
+            - button
+            - button
+          - button
+        - generic:
+          - generic:
+            - generic:
+              - generic [aria-hidden]:
+                - button:
+                  - generic: 导入/导出
+                - generic:
+                  - generic:
+                    - button
+                  - generic:
+                    - button
+                  - generic:
+                    - button
+                  - generic:
+                    - button
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic [aria-hidden]:
+                        - textbox:
+                          - /placeholder: 搜索...
+                          - text: Redis
+                        - generic:
+                          - button
+                          - generic:
+                            - button:
+                              - generic [aria-hidden]: .*
+                          - generic:
+                            - switch
+                      - generic [aria-hidden]:
+                        - button
+                      - generic [aria-hidden]:
+                        - generic:
+                          - button
+                      - generic:
+                        - button "仅显示活跃连接":
+                          - generic: 活跃连接：1
+                  - generic [aria-hidden]:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: DBX 开发测试连接
+                              - checkbox
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: DBX Dev | Redis 3.0.7
+                              - button
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: DBX Dev | Redis 7.4
+                              - button
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - generic: db0 (4)
+                                  - generic: 默认库
+                        - generic: db1 (10)
+                        - generic: db2 (10)
+                        - generic: db3 (0)
+                        - generic: db4 (0)
+                        - generic: db5 (0)
+                        - generic: db6 (2)
+                        - generic: db7 (0)
+                        - generic: db8 (0)
+                        - generic: db9 (0)
+                        - generic: db10 (0)
+                        - generic: db11 (0)
+                        - generic: db12 (0)
+                        - generic: db13 (0)
+                        - generic: db14 (0)
+                        - generic: db15 (0)
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: qm_非测试库
+                              - checkbox
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: 智投Redis
+                              - button
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: 漫剧测试redis
+                              - button
+                        - generic:
+                          - generic:
+                            - generic:
+                              - button
+                              - generic: 免费小说-测试
+                              - button
+          - generic [aria-hidden]:
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic:
+                                  - generic:
+                                    - button
+                                    - generic:
+                                      - generic:
+                                        - generic:
+                                          - generic:
+                                            - generic:
+                                              - generic:
+                                                - generic: db0
+                                                - button
+                                - generic:
+                                  - generic:
+                                    - generic:
+                                      - generic:
+                                        - generic:
+                                          - generic:
+                                            - generic:
+                                              - generic:
+                                                - generic:
+                                                  - generic:
+                                                    - group:
+                                                      - button: 键
+                                                      - button: 值
+                                                      - button: 全部
+                                                    - generic: 已加载 4 / 共 4 个 key
+                                                    - generic:
+                                                      - button: 全选
+                                                      - button
+                                                      - button
+                                                  - generic:
+                                                    - generic:
+                                                      - combobox
+                                                      - button
+                                                    - generic:
+                                                      - button:
+                                                        - generic: 模糊
+                                                      - button:
+                                                        - generic: 仅无过期
+                                                - generic:
+                                                  - button: 自定义分组
+                                                  - button: 分组规则
+                                                - generic:
+                                                  - generic:
+                                                    - generic:
+                                                      - generic:
+                                                        - generic:
+                                                          - checkbox
+                                                          - generic: dbx
+                                                          - generic: (2)
+                                                        - generic:
+                                                          - button
+                                                    - generic:
+                                                      - generic:
+                                                        - generic:
+                                                          - checkbox
+                                                          - generic: issue-4304
+                                                          - generic: (1)
+                                                        - generic:
+                                                          - button
+                                                    - generic:
+                                                      - generic:
+                                                        - generic:
+                                                          - generic:
+                                                            - checkbox
+                                                          - generic: smoke
+                                                        - generic:
+                                                          - generic: string
+                                                          - generic: 永不过期
+                                                          - button
+                                                    - generic:
+                                                      - generic:
+                                                        - generic:
+                                                          - generic:
+                                                            - checkbox
+                                                          - generic: "23324"
+                                                        - generic:
+                                                          - generic: string
+                                                          - generic: 1天 4小时
+                                                          - button
+                                                    - generic:
+                                                      - generic:
+                                                        - generic:
+                                                          - generic:
+                                                            - checkbox
+                                                          - generic: test
+                                                        - generic:
+                                                          - generic: string
+                                                          - generic: 永不过期
+                                                          - button
+                                            - separator
+                                            - generic:
+                                              - generic:
+                                                - generic:
+                                                  - generic:
+                                                    - tablist:
+                                                      - tab [selected]: 键详情
+                                                      - tab: 命令行
+                                                      - tab: 发布/订阅
+                                                      - tab: 慢日志
+                                                  - tabpanel:
+                                                    - generic: 选择一个 key 查看详情
+                        - separator
+  - dialog [ref=e1179]:
+    - paragraph [aria-hidden] [ref=e1180]
+    - heading "新增 key" [level=2] [ref=e1182]
+    - generic [ref=e1183]:
+      - generic [ref=e1184] [cursor=pointer]:
+        - generic [ref=e1185]: Key
+        - textbox "Key" [active] [ref=e1186]:
+          - /placeholder: user:1
+      - generic [ref=e1187] [cursor=pointer]:
+        - generic [ref=e1188]: 类型
+        - combobox "类型" [ref=e1189]:
+          - generic: String
+      - generic [ref=e1190]:
+        - generic [ref=e1191]: 过期时间
+        - combobox [ref=e1192] [cursor=pointer]:
+          - generic: 永不过期
+      - generic [ref=e1193] [cursor=pointer]:
+        - generic [ref=e1194]: 值
+        - textbox "值" [ref=e1195]:
+          - /placeholder: value
+    - generic [ref=e1196]:
+      - button "取消" [ref=e1197] [cursor=pointer]
+      - button "新增" [ref=e1198] [cursor=pointer]
+    - button "Close" [ref=e1199] [cursor=pointer]

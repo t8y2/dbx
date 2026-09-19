@@ -837,6 +837,55 @@ describe("TableStructureEditor horizontal scrolling", () => {
   });
 });
 
+describe("TableStructureEditor vertical scrolling", () => {
+  it("shows a fixed scrollbar for overflowing fields and syncs thumb dragging", async () => {
+    const root = await mountEditor("postgres");
+    const scroller = root.querySelector<HTMLElement>(".structure-table-scroller");
+    if (!scroller) throw new Error("Missing structure table scroller");
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 800 },
+      scrollTop: { configurable: true, value: 0, writable: true },
+    });
+
+    scroller.dispatchEvent(new Event("scroll"));
+    await nextTick();
+    await nextTick();
+
+    const track = root.querySelector<HTMLElement>(".structure-vertical-scrollbar");
+    const thumb = root.querySelector<HTMLElement>(".structure-vertical-scrollbar__thumb");
+    if (!track || !thumb) throw new Error("Missing fixed vertical scrollbar");
+    expect(Number.parseFloat(thumb.style.height)).toBeCloseTo(25);
+    expect(Number.parseFloat(thumb.style.top)).toBeCloseTo(0);
+
+    track.getBoundingClientRect = () => DOMRect.fromRect({ width: 10, height: 200 });
+    document.body.style.userSelect = "text";
+    track.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientY: 50, isPrimary: true }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientY: 125, isPrimary: true }));
+
+    expect(scroller.scrollTop).toBeCloseTo(400);
+    expect(document.body.style.userSelect).toBe("none");
+    window.dispatchEvent(new PointerEvent("pointerup", { isPrimary: true }));
+    expect(document.body.style.userSelect).toBe("");
+  });
+
+  it("does not render the vertical scrollbar when the editor opens on the DDL tab", async () => {
+    const root = await mountLoadingEditor("ddl");
+    const scroller = root.querySelector<HTMLElement>(".structure-table-scroller");
+    if (!scroller) throw new Error("Missing structure table scroller");
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 800 },
+    });
+
+    scroller.dispatchEvent(new Event("scroll"));
+    await nextTick();
+    await nextTick();
+
+    expect(root.querySelector(".structure-vertical-scrollbar")).toBeNull();
+  });
+});
+
 describe("TableStructureEditor metadata loading", () => {
   it("opens the initial DDL tab with its always-visible table comment", async () => {
     const root = await mountLoadingEditor("ddl", "app_user", "Application users");

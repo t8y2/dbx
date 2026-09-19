@@ -898,7 +898,7 @@ async fn run_idle_ttl_trace(
 
     let released_payload = read_fixture_cell(
         fixture,
-        &database,
+        database,
         format!("SELECT payload FROM {table} WHERE id = 20"),
         "verify idle-TTL rollback released exactly the seeded fixture row",
     )
@@ -999,21 +999,29 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
             .await
             .map_err(|_| "open candidate LocalBackend failed (details redacted)".to_string())?;
         #[cfg(feature = "transaction-test-hooks")]
-        let backend = backend.with_transaction_test_config(dbx_mcp::transaction::TransactionOwnerConfig {
-            idle_ttl: Duration::from_millis(750),
-            operation_timeout: Duration::from_secs(30),
-            cleanup_timeout: Duration::from_secs(5),
-        });
+        let idle_ttl_backend = LocalBackend::from_app_state(backend.state().clone(), directory.path().to_path_buf())
+            .with_transaction_test_config(dbx_mcp::transaction::TransactionOwnerConfig {
+                idle_ttl: Duration::from_millis(750),
+                operation_timeout: Duration::from_secs(30),
+                cleanup_timeout: Duration::from_secs(5),
+            });
         let backend = Arc::new(backend);
         let policy_storage =
             Storage::open(&db_path).await.map_err(|error| format!("reopen isolated policy storage: {error}"))?;
         let candidate_server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
         let fixture_server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        #[cfg(feature = "transaction-test-hooks")]
+        let idle_ttl_server =
+            DbxMcpServer::with_runtime_options(Arc::new(idle_ttl_backend), McpScope::default(), false);
         let (candidate_server_transport, candidate_client_transport) = tokio::io::duplex(64 * 1024);
         let (fixture_server_transport, fixture_client_transport) = tokio::io::duplex(64 * 1024);
+        #[cfg(feature = "transaction-test-hooks")]
+        let (idle_ttl_server_transport, idle_ttl_client_transport) = tokio::io::duplex(64 * 1024);
         let candidate_server_task =
             tokio::spawn(async move { candidate_server.serve(candidate_server_transport).await });
         let fixture_server_task = tokio::spawn(async move { fixture_server.serve(fixture_server_transport).await });
+        #[cfg(feature = "transaction-test-hooks")]
+        let idle_ttl_server_task = tokio::spawn(async move { idle_ttl_server.serve(idle_ttl_server_transport).await });
         let mut candidate_client =
             ().serve(candidate_client_transport)
                 .await
@@ -1022,6 +1030,11 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
             ().serve(fixture_client_transport)
                 .await
                 .map_err(|error| format!("initialize fixture MCP client: {error}"))?;
+        #[cfg(feature = "transaction-test-hooks")]
+        let mut idle_ttl_client =
+            ().serve(idle_ttl_client_transport)
+                .await
+                .map_err(|error| format!("initialize idle-TTL MCP client: {error}"))?;
         let mut candidate_service = candidate_server_task
             .await
             .map_err(|error| format!("candidate server task failed: {error}"))?
@@ -1030,6 +1043,11 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
             .await
             .map_err(|error| format!("fixture server task failed: {error}"))?
             .map_err(|error| format!("initialize fixture MCP server: {error}"))?;
+        #[cfg(feature = "transaction-test-hooks")]
+        let mut idle_ttl_service = idle_ttl_server_task
+            .await
+            .map_err(|error| format!("idle-TTL server task failed: {error}"))?
+            .map_err(|error| format!("initialize idle-TTL MCP server: {error}"))?;
 
         let fixture_open = tokio::time::timeout(
             Duration::from_secs(10),
@@ -1099,7 +1117,7 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
                 run_contention_trace(&candidate_client, &database, &table, wire_proxy.as_ref()).await?;
                 run_native_cleanup_traces(&candidate_client, &fixture_client, &database, &table).await?;
                 #[cfg(feature = "transaction-test-hooks")]
-                run_idle_ttl_trace(&candidate_client, &fixture_client, &database, &table).await?;
+                run_idle_ttl_trace(&idle_ttl_client, &fixture_client, &database, &table).await?;
                 run_permission_refusal_trace(&candidate_client, &fixture_client, &policy_storage, &database, &table)
                     .await?;
                 if let Some(proxy) = wire_proxy.as_ref() {
@@ -1115,11 +1133,26 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
             Err(error) => Err(error),
         };
 
-        let cleanup = tokio::time::timeout(Duration::from_secs(35), async {
-            let _ = candidate_client.close_with_timeout(Duration::from_secs(12)).await;
-            let _ = candidate_service.close_with_timeout(Duration::from_secs(12)).await;
-            drop(candidate_client);
-            drop(candidate_service);
+        let cleanup = tokio::time::timeout(Duration::from_secs(60), async {
+            let close_candidate = async {
+                let _ = candidate_client.close_with_timeout(Duration::from_secs(12)).await;
+                let _ = candidate_service.close_with_timeout(Duration::from_secs(12)).await;
+                drop(candidate_client);
+                drop(candidate_service);
+            };
+
+            #[cfg(feature = "transaction-test-hooks")]
+            let close_idle_ttl = async {
+                let _ = idle_ttl_client.close_with_timeout(Duration::from_secs(12)).await;
+                let _ = idle_ttl_service.close_with_timeout(Duration::from_secs(12)).await;
+                drop(idle_ttl_client);
+                drop(idle_ttl_service);
+            };
+
+            #[cfg(feature = "transaction-test-hooks")]
+            tokio::join!(close_candidate, close_idle_ttl);
+            #[cfg(not(feature = "transaction-test-hooks"))]
+            close_candidate.await;
 
             let drop_result = tokio::time::timeout(
                 Duration::from_secs(15),

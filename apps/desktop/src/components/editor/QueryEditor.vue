@@ -7783,6 +7783,19 @@ watch(
   { deep: true },
 );
 
+// The editor component is reused across tabs, so a tab switch can change the
+// connection/database without remounting it.
+watch([() => props.connectionId, () => props.database, () => props.catalog, () => props.clientSessionId], () => warmActiveTabConnection());
+
+// Restored tabs mount before their connection is established, so the warm-up
+// above is skipped and never retried when connecting finishes later.
+watch(
+  () => (props.connectionId ? connectionStore.connectedIds.has(props.connectionId) : false),
+  (connected) => {
+    if (connected) warmActiveTabConnection();
+  },
+);
+
 // A content-search jump. Fires on id change (a new or reused tab, or a repeat
 // click on the same result), and on mount when the request is already pending.
 watch(
@@ -8086,10 +8099,22 @@ function resumeQueryEditorBackgroundWork() {
   editorIsActive = true;
   registerTableReferenceDropListener();
   scheduleSemanticDiagnostics();
+  // Warm the database driver/pool while the user is still reading or typing, so
+  // the first Run does not pay pool creation or external-driver startup.
+  warmActiveTabConnection();
   if (view.value) schedulePreviewContextRefresh(view.value);
   restoreEditorSelection(undefined, !props.initialViewport);
   restoreEditorFocus();
   restoreEditorViewport();
+}
+
+function warmActiveTabConnection() {
+  if (!props.connectionId) return;
+  connectionStore.warmConnection(props.connectionId, {
+    database: props.database,
+    catalog: props.catalog,
+    clientSessionId: props.clientSessionId,
+  });
 }
 
 onActivated(resumeQueryEditorBackgroundWork);
@@ -8099,6 +8124,7 @@ onDeactivated(pauseQueryEditorBackgroundWork);
 onMounted(() => {
   if (typeof window === "undefined") return;
   window.addEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
+  warmActiveTabConnection();
 });
 
 onBeforeUnmount(() => {

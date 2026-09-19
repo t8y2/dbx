@@ -175,6 +175,13 @@ public final class JdbcExecutor {
                     try (ResultSet rs = stmt.getResultSet()) {
                         result = readResultSet(rs, elapsed, effectiveMaxRows, valueReader);
                     }
+                    // `elapsed` stops at `stmt.execute()`. Retrieving and
+                    // converting the rows above is frequently the dominant
+                    // cost of a statement, so report the whole duration the
+                    // same way the native drivers do. Without this a
+                    // fetch-heavy result shows up in the UI as a few
+                    // milliseconds while the caller waited for seconds.
+                    result.setExecution_time_ms(System.currentTimeMillis() - start);
                 } else {
                     result = new QueryResult(
                         Collections.emptyList(),
@@ -464,7 +471,11 @@ public final class JdbcExecutor {
                 );
                 createdSession = session;
                 targetSessions.put(sessionId, session);
-                return readSessionPage(targetSessions, session, options.getPageSize(), elapsed);
+                QueryPageResult page = readSessionPage(targetSessions, session, options.getPageSize(), elapsed);
+                // Same reason as `execute`: pulling the first page's rows is
+                // part of the duration the caller waited for.
+                page.setExecution_time_ms(System.currentTimeMillis() - start);
+                return page;
             } catch (Exception e) {
                 if (createdSession != null) {
                     closeSession(targetSessions, createdSession.id);
@@ -711,8 +722,14 @@ public final class JdbcExecutor {
             throw new IllegalArgumentException(missingMessage);
         }
         synchronized (session) {
+            long fetchStart = System.currentTimeMillis();
             try {
-                return readSessionPage(targetSessions, session, pageSize, 0L);
+                QueryPageResult page = readSessionPage(targetSessions, session, pageSize, 0L);
+                // A later page reads its rows after `stmt.execute()` has long
+                // returned, so it has to measure the fetch itself instead of
+                // reporting 0ms while the caller waits.
+                page.setExecution_time_ms(System.currentTimeMillis() - fetchStart);
+                return page;
             } catch (RuntimeException | Error error) {
                 closeSession(targetSessions, sessionId);
                 throw error;

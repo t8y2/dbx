@@ -1335,6 +1335,10 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return invokeBackend("check_connection_health", { connectionId });
 }
 
+export async function prewarmConnection(connectionId: string, database?: string, catalog?: string, clientSessionId?: string): Promise<void> {
+  return invokeBackend("prewarm_connection", { connectionId, database, catalog, clientSessionId });
+}
+
 export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
   const quote = await invoke<string | null>("connection_identifier_quote", {
     connectionId,

@@ -1,6 +1,7 @@
 import type { SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
+import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, type DatabaseType } from "@/types/database";
 
@@ -2364,7 +2365,7 @@ function redisExecutableCommandRanges(sql: string): SqlTextRange[] {
     const leadingWhitespace = rawLine.length - rawLine.trimStart().length;
     const trailingWhitespace = rawLine.length - rawLine.trimEnd().length;
     const trimmedLine = rawLine.trim();
-    if (trimmedLine && !trimmedLine.startsWith("#")) {
+    if (trimmedLine && !isRedisCommentLine(trimmedLine)) {
       const from = lineStart + leadingWhitespace;
       const to = lineStart + rawLine.length - trailingWhitespace;
       ranges.push({ from, to, sql: sql.slice(from, to) });
@@ -2386,7 +2387,7 @@ function redisCommandRangeAtCursor(sql: string, cursorPos: number): SqlTextRange
   const rawLine = sql.slice(lineStart, lineEnd);
   const leadingWhitespace = rawLine.length - rawLine.trimStart().length;
   const trimmedLine = rawLine.trim();
-  if (!trimmedLine || trimmedLine.startsWith("#")) return null;
+  if (!trimmedLine || isRedisCommentLine(trimmedLine)) return null;
 
   const from = lineStart + leadingWhitespace;
   const to = lineStart + rawLine.length - (rawLine.length - rawLine.trimEnd().length);

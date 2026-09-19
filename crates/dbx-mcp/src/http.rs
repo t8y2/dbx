@@ -299,6 +299,11 @@ mod tests {
         backend: Arc<HttpTestBackend>,
         keep_alive: std::time::Duration,
     ) -> (String, Arc<LocalSessionManager>, CancellationToken, tokio::task::JoinHandle<()>) {
+        // A single default provider avoids the "No rustls crypto provider is
+        // configured" panic when tests build reqwest clients in workspace
+        // builds where multiple rustls crypto features are present; the
+        // install is idempotent, so subsequent calls are no-ops.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let mut session_config = SessionConfig::default();

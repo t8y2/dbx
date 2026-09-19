@@ -297,6 +297,38 @@ export function useDataGridColumnLayoutState(options: {
     setFrozenColumnCount(selectedActualIdxs.length);
   }
 
+  function freezeSelectedColumnsIncrementally(selectedVisibleColIdxs: number[]) {
+    if (selectedVisibleColIdxs.length === 0) return;
+    const visibleIdxs = visibleColumnIndexes.value;
+    const selectedActualIdxs = [...new Set(selectedVisibleColIdxs.map((vIdx) => visibleIdxs[vIdx]).filter((idx): idx is number => idx !== undefined))];
+    if (selectedActualIdxs.length === 0) return;
+    const currentOrder = orderedDisplayableColumnIndexes.value;
+    const frozenVisibleIndexes = visibleColumnIndexes.value.slice(0, frozenColumnCount.value);
+    const frozenSet = new Set(frozenVisibleIndexes);
+    const additions = selectedActualIdxs.filter((idx) => !frozenSet.has(idx));
+    if (additions.length === 0) return;
+    if (columnOrderSnapshotBeforeFreeze.value === null) columnOrderSnapshotBeforeFreeze.value = [...persistedColumnOrderKeys.value];
+    const remaining = currentOrder.filter((idx) => !additions.includes(idx));
+    const frozenEnd = frozenVisibleIndexes.reduce((end, idx) => Math.max(end, remaining.indexOf(idx) + 1), 0);
+    persistColumnOrder([...remaining.slice(0, frozenEnd), ...additions, ...remaining.slice(frozenEnd)]);
+    setFrozenColumnCount(frozenColumnCount.value + additions.length);
+  }
+
+  function unfreezeSelectedColumns(selectedVisibleColIdxs: number[]) {
+    if (selectedVisibleColIdxs.length === 0 || frozenColumnCount.value === 0) return;
+    const visibleIdxs = visibleColumnIndexes.value;
+    const selected = new Set(selectedVisibleColIdxs.map((vIdx) => visibleIdxs[vIdx]).filter((idx): idx is number => idx !== undefined));
+    const currentOrder = orderedDisplayableColumnIndexes.value;
+    const frozen = visibleColumnIndexes.value.slice(0, frozenColumnCount.value);
+    const removing = frozen.filter((idx) => selected.has(idx));
+    if (removing.length === 0) return;
+    if (columnOrderSnapshotBeforeFreeze.value === null) columnOrderSnapshotBeforeFreeze.value = [...persistedColumnOrderKeys.value];
+    const nextFrozen = frozen.filter((idx) => !selected.has(idx));
+    persistColumnOrder(currentOrder.filter((idx) => !removing.includes(idx)).concat(removing));
+    setFrozenColumnCount(nextFrozen.length);
+    if (nextFrozen.length === 0) unfreezeAllColumns();
+  }
+
   function unfreezeAllColumns() {
     setFrozenColumnCount(0);
     if (columnOrderSnapshotBeforeFreeze.value !== null) {
@@ -441,6 +473,8 @@ export function useDataGridColumnLayoutState(options: {
     frozenColumnCount,
     freezeToColumn,
     freezeSelectedColumns,
+    freezeSelectedColumnsIncrementally,
+    unfreezeSelectedColumns,
     unfreezeAllColumns,
   };
 }

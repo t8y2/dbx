@@ -22,10 +22,19 @@ describe("dataGridConditionColumnOptions", () => {
     ]);
   });
 
-  it.each(["mysql", "sqlserver", "oracle"] as const)("keeps existing %s condition insertions unchanged", (databaseType) => {
+  it.each(["mysql", "sqlserver"] as const)("keeps existing %s condition insertions unchanged", (databaseType) => {
     expect(dataGridConditionColumnOptions(["OrderId", "order"], databaseType)).toEqual([
       { name: "OrderId", insertText: "OrderId" },
       { name: "order", insertText: "order" },
+    ]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"] as const)("quotes case-sensitive Oracle-family columns for %s while keeping foldable names bare", (databaseType) => {
+    expect(dataGridConditionColumnOptions(["Id", "NO", "OrderId", "V$SESSION"], databaseType)).toEqual([
+      { name: "Id", insertText: '"Id"' },
+      { name: "NO", insertText: "NO" },
+      { name: "OrderId", insertText: '"OrderId"' },
+      { name: "V$SESSION", insertText: "V$SESSION" },
     ]);
   });
 

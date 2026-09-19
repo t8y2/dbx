@@ -84,6 +84,7 @@ import { canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTr
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
+import { hasTableVGroupEntries, selectedTableVGroupMoveTargets, tableVGroupDestinationRows, tableVGroupPathForTable, tableVGroupsEnabled } from "@/lib/table/tableVGroup";
 import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
@@ -219,6 +220,13 @@ import {
   sidebarDangerRunningCancel,
   sidebarFormTarget,
   showDeleteConfirm,
+  showTableVGroupDialog,
+  showTableVGroupDeleteConfirm,
+  tableVGroupDeleteTarget,
+  tableVGroupName,
+  tableVGroupDialogScope,
+  tableVGroupDialogParentGroupId,
+  tableVGroupDialogTableNames,
   showDropTableConfirm,
   showDropTableChildObjectConfirm,
   showBatchDropConfirm,
@@ -819,6 +827,13 @@ async function toggle(requestId = beginNavigationRequest()) {
     return;
   }
 
+  if (node.type === "table-vgroup") {
+    node.isExpanded = !node.isExpanded;
+    if (node.vgroupId) connectionStore.toggleTableVGroupCollapsed(node, node.vgroupId);
+    emitNodeToggled(node, wasExpanded);
+    return;
+  }
+
   if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
     node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
     emitNodeToggled(node, wasExpanded);
@@ -1402,6 +1417,10 @@ function requestRenameSelectedNode(): boolean {
     startRenameGroup();
     return true;
   }
+  if (activeNode.value.type === "table-vgroup" && activeNode.value.vgroupId) {
+    emit("request-group-rename", activeNode.value.id);
+    return true;
+  }
   if (activeNode.value.type === "saved-sql-file" && activeNode.value.savedSqlId) {
     emit("request-saved-sql-rename", activeNode.value.id);
     return true;
@@ -1461,6 +1480,10 @@ function requestDeleteSelectedNode(): boolean {
   }
   if (activeNode.value.type === "connection-group") {
     deleteConnectionGroup();
+    return true;
+  }
+  if (activeNode.value.type === "table-vgroup") {
+    requestTableVGroupDelete(activeNode.value);
     return true;
   }
   if (canDropDatabase.value) {
@@ -5707,6 +5730,7 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
 
 function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
+  appendTableVGroupContainerItems(node, items);
   // 4. Database / Schema
   if (node.type === "database" || node.type === "schema") {
     if (isXuguSyntheticTreeNode(currentDatabaseType(), node.type, node.schema)) {
@@ -6104,6 +6128,10 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     }
     const destructiveActions: ContextMenuItem[] = [];
     items.push(copyNameMenuItem());
+    if (node.type === "table") {
+      const vgroupMoveItems = buildTableVGroupMoveMenuItems(node);
+      if (vgroupMoveItems.length) items.push({ label: t("tableVGroup.moveToGroup"), icon: FolderInput, children: vgroupMoveItems });
+    }
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (node.type === "table" && supportsAiAssistantContext(currentDatabaseType())) {
       items.push(addToAiMenuItem(node));
@@ -6435,6 +6463,7 @@ function treeTableClipboardMenuItems(node: TreeNode): ContextMenuItem[] {
 
 function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   const { node, items } = context;
+  appendTableVGroupContainerItems(node, items);
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
@@ -6506,7 +6535,89 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   return false;
 }
 
-const sidebarMenuFactories: readonly SidebarMenuFactory[] = [buildConnectionSidebarMenu, buildDatabaseSidebarMenu, buildSpecialSidebarMenu, buildObjectSidebarMenu, buildObjectGroupSidebarMenu];
+function buildTableVGroupMoveMenuItems(node: TreeNode): ContextMenuItem[] {
+  const layout = connectionStore.tableVGroupLayoutFor(node);
+  const targets = selectedTableVGroupMoveTargets(node, selectedTreeNodesInVisibleOrder());
+  const targetNames = targets.map((target) => target.label);
+  const targetsInGroup = (groupId: string) => targetNames.every((name) => tableVGroupPathForTable(layout, name).includes(groupId));
+  const items: ContextMenuItem[] = tableVGroupDestinationRows(layout).map((row) => ({
+    label: row.name,
+    title: row.path.join(" / "),
+    disabled: targetNames.length > 0 && targetsInGroup(row.id),
+    action: () => {
+      for (const name of targetNames) connectionStore.moveTableToVGroup(node, name, row.id);
+    },
+  }));
+  if (targetNames.some((name) => tableVGroupPathForTable(layout, name).length > 0)) {
+    items.push({
+      label: t("tableVGroup.removeFromGroup"),
+      action: () => {
+        for (const name of targetNames) connectionStore.moveTableToVGroup(node, name, null);
+      },
+    });
+  }
+  items.push({ label: "", separator: true });
+  items.push({
+    label: t("tableVGroup.moveToNewGroup"),
+    action: () => {
+      tableVGroupDialogScope.value = node;
+      tableVGroupDialogParentGroupId.value = null;
+      tableVGroupDialogTableNames.value = targetNames;
+      tableVGroupName.value = "";
+      showTableVGroupDialog.value = true;
+    },
+    icon: FolderPlus,
+  });
+  return items;
+}
+
+function appendTableVGroupContainerItems(node: TreeNode, items: ContextMenuItem[]) {
+  if (node.type !== "database" && node.type !== "schema" && node.type !== "linked-server-schema" && node.type !== "group-tables") return;
+  const layout = connectionStore.tableVGroupLayoutFor(node);
+  if (!hasTableVGroupEntries(layout)) return;
+  const enabled = tableVGroupsEnabled(layout);
+  items.push({
+    label: enabled ? t("tableVGroup.disableGroups") : t("tableVGroup.enableGroups"),
+    action: () => connectionStore.setTableVGroupsEnabled(node, !enabled),
+    icon: FolderInput,
+  });
+  items.push({ label: "", separator: true });
+}
+
+function buildTableVGroupSidebarMenu(context: SidebarMenuFactoryContext): boolean {
+  const { node, items } = context;
+  if (node.type !== "table-vgroup" || !node.vgroupId) return false;
+  const groupId = node.vgroupId;
+  items.push({
+    label: t("tableVGroup.newSubgroup"),
+    action: () => {
+      tableVGroupDialogScope.value = node;
+      tableVGroupDialogParentGroupId.value = groupId;
+      tableVGroupDialogTableNames.value = [];
+      tableVGroupName.value = "";
+      showTableVGroupDialog.value = true;
+    },
+    icon: FolderPlus,
+  });
+  items.push({ label: t("connectionGroup.renameGroup"), action: () => emit("request-group-rename", node.id), icon: Pencil, shortcut: shortcutRename });
+  items.push({
+    label: t("tableVGroup.deleteGroup"),
+    action: () => requestTableVGroupDelete(node),
+    icon: Trash2,
+    variant: "destructive" as const,
+    shortcut: shortcutDelete,
+  });
+  return true;
+}
+
+/** Open the shared confirmation before removing a group (its tables stay). */
+function requestTableVGroupDelete(node: TreeNode) {
+  if (node.type !== "table-vgroup" || !node.vgroupId) return;
+  tableVGroupDeleteTarget.value = { scope: node, groupId: node.vgroupId, name: node.label };
+  showTableVGroupDeleteConfirm.value = true;
+}
+
+const sidebarMenuFactories: readonly SidebarMenuFactory[] = [buildConnectionSidebarMenu, buildDatabaseSidebarMenu, buildSpecialSidebarMenu, buildTableVGroupSidebarMenu, buildObjectSidebarMenu, buildObjectGroupSidebarMenu];
 
 function treeItemMenuItems(): ContextMenuItem[] {
   const node = activeNode.value;

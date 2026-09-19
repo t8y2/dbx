@@ -896,6 +896,9 @@ export const getAppSupportInfo = forward("getAppSupportInfo");
 // Layout
 export const saveSidebarLayout = forward("saveSidebarLayout");
 export const loadSidebarLayout = forward("loadSidebarLayout");
+export const saveTableVGroups = forward("saveTableVGroups");
+export const loadTableVGroups = forward("loadTableVGroups");
+export const deleteTableVGroupsForConnection = forward("deleteTableVGroupsForConnection");
 
 // ---------------------------------------------------------------------------
 // Re-export all types from tauri.ts (shared between both backends)

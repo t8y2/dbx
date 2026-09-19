@@ -322,6 +322,10 @@ describe("supportsTableImport", () => {
   it("enables OceanBase Oracle table import", () => {
     expect(supportsTableImport("oceanbase-oracle")).toBe(true);
   });
+
+  it("keeps Xugu table import available", () => {
+    expect(supportsTableImport("xugu")).toBe(true);
+  });
 });
 
 describe("database property editing", () => {

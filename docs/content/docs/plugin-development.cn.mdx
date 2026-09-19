@@ -199,6 +199,8 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 
 连接生命周期使用固定的 `connection/test`、`connection/connect`、`connection/disconnect`，自定义表单动作使用 `connection/action`，参数包含 `provider`、`connection`、`runtime`；动作额外包含 `action: { id }`。后端使用 `connection.id` 保存会话，并使用 `runtime.host`/`runtime.port` 连接经过 DBX 隧道或代理转换后的端点。仅在后端生命周期请求中接收补齐 Secret 的连接；前端通过 `connectionId` 使用已经建立的会话。
 
+多端点协议（Kafka `advertised.listeners`、集群发现等）在贡献点上声明 `proxy_route`。配置了传输层后，DBX 会在 payload 中下发 SOCKS5 路由而非静态转发：`runtime.host`/`runtime.port` 保留逻辑端点，插件通过 `runtime.proxy`（`{ "type": "socks5", "host": "...", "port": 1080, "username": "...", "password": "..." }`）拨号每个广播端点——SSH 末层暴露其动态 SOCKS5 端点，SOCKS5 代理层直接使用；代理凭据与连接 Secret 走同一加密通道，插件不得记录日志。未声明该旗标时传输层保持静态转发行为，要求标准 `host`/`port` 字段给出单一远端端点；对会隧道到空端点的插件连接，DBX 直接给出可行动的报错而非静默超时。
+
 动作的 `when` 可为 `always`、`create`、`edit`；`variant` 可为 `default`、`outline`、`secondary`、`destructive`、`ghost`；`timeout_ms` 为 1–120000。`requires_valid_form` 决定是否要求完整表单，`close_on_success` 决定成功后是否关闭。返回 `{ "success": true, "message": "...", "fieldValues": { "port": 443 } }` 可以更新已声明的字段；返回 `success: false` 表示失败。
 
 ### 其他 Contributions

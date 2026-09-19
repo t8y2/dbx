@@ -288,6 +288,37 @@ Lifecycle methods receive:
 
 `runtime.host` and `runtime.port` are the final endpoint after DBX transport layers. A protocol plugin must connect to this endpoint instead of rebuilding DBX tunnels itself.
 
+##### Transport proxy route for multi-endpoint targets
+
+A static tunnel forwards exactly one remote endpoint. Protocols whose server advertises additional endpoints a client must dial (Kafka `advertised.listeners`, cluster discovery, etc.) cannot be served that way: the bootstrap endpoint connects, but every advertised broker is unreachable. Such providers declare `proxy_route` on the connection-provider contribution:
+
+```json
+{
+  "type": "connection-provider",
+  "id": "vendor.kafka.connection",
+  "database_type": "kafka",
+  "proxy_route": true
+}
+```
+
+When transport layers are configured, DBX then delivers a SOCKS5 route instead of a static forward:
+
+```json
+{
+  "provider": { "...": "..." },
+  "connection": { "...": "..." },
+  "runtime": {
+    "host": "",
+    "port": 0,
+    "proxy": { "type": "socks5", "host": "127.0.0.1", "port": 49153, "username": "", "password": "" }
+  }
+}
+```
+
+- With SSH as the final transport layer the route is the hop's dynamic SOCKS5 endpoint (`ssh -D`); with a SOCKS5 proxy layer the route is that proxy, tunneled through any preceding layers. `username`/`password` are omitted when empty.
+- `runtime.host`/`runtime.port` stay at the connection's logical endpoint, which the plugin should keep using as its seed/metadata source while dialing every endpoint through the SOCKS5 route. Credentials ride the same encrypted lifecycle channel as connection secrets and must never be logged by the plugin.
+- Without the flag, transport layers keep the static-tunnel behavior, which requires the connection to resolve a single remote endpoint (providers should declare `host`/`port` bindings, as the SSH and LDAP plugins do); DBX rejects plugin connections that would tunnel to an empty endpoint instead of timing out silently.
+
 #### Connection dialog actions
 
 Connection providers may add ordered custom actions before DBX-owned lifecycle buttons:

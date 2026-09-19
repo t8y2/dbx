@@ -163,7 +163,9 @@ pub fn build_executable_object_source_statements(input: EditableObjectSourceSqlI
         )]);
     }
 
-    if is_oracle_like(input.database_type) && input.object_type == ObjectSourceKind::View {
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && input.object_type == ObjectSourceKind::View
+    {
         return Ok(vec![executable_oracle_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
@@ -567,14 +569,18 @@ fn leading_sql_statement_start(source: &str) -> usize {
 
 fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) -> String {
     let trimmed = source.trim();
-    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(trimmed) || source_starts_with_alter(trimmed) {
+    let statement_start = leading_sql_statement_start(trimmed);
+    let executable = &trimmed[statement_start..];
+    if Regex::new(r"(?i)^CREATE\s+OR\s+REPLACE\s+").unwrap().is_match(executable)
+        || source_starts_with_alter(executable)
+    {
         return ensure_semicolon(trimmed);
     }
 
     let create_view = Regex::new(r"(?i)^CREATE\s+((?:(?:NO)?FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?VIEW\s+)").unwrap();
-    if create_view.is_match(trimmed) {
-        let replaced = create_view.replace(trimmed, "CREATE OR REPLACE $1");
-        return ensure_semicolon(replaced.as_ref());
+    if create_view.is_match(executable) {
+        let replaced = create_view.replace(executable, "CREATE OR REPLACE $1");
+        return ensure_semicolon(&format!("{}{}", &trimmed[..statement_start], replaced));
     }
 
     format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(trimmed))
@@ -1666,6 +1672,56 @@ mod tests {
             sql,
             "CREATE OR REPLACE VIEW \"DBX_TEST\".\"V_ACTIVE_USERS\" AS\nSELECT id, name FROM users WHERE active = 1;"
         );
+    }
+
+    #[test]
+    fn oceanbase_oracle_view_source_builds_executable_replace_ddl() {
+        for (source, expected) in [
+            (
+                "SELECT 2 AS N FROM DUAL",
+                "CREATE OR REPLACE VIEW \"SYS\".\"DBX_VIEW_SAVE_PROBE\" AS\nSELECT 2 AS N FROM DUAL;",
+            ),
+            (
+                "CREATE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL",
+                "CREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL;",
+            ),
+        ] {
+            let input = EditableObjectSourceSqlInput {
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::View,
+                schema: Some("SYS".to_string()),
+                name: "DBX_VIEW_SAVE_PROBE".to_string(),
+                source: source.to_string(),
+            };
+
+            assert_eq!(build_editable_object_source(input.clone()), expected);
+            assert_eq!(build_executable_object_source_sql(input).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn oceanbase_oracle_view_full_ddl_keeps_leading_comments() {
+        for (source, expected) in [
+            (
+                "/* Keep this note */\nCREATE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 2 AS N FROM DUAL",
+                "/* Keep this note */\nCREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 2 AS N FROM DUAL;",
+            ),
+            (
+                "-- Keep this note\nCREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL",
+                "-- Keep this note\nCREATE OR REPLACE VIEW SYS.DBX_VIEW_SAVE_PROBE AS SELECT 3 AS N FROM DUAL;",
+            ),
+        ] {
+            let sql = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::View,
+                schema: Some("SYS".to_string()),
+                name: "DBX_VIEW_SAVE_PROBE".to_string(),
+                source: source.to_string(),
+            })
+            .unwrap();
+
+            assert_eq!(sql, expected);
+        }
     }
 
     #[test]

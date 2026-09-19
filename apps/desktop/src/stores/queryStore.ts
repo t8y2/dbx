@@ -309,6 +309,10 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     mongo_documents: appendParallelValues(previous.mongo_documents, segment.mongo_documents),
     mongo_copy_documents: appendParallelValues(previous.mongo_copy_documents, segment.mongo_copy_documents),
     execution_time_ms: (previous.execution_time_ms ?? 0) + (segment.execution_time_ms ?? 0),
+    // A JDBC cursor's terminal page audits the entire original statement.
+    // Independent page SQLs need every page sampled before a total is shown.
+    server_execute_time_us: previous.session_id ? segment.server_execute_time_us : previous.server_execute_time_us !== undefined && segment.server_execute_time_us !== undefined ? previous.server_execute_time_us + segment.server_execute_time_us : undefined,
+    client_request_wait_ms: previous.client_request_wait_ms !== undefined && segment.client_request_wait_ms !== undefined ? previous.client_request_wait_ms + segment.client_request_wait_ms : undefined,
     has_more: previous.rows.length + appendedRowCount >= maxRows ? false : segment.has_more,
   });
 }
@@ -6311,6 +6315,7 @@ export const useQueryStore = defineStore("query", () => {
     let exactQueryRowBound: number | undefined;
     let useAgentResultSession = false;
     let executionDispatched = false;
+    let clientRequestStartedAt: number | undefined;
     let producedResult = false;
     const resumedExecutionTarget = batchResume?.batch.executionTarget;
     const executionConnectionId = resumedExecutionTarget?.connectionId ?? options?.executionTarget?.connectionId ?? tab.connectionId;
@@ -7144,6 +7149,7 @@ export const useQueryStore = defineStore("query", () => {
           clientSession: Boolean(executionClientSessionId),
         });
         executionDispatched = true;
+        if (effectiveDbType === "oceanbase-oracle" && tab.mode === "query") clientRequestStartedAt = performance.now();
         if (useAgentResultSession && tab.mode === "query" && typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId && !(tab.batchSqlExecution && tab.batchSqlExecution.total > 1)) {
           return (async () => {
             let sessionId: string | undefined;
@@ -7216,6 +7222,7 @@ export const useQueryStore = defineStore("query", () => {
         } else {
           queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
           executionDispatched = true;
+          if (effectiveDbType === "oceanbase-oracle" && tab.mode === "query") clientRequestStartedAt = performance.now();
           // Only an initial manual execution classifies the user SQL (sticky
           // proven-read-only dialects). A later cursor-page fetch must neither
           // set nor clear the sticky bit.
@@ -7254,20 +7261,15 @@ export const useQueryStore = defineStore("query", () => {
       } else {
         executionPromise = executeWithoutManualTransaction();
       }
-      const annotatedResults = annotateQueryResultSources(
-        markQueryResultsRowsRaw(
-          await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }), () => {
-            void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
-          }),
-        ),
-        queryBaseSql,
-        sourceLabelDatabase,
-        effectiveDbType,
-        options?.sourceOffset,
-        sqlStatementParameterOptions,
-        sqlToExecute,
-        options?.sourceOffset === undefined ? undefined : tab.sql,
-      );
+      const responseResults = await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }), () => {
+        void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
+      });
+      // A single result has an unambiguous request boundary. This includes fetch and
+      // transport, but excludes SQL preparation and the grid's later render work.
+      if (clientRequestStartedAt !== undefined && responseResults.length === 1 && !responseResults[0]?.execution_error) {
+        responseResults[0]!.client_request_wait_ms = Math.max(0, Math.round(performance.now() - clientRequestStartedAt));
+      }
+      const annotatedResults = annotateQueryResultSources(markQueryResultsRowsRaw(responseResults), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset, sqlStatementParameterOptions, sqlToExecute, options?.sourceOffset === undefined ? undefined : tab.sql);
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
       reconcileBatchSqlResults(tab, executionId, results);
       // Sticky proven-read-only aggregation (Oracle/OceanBase-Oracle/MySQL/PG).

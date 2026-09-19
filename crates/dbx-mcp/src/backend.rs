@@ -2272,6 +2272,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         rows,
         affected_rows,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,

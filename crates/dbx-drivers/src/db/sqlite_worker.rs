@@ -114,6 +114,7 @@ impl SqliteWorkerClient {
                 rows: rows.unwrap_or_default(),
                 affected_rows: affected_rows.unwrap_or(0),
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: truncated.unwrap_or(false),
                 session_id: None,
                 has_more: false,

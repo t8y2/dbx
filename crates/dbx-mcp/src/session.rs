@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::transaction::TransactionOwner;
+
 /// Idle time after which an MCP session is considered expired and its pinned
 /// backend connection pool may be reclaimed.
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
@@ -22,6 +24,7 @@ pub struct McpSession {
     /// Value forwarded to the backend as `client_session_id`, pinning all
     /// queries in this session to the same connection pool.
     pub client_session_id: String,
+    pub transaction_owner: Option<Arc<TransactionOwner>>,
     last_used: Instant,
 }
 
@@ -81,10 +84,18 @@ impl McpSessionStore {
             // sessions in backend diagnostics. `:` is normalized away by the
             // backend pool key sanitizer.
             client_session_id: format!("mcp:{id}"),
+            transaction_owner: None,
             last_used: Instant::now(),
         };
         state.active.insert(id, session.clone());
         McpSessionStoreResult::new(Ok(session), expired)
+    }
+
+    pub async fn attach_transaction_owner(&self, session_id: &str, owner: Arc<TransactionOwner>) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        let session = state.active.get_mut(session_id).ok_or_else(|| "MCP session is no longer active".to_string())?;
+        session.transaction_owner = Some(owner);
+        Ok(())
     }
 
     /// Resolve a session id and refresh its idle timer.
@@ -103,9 +114,9 @@ impl McpSessionStore {
     pub async fn begin_close(&self, session_id: &str) -> McpSessionStoreResult<Option<McpSession>> {
         let mut state = self.state.lock().await;
         let expired = sweep_expired(&mut state.active);
-        let session = state.active.remove(session_id);
+        let session = state.active.remove(session_id).or_else(|| state.closing.get(session_id).cloned());
         if let Some(session) = &session {
-            state.closing.insert(session.id.clone(), session.clone());
+            state.closing.entry(session.id.clone()).or_insert_with(|| session.clone());
         }
         McpSessionStoreResult::new(session, expired)
     }
@@ -165,6 +176,7 @@ mod tests {
         assert!(expired.is_empty());
         assert_eq!(closing.unwrap().id, session.id);
         assert!(store.resolve(&session.id).await.into_parts().0.is_none());
+        assert_eq!(store.begin_close(&session.id).await.into_parts().0.unwrap().id, session.id);
         store.finish_close(&session.id).await;
         assert!(store.begin_close(&session.id).await.into_parts().0.is_none());
     }

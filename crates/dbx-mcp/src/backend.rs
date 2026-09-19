@@ -21,7 +21,10 @@ use tokio::sync::Mutex;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use crate::mongo::MongoCommand;
+use crate::{
+    mongo::MongoCommand,
+    transaction::{MysqlTransactionIo, TransactionOwner, TransactionOwnerConfig, TransactionOwnerRegistry},
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionSummary {
@@ -119,10 +122,22 @@ pub struct BatchStatementResult {
     /// false.
     #[serde(skip_serializing_if = "is_false")]
     pub merged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_state: Option<crate::transaction::TransactionState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_outcome: Option<crate::transaction::TransactionOutcome>,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub(crate) fn native_mysql_transaction_connection(connection: &ConnectionConfig) -> bool {
+    connection.db_type == DatabaseType::Mysql
+        && connection.driver_profile.as_deref().is_none_or(|profile| {
+            let profile = profile.trim();
+            profile.is_empty() || profile.eq_ignore_ascii_case("mysql")
+        })
 }
 
 impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
@@ -136,6 +151,8 @@ impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
             statement_index: result.statement_index,
             error_message,
             merged: false,
+            transaction_state: None,
+            transaction_outcome: None,
         }
     }
 }
@@ -160,7 +177,15 @@ fn batch_statement_result_from_json(value: &Value) -> Result<BatchStatementResul
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| value.pointer("/rows/0/0").and_then(Value::as_str).map(str::to_owned));
-    Ok(BatchStatementResult { result, execution_error, statement_index, error_message, merged: false })
+    Ok(BatchStatementResult {
+        result,
+        execution_error,
+        statement_index,
+        error_message,
+        merged: false,
+        transaction_state: None,
+        transaction_outcome: None,
+    })
 }
 
 /// Wire-level options for a documentation snapshot. Mirrors
@@ -241,6 +266,15 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<dbx_core::db::QueryResult, String> {
         let _ = (connection, database, sql, max_rows, timeout_secs);
         Err("SQL queries are not supported by this backend.".to_string())
+    }
+    async fn open_transaction_owner(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        let _ = (connection, database, client_session_id);
+        Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection.".to_string())
     }
     /// Execute a multi-statement SQL script, returning one result per statement.
     ///
@@ -374,6 +408,7 @@ pub trait DbxBackend: Send + Sync {
 pub struct LocalBackend {
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
+    transaction_owners: Arc<TransactionOwnerRegistry>,
 }
 
 #[derive(Debug, Default)]
@@ -389,6 +424,12 @@ pub struct WebBackend {
     headers: HeaderMap,
     auth: Mutex<WebAuthState>,
     connected: Mutex<HashMap<String, ConnectionConfig>>,
+}
+
+impl Drop for LocalBackend {
+    fn drop(&mut self) {
+        self.transaction_owners.invalidate_all();
+    }
 }
 
 // Manual impl: the derived one would print `password` (and the session cookie
@@ -583,7 +624,7 @@ impl LocalBackend {
     /// Reuse an already initialized DBX application state, for hosts that
     /// embed MCP alongside their own HTTP server.
     pub fn from_app_state(state: Arc<AppState>, data_dir: PathBuf) -> Self {
-        Self { state, data_dir }
+        Self { state, data_dir, transaction_owners: Arc::new(TransactionOwnerRegistry::default()) }
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
@@ -608,7 +649,7 @@ impl LocalBackend {
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
-        Ok(Self { state, data_dir })
+        Ok(Self { state, data_dir, transaction_owners: Arc::new(TransactionOwnerRegistry::default()) })
     }
 
     pub fn state(&self) -> &Arc<AppState> {
@@ -706,6 +747,7 @@ impl LocalBackend {
         };
 
         for id in pool_ids_to_drop {
+            self.transaction_owners.invalidate_connection(&id);
             self.state.remove_connection_pools_detached(&id).await;
         }
     }
@@ -870,6 +912,52 @@ impl DbxBackend for LocalBackend {
         .await
     }
 
+    async fn open_transaction_owner(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        if !native_mysql_transaction_connection(connection) {
+            return Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection."
+                .to_string());
+        }
+        let pool_database = (!database.trim().is_empty()).then_some(database);
+        let pool_key =
+            self.state.get_or_create_pool_for_session(&connection.id, pool_database, Some(client_session_id)).await?;
+        let pool = match self.state.pool_handle(&pool_key).await {
+            Some(dbx_core::connection::PoolKind::Mysql(pool, dbx_core::connection::MysqlMode::Normal)) => pool,
+            _ => {
+                let _ = self.state.close_client_session_pool(&connection.id, pool_database, client_session_id).await;
+                return Err(
+                    "TRANSACTION_UNSUPPORTED: fixed-session transactions require the native MySQL driver.".to_string()
+                );
+            }
+        };
+        let conn = match dbx_core::db::mysql::get_conn_with_health_check(&pool).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let _ = self.state.close_client_session_pool(&connection.id, pool_database, client_session_id).await;
+                return Err(format!("Failed to acquire the fixed MySQL session connection: {error}"));
+            }
+        };
+        let owner = TransactionOwner::spawn(
+            MysqlTransactionIo::new(
+                conn,
+                self.state.clone(),
+                connection.id.clone(),
+                database.to_string(),
+                client_session_id.to_string(),
+            ),
+            TransactionOwnerConfig {
+                operation_timeout: std::time::Duration::from_secs(connection.effective_query_timeout_secs()),
+                ..TransactionOwnerConfig::default()
+            },
+        );
+        self.transaction_owners.register(&connection.id, &owner);
+        Ok(owner)
+    }
+
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -947,6 +1035,7 @@ impl DbxBackend for LocalBackend {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
+            self.transaction_owners.invalidate_connection(connection_id);
             self.state.remove_connection_pools_detached(connection_id).await;
         }
         Ok(removed)
@@ -2498,6 +2587,31 @@ mod tests {
         assert_eq!(parse_database_type("Postgres").unwrap(), DatabaseType::Postgres);
         assert_eq!(parse_database_type("mongodb").unwrap(), DatabaseType::MongoDb);
         assert!(parse_database_type("unknown").is_err());
+    }
+
+    #[test]
+    fn native_mysql_transaction_gate_accepts_the_builtin_mysql_profile_only() {
+        let mut connection: ConnectionConfig = serde_json::from_value(json!({
+            "id": "mysql",
+            "name": "mysql",
+            "db_type": "mysql",
+            "host": "",
+            "port": 3306,
+            "username": "",
+            "password": "",
+            "database": "test",
+            "ssl": false
+        }))
+        .unwrap();
+        assert!(native_mysql_transaction_connection(&connection));
+        connection.driver_profile = Some("mysql".to_string());
+        assert!(native_mysql_transaction_connection(&connection));
+        connection.driver_profile = Some("MySQL".to_string());
+        assert!(native_mysql_transaction_connection(&connection));
+        for profile in ["dolt", "tidb", "oceanbase", "custom-profile"] {
+            connection.driver_profile = Some(profile.to_string());
+            assert!(!native_mysql_transaction_connection(&connection), "unexpectedly accepted {profile}");
+        }
     }
 
     #[test]

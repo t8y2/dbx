@@ -19,6 +19,7 @@ async-trait = "0.1"
 dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
 log = "0.4"
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls", "client_ed25519", "chrono", "rust_decimal"] }
 axum = "0.8"
 chrono = "0.4"
 rmcp = { version = "2.2.0", features = ["client", "transport-io", "transport-streamable-http-server"] }
@@ -27,6 +28,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlparser = "0.62"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }

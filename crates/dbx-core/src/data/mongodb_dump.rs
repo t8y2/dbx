@@ -21,10 +21,15 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use futures::TryStreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, Document, RawDocumentBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::connection::{AppState, PoolKind};
+use crate::db::agent_driver::{AgentCapability, PooledAgentClient};
+use crate::db::mongo_driver::{
+    agent_insert_outcome, document_to_canonical_extended_json, insert_bson_documents,
+    json_object_to_document_extended_json, MongoCollectionKind, MongoDocumentResult, MongoInsertOutcome,
+};
 use crate::mongodb_import_export::{export_mongodb_query_core, MongoExportFormat, MongoExportRequest};
 use metadata::CollectionMetadata;
 
@@ -206,33 +211,205 @@ fn catalog(entries: &[PreparedCollection], exact: bool) -> MongoDumpCatalog {
     }
 }
 
-async fn native_client(state: &AppState, id: &str, database: &str) -> Result<mongodb::Client, String> {
-    metadata::validate_database(database)?;
-    state.get_or_create_pool(id, Some(database)).await?;
-    match state.pool_handle(id).await {
-        Some(PoolKind::MongoDb(client)) => Ok(client.clone()),
-        _ => Err("Database dump/restore requires the native MongoDB driver".into()),
+/// A `listCollections` entry with what dump/restore needs from it.
+pub(crate) struct DumpCollectionSpec {
+    pub name: String,
+    pub kind: MongoCollectionKind,
+    pub options: Document,
+}
+
+/// The connection a dump or restore runs over. Both drivers expose the same handful of
+/// commands; the legacy agent runs them through its generic `runCommand` so nothing has to
+/// be added to the agent itself.
+pub(crate) enum DumpClient {
+    Native(mongodb::Client),
+    Agent(Arc<PooledAgentClient>),
+}
+
+impl DumpClient {
+    async fn run_command(&self, database: &str, command: Document) -> Result<Document, String> {
+        match self {
+            Self::Native(client) => client.database(database).run_command(command).await.map_err(|e| e.to_string()),
+            Self::Agent(client) => {
+                let mut client = client.lock().await;
+                let result: MongoDocumentResult = client
+                    .mongo_run_command(serde_json::json!({
+                        "database": database,
+                        "command_json": document_to_canonical_extended_json(&command).to_string(),
+                    }))
+                    .await?;
+                let response = result
+                    .extended_documents
+                    .as_ref()
+                    .and_then(|documents| documents.first())
+                    .or_else(|| result.documents.first())
+                    .ok_or("MongoDB Legacy Agent returned an empty runCommand response")?;
+                json_object_to_document_extended_json(response)
+            }
+        }
+    }
+
+    /// Drains a command cursor (`listCollections`, `listIndexes`) through `getMore` so a database
+    /// with more entries than one batch is still read completely on the agent path.
+    async fn command_cursor(&self, database: &str, command: Document) -> Result<Vec<Document>, String> {
+        let mut response = self.run_command(database, command).await?;
+        let mut documents = Vec::new();
+        loop {
+            let cursor = response.get_document_mut("cursor").map_err(|e| e.to_string())?;
+            let batch = if cursor.contains_key("firstBatch") { "firstBatch" } else { "nextBatch" };
+            if let Ok(entries) = cursor.get_array_mut(batch) {
+                documents.extend(std::mem::take(entries).into_iter().filter_map(|entry| match entry {
+                    mongodb::bson::Bson::Document(document) => Some(document),
+                    _ => None,
+                }));
+            }
+            let id = cursor.get_i64("id").unwrap_or(0);
+            if id == 0 {
+                return Ok(documents);
+            }
+            let namespace = cursor.get_str("ns").map_err(|e| e.to_string())?;
+            let collection =
+                namespace.strip_prefix(database).and_then(|rest| rest.strip_prefix('.')).unwrap_or(namespace);
+            response = self.run_command(database, doc! { "getMore": id, "collection": collection }).await?;
+        }
+    }
+
+    pub(crate) async fn list_collections(&self, database: &str) -> Result<Vec<DumpCollectionSpec>, String> {
+        match self {
+            Self::Native(client) => {
+                let mut cursor = client.database(database).list_collections().await.map_err(|e| e.to_string())?;
+                let mut specs = Vec::new();
+                while let Some(spec) = cursor.try_next().await.map_err(|e| e.to_string())? {
+                    specs.push(DumpCollectionSpec {
+                        name: spec.name,
+                        kind: MongoCollectionKind::from_driver_type(&spec.collection_type),
+                        options: mongodb::bson::to_document(&spec.options).map_err(|e| e.to_string())?,
+                    });
+                }
+                Ok(specs)
+            }
+            Self::Agent(_) => self
+                .command_cursor(database, doc! { "listCollections": 1 })
+                .await?
+                .into_iter()
+                .map(|mut spec| {
+                    let name = spec.get_str("name").map_err(|e| format!("listCollections entry: {e}"))?.to_string();
+                    let kind = MongoCollectionKind::from_metadata_kind(spec.get_str("type").ok());
+                    let options = spec.remove("options").and_then(|o| o.as_document().cloned()).unwrap_or_default();
+                    Ok(DumpCollectionSpec { name, kind, options })
+                })
+                .collect(),
+        }
+    }
+
+    async fn list_indexes(&self, database: &str, collection: &str) -> Result<Vec<Document>, String> {
+        match self {
+            Self::Native(client) => {
+                let mut indexes = client
+                    .database(database)
+                    .collection::<Document>(collection)
+                    .list_indexes()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut documents = Vec::new();
+                while let Some(index) = indexes.try_next().await.map_err(|e| e.to_string())? {
+                    documents.push(mongodb::bson::to_document(&index).map_err(|e| e.to_string())?);
+                }
+                Ok(documents)
+            }
+            Self::Agent(_) => self.command_cursor(database, doc! { "listIndexes": collection }).await,
+        }
+    }
+
+    pub(crate) async fn drop_collection(&self, database: &str, collection: &str) -> Result<(), String> {
+        match self {
+            Self::Native(client) => {
+                client.database(database).collection::<Document>(collection).drop().await.map_err(|e| e.to_string())
+            }
+            Self::Agent(_) => self.run_command(database, doc! { "drop": collection }).await.map(|_| ()),
+        }
+    }
+
+    pub(crate) async fn create_collection(&self, database: &str, command: Document) -> Result<(), String> {
+        self.run_command(database, command).await.map(|_| ())
+    }
+
+    /// Inserts one restore batch. The agent takes documents as canonical Extended JSON, the same
+    /// lossless form collection-level BSON import already uses on that path.
+    pub(crate) async fn insert_documents(
+        &self,
+        database: &str,
+        collection: &str,
+        documents: Vec<RawDocumentBuf>,
+    ) -> Result<MongoInsertOutcome, String> {
+        match self {
+            Self::Native(client) => {
+                insert_bson_documents(client, database, collection, documents).await.map_err(|e| e.message)
+            }
+            Self::Agent(client) => {
+                let documents = documents
+                    .iter()
+                    .map(|raw| {
+                        Document::try_from(raw.as_ref()).map(|document| document_to_canonical_extended_json(&document))
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                let docs_json = serde_json::to_string(&documents).map_err(|e| e.to_string())?;
+                let mut client = client.lock().await;
+                let result: serde_json::Value = client
+                    .mongo_insert_documents(serde_json::json!({
+                        "database": database,
+                        "collection": collection,
+                        "docs_json": docs_json,
+                        "ordered": false,
+                    }))
+                    .await?;
+                agent_insert_outcome(&result)
+            }
+        }
+    }
+
+    async fn create_index(&self, database: &str, collection: &str, index: Document) -> Result<(), String> {
+        self.run_command(database, doc! { "createIndexes": collection, "indexes": [index] }).await.map(|_| ())
+    }
+
+    async fn server_version(&self, database: &str) -> Result<String, String> {
+        Ok(self.run_command(database, doc! { "buildInfo": 1 }).await?.get_str("version").unwrap_or("").to_string())
     }
 }
 
-async fn database_entries(client: &mongodb::Client, database: &str) -> Result<Vec<PreparedCollection>, String> {
-    let db = client.database(database);
-    let mut cursor = db.list_collections().await.map_err(|e| e.to_string())?;
+async fn dump_client(state: &AppState, id: &str, database: &str) -> Result<DumpClient, String> {
+    metadata::validate_database(database)?;
+    state.get_or_create_pool(id, Some(database)).await?;
+    match state.pool_handle(id).await {
+        Some(PoolKind::MongoDb(client)) => Ok(DumpClient::Native(client.clone())),
+        Some(PoolKind::Agent(client)) => {
+            let supported = {
+                let client = client.lock().await;
+                client.supports_capability(AgentCapability::MongoRunCommand)
+                    && client.supports_capability(AgentCapability::MongoInsertDocuments)
+            };
+            if !supported {
+                return Err("MongoDB Legacy Agent does not support database dump/restore; upgrade or reinstall the MongoDB Legacy driver".into());
+            }
+            Ok(DumpClient::Agent(client.clone()))
+        }
+        _ => Err("Database dump/restore requires a MongoDB connection".into()),
+    }
+}
+
+async fn database_entries(client: &DumpClient, database: &str) -> Result<Vec<PreparedCollection>, String> {
     let mut entries = Vec::new();
-    while let Some(spec) = cursor.try_next().await.map_err(|e| e.to_string())? {
+    for spec in client.list_collections(database).await? {
         if spec.name.starts_with("system.") && spec.name != "system.js" {
             continue;
         }
         let mut metadata = CollectionMetadata::empty(&spec.name);
-        metadata.kind =
-            crate::db::mongo_driver::MongoCollectionKind::from_driver_type(&spec.collection_type).as_str().into();
-        metadata.options = mongodb::bson::to_document(&spec.options).map_err(|e| e.to_string())?;
+        metadata.kind = spec.kind.as_str().into();
+        metadata.options = spec.options;
         metadata.validate()?;
         if !metadata.is_view() {
-            let mut indexes = db.collection::<Document>(&spec.name).list_indexes().await.map_err(|e| e.to_string())?;
-            while let Some(index) = indexes.try_next().await.map_err(|e| e.to_string())? {
-                metadata.indexes.push(mongodb::bson::to_document(&index).map_err(|e| e.to_string())?);
-            }
+            metadata.indexes = client.list_indexes(database, &spec.name).await?;
         }
         metadata.validate()?;
         entries.push(PreparedCollection {
@@ -253,7 +430,7 @@ pub async fn inspect_mongodb_database_dump(
     id: &str,
     database: &str,
 ) -> Result<MongoDumpCatalog, String> {
-    let client = native_client(state, id, database).await?;
+    let client = dump_client(state, id, database).await?;
     let entries = database_entries(&client, database).await?;
     let mut catalog = catalog(&entries, false);
     catalog.databases = vec![database.into()];
@@ -370,7 +547,7 @@ where
         if is_cancelled(&request.task_id).await {
             return Err("MongoDB dump/restore cancelled".into());
         }
-        let client = native_client(state, &request.connection_id, &request.database).await?;
+        let client = dump_client(state, &request.connection_id, &request.database).await?;
         let mut entries = select_entries(&database_entries(&client, &request.database).await?, &request.collections)?;
         progress.collections_total = entries.len();
         let target = PathBuf::from(&request.file_path);
@@ -428,14 +605,7 @@ where
         }
         progress.phase = "archive".into();
         progress.emit(started, &mut on_progress);
-        let server_version = client
-            .database(&request.database)
-            .run_command(doc! { "buildInfo": 1 })
-            .await
-            .map_err(|e| e.to_string())?
-            .get_str("version")
-            .unwrap_or("")
-            .to_string();
+        let server_version = client.server_version(&request.database).await?;
         let database = request.database.clone();
         let gzip = request.gzip;
         let format = request.format;
@@ -507,21 +677,13 @@ where
         let entries = ordered_entries(&select_entries(&source_entries, &request.collections)?)?;
         progress.collections_total = entries.len();
         source.check_ready(&entries)?;
-        let client = native_client(state, &request.connection_id, &request.database).await?;
-        let db = client.database(&request.database);
-        let existing = db
-            .list_collections()
-            .await
-            .map_err(|e| e.to_string())?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| e.to_string())?;
+        let client = dump_client(state, &request.connection_id, &request.database).await?;
+        let existing = client.list_collections(&request.database).await?;
         for entry in &entries {
             entry.metadata.validate()?;
             if let Some(target) = existing.iter().find(|target| target.name == entry.metadata.collection_name) {
                 if !request.drop_existing
-                    && (entry.metadata.is_view()
-                        || !matches!(target.collection_type, mongodb::results::CollectionType::Collection))
+                    && (entry.metadata.is_view() || target.kind != MongoCollectionKind::Collection)
                 {
                     return Err(format!(
                         "{}: replacing an existing view or non-regular collection requires dropExisting",
@@ -571,9 +733,7 @@ where
                     if is_cancelled(&request.task_id).await {
                         return Err("MongoDB dump/restore cancelled".into());
                     }
-                    db.run_command(doc! { "createIndexes": name, "indexes": [index] })
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    client.create_index(&request.database, name, index).await?;
                     progress.indexes_created += 1;
                 }
             }

@@ -4576,7 +4576,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             .iter()
             .take(row_limit)
             .map(|row| {
-                let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+                let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
                 spatial_values.push(srids);
                 values
             })

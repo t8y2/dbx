@@ -113,6 +113,12 @@ const {
   cloneMongoCollectionLoading,
   confirmCloneMongoCollection,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
+  meilisearchCreateIndexUid,
+  meilisearchCreateIndexPrimaryKey,
+  meilisearchCreateIndexError,
+  meilisearchCreateIndexLoading,
+  confirmCreateMeilisearchIndex,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
@@ -208,6 +214,7 @@ watch(
     showRenameMongoCollectionDialog,
     showCloneMongoCollectionDialog,
     showCreateMongoIndexDialog,
+    showCreateMeilisearchIndexDialog,
     showMongoIndexManagerDialog,
     showRedisDatabaseAliasDialog,
     showCreateSchemaDialog,
@@ -396,6 +403,33 @@ watch(
         <Button :disabled="mongoCreateIndexLoading || !mongoCreateIndexCanSubmit" @click="confirmCreateMongoIndex">
           <Loader2 v-if="mongoCreateIndexLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.createMongoIndex") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showCreateMeilisearchIndexDialog">
+    <DialogContent class="sm:max-w-[420px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("meilisearch.createIndex") }}</DialogTitle>
+      </DialogHeader>
+      <div class="grid gap-3">
+        <label class="grid gap-1.5 text-sm font-medium">
+          {{ t("meilisearch.createIndexUid") }}
+          <Input v-model="meilisearchCreateIndexUid" :disabled="meilisearchCreateIndexLoading" :placeholder="t('meilisearch.createIndexUidPlaceholder')" @keydown.enter.prevent="confirmCreateMeilisearchIndex" />
+        </label>
+        <label class="grid gap-1.5 text-sm font-medium">
+          {{ t("meilisearch.createIndexPrimaryKey") }}
+          <Input v-model="meilisearchCreateIndexPrimaryKey" :disabled="meilisearchCreateIndexLoading" :placeholder="t('meilisearch.createIndexPrimaryKeyPlaceholder')" />
+          <span class="text-xs font-normal text-muted-foreground">{{ t("meilisearch.createIndexPrimaryKeyHelp") }}</span>
+        </label>
+        <p v-if="meilisearchCreateIndexError" class="text-sm text-destructive">{{ meilisearchCreateIndexError }}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" :disabled="meilisearchCreateIndexLoading" @click="showCreateMeilisearchIndexDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="meilisearchCreateIndexLoading || !meilisearchCreateIndexUid.trim()" @click="confirmCreateMeilisearchIndex">
+          <Loader2 v-if="meilisearchCreateIndexLoading" class="mr-2 h-4 w-4 animate-spin" />
+          {{ t("meilisearch.createIndex") }}
         </Button>
       </DialogFooter>
     </DialogContent>

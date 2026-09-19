@@ -2372,6 +2372,7 @@ pub fn run() {
             commands::document_cmd::meilisearch_update_index_settings,
             commands::document_cmd::meilisearch_get_index_stats,
             commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_create_index,
             commands::document_cmd::meilisearch_delete_index,
             commands::document_cmd::meilisearch_delete_all_documents,
             commands::document_cmd::meilisearch_get_system_overview,

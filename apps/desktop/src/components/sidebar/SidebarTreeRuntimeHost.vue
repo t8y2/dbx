@@ -316,6 +316,11 @@ import {
   showDropAllMongoIndexesConfirm,
   dropAllMongoIndexesLoading,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
+  meilisearchCreateIndexUid,
+  meilisearchCreateIndexPrimaryKey,
+  meilisearchCreateIndexError,
+  meilisearchCreateIndexLoading,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
@@ -566,6 +571,9 @@ const {
   mongoCreateIndexCanSubmit,
   mongoCreateIndexCanAddField,
   prepareCreateMongoIndexDialog,
+  canCreateMeilisearchIndex,
+  prepareCreateMeilisearchIndexDialog,
+  confirmCreateMeilisearchIndex,
   addMongoCreateIndexField,
   removeMongoCreateIndexField,
   confirmCreateMongoIndex,
@@ -1444,6 +1452,12 @@ function openCreateMongoIndexDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   prepareCreateMongoIndexDialog();
+}
+
+function openCreateMeilisearchIndexDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareCreateMeilisearchIndexDialog();
 }
 
 function openMongoIndexManagerDialog() {
@@ -5311,6 +5325,12 @@ function databaseSpecificDialogCapabilities() {
     cloneMongoCollectionLoading,
     confirmCloneMongoCollection,
     showCreateMongoIndexDialog,
+    showCreateMeilisearchIndexDialog,
+    meilisearchCreateIndexUid,
+    meilisearchCreateIndexPrimaryKey,
+    meilisearchCreateIndexError,
+    meilisearchCreateIndexLoading,
+    confirmCreateMeilisearchIndex,
     mongoCreateIndexForm,
     mongoCreateIndexFieldOptions,
     mongoCreateIndexError,
@@ -5548,6 +5568,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       if (supportsAiContext) {
         items.push(addToAiMenuItem(node));
       }
+    }
+    if (canCreateMeilisearchIndex.value) {
+      items.push({ label: t("meilisearch.createIndex"), action: openCreateMeilisearchIndexDialog, icon: Plus });
     }
     const connectionWorkspace = node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
     if (connectionWorkspace?.entryScopes.includes("connection")) {

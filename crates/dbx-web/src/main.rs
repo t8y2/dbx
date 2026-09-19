@@ -127,12 +127,88 @@ where
     )
 }
 
-fn mount_public_base_path(mut app: Router, public_base_path: &str, static_dir: Option<&std::path::Path>) -> Router {
-    if let Some(static_dir) = static_dir {
-        use tower_http::services::{ServeDir, ServeFile};
-        let index_path = static_dir.join("index.html");
-        let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
-        app = app.fallback_service(serve_dir);
+/// Frontend build output compiled into the binary by the `embed-static` feature.
+/// The folder is relative to this crate's manifest (crates/dbx-web) and points
+/// at the workspace root `dist` directory produced by the frontend build.
+#[cfg(feature = "embed-static")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../dist"]
+struct EmbeddedStaticAssets;
+
+/// Serves an embedded static asset, falling back to `index.html` so that
+/// client-side (SPA) routes resolve like they do with the disk-based ServeDir.
+#[cfg(feature = "embed-static")]
+async fn serve_embedded_asset(uri: Uri) -> axum::response::Response {
+    use axum::http::header;
+
+    let path = uri.path().trim_start_matches('/');
+    if let Some(asset) = EmbeddedStaticAssets::get(path) {
+        let content_type = mime_guess::from_path(path).first_or_octet_stream();
+        let mut response = axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, content_type.as_ref())
+            .body(axum::body::Body::from(asset.data.into_owned()))
+            .expect("valid embedded asset response");
+        // Vite emits content-hashed, immutable files under assets/. The HTML
+        // entry point must always revalidate so binary upgrades take effect;
+        // other files (favicon, fonts) keep browser heuristic caching, which
+        // matches tower-http's ServeDir behaviour.
+        let cache_control = if path.starts_with("assets/") {
+            Some("public, max-age=31536000, immutable")
+        } else if path == "index.html" {
+            Some("no-cache")
+        } else {
+            None
+        };
+        if let Some(cache_control) = cache_control {
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_str(cache_control).expect("valid cache-control"),
+            );
+        }
+        response
+    } else {
+        serve_embedded_index().await
+    }
+}
+
+/// Serves the embedded SPA entry point. It must never be cached aggressively so
+/// that upgraded binaries are not shadowed by an old index referencing removed
+/// hashed assets.
+#[cfg(feature = "embed-static")]
+async fn serve_embedded_index() -> axum::response::Response {
+    use axum::http::header;
+
+    let index = EmbeddedStaticAssets::get("index.html").expect("embedded dist must contain index.html");
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(axum::body::Body::from(index.data.into_owned()))
+        .expect("valid embedded index response")
+}
+
+/// Selects where the static frontend files are served from.
+#[derive(Clone, Copy)]
+enum StaticSource<'a> {
+    /// Serve files from a directory on disk (DBX_STATIC_DIR).
+    Dir(&'a std::path::Path),
+    /// Serve the dist files compiled into the binary (`embed-static` feature).
+    #[cfg(feature = "embed-static")]
+    Embedded,
+}
+
+fn mount_static_assets(mut app: Router, public_base_path: &str, source: Option<StaticSource<'_>>) -> Router {
+    match source {
+        Some(StaticSource::Dir(static_dir)) => {
+            use tower_http::services::{ServeDir, ServeFile};
+            let index_path = static_dir.join("index.html");
+            let serve_dir = ServeDir::new(static_dir).not_found_service(ServeFile::new(index_path));
+            app = app.fallback_service(serve_dir);
+        }
+        #[cfg(feature = "embed-static")]
+        Some(StaticSource::Embedded) => {
+            app = app.fallback(serve_embedded_asset);
+        }
+        None => {}
     }
 
     if public_base_path == "/" {
@@ -141,9 +217,16 @@ fn mount_public_base_path(mut app: Router, public_base_path: &str, static_dir: O
 
     app = Router::new().nest(public_base_path, app);
     app = add_public_base_path_redirect(app, public_base_path);
-    if let Some(static_dir) = static_dir {
-        use tower_http::services::ServeFile;
-        app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
+    match source {
+        Some(StaticSource::Dir(static_dir)) => {
+            use tower_http::services::ServeFile;
+            app = app.route_service(&format!("{public_base_path}/"), ServeFile::new(static_dir.join("index.html")));
+        }
+        #[cfg(feature = "embed-static")]
+        Some(StaticSource::Embedded) => {
+            app = app.route(&format!("{public_base_path}/"), get(serve_embedded_index));
+        }
+        None => {}
     }
     app
 }
@@ -1184,7 +1267,23 @@ async fn main() {
     }
 
     let static_dir = std::env::var_os("DBX_STATIC_DIR").map(std::path::PathBuf::from);
-    app = mount_public_base_path(app, &public_base_path, static_dir.as_deref());
+    // DBX_STATIC_DIR always wins (frontend development); otherwise serve the
+    // assets embedded into the binary when the embed-static feature is enabled.
+    let static_source = {
+        let dir_source = static_dir.as_deref().map(StaticSource::Dir);
+        #[cfg(feature = "embed-static")]
+        {
+            dir_source.or_else(|| {
+                tracing::info!("Serving embedded frontend assets (DBX_STATIC_DIR not set)");
+                Some(StaticSource::Embedded)
+            })
+        }
+        #[cfg(not(feature = "embed-static"))]
+        {
+            dir_source
+        }
+    };
+    app = mount_static_assets(app, &public_base_path, static_source);
 
     // Bind address
     let port: u16 = std::env::var("DBX_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(4224);
@@ -1216,8 +1315,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        mount_public_base_path, normalize_public_base_path, web_agent_dir_from_env, web_body_limit_bytes_from_value,
-        web_compression_predicate, XLSX_CONTENT_TYPE,
+        mount_static_assets, normalize_public_base_path, web_agent_dir_from_env, web_body_limit_bytes_from_value,
+        web_compression_predicate, StaticSource, XLSX_CONTENT_TYPE,
     };
     use crate::routes::table_import;
     use axum::body::Body;
@@ -1350,10 +1449,10 @@ mod tests {
         std::fs::write(static_dir.join("app.js"), "subpath asset").expect("write asset");
 
         for public_base_path in ["/dbx", "/xxxx/rsu"] {
-            let router = mount_public_base_path(
+            let router = mount_static_assets(
                 Router::new().route("/api/ping", get(|| async { "pong" })),
                 public_base_path,
-                Some(&static_dir),
+                Some(StaticSource::Dir(&static_dir)),
             );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
             let address = listener.local_addr().expect("test listener address");
@@ -1416,8 +1515,11 @@ mod tests {
         std::fs::create_dir_all(&static_dir).expect("create static directory");
         std::fs::write(static_dir.join("index.html"), "root index").expect("write index");
         std::fs::write(static_dir.join("app.js"), "root asset").expect("write asset");
-        let router =
-            mount_public_base_path(Router::new().route("/api/ping", get(|| async { "pong" })), "/", Some(&static_dir));
+        let router = mount_static_assets(
+            Router::new().route("/api/ping", get(|| async { "pong" })),
+            "/",
+            Some(StaticSource::Dir(&static_dir)),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind test listener");
         let address = listener.local_addr().expect("test listener address");
         let server = tokio::spawn(async move {

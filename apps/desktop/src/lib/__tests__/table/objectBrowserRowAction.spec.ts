@@ -76,8 +76,8 @@ describe("doubleClickRowAction", () => {
     expect(doubleClickRowAction(row("TABLE", "orders"))).toBe("open-table");
   });
 
-  it("returns open-source for VIEW", () => {
-    expect(doubleClickRowAction(row("VIEW", "v_orders"))).toBe("open-source");
+  it.each(["VIEW", "MATERIALIZED_VIEW"] as const)("returns open-table for %s like the sidebar data nodes", (type) => {
+    expect(doubleClickRowAction(row(type, "v_orders"))).toBe("open-table");
   });
 
   it("returns open-source for PROCEDURE", () => {
@@ -123,9 +123,9 @@ describe("resolveRowClickAction", () => {
       expect(result.isDouble).toBe(false);
     });
 
-    it("double click on VIEW returns open-source", () => {
+    it("double click on VIEW returns open-table", () => {
       const result = resolveRowClickAction(viewRow, 2, "single");
-      expect(result.action).toBe("open-source");
+      expect(result.action).toBe("open-table");
       expect(result.isDouble).toBe(true);
     });
   });
@@ -149,9 +149,9 @@ describe("resolveRowClickAction", () => {
       expect(result.isDouble).toBe(true);
     });
 
-    it("double click on VIEW returns open-source", () => {
+    it("double click on VIEW returns open-table", () => {
       const result = resolveRowClickAction(viewRow, 2, "double");
-      expect(result.action).toBe("open-source");
+      expect(result.action).toBe("open-table");
       expect(result.isDouble).toBe(true);
     });
   });
@@ -165,8 +165,12 @@ describe("shouldDeferSingleClick", () => {
     expect(shouldDeferSingleClick(tableRow, "table-info")).toBe(true);
   });
 
-  it("does not defer VIEW open-source (same single/double action)", () => {
-    expect(shouldDeferSingleClick(viewRow, "open-source")).toBe(false);
+  it("defers VIEW open-source (distinct single/double actions)", () => {
+    expect(shouldDeferSingleClick(viewRow, "open-source")).toBe(true);
+  });
+
+  it("does not defer PROCEDURE open-source (same single/double action)", () => {
+    expect(shouldDeferSingleClick(row("PROCEDURE", "sp_run"), "open-source")).toBe(false);
   });
 
   it("does not defer none action", () => {

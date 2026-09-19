@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { reactive, readonly } from "vue";
 import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
-import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
+import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
 function plugin(permissions: string[] = []): InstalledPlugin {
   return {
@@ -11,6 +11,7 @@ function plugin(permissions: string[] = []): InstalledPlugin {
 }
 
 const workbench: PluginWorkbenchContribution = { type: "workbench", id: "sample.main", label: "Sample" };
+const resultView: PluginResultViewContribution = { type: "result-view", id: "sample.graph", label: "Graph" };
 
 describe("PluginHostBridge", () => {
   it("binds backend calls to the owning plugin identity", async () => {
@@ -164,6 +165,23 @@ describe("PluginHostBridge", () => {
           readAsset: vi.fn(),
         }),
     ).toThrow("exceeds");
+  });
+
+  it("sends the opened contribution id for a result-view surface in the init message", () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    // The plugin has a single UI entrypoint, so the contribution id is the only
+    // signal telling its UI which declared surface was opened.
+    const bridge = new PluginHostBridge(plugin(), resultView, { connectionId: "connection", sql: "SELECT 1" }, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+
+    bridge.sendInit();
+
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "init", pluginId: "sample", contributionId: "sample.graph", context: { connectionId: "connection", sql: "SELECT 1" } });
   });
 
   it("rejects privileged host calls without manifest permission", async () => {

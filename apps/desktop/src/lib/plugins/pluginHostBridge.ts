@@ -1,4 +1,4 @@
-import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginWorkbenchContribution } from "@/types/database";
+import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
@@ -81,7 +81,7 @@ export class PluginHostBridge {
 
   constructor(
     private readonly plugin: InstalledPlugin,
-    private readonly workbench: PluginWorkbenchContribution,
+    private readonly contribution: PluginUiContribution,
     context: PluginWorkbenchContext,
     private readonly targetWindow: () => Window | null,
     private readonly api: PluginHostBridgeApi,
@@ -161,7 +161,7 @@ export class PluginHostBridge {
       version: BRIDGE_VERSION,
       type: "init",
       pluginId: this.plugin.manifest.id,
-      contributionId: this.workbench.id,
+      contributionId: this.contribution.id,
       locale: this.locale,
       theme: this.theme ? clonePluginData(this.theme) : undefined,
       permissions: [...(this.plugin.manifest.permissions || [])],
@@ -684,6 +684,6 @@ function enforcePayloadLimit(value: unknown): void {
   if (bytes > MAX_BRIDGE_PAYLOAD_BYTES) throw new Error("Plugin bridge request is too large");
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

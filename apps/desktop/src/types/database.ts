@@ -472,6 +472,16 @@ export interface PluginResultViewContribution {
   icon?: string;
 }
 
+/**
+ * Contribution types the host renders through the plugin's own UI entrypoint in
+ * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
+ * or `host.openWorkbench`; a `result-view` is launched from the query-result
+ * toolbar with the current result snapshot as context. Both declare display
+ * metadata only — the opened contribution id is what tells the plugin UI which
+ * of its declared surfaces to render.
+ */
+export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
+
 export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution;
 
 export interface PluginEngines {

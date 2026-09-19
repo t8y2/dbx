@@ -1065,8 +1065,10 @@ function onRefreshObjectBrowser(event: Event) {
 function openPluginResultView(pluginId: string, contributionId: string, label: string) {
   const result = props.activeTab.result;
   if (!result) return;
-  // Plugin workbenches receive a bounded snapshot; plugins re-query through
-  // their backend when they need the full or streamed result set.
+  // The tab carries the result-view contribution id, not a workbench id: the
+  // plugin UI is told which declared surface the user picked, and it receives a
+  // bounded snapshot — plugins re-query through their backend when they need the
+  // full or streamed result set.
   const cappedRows = result.rows.slice(0, 500);
   queryStore.openPluginWorkbench(pluginId, contributionId, {
     title: label,

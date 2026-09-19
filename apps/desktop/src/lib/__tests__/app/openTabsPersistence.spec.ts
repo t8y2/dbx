@@ -224,6 +224,38 @@ describe("openTabsPersistence originalSql round-trip", () => {
     });
   });
 
+  it("preserves a result-view tab's entry contribution id and result snapshot", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        id: "plugin-result-view",
+        title: "Chart",
+        connectionId: "plugin-connection",
+        database: "dbx_test",
+        mode: "plugin-workbench",
+        pluginWorkbench: {
+          pluginId: "dbx.example.graph",
+          contributionId: "dbx.example.graph.chart",
+          context: {
+            connectionId: "plugin-connection",
+            database: "dbx_test",
+            sql: "SELECT 1",
+            result: { columns: ["id"], rows: [[1]], truncated: false },
+          },
+        },
+      }),
+    ]);
+
+    // `contributionId` names the entry contribution, not a workbench: a restored
+    // result-view tab must keep its own id so the renderer can resolve it again.
+    expect(restored.pluginWorkbench?.contributionId).toBe("dbx.example.graph.chart");
+    expect(restored.pluginWorkbench?.context).toEqual({
+      connectionId: "plugin-connection",
+      database: "dbx_test",
+      sql: "SELECT 1",
+      result: { columns: ["id"], rows: [[1]], truncated: false },
+    });
+  });
+
   it("preserves host-owned plugin filesystem navigation", () => {
     const [restored] = roundTrip([
       queryTab({

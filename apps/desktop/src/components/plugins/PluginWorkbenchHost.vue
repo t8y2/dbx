@@ -6,7 +6,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type PluginSaveFileRequest, type PluginSaveFileResult, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
-import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
+import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -15,7 +15,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 const props = withDefaults(
   defineProps<{
     plugin: InstalledPlugin;
-    contribution: PluginWorkbenchContribution;
+    contribution: PluginUiContribution;
     context?: PluginWorkbenchContext;
   }>(),
   { context: () => ({}) },

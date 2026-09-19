@@ -5578,6 +5578,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Bal həddi",
     results: "Nəticələr",
     exportResults: "Nəticələri ixrac et",
+    exportFiltered: "Süzülmüş nəticələri ixrac et",
+    exportAll: "Bütün sənədləri ixrac et",
+    exportLimitReached: "Yalnız {count}/{total} nəticə əlçatandır; Meilisearch limiti tam ixraca mane olur.",
+    importResults: "JSON-u idxal et",
+    importSuccess: "{count} sənəd idxal edildi",
+    importFailed: "İdxal uğursuz oldu: {message}",
+    importInvalidJson: "JSON obyekt və ya obyektlər massivi olmalıdır",
     exportSearchUnsupported: "Meilisearch axtarış səhifələməsini məhdudlaşdırdığı üçün mətn, hibrid və ya bal həddinə görə axtarışlarda tam ixrac mümkün deyil. Süzgəcdən keçən bütün sənədləri ixrac etmək üçün həmin seçimləri təmizləyin.",
   },
   dynamodb: {

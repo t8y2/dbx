@@ -5461,6 +5461,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Umbral de puntuación",
     results: "Resultados",
     exportResults: "Exportar resultados",
+    exportFiltered: "Exportar resultados filtrados",
+    exportAll: "Exportar todos los documentos",
+    exportLimitReached: "Solo {count} de {total} resultados están disponibles; el límite de Meilisearch impide la exportación completa.",
+    importResults: "Importar JSON",
+    importSuccess: "Se importaron {count} documentos",
+    importFailed: "Error de importación: {message}",
+    importInvalidJson: "El JSON debe contener un objeto o una matriz de objetos",
     exportSearchUnsupported: "Meilisearch limita la paginación de búsquedas de texto, híbridas o con umbral de puntuación. Borre esas opciones para exportar todos los documentos filtrados.",
   },
   dynamodb: {

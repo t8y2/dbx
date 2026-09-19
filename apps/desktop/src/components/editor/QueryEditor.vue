@@ -182,6 +182,7 @@ import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { startsQueryEditorRectangularSelection, startsQueryEditorSelectionDrag, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
+import { queryEditorClipboardPasteChange } from "@/lib/editor/queryEditorClipboardPaste";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
@@ -1910,8 +1911,7 @@ async function pasteClipboardSqlFromContextMenu() {
     const selection = currentView.state.selection.main;
     // 粘贴：替换选中内容或在光标处插入
     currentView.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: text },
-      selection: { anchor: selection.from + text.length, head: selection.from + text.length },
+      ...queryEditorClipboardPasteChange(text, selection.from, selection.to),
       scrollIntoView: true,
       userEvent: "input.paste",
     });

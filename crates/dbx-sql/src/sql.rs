@@ -954,6 +954,13 @@ fn split_sql_statement_ranges(sql: &str) -> Vec<SqlStatementRange> {
     split_sql_statement_ranges_with_options(sql, SqlParsingOptions::default())
 }
 
+/// Statement ranges that keep their byte offsets into `sql`, so callers can rewrite
+/// individual statements in place (see the Oracle administrative DDL tolerance in
+/// `sql_analysis`).
+pub(crate) fn statement_ranges_for_database(sql: &str, db_type: DatabaseType) -> Vec<SqlStatementRange> {
+    split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(db_type))
+}
+
 fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions) -> Vec<SqlStatementRange> {
     let mut ranges = Vec::new();
     let mut start = 0;

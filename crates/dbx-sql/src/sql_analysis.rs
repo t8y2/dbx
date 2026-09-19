@@ -16,7 +16,10 @@ use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Span, Token, TokenWithSpan, Tokenizer};
 
-use crate::sql::{starts_with_duckdb_result_sql_keyword, starts_with_executable_sql_keyword};
+use crate::models::connection::DatabaseType;
+use crate::sql::{
+    starts_with_duckdb_result_sql_keyword, starts_with_executable_sql_keyword, statement_ranges_for_database,
+};
 
 static CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(ANY|ALL|SEMI|ANTI|ASOF)\s+(LEFT|RIGHT|FULL|INNER|CROSS)(\s+OUTER)?\s+JOIN\b")
@@ -24,6 +27,17 @@ static CLICKHOUSE_STRICTNESS_FIRST_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static POSTGRES_DEFAULT_PRIVILEGES_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*ALTER\s+DEFAULT\s+PRIVILEGES\b").expect("valid PostgreSQL default privileges regex")
+});
+
+/// Oracle administrative DDL that sqlparser has no grammar for: Oracle and the
+/// Oracle-compatible engines (OceanBase Oracle mode, Dameng) accept these statements, but
+/// the analyzer routes them through sqlparser's generic dialect, which reports a bogus
+/// `sql parser error` on statements the server happily runs (issue #9104).
+static ORACLE_ADMIN_DDL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?is)^\s*(?:(?:create|alter|drop)\s+(?:or\s+replace\s+)?(?:public\s+)?(?:user|tablespace|profile|directory|synonym|role|session|system)\b|(?:grant|revoke)\b)",
+    )
+    .expect("valid Oracle administrative DDL regex")
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +137,10 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         {
             return Ok(SqlReferenceAnalysis { tables: vec![], columns: vec![], scopes: vec![] });
         }
-        Err(error) => return Err(error.to_string()),
+        Err(error) => match oracle_admin_ddl_gap_statements(dialect, &parser_sql) {
+            Some(statements) => statements,
+            None => return Err(error.to_string()),
+        },
     };
 
     let mut analyzer = Analyzer {
@@ -791,6 +808,53 @@ fn unquoted_token_keyword(token: &TokenWithSpan) -> Option<Keyword> {
 fn starts_with_duckdb_parser_gap_sql(sql: &str) -> bool {
     starts_with_duckdb_result_sql_keyword(sql)
         && starts_with_executable_sql_keyword(sql, &["FROM", "SUMMARIZE", "SUMMARISE", "PIVOT", "UNPIVOT"])
+}
+
+/// Oracle-compatible dialects whose statements the analyzer parses with sqlparser's
+/// generic dialect. Oracle connections report the PL/SQL formatter id (`oracle`) as
+/// their analysis dialect, and Dameng follows the same Oracle-compatible grammar.
+fn is_oracle_compatible_analysis_dialect(dialect: Option<&str>) -> bool {
+    let Some(name) = dialect else {
+        return false;
+    };
+    let name = name.trim().to_ascii_lowercase();
+    matches!(name.as_str(), "oracle" | "dameng")
+}
+
+/// Re-parses `sql` with every Oracle administrative DDL statement blanked out, so the
+/// statements around it keep their diagnostics instead of the whole script failing on a
+/// false syntax error. Returns `None` when nothing matched or when the rest of the script
+/// still does not parse, in which case the caller keeps the original parser error.
+fn oracle_admin_ddl_gap_statements(dialect: Option<&str>, sql: &str) -> Option<Vec<Statement>> {
+    if !is_oracle_compatible_analysis_dialect(dialect) {
+        return None;
+    }
+    let mut masked: Option<String> = None;
+    for range in statement_ranges_for_database(sql, DatabaseType::Oracle) {
+        if !ORACLE_ADMIN_DDL_RE.is_match(&range.text) {
+            continue;
+        }
+        let target = masked.get_or_insert_with(|| sql.to_string());
+        let blanked = blank_out_statement_text(target.get(range.start..range.end)?);
+        target.replace_range(range.start..range.end, &blanked);
+    }
+    Parser::parse_sql(&GenericDialect {}, masked.as_deref()?).ok()
+}
+
+/// Replaces every character of a statement with a space while keeping line breaks and the
+/// original byte length, so token positions of the statements that follow stay exact.
+fn blank_out_statement_text(statement: &str) -> String {
+    let mut blanked = String::with_capacity(statement.len());
+    for character in statement.chars() {
+        if character == '\n' || character == '\r' {
+            blanked.push(character);
+        } else {
+            for _ in 0..character.len_utf8() {
+                blanked.push(' ');
+            }
+        }
+    }
+    blanked
 }
 
 fn starts_with_postgres_parser_gap_sql(sql: &str) -> bool {

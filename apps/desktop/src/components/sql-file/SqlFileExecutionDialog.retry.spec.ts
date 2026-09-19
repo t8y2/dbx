@@ -415,4 +415,40 @@ describe("SqlFileExecutionDialog selected-table restore", () => {
     await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
     expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("selectedTables");
   });
+
+  it("loads previews from a pasted file path on Enter", async () => {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    mocks.previewSqlFile.mockClear();
+
+    const input = root.querySelector("input:not([type=file])") as HTMLInputElement;
+    input.value = ' "/tmp/pasted.sql" ';
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/pasted.sql"));
+    expect(mocks.previewSqlFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the typed path when the pasted file cannot be loaded", async () => {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    mocks.previewSqlFile.mockReset();
+    mocks.previewSqlFile.mockRejectedValueOnce(new Error("no such file"));
+
+    const input = root.querySelector("input:not([type=file])") as HTMLInputElement;
+    input.value = "/tmp/missing.sql";
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new Event("blur"));
+
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("no such file", 5000));
+    await nextTick();
+    expect(input.value).toBe("/tmp/missing.sql");
+  });
 });

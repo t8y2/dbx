@@ -243,6 +243,7 @@ struct TransactionOwnerInner {
     status: Mutex<TransactionStatus>,
     closed: AtomicBool,
     closed_notify: tokio::sync::Notify,
+    closed_token: CancellationToken,
     cleanup_timeout: Duration,
 }
 
@@ -258,6 +259,22 @@ impl fmt::Debug for TransactionOwner {
 
 impl TransactionOwner {
     pub fn spawn(io: impl TransactionIo, config: TransactionOwnerConfig) -> Arc<Self> {
+        Self::spawn_inner(io, config, None)
+    }
+
+    pub fn spawn_with_resource_permit(
+        io: impl TransactionIo,
+        config: TransactionOwnerConfig,
+        resource_permit: OwnedSemaphorePermit,
+    ) -> Arc<Self> {
+        Self::spawn_inner(io, config, Some(resource_permit))
+    }
+
+    fn spawn_inner(
+        io: impl TransactionIo,
+        config: TransactionOwnerConfig,
+        resource_permit: Option<OwnedSemaphorePermit>,
+    ) -> Arc<Self> {
         let (sender, receiver) = mpsc::channel(1);
         let inner = Arc::new(TransactionOwnerInner {
             sender,
@@ -266,9 +283,10 @@ impl TransactionOwner {
             status: Mutex::new(TransactionStatus::default()),
             closed: AtomicBool::new(false),
             closed_notify: tokio::sync::Notify::new(),
+            closed_token: CancellationToken::new(),
             cleanup_timeout: config.cleanup_timeout,
         });
-        tokio::spawn(run_owner(Box::new(io), receiver, inner.clone(), config));
+        tokio::spawn(run_owner(Box::new(io), receiver, inner.clone(), config, resource_permit));
         Arc::new(Self { inner })
     }
 
@@ -320,6 +338,10 @@ impl TransactionOwner {
 
     pub fn invalidate(&self) {
         self.inner.cancellation.cancel();
+    }
+
+    pub fn closed_token(&self) -> CancellationToken {
+        self.inner.closed_token.clone()
     }
 
     fn terminal_failure(&self, code: &'static str, message: impl Into<String>) -> TransactionFailure {
@@ -438,6 +460,7 @@ async fn run_owner(
     mut receiver: mpsc::Receiver<Command>,
     inner: Arc<TransactionOwnerInner>,
     config: TransactionOwnerConfig,
+    resource_permit: Option<OwnedSemaphorePermit>,
 ) {
     loop {
         let command = tokio::select! {
@@ -467,6 +490,8 @@ async fn run_owner(
     inner.closed.store(true, Ordering::Release);
     inner.operation_gate.close();
     inner.closed_notify.notify_waiters();
+    inner.closed_token.cancel();
+    drop(resource_permit);
 }
 
 async fn handle_command(
@@ -492,6 +517,7 @@ async fn handle_command(
     }
 
     let is_begin = matches!(&command.operation, Operation::Begin);
+    let is_commit = matches!(&command.operation, Operation::Commit);
     let (sql, max_rows, success_outcome) = match command.operation {
         Operation::Begin => ("START TRANSACTION".to_string(), None, None),
         Operation::Query { sql, max_rows } => (sql, max_rows, None),
@@ -546,6 +572,12 @@ async fn handle_command(
             false
         }
         Ok(Err(TransactionIoError::Server { code, message })) => {
+            if is_commit {
+                set_unknown(inner);
+                let status = *inner.status.lock().expect("transaction status lock");
+                let _ = command.response.send(Err(failure("TRANSACTION_STATE_UNKNOWN", message, Some(code), status)));
+                return true;
+            }
             let probe = tokio::select! {
                 _ = inner.cancellation.cancelled() => {
                     set_unknown(inner);
@@ -641,7 +673,7 @@ mod tests {
 
     use async_trait::async_trait;
     use dbx_core::db::QueryResult;
-    use tokio::sync::Notify;
+    use tokio::sync::{Notify, Semaphore};
 
     use super::{
         TransactionIo, TransactionIoError, TransactionIoSuccess, TransactionOutcome, TransactionOwner,
@@ -663,6 +695,7 @@ mod tests {
         active_calls: Arc<AtomicUsize>,
         max_active_calls: Arc<AtomicUsize>,
         disconnects: Arc<AtomicUsize>,
+        ping_calls: Arc<AtomicUsize>,
         executed_sql: Arc<Mutex<Vec<String>>>,
     }
 
@@ -670,6 +703,7 @@ mod tests {
         active_calls: Arc<AtomicUsize>,
         max_active_calls: Arc<AtomicUsize>,
         disconnects: Arc<AtomicUsize>,
+        ping_calls: Arc<AtomicUsize>,
         executed_sql: Arc<Mutex<Vec<String>>>,
     }
 
@@ -678,6 +712,7 @@ mod tests {
             let active_calls = Arc::new(AtomicUsize::new(0));
             let max_active_calls = Arc::new(AtomicUsize::new(0));
             let disconnects = Arc::new(AtomicUsize::new(0));
+            let ping_calls = Arc::new(AtomicUsize::new(0));
             let executed_sql = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
@@ -685,9 +720,10 @@ mod tests {
                     active_calls: active_calls.clone(),
                     max_active_calls: max_active_calls.clone(),
                     disconnects: disconnects.clone(),
+                    ping_calls: ping_calls.clone(),
                     executed_sql: executed_sql.clone(),
                 },
-                IoProbe { active_calls, max_active_calls, disconnects, executed_sql },
+                IoProbe { active_calls, max_active_calls, disconnects, ping_calls, executed_sql },
             )
         }
 
@@ -725,6 +761,7 @@ mod tests {
         }
 
         async fn ping_in_transaction(&mut self) -> Result<bool, TransactionIoError> {
+            self.ping_calls.fetch_add(1, Ordering::SeqCst);
             match self.steps.pop_front().expect("scripted ping step") {
                 Step::Ping { in_transaction } => Ok(in_transaction),
                 Step::WaitPing { entered, release, in_transaction } => {
@@ -835,6 +872,30 @@ mod tests {
         assert_eq!(probe.disconnects.load(Ordering::SeqCst), 1);
         let later = owner.acquire().await.unwrap_err();
         assert_eq!(later.state, TransactionState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn commit_server_error_is_terminal_unknown_without_status_probe() {
+        let (io, probe) = ScriptedIo::new([
+            Step::Success { in_transaction: true },
+            Step::ServerError { code: 1180, message: "Got error during COMMIT" },
+            Step::Ping { in_transaction: false },
+        ]);
+        let owner = TransactionOwner::spawn(io, config());
+        owner.acquire().await.unwrap().begin().await.unwrap();
+
+        let failure = owner.acquire().await.unwrap().commit().await.unwrap_err();
+
+        assert_eq!(failure.code, "TRANSACTION_STATE_UNKNOWN");
+        assert_eq!(failure.mysql_code, Some(1180));
+        assert_eq!(failure.state, TransactionState::Unknown);
+        assert_eq!(failure.outcome, Some(TransactionOutcome::Unknown));
+        assert_eq!(probe.ping_calls.load(Ordering::SeqCst), 0);
+
+        let close = owner.close().await.unwrap();
+        assert_eq!(close.state, TransactionState::Unknown);
+        assert_eq!(close.outcome, Some(TransactionOutcome::Unknown));
+        assert_eq!(probe.ping_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -981,6 +1042,30 @@ mod tests {
         assert_eq!(status.state, TransactionState::Unknown);
         assert_eq!(probe.disconnects.load(Ordering::SeqCst), 1);
         assert!(owner.inner.closed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn resource_permit_is_held_until_pending_owner_cleanup_finishes() {
+        let rollback_release = Arc::new(Notify::new());
+        let budget = Arc::new(Semaphore::new(1));
+        let permit = budget.clone().acquire_owned().await.unwrap();
+        let (io, probe) =
+            ScriptedIo::new([Step::Success { in_transaction: true }, Step::Wait(rollback_release.clone())]);
+        let owner = TransactionOwner::spawn_with_resource_permit(io, config(), permit);
+        owner.acquire().await.unwrap().begin().await.unwrap();
+
+        let closing = {
+            let owner = owner.clone();
+            tokio::spawn(async move { owner.close().await })
+        };
+        while probe.active_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(budget.clone().try_acquire_owned().is_err());
+
+        rollback_release.notify_one();
+        closing.await.unwrap().unwrap();
+        assert!(budget.clone().try_acquire_owned().is_ok());
     }
 
     #[tokio::test]

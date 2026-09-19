@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
-    connection::{connection_configs_pool_equivalent, AppState},
+    connection::{connection_configs_pool_equivalent, AppState, ConnectionLifecycleSnapshot},
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     history::HistoryEntry,
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
@@ -409,6 +409,7 @@ pub struct LocalBackend {
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
     transaction_owners: Arc<TransactionOwnerRegistry>,
+    transaction_owner_config: TransactionOwnerConfig,
 }
 
 #[derive(Debug, Default)]
@@ -621,10 +622,51 @@ impl WebBackend {
 }
 
 impl LocalBackend {
+    fn spawn_connection_lifecycle_watcher(
+        &self,
+        lifecycle: ConnectionLifecycleSnapshot,
+        owner: &Arc<TransactionOwner>,
+    ) -> tokio::task::JoinHandle<()> {
+        let cancellation = lifecycle.cancellation().clone();
+        let owner_closed = owner.closed_token();
+        let watched_owner = Arc::downgrade(owner);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    if let Some(owner) = watched_owner.upgrade() {
+                        owner.invalidate();
+                    }
+                }
+                _ = owner_closed.cancelled() => {}
+            }
+        })
+    }
+
+    async fn finalize_transaction_owner(
+        &self,
+        connection_id: &str,
+        lifecycle: ConnectionLifecycleSnapshot,
+        owner: Arc<TransactionOwner>,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        self.spawn_connection_lifecycle_watcher(lifecycle.clone(), &owner);
+        self.transaction_owners.register(connection_id, &owner);
+        if !self.state.connection_lifecycle_is_current(connection_id, &lifecycle) {
+            owner.invalidate();
+            let _ = owner.close().await;
+            return Err("The connection was removed while its fixed transaction session was opening.".to_string());
+        }
+        Ok(owner)
+    }
+
     /// Reuse an already initialized DBX application state, for hosts that
     /// embed MCP alongside their own HTTP server.
     pub fn from_app_state(state: Arc<AppState>, data_dir: PathBuf) -> Self {
-        Self { state, data_dir, transaction_owners: Arc::new(TransactionOwnerRegistry::default()) }
+        Self {
+            state,
+            data_dir,
+            transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
+            transaction_owner_config: TransactionOwnerConfig::default(),
+        }
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
@@ -649,7 +691,18 @@ impl LocalBackend {
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
-        Ok(Self { state, data_dir, transaction_owners: Arc::new(TransactionOwnerRegistry::default()) })
+        Ok(Self {
+            state,
+            data_dir,
+            transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
+            transaction_owner_config: TransactionOwnerConfig::default(),
+        })
+    }
+
+    #[cfg(feature = "transaction-test-hooks")]
+    pub fn with_transaction_test_config(mut self, config: TransactionOwnerConfig) -> Self {
+        self.transaction_owner_config = config;
+        self
     }
 
     pub fn state(&self) -> &Arc<AppState> {
@@ -922,6 +975,12 @@ impl DbxBackend for LocalBackend {
             return Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection."
                 .to_string());
         }
+        let lifecycle = self.state.connection_lifecycle_snapshot(&connection.id);
+        let resource_permit =
+            self.state.shared_resource_budget("dbx-mcp-transaction-owners", 32)?.try_acquire_owned().map_err(|_| {
+                "Too many open transaction-enabled MCP sessions (max 32). Close an existing transaction session first."
+                    .to_string()
+            })?;
         let pool_database = (!database.trim().is_empty()).then_some(database);
         let pool_key =
             self.state.get_or_create_pool_for_session(&connection.id, pool_database, Some(client_session_id)).await?;
@@ -941,7 +1000,9 @@ impl DbxBackend for LocalBackend {
                 return Err(format!("Failed to acquire the fixed MySQL session connection: {error}"));
             }
         };
-        let owner = TransactionOwner::spawn(
+        let mut owner_config = self.transaction_owner_config;
+        owner_config.operation_timeout = std::time::Duration::from_secs(connection.effective_query_timeout_secs());
+        let owner = TransactionOwner::spawn_with_resource_permit(
             MysqlTransactionIo::new(
                 conn,
                 self.state.clone(),
@@ -949,13 +1010,10 @@ impl DbxBackend for LocalBackend {
                 database.to_string(),
                 client_session_id.to_string(),
             ),
-            TransactionOwnerConfig {
-                operation_timeout: std::time::Duration::from_secs(connection.effective_query_timeout_secs()),
-                ..TransactionOwnerConfig::default()
-            },
+            owner_config,
+            resource_permit,
         );
-        self.transaction_owners.register(&connection.id, &owner);
-        Ok(owner)
+        self.finalize_transaction_owner(&connection.id, lifecycle, owner).await
     }
 
     async fn execute_query(
@@ -2548,7 +2606,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         time::Duration,
     };
 
@@ -3940,6 +4001,91 @@ mod tests {
         let backend = LocalBackend::open(&database_path).await.unwrap();
 
         assert_eq!(backend.state().agent_manager.base_dir(), &agent_dir);
+    }
+
+    struct LifecycleTestIo {
+        disconnects: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::transaction::TransactionIo for LifecycleTestIo {
+        async fn execute(
+            &mut self,
+            _sql: &str,
+            _max_rows: Option<usize>,
+        ) -> Result<crate::transaction::TransactionIoSuccess, crate::transaction::TransactionIoError> {
+            panic!("lifecycle test owner must stay idle")
+        }
+
+        async fn ping_in_transaction(&mut self) -> Result<bool, crate::transaction::TransactionIoError> {
+            panic!("lifecycle test owner must not probe")
+        }
+
+        async fn disconnect(&mut self) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_transaction_owner_rejects_stale_connection_lifecycle_before_registration() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        state.invalidate_connection_lifecycle("conn");
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: disconnects.clone() },
+            TransactionOwnerConfig::default(),
+        );
+
+        let error = backend.finalize_transaction_owner("conn", lifecycle, owner.clone()).await.unwrap_err();
+
+        assert!(error.contains("removed"), "{error}");
+        owner.wait_closed().await;
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_app_state_removal_cancels_a_registered_local_transaction_owner() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: disconnects.clone() },
+            TransactionOwnerConfig::default(),
+        );
+        backend.finalize_transaction_owner("conn", lifecycle, owner.clone()).await.unwrap();
+
+        state.remove_connection_pools_detached("conn").await;
+        owner.wait_closed().await;
+
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn connection_lifecycle_watcher_exits_after_normal_owner_disposal() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: Arc::new(AtomicUsize::new(0)) },
+            TransactionOwnerConfig::default(),
+        );
+        let watcher = backend.spawn_connection_lifecycle_watcher(lifecycle, &owner);
+
+        owner.close().await.unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), watcher)
+            .await
+            .expect("lifecycle watcher must not outlive a normally disposed owner")
+            .unwrap();
     }
 
     #[test]

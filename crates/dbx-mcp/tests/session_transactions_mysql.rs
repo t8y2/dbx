@@ -35,6 +35,9 @@ use rmcp::{
 };
 use serde_json::{json, Map, Value};
 
+mod support;
+use support::mysql_wire_proxy::MysqlWireProxy;
+
 fn required_env(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|_| format!("set {name} through the private live-test environment"))
 }
@@ -121,6 +124,7 @@ async fn run_contention_trace(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     database: &str,
     table: &str,
+    wire_proxy: Option<&MysqlWireProxy>,
 ) -> Result<(), String> {
     let peer = client.peer();
     let connection = "mcp-session-transaction-live";
@@ -202,6 +206,9 @@ async fn run_contention_trace(
     let pending_database = database.to_string();
     let pending_table = table.to_string();
     let pending_session = session_b.clone();
+    if let Some(proxy) = wire_proxy {
+        proxy.set_contention_marker("VALUES (1, 'loser')").await;
+    }
     let mut b_insert = tokio::spawn(async move {
         pending_peer
             .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments(json!({
@@ -214,6 +221,11 @@ async fn run_contention_trace(
     });
     if tokio::time::timeout(Duration::from_millis(300), &mut b_insert).await.is_ok() {
         return Err("B.insert completed before A.commit; contention was not established".to_string());
+    }
+    if let Some(proxy) = wire_proxy {
+        if !proxy.contention_forwarded_and_pending() {
+            return Err("wire proxy did not prove that B.insert was forwarded with no server response".to_string());
+        }
     }
 
     let commit_a = call_tool!(peer, "dbx_commit_transaction", json!({"session_id": session_a}))?;
@@ -420,6 +432,338 @@ async fn run_native_cleanup_traces(
     Ok(())
 }
 
+async fn run_fault_proxy_traces(
+    candidate: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    fixture: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    database: &str,
+    table: &str,
+    proxy: &MysqlWireProxy,
+) -> Result<(), String> {
+    let connection = "mcp-session-transaction-live";
+    let open = call_tool!(
+        candidate.peer(),
+        "dbx_open_session",
+        json!({"connection_id": connection, "database": database, "enable_transactions": true})
+    )?;
+    expect_success(&open, "open lost-commit-ack session")?;
+    let session = structured(&open)?["session_id"]
+        .as_str()
+        .ok_or_else(|| "lost-commit-ack open omitted session_id".to_string())?
+        .to_string();
+    expect_success(
+        &call_tool!(candidate.peer(), "dbx_begin_transaction", json!({"session_id": session}))?,
+        "begin lost-commit-ack transaction",
+    )?;
+    expect_success(
+        &call_tool!(
+            candidate.peer(),
+            "dbx_execute_query",
+            json!({
+                "connection_id": connection,
+                "database": database,
+                "session_id": session,
+                "sql": format!("INSERT INTO {table}(id, payload) VALUES (10, 'commit_ack_dropped')")
+            })
+        )?,
+        "insert before lost COMMIT ACK",
+    )?;
+    proxy.arm_drop_commit_ack().await;
+    let commit = call_tool!(candidate.peer(), "dbx_commit_transaction", json!({"session_id": session}))?;
+    if commit.is_error != Some(true) {
+        return Err("COMMIT with a dropped server ACK unexpectedly reported success".to_string());
+    }
+    expect_state(&commit, "unknown")?;
+    if !proxy.commit_forwarded() || !proxy.commit_ok_observed() || !proxy.commit_ack_dropped() {
+        return Err("wire proxy did not prove forwarded COMMIT + observed server OK + dropped ACK".to_string());
+    }
+    let committed = call_tool!(
+        fixture.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": "mcp-session-transaction-fixture",
+            "database": database,
+            "sql": format!("SELECT payload FROM {table} WHERE id = 10")
+        })
+    )?;
+    expect_success(&committed, "verify commit after dropped ACK")?;
+    if result_cell(&committed, 0, 0)?.as_str() != Some("commit_ack_dropped") {
+        return Err("fixture channel did not observe the COMMIT whose ACK was dropped".to_string());
+    }
+    let close = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
+    expect_success(&close, "close unknown lost-commit-ack session")?;
+    expect_state(&close, "unknown")?;
+
+    let open = call_tool!(
+        candidate.peer(),
+        "dbx_open_session",
+        json!({"connection_id": connection, "database": database, "enable_transactions": true})
+    )?;
+    expect_success(&open, "open non-COMMIT transport-loss session")?;
+    let session = structured(&open)?["session_id"]
+        .as_str()
+        .ok_or_else(|| "non-COMMIT transport-loss open omitted session_id".to_string())?
+        .to_string();
+    expect_success(
+        &call_tool!(candidate.peer(), "dbx_begin_transaction", json!({"session_id": session}))?,
+        "begin non-COMMIT transport-loss transaction",
+    )?;
+    proxy.arm_drop_query_response("SELECT SLEEP(2)").await;
+    let lost = call_tool!(
+        candidate.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": connection,
+            "database": database,
+            "session_id": session,
+            "sql": "SELECT SLEEP(2)"
+        })
+    )?;
+    if lost.is_error != Some(true) {
+        return Err("non-COMMIT transport loss unexpectedly reported success".to_string());
+    }
+    expect_state(&lost, "unknown")?;
+    if !proxy.dropped_query_forwarded() {
+        return Err("wire proxy did not prove the non-COMMIT command was forwarded".to_string());
+    }
+    let close = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
+    expect_success(&close, "close unknown non-COMMIT transport-loss session")?;
+    expect_state(&close, "unknown")?;
+    Ok(())
+}
+
+async fn run_permission_refusal_trace(
+    candidate: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    fixture: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    policy_storage: &Storage,
+    database: &str,
+    table: &str,
+) -> Result<(), String> {
+    let writable_policy = || McpGlobalPolicy {
+        read_only: false,
+        allow_dangerous_sql: true,
+        allowed_connection_ids: Some(vec![
+            "mcp-session-transaction-live".to_string(),
+            "mcp-session-transaction-fixture".to_string(),
+        ]),
+        ..Default::default()
+    };
+    let seed = call_tool!(
+        fixture.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": "mcp-session-transaction-fixture",
+            "database": database,
+            "sql": format!("INSERT INTO {table}(id, payload) VALUES (30, 'policy_seed')")
+        })
+    )?;
+    expect_success(&seed, "seed permission-refusal row")?;
+    let open = call_tool!(
+        candidate.peer(),
+        "dbx_open_session",
+        json!({
+            "connection_id": "mcp-session-transaction-live",
+            "database": database,
+            "enable_transactions": true
+        })
+    )?;
+    expect_success(&open, "open permission-refusal transaction")?;
+    let session = structured(&open)?["session_id"]
+        .as_str()
+        .ok_or_else(|| "permission-refusal open omitted session_id".to_string())?
+        .to_string();
+    expect_success(
+        &call_tool!(candidate.peer(), "dbx_begin_transaction", json!({"session_id": session}))?,
+        "begin permission-refusal transaction",
+    )?;
+
+    let mut read_only_policy = writable_policy();
+    read_only_policy.read_only = true;
+    policy_storage
+        .save_mcp_global_policy(&read_only_policy)
+        .await
+        .map_err(|error| format!("set isolated read-only policy: {error}"))?;
+    let read_only_check = async {
+        let rejected = call_tool!(
+            candidate.peer(),
+            "dbx_execute_query",
+            json!({
+                "connection_id": "mcp-session-transaction-live",
+                "database": database,
+                "session_id": session,
+                "sql": format!("UPDATE {table} SET payload = 'read_only_bypass' WHERE id = 30")
+            })
+        )?;
+        if rejected.is_error != Some(true) {
+            return Err("isolated read-only policy unexpectedly allowed a transaction write".to_string());
+        }
+        let state = call_tool!(
+            candidate.peer(),
+            "dbx_execute_query",
+            json!({
+                "connection_id": "mcp-session-transaction-live",
+                "database": database,
+                "session_id": session,
+                "sql": format!("SELECT payload FROM {table} WHERE id = 30")
+            })
+        )?;
+        expect_success(&state, "read transaction state after read-only refusal")?;
+        expect_state(&state, "active")?;
+        Result::<(), String>::Ok(())
+    }
+    .await;
+    policy_storage
+        .save_mcp_global_policy(&writable_policy())
+        .await
+        .map_err(|error| format!("restore isolated writable policy: {error}"))?;
+    read_only_check?;
+
+    let previous_confirmation = std::env::var_os("DBX_MCP_CONFIRMED_WRITE_SQL");
+    unsafe {
+        std::env::set_var(
+            "DBX_MCP_CONFIRMED_WRITE_SQL",
+            format!("UPDATE {table} SET payload = 'only_exact_sql' WHERE id = 30"),
+        );
+    }
+    let confirmation_check = async {
+        let rejected = call_tool!(
+            candidate.peer(),
+            "dbx_execute_query",
+            json!({
+                "connection_id": "mcp-session-transaction-live",
+                "database": database,
+                "session_id": session,
+                "sql": format!("UPDATE {table} SET payload = 'different_sql' WHERE id = 30")
+            })
+        )?;
+        if rejected.is_error != Some(true) {
+            return Err("mismatched confirmed SQL unexpectedly executed in the transaction".to_string());
+        }
+        let state = call_tool!(
+            candidate.peer(),
+            "dbx_execute_query",
+            json!({
+                "connection_id": "mcp-session-transaction-live",
+                "database": database,
+                "session_id": session,
+                "sql": format!("SELECT payload FROM {table} WHERE id = 30")
+            })
+        )?;
+        expect_success(&state, "read transaction state after confirmed-SQL refusal")?;
+        expect_state(&state, "active")?;
+        Result::<(), String>::Ok(())
+    }
+    .await;
+    unsafe {
+        match previous_confirmation {
+            Some(value) => std::env::set_var("DBX_MCP_CONFIRMED_WRITE_SQL", value),
+            None => std::env::remove_var("DBX_MCP_CONFIRMED_WRITE_SQL"),
+        }
+    }
+    confirmation_check?;
+
+    let unchanged = call_tool!(
+        fixture.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": "mcp-session-transaction-fixture",
+            "database": database,
+            "sql": format!("SELECT payload FROM {table} WHERE id = 30")
+        })
+    )?;
+    expect_success(&unchanged, "verify permission refusals left target data unchanged")?;
+    if result_cell(&unchanged, 0, 0)?.as_str() != Some("policy_seed") {
+        return Err("permission refusal trace changed the target fixture row".to_string());
+    }
+    expect_success(
+        &call_tool!(candidate.peer(), "dbx_rollback_transaction", json!({"session_id": session}))?,
+        "rollback permission-refusal transaction",
+    )?;
+    expect_success(
+        &call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?,
+        "close permission-refusal transaction",
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "transaction-test-hooks")]
+async fn run_idle_ttl_trace(
+    candidate: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    fixture: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    database: &str,
+    table: &str,
+) -> Result<(), String> {
+    let seeded = call_tool!(
+        fixture.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": "mcp-session-transaction-fixture",
+            "database": database,
+            "sql": format!("INSERT INTO {table}(id, payload) VALUES (20, 'ttl_seed')")
+        })
+    )?;
+    expect_success(&seeded, "seed idle-TTL fixture row")?;
+
+    let open = call_tool!(
+        candidate.peer(),
+        "dbx_open_session",
+        json!({
+            "connection_id": "mcp-session-transaction-live",
+            "database": database,
+            "enable_transactions": true
+        })
+    )?;
+    expect_success(&open, "open idle-TTL transaction session")?;
+    let session = structured(&open)?["session_id"]
+        .as_str()
+        .ok_or_else(|| "idle-TTL open omitted session_id".to_string())?
+        .to_string();
+    expect_success(
+        &call_tool!(candidate.peer(), "dbx_begin_transaction", json!({"session_id": session}))?,
+        "begin idle-TTL transaction",
+    )?;
+    let locked = call_tool!(
+        candidate.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": "mcp-session-transaction-live",
+            "database": database,
+            "session_id": session,
+            "sql": format!("UPDATE {table} SET payload = 'ttl_uncommitted' WHERE id = 20")
+        })
+    )?;
+    expect_success(&locked, "hold idle-TTL row lock")?;
+
+    let fixture_peer = fixture.peer().clone();
+    let database = database.to_string();
+    let table = table.to_string();
+    let mut conditional_update = tokio::spawn(async move {
+        fixture_peer
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments(json!({
+                "connection_id": "mcp-session-transaction-fixture",
+                "database": database,
+                "sql": format!(
+                    "UPDATE {table} SET payload = 'ttl_released' WHERE id = 20 AND payload = 'ttl_seed'"
+                )
+            }))))
+            .await
+    });
+    if tokio::time::timeout(Duration::from_millis(100), &mut conditional_update).await.is_ok() {
+        return Err("idle-TTL fixture update did not remain pending for 100ms".to_string());
+    }
+    let released = tokio::time::timeout(Duration::from_secs(3), conditional_update)
+        .await
+        .map_err(|_| "idle-TTL rollback did not release the row lock".to_string())?
+        .map_err(|error| format!("idle-TTL fixture task failed: {error}"))?
+        .map_err(|error| format!("idle-TTL fixture transport failed: {error}"))?;
+    expect_success(&released, "conditional update after idle-TTL rollback")?;
+    if structured(&released)?.pointer("/result/affected_rows").and_then(Value::as_u64) != Some(1) {
+        return Err("idle-TTL conditional fixture update did not affect exactly one row".to_string());
+    }
+    let closed = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
+    expect_success(&closed, "close idle-TTL session")?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires an authorized native MySQL ConnectionConfig in DBX_TXN_MYSQL_CONNECTION_JSON"]
 async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
@@ -451,6 +795,28 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
                 "candidate and fixture channels must name the same non-empty authorized test database".to_string()
             );
         }
+        let mut wire_proxy = if std::env::var("DBX_TXN_MYSQL_FAULT_PROXY").as_deref() == Ok("1") {
+            if std::env::var("DBX_TXN_MYSQL_DIRECT_PLAINTEXT").as_deref() != Ok("1") {
+                return Err(
+                    "DBX_TXN_MYSQL_FAULT_PROXY=1 also requires the coordinator's DBX_TXN_MYSQL_DIRECT_PLAINTEXT=1 attestation"
+                        .to_string(),
+                );
+            }
+            if candidate.ssl
+                || !candidate.transport_layers.is_empty()
+                || candidate.connection_string.as_deref().is_some_and(|value| !value.trim().is_empty())
+            {
+                return Err("fault proxy requires a direct plaintext candidate without TLS, tunnels, or a custom connection string".to_string());
+            }
+            let proxy = MysqlWireProxy::start(candidate.host.clone(), candidate.port)
+                .await
+                .map_err(|error| format!("start loopback MySQL fault proxy: {error}"))?;
+            candidate.host = proxy.listen_addr().ip().to_string();
+            candidate.port = proxy.listen_addr().port();
+            Some(proxy)
+        } else {
+            None
+        };
         candidate.id = "mcp-session-transaction-live".to_string();
         candidate.name = candidate.id.clone();
         fixture.id = "mcp-session-transaction-fixture".to_string();
@@ -481,11 +847,18 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
             .map_err(|error| format!("seed isolated policy: {error}"))?;
         drop(storage);
 
-        let backend = Arc::new(
-            LocalBackend::open(&db_path)
-                .await
-                .map_err(|_| "open candidate LocalBackend failed (details redacted)".to_string())?,
-        );
+        let backend = LocalBackend::open(&db_path)
+            .await
+            .map_err(|_| "open candidate LocalBackend failed (details redacted)".to_string())?;
+        #[cfg(feature = "transaction-test-hooks")]
+        let backend = backend.with_transaction_test_config(dbx_mcp::transaction::TransactionOwnerConfig {
+            idle_ttl: Duration::from_millis(750),
+            operation_timeout: Duration::from_secs(30),
+            cleanup_timeout: Duration::from_secs(5),
+        });
+        let backend = Arc::new(backend);
+        let policy_storage =
+            Storage::open(&db_path).await.map_err(|error| format!("reopen isolated policy storage: {error}"))?;
         let candidate_server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
         let fixture_server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
         let (candidate_server_transport, candidate_client_transport) = tokio::io::duplex(64 * 1024);
@@ -549,34 +922,49 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
         expect_success(&fixture_close, "close fixture capability session")?;
 
         let table = format!("dbx_mcp_txn_{}", uuid::Uuid::new_v4().simple());
-        let create = tokio::time::timeout(
-            Duration::from_secs(10),
-            fixture_client.peer().call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments(
-                json!({
-                    "connection_id": "mcp-session-transaction-fixture",
-                    "database": database,
-                    "sql": format!(
-                        "CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload VARCHAR(255) NOT NULL) ENGINE=InnoDB"
-                    )
-                }),
-            ))),
-        )
-        .await
-        .map_err(|_| "fixture CREATE timed out".to_string())?
-        .map_err(|error| format!("fixture CREATE transport failed: {error}"))?;
-        expect_success(&create, "create unique InnoDB fixture")?;
+        // Record the exact attributable name before CREATE is dispatched. A
+        // lost response can still mean the server committed the DDL, so every
+        // path from this point must attempt the exact-name bounded cleanup.
         eprintln!("DBX transaction fixture token: {table}");
+        let create = async {
+            let create = tokio::time::timeout(
+                Duration::from_secs(10),
+                fixture_client.peer().call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                    arguments(json!({
+                        "connection_id": "mcp-session-transaction-fixture",
+                        "database": database,
+                        "sql": format!(
+                            "CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload VARCHAR(255) NOT NULL) ENGINE=InnoDB"
+                        )
+                    })),
+                )),
+            )
+            .await
+            .map_err(|_| "fixture CREATE timed out".to_string())?
+            .map_err(|error| format!("fixture CREATE transport failed: {error}"))?;
+            expect_success(&create, "create unique InnoDB fixture")
+        }
+        .await;
 
-        // From this point every path, including scenario timeout/failure, enters
-        // the bounded teardown and exact-name DROP below.
-        let scenario = match tokio::time::timeout(Duration::from_secs(90), async {
-            run_contention_trace(&candidate_client, &database, &table).await?;
-            run_native_cleanup_traces(&candidate_client, &fixture_client, &database, &table).await
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err("native transaction scenarios exceeded 90 seconds".to_string()),
+        let scenario = match create {
+            Ok(()) => match tokio::time::timeout(Duration::from_secs(90), async {
+                run_contention_trace(&candidate_client, &database, &table, wire_proxy.as_ref()).await?;
+                run_native_cleanup_traces(&candidate_client, &fixture_client, &database, &table).await?;
+                #[cfg(feature = "transaction-test-hooks")]
+                run_idle_ttl_trace(&candidate_client, &fixture_client, &database, &table).await?;
+                run_permission_refusal_trace(&candidate_client, &fixture_client, &policy_storage, &database, &table)
+                    .await?;
+                if let Some(proxy) = wire_proxy.as_ref() {
+                    run_fault_proxy_traces(&candidate_client, &fixture_client, &database, &table, proxy).await?;
+                }
+                Ok(())
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err("native transaction scenarios exceeded 90 seconds".to_string()),
+            },
+            Err(error) => Err(error),
         };
 
         let cleanup = tokio::time::timeout(Duration::from_secs(35), async {
@@ -591,7 +979,7 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
                     arguments(json!({
                         "connection_id": "mcp-session-transaction-fixture",
                         "database": database,
-                        "sql": format!("DROP TABLE {table}")
+                        "sql": format!("DROP TABLE IF EXISTS {table}")
                     })),
                 )),
             )
@@ -608,6 +996,9 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
 
         if let Err(error) = cleanup {
             return Err(format!("{error}; attributable fixture token: {table}"));
+        }
+        if let Some(proxy) = wire_proxy.take() {
+            proxy.shutdown().await;
         }
         scenario
     }

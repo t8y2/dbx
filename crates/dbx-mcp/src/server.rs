@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
-use crate::transaction::{TransactionFailure, TransactionResult};
+use crate::transaction::{TransactionFailure, TransactionResult, TransactionStatus};
 use dbx_core::{
     agent_tools::{
         format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow, MAX_EXECUTE_QUERY_ROWS,
@@ -366,6 +366,11 @@ struct ResolvedConnection {
     group_ids: Vec<String>,
 }
 
+struct SessionCleanupResult {
+    status: Option<TransactionStatus>,
+    error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 enum DatabaseScope {
     All,
@@ -434,21 +439,87 @@ impl DbxMcpServer {
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
 
-    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
-        for session in sessions {
-            if let Some(owner) = &session.transaction_owner {
-                if owner.close().await.is_err() {
-                    log::warn!("transaction owner cleanup is still pending for expired MCP session {}", session.id);
-                    continue;
+    fn spawn_session_cleanup(&self, session: McpSession) -> tokio::sync::oneshot::Receiver<SessionCleanupResult> {
+        let backend = self.backend.clone();
+        let sessions = self.sessions.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let status = if let Some(owner) = &session.transaction_owner {
+                match owner.close().await {
+                    Ok(status) => Some(status),
+                    Err(_) => {
+                        owner.wait_closed().await;
+                        Some(owner.status())
+                    }
                 }
-            }
-            let _ = self
-                .backend
+            } else {
+                None
+            };
+            let close_result = backend
                 .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
                 .await;
+            let error = match close_result {
+                Ok(_) => {
+                    sessions.finish_close(&session.id).await;
+                    None
+                }
+                Err(error) if session.transaction_owner.is_none() => {
+                    sessions.restore_after_failed_close(session).await;
+                    Some(error)
+                }
+                Err(error) => {
+                    sessions.finish_close(&session.id).await;
+                    Some(error)
+                }
+            };
+            let _ = result_tx.send(SessionCleanupResult { status, error });
+        });
+        result_rx
+    }
+
+    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
+        let cleanups = sessions.into_iter().map(|session| self.spawn_session_cleanup(session)).collect::<Vec<_>>();
+        for cleanup in cleanups {
+            let _ = cleanup.await;
         }
     }
 
+    fn spawn_transaction_session_open(
+        &self,
+        connection: ConnectionConfig,
+        database: String,
+        session: McpSession,
+    ) -> (
+        tokio::sync::oneshot::Receiver<Result<Arc<crate::transaction::TransactionOwner>, String>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let backend = self.backend.clone();
+        let sessions = self.sessions.clone();
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let owner = match backend.open_transaction_owner(&connection, &database, &session.client_session_id).await {
+                Ok(owner) => owner,
+                Err(error) => {
+                    sessions.cancel_opening(&session.id).await;
+                    let _ = backend
+                        .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+                        .await;
+                    let _ = prepared_tx.send(Err(error));
+                    return;
+                }
+            };
+            if prepared_tx.send(Ok(owner.clone())).is_err() || ack_rx.await.is_err() {
+                sessions.cancel_opening(&session.id).await;
+                let _ = owner.close().await;
+                owner.wait_closed().await;
+                let _ = backend
+                    .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+                    .await;
+            }
+        });
+        (prepared_rx, ack_tx)
+    }
     async fn save_mcp_sql_history(
         &self,
         connection: &ConnectionConfig,
@@ -1311,6 +1382,14 @@ impl DbxMcpServer {
         name = "dbx_open_session",
         description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes."
     )]
+    async fn open_session_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<OpenSessionRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.open_session(parameters)).await
+    }
+
     async fn open_session(&self, Parameters(request): Parameters<OpenSessionRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_open_session").await {
             return error;
@@ -1336,42 +1415,44 @@ impl DbxMcpServer {
                 "Fixed-session transactions require a native local MySQL connection without an external driver profile.",
             );
         }
-        let (session, expired) = self.sessions.open(&connection.id, &database).await.into_parts();
+        let (session, expired) = if request.enable_transactions {
+            self.sessions.reserve_opening(&connection.id, &database).await.into_parts()
+        } else {
+            self.sessions.open(&connection.id, &database).await.into_parts()
+        };
         self.close_backend_sessions_best_effort(expired).await;
         let session = match session {
             Ok(session) => session,
             Err(error) => return tool_error("SESSION_LIMIT", error),
         };
         if request.enable_transactions {
-            let owner =
-                match self.backend.open_transaction_owner(connection, &database, &session.client_session_id).await {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        let _ = self.sessions.begin_close(&session.id).await.into_parts();
-                        self.sessions.finish_close(&session.id).await;
-                        return backend_tool_error("TRANSACTION_UNSUPPORTED", error);
-                    }
-                };
-            if let Err(error) = self.sessions.attach_transaction_owner(&session.id, owner.clone()).await {
-                let _ = owner.close().await;
-                let _ = self.sessions.begin_close(&session.id).await.into_parts();
-                self.sessions.finish_close(&session.id).await;
-                return tool_error("SESSION_OPEN_ERROR", error);
-            }
-        }
-        let transaction_line = request.enable_transactions.then_some("transactions: enabled\n").unwrap_or_default();
-        let mut result = text(format!(
-            "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\n{}\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
-            session.id, connection.name, connection.id, database, transaction_line
-        ));
-        if request.enable_transactions {
+            let (prepared, acknowledge) =
+                self.spawn_transaction_session_open(connection.clone(), database.clone(), session.clone());
+            let owner = match prepared.await {
+                Ok(Ok(owner)) => owner,
+                Ok(Err(error)) => return backend_tool_error("TRANSACTION_UNSUPPORTED", error),
+                Err(_) => return tool_error("SESSION_OPEN_ERROR", "Transaction session open worker stopped."),
+            };
+            let session = match self.sessions.promote_opening(&session.id, owner).await {
+                Ok(session) => session,
+                Err(error) => return tool_error("SESSION_OPEN_ERROR", error),
+            };
+            let mut result = text(format!(
+                "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\ntransactions: enabled\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
+                session.id, connection.name, connection.id, database
+            ));
             result.structured_content = Some(json!({
                 "session_id": session.id,
                 "transaction_state": "idle",
                 "transaction_outcome": null,
             }));
+            let _ = acknowledge.send(());
+            return result;
         }
-        result
+        text(format!(
+            "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
+            session.id, connection.name, connection.id, database
+        ))
     }
 
     #[tool(
@@ -1515,51 +1596,24 @@ impl DbxMcpServer {
                 format!("Session \"{}\" not found or already closed.", request.session_id),
             );
         };
-        let terminal_status = match &session.transaction_owner {
-            Some(owner) => match owner.close().await {
-                Ok(status) => Some(status),
-                Err(status) => {
-                    let mut result = tool_error(
-                        "SESSION_CLOSE_TIMEOUT",
-                        "Transaction cleanup is still pending; the session remains counted until its connection is disposed.",
-                    );
-                    result.structured_content = Some(json!({
-                        "session_id": session.id,
-                        "transaction_state": status.state,
-                        "transaction_outcome": status.outcome,
-                        "resource_released": false,
-                    }));
-                    return result;
-                }
-            },
-            None => None,
+        let session_id = session.id.clone();
+        let cleanup = self.spawn_session_cleanup(session);
+        let cleanup = match cleanup.await {
+            Ok(cleanup) => cleanup,
+            Err(_) => return tool_error("SESSION_CLOSE_ERROR", "Session cleanup worker stopped."),
         };
-        match self
-            .backend
-            .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
-            .await
-        {
-            Ok(_) => {
-                self.sessions.finish_close(&session.id).await;
-                let mut result = text(format!("Session \"{}\" closed.", session.id));
-                if let Some(status) = terminal_status {
-                    result.structured_content = Some(json!({
-                        "session_id": session.id,
-                        "transaction_state": status.state,
-                        "transaction_outcome": status.outcome,
-                    }));
-                }
-                result
-            }
-            Err(error) => {
-                if session.transaction_owner.is_none() {
-                    self.sessions.restore_after_failed_close(session).await;
-                } else {
-                    self.sessions.finish_close(&session.id).await;
-                }
-                backend_tool_error("SESSION_CLOSE_ERROR", error)
-            }
+        if let Some(error) = cleanup.error {
+            return backend_tool_error("SESSION_CLOSE_ERROR", error);
         }
+        let mut result = text(format!("Session \"{}\" closed.", session_id));
+        if let Some(status) = cleanup.status {
+            result.structured_content = Some(json!({
+                "session_id": session_id,
+                "transaction_state": status.state,
+                "transaction_outcome": status.outcome,
+            }));
+        }
+        result
     }
 
     #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
@@ -2775,11 +2829,144 @@ fn confirmed_batch_sql_block_reason(
 
 fn validate_transaction_sql_shape(sql: &str) -> Result<(), String> {
     use sqlparser::{
-        ast::Statement,
+        ast::{Expr, Statement, Visit, Visitor},
         dialect::MySqlDialect,
         parser::Parser,
         tokenizer::{Token, Tokenizer},
     };
+    use std::ops::ControlFlow;
+
+    const SAFE_FUNCTIONS: &[&str] = &[
+        "abs",
+        "ascii",
+        "avg",
+        "bin",
+        "ceiling",
+        "char_length",
+        "character_length",
+        "coalesce",
+        "concat",
+        "concat_ws",
+        "connection_id",
+        "conv",
+        "count",
+        "crc32",
+        "curdate",
+        "curtime",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "date_format",
+        "datediff",
+        "dayname",
+        "dayofmonth",
+        "dayofweek",
+        "dayofyear",
+        "exp",
+        "floor",
+        "format",
+        "greatest",
+        "hex",
+        "hour",
+        "if",
+        "ifnull",
+        "inet_aton",
+        "inet_ntoa",
+        "instr",
+        "isnull",
+        "json_extract",
+        "json_length",
+        "json_unquote",
+        "json_valid",
+        "last_day",
+        "lcase",
+        "least",
+        "left",
+        "length",
+        "ln",
+        "locate",
+        "log",
+        "log10",
+        "log2",
+        "lower",
+        "lpad",
+        "ltrim",
+        "max",
+        "md5",
+        "microsecond",
+        "min",
+        "minute",
+        "mod",
+        "month",
+        "monthname",
+        "now",
+        "nullif",
+        "oct",
+        "ord",
+        "position",
+        "pow",
+        "power",
+        "quarter",
+        "rand",
+        "repeat",
+        "replace",
+        "reverse",
+        "right",
+        "round",
+        "rpad",
+        "rtrim",
+        "second",
+        "sha",
+        "sha1",
+        "sha2",
+        "sign",
+        "sleep",
+        "space",
+        "sqrt",
+        "str_to_date",
+        "substring",
+        "substr",
+        "time_format",
+        "timediff",
+        "timestampadd",
+        "timestampdiff",
+        "truncate",
+        "unhex",
+        "unix_timestamp",
+        "upper",
+        "ucase",
+        "utc_date",
+        "utc_time",
+        "utc_timestamp",
+        "uuid",
+        "version",
+        "week",
+        "weekday",
+        "year",
+    ];
+
+    struct TransactionFunctionVisitor {
+        rejected: bool,
+    }
+
+    impl Visitor for TransactionFunctionVisitor {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            if let Expr::Function(function) = expr {
+                let parts = &function.name.0;
+                let allowed = parts.len() == 1
+                    && parts.last().and_then(|part| part.as_ident()).is_some_and(|ident| {
+                        SAFE_FUNCTIONS.iter().any(|candidate| ident.value.eq_ignore_ascii_case(candidate))
+                    });
+                if !allowed {
+                    self.rejected = true;
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
 
     if sql.contains("/*!") || sql.contains("/*+") {
         return Err("Executable comments and optimizer hints are not allowed in transaction sessions.".to_string());
@@ -2836,7 +3023,16 @@ fn validate_transaction_sql_shape(sql: &str) -> Result<(), String> {
             "Transaction sessions allow only SELECT (including locking reads), INSERT, UPDATE, DELETE, and REPLACE."
                 .to_string(),
         ),
+    }?;
+
+    let mut visitor = TransactionFunctionVisitor { rejected: false };
+    let _ = statement.visit(&mut visitor);
+    if visitor.rejected {
+        return Err(
+            "Only unqualified, known-safe MySQL built-in functions are allowed in transaction sessions.".to_string()
+        );
     }
+    Ok(())
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -3179,12 +3375,13 @@ mod tests {
         service::PeerRequestOptions,
         ServiceExt,
     };
-    use std::{collections::HashSet, sync::atomic::AtomicUsize};
+    use std::{collections::HashSet, sync::atomic::AtomicUsize, time::Duration};
 
     struct FakeTransactionIo {
         in_transaction: bool,
         executed_sql: Arc<std::sync::Mutex<Vec<String>>>,
         block_next_sql: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+        disconnects: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -3228,7 +3425,9 @@ mod tests {
             Ok(self.in_transaction)
         }
 
-        async fn disconnect(&mut self) {}
+        async fn disconnect(&mut self) {
+            self.disconnects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -3236,6 +3435,8 @@ mod tests {
         for sql in [
             "SELECT id FROM accounts WHERE id = 1",
             "SELECT id FROM accounts WHERE id = 1 FOR UPDATE",
+            "SELECT CONNECTION_ID(), VERSION(), SLEEP(0)",
+            "SELECT COUNT(*), LOWER(name), COALESCE(name, '') FROM accounts",
             "INSERT INTO accounts(id) VALUES (1)",
             "UPDATE accounts SET name = 'safe' WHERE id = 1",
             "DELETE FROM accounts WHERE id = 1",
@@ -3261,6 +3462,12 @@ mod tests {
             "ROLLBACK",
             "SELECT 1 INTO OUTFILE '/tmp/output'",
             "SELECT @value := 1",
+            "SELECT evil_udf(id) FROM accounts",
+            "SELECT app.evil_udf(id) FROM accounts",
+            "SELECT (SELECT evil_udf())",
+            "INSERT INTO accounts(id) VALUES (evil_udf(1))",
+            "UPDATE accounts SET name = evil_udf(name) WHERE id = 1",
+            "DELETE FROM accounts WHERE evil_udf(id) = 1",
             "/*!40101 SET autocommit = 0 */",
             "SELECT 1; DELETE FROM accounts",
         ] {
@@ -3279,6 +3486,10 @@ mod tests {
         transaction_owners_opened: AtomicUsize,
         transaction_owner_sql: Arc<std::sync::Mutex<Vec<String>>>,
         transaction_block_next_sql: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+        transaction_owner_disconnects: Arc<AtomicUsize>,
+        transaction_owner_budget: Arc<tokio::sync::Semaphore>,
+        transaction_open_before: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        transaction_open_after_owner: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
         transaction_open_error: Option<String>,
         policy_override: std::sync::Mutex<Option<McpGlobalPolicy>>,
     }
@@ -3296,6 +3507,10 @@ mod tests {
                 transaction_owners_opened: AtomicUsize::new(0),
                 transaction_owner_sql: Arc::new(std::sync::Mutex::new(Vec::new())),
                 transaction_block_next_sql: Arc::new(std::sync::Mutex::new(None)),
+                transaction_owner_disconnects: Arc::new(AtomicUsize::new(0)),
+                transaction_owner_budget: Arc::new(tokio::sync::Semaphore::new(32)),
+                transaction_open_before: None,
+                transaction_open_after_owner: None,
                 transaction_open_error: None,
                 policy_override: std::sync::Mutex::new(None),
             }
@@ -3361,15 +3576,31 @@ mod tests {
             if let Some(error) = &self.transaction_open_error {
                 return Err(error.clone());
             }
+            if let Some((entered, release)) = &self.transaction_open_before {
+                entered.notify_one();
+                release.notified().await;
+            }
             self.transaction_owners_opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(crate::transaction::TransactionOwner::spawn(
+            let permit = self
+                .transaction_owner_budget
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| "Too many open transaction-enabled MCP sessions (max 32).".to_string())?;
+            let owner = crate::transaction::TransactionOwner::spawn_with_resource_permit(
                 FakeTransactionIo {
                     in_transaction: false,
                     executed_sql: self.transaction_owner_sql.clone(),
                     block_next_sql: self.transaction_block_next_sql.clone(),
+                    disconnects: self.transaction_owner_disconnects.clone(),
                 },
                 crate::transaction::TransactionOwnerConfig::default(),
-            ))
+                permit,
+            );
+            if let Some((entered, release)) = &self.transaction_open_after_owner {
+                entered.notify_one();
+                release.notified().await;
+            }
+            Ok(owner)
         }
 
         async fn execute_agent_tool(
@@ -5091,6 +5322,168 @@ mod tests {
 
         let closed = server.close_session(Parameters(CloseSessionRequest { session_id: final_session_id })).await;
         assert!(result_text(&closed).contains("closed"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_eager_open_while_backend_acquisition_is_blocked_does_not_leak_capacity() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            transaction_open_before: Some((entered.clone(), release.clone())),
+            ..Default::default()
+        });
+        let server = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let opening = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .open_session(Parameters(OpenSessionRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        enable_transactions: true,
+                    }))
+                    .await
+            })
+        };
+        entered.notified().await;
+
+        opening.abort();
+        assert!(opening.await.unwrap_err().is_cancelled());
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while backend.closed_sessions.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled provisional open must close its backend session");
+        assert_eq!(backend.transaction_owner_disconnects.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_eager_open_after_owner_acquisition_disposes_owner_and_backend_session() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            transaction_open_after_owner: Some((entered.clone(), release.clone())),
+            ..Default::default()
+        });
+        let server = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let opening = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .open_session(Parameters(OpenSessionRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        enable_transactions: true,
+                    }))
+                    .await
+            })
+        };
+        entered.notified().await;
+
+        opening.abort();
+        assert!(opening.await.unwrap_err().is_cancelled());
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while backend.closed_sessions.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled prepared open must close its backend session");
+        assert_eq!(backend.transaction_owner_disconnects.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn two_protocol_servers_share_physical_owner_budget_until_cleanup_finishes() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            ..Default::default()
+        });
+        let server_a = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let server_b = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let mut sessions_a = Vec::new();
+        for _ in 0..16 {
+            let opened = server_a
+                .open_session(Parameters(OpenSessionRequest {
+                    selector: selector("mysql"),
+                    database: None,
+                    enable_transactions: true,
+                }))
+                .await;
+            assert!(!opened.is_error.unwrap_or(false));
+            sessions_a.push(opened_session_id(&opened));
+        }
+        for _ in 0..16 {
+            let opened = server_b
+                .open_session(Parameters(OpenSessionRequest {
+                    selector: selector("mysql"),
+                    database: None,
+                    enable_transactions: true,
+                }))
+                .await;
+            assert!(!opened.is_error.unwrap_or(false));
+        }
+
+        let rejected = server_b
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&rejected).contains("max 32"));
+
+        let session_id = sessions_a.pop().unwrap();
+        let hidden_from_other_protocol =
+            server_b.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&hidden_from_other_protocol).contains("SESSION_NOT_FOUND"));
+        server_a.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        let rollback_release = Arc::new(tokio::sync::Notify::new());
+        *backend.transaction_block_next_sql.lock().unwrap() = Some(rollback_release.clone());
+        let closing = {
+            let server = server_a.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move { server.close_session(Parameters(CloseSessionRequest { session_id })).await })
+        };
+        while !backend.transaction_owner_sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK") {
+            tokio::task::yield_now().await;
+        }
+        closing.abort();
+        assert!(closing.await.unwrap_err().is_cancelled());
+
+        let still_rejected = server_b
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&still_rejected).contains("max 32"));
+
+        rollback_release.notify_one();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while backend.transaction_owner_budget.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical owner permit must return after disposal");
+
+        let opened = server_b
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(!opened.is_error.unwrap_or(false));
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ default = ["duckdb-sidecar", "mq-admin", "sqlite-bundled"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-bundled = ["dbx-core/sqlite-bundled"]
+transaction-test-hooks = []
 
 [[bin]]
 name = "dbx-mcp"
@@ -28,7 +29,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlparser = "0.62"
+sqlparser = { version = "0.62", features = ["visitor"] }
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
 tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }
@@ -36,6 +37,7 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 
 [dev-dependencies]
+rmcp = { version = "2.2.0", features = ["transport-streamable-http-client-reqwest"] }
 rustls-pemfile = "2.2"
 tempfile = "3"
 tokio = { version = "1", features = ["net", "io-util"] }

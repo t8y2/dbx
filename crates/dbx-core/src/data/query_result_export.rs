@@ -630,6 +630,27 @@ fn single_execution_row_bound(request: &QueryResultExportRequest) -> Option<usiz
     }
 }
 
+/// Maps the frozen export header onto the column list a page reported.
+/// Schemaless engines (Elasticsearch, Easysearch) derive the column set from the
+/// page payload, so later pages may reorder, add, or drop columns; values must
+/// follow their column name instead of their position in the page.
+fn export_column_remap(page_columns: &[String], header_columns: &[String]) -> Vec<Option<usize>> {
+    header_columns.iter().map(|column| page_columns.iter().position(|page_column| page_column == column)).collect()
+}
+
+/// Reorders one page row (or a page-level cell list such as column types) into
+/// the frozen header order (`remap` indexes the page), filling cells whose column
+/// the page did not report with the cell type's default (`NULL` for values, empty
+/// for column types).
+fn realign_page_cells<T: Clone + Default>(remap: &[Option<usize>], cells: Vec<T>) -> Vec<T> {
+    remap.iter().map(|index| index.and_then(|index| cells.get(index)).cloned().unwrap_or_default()).collect()
+}
+
+/// Applies [`realign_page_cells`] to every row of a page.
+fn realign_page_rows<T: Clone + Default>(remap: &[Option<usize>], rows: Vec<Vec<T>>) -> Vec<Vec<T>> {
+    rows.into_iter().map(|row| realign_page_cells(remap, row)).collect()
+}
+
 fn single_execution_page_limit(request: &QueryResultExportRequest, page_size: usize) -> Option<usize> {
     single_execution_row_bound(request).filter(|bound| *bound > 0 && *bound <= page_size.max(1))
 }
@@ -973,13 +994,27 @@ async fn export_query_result_core_inner(
             return Ok(());
         }
 
-        if columns.is_empty() {
+        let page_column_types = if columns.is_empty() {
             columns = result.columns.clone();
             column_types = result.column_types.clone();
             if let Some(writer) = sql_writer.as_mut() {
                 writer.set_columns(columns.clone(), &column_types, &result.spatial_columns, request);
             }
-        }
+            column_types.clone()
+        } else if result.columns == columns {
+            column_types.clone()
+        } else {
+            // The export header is frozen by the first page, so every later page
+            // must be aligned by column name; writing page rows positionally
+            // dropped/duplicated values into the wrong columns.
+            let remap = export_column_remap(&result.columns, &columns);
+            let page_column_types = realign_page_cells(&remap, result.column_types.clone());
+            result.rows = realign_page_rows(&remap, mem::take(&mut result.rows));
+            if !result.spatial_values.is_empty() {
+                result.spatial_values = realign_page_rows(&remap, mem::take(&mut result.spatial_values));
+            }
+            page_column_types
+        };
         let fetched_row_count = result.rows.len();
         if result.rows.len() > this_page {
             result.rows.truncate(this_page);
@@ -987,7 +1022,7 @@ async fn export_query_result_core_inner(
         let row_count = result.rows.len();
         let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_cow(
             &result.rows,
-            &column_types,
+            &page_column_types,
             request.date_time_format.as_deref(),
         );
 
@@ -1979,6 +2014,38 @@ async fn try_export_sqlserver_query_result_stream(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn export_column_remap_follows_column_names_across_pages() {
+        // Elasticsearch-style page drift: the second page reports `beta` where the
+        // header has `alpha`, so the `alpha` cell must be filled with NULL instead
+        // of the value that happens to sit at the same position.
+        let header = vec!["id".to_string(), "alpha".to_string(), "_id".to_string()];
+        let page = vec!["id".to_string(), "beta".to_string(), "_id".to_string()];
+        let remap = export_column_remap(&page, &header);
+        assert_eq!(remap, vec![Some(0), None, Some(2)]);
+        let rows = vec![vec![json!(101), json!("B101"), json!("101")]];
+        assert_eq!(realign_page_rows(&remap, rows), vec![vec![json!(101), Value::Null, json!("101")]]);
+    }
+
+    #[test]
+    fn export_column_remap_reorders_pages_that_report_columns_differently() {
+        let header = vec!["id".to_string(), "alpha".to_string()];
+        let page = vec!["alpha".to_string(), "id".to_string()];
+        let remap = export_column_remap(&page, &header);
+        assert_eq!(remap, vec![Some(1), Some(0)]);
+        let rows = vec![vec![json!("A1"), json!(1)]];
+        assert_eq!(realign_page_rows(&remap, rows), vec![vec![json!(1), json!("A1")]]);
+    }
+
+    #[test]
+    fn export_column_remap_keeps_identical_headers_untouched() {
+        let header = vec!["id".to_string(), "alpha".to_string()];
+        let remap = export_column_remap(&header, &header);
+        assert_eq!(remap, vec![Some(0), Some(1)]);
+        let rows = vec![vec![json!(1), json!("A1")]];
+        assert_eq!(realign_page_rows(&remap, rows.clone()), rows);
+    }
 
     #[test]
     fn staged_export_target_preserves_existing_destination_on_discard_and_replace_failure() {

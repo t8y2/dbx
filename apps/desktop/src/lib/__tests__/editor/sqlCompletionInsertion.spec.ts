@@ -17,6 +17,13 @@ describe("SQL completion insertion", () => {
     expect(appendSqlCompletionSpace("orders", { enabled: true, itemType: "table", nextCharacter: "," })).toBe("orders");
   });
 
+  it("keeps the space when a statement terminator follows the cursor", () => {
+    // Completing `BETWEEN` before an existing `;` must not glue the two together,
+    // otherwise the user cannot keep typing the operand without fixing the text.
+    expect(appendSqlCompletionSpace("BETWEEN", { enabled: true, itemType: "keyword", nextCharacter: ";" })).toBe("BETWEEN ");
+    expect(appendSqlCompletionSpace("SALARY", { enabled: true, itemType: "column", nextCharacter: ";" })).toBe("SALARY ");
+  });
+
   it("honors the setting and leaves snippet-like completions unchanged", () => {
     expect(appendSqlCompletionSpace("SELECT", { enabled: false, itemType: "keyword" })).toBe("SELECT");
     expect(appendSqlCompletionSpace("CASE ${value}", { enabled: true, itemType: "snippet" })).toBe("CASE ${value}");

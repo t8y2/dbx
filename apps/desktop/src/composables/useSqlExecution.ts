@@ -14,6 +14,7 @@ import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCach
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
+import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -253,7 +254,7 @@ export function useSqlExecution(deps: {
       const commands = sql
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line.length > 0);
+        .filter((line) => line.length > 0 && !isRedisCommentLine(line));
       let highestSafety: "allowed" | "write" | "confirm" | "blocked" = "allowed";
       for (const cmd of commands) {
         const safety = classifyRedisCommandSafety(cmd);
@@ -489,7 +490,7 @@ export function useSqlExecution(deps: {
       const commands = sql
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line.length > 0);
+        .filter((line) => line.length > 0 && !isRedisCommentLine(line));
       let highestSafety: "allowed" | "confirm" | "blocked" = "allowed";
       for (const command of commands) {
         const safety = classifyRedisCommandSafety(command);

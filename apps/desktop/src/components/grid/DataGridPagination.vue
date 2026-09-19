@@ -20,6 +20,10 @@ const props = withDefaults(
     loading: boolean;
     infiniteScrollEnabled: boolean;
     infiniteScrollAllLoaded: boolean;
+    /** True while the grid holds rows accumulated by "load all rows" rather than a single page — hides page navigation so a stray page click cannot overwrite the accumulated result. */
+    accumulatedRows?: boolean;
+    /** True only while a "load all rows" batch is still in flight — suppresses the "all loaded" label so it doesn't claim completion mid-load. */
+    fetchingAllRows?: boolean;
     pageSize: number;
     defaultPageSize: number;
     pageSizeMenuItems: LightDropdownItem[];
@@ -96,10 +100,10 @@ function handlePageInputKeydown(event: KeyboardEvent) {
       </div>
     </div>
     <Loader2 class="w-3 h-3 text-muted-foreground" :class="loading ? 'animate-spin' : 'invisible'" aria-hidden="true" />
-    <template v-if="paginationEnabled && infiniteScrollEnabled">
-      <span v-if="infiniteScrollAllLoaded" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
+    <template v-if="paginationEnabled && (infiniteScrollEnabled || accumulatedRows)">
+      <span v-if="infiniteScrollAllLoaded || (accumulatedRows && !fetchingAllRows)" class="text-xs text-muted-foreground shrink-0">{{ t("grid.allLoaded") }}</span>
     </template>
-    <template v-if="paginationEnabled && !infiniteScrollEnabled">
+    <template v-if="paginationEnabled">
       <LightDropdown
         :model-value="String(pageSize)"
         :items="pageSizeMenuItems"
@@ -136,6 +140,8 @@ function handlePageInputKeydown(event: KeyboardEvent) {
           <button type="button" class="flex-1 whitespace-nowrap rounded-md bg-primary px-2 py-1.5 text-center text-xs text-primary-foreground hover:bg-primary/90" @click.stop="emit('applyCustomPageSizeAndSetDefault')">{{ t("grid.applyAndSetDefault") }}</button>
         </div>
       </LightDropdown>
+    </template>
+    <template v-if="paginationEnabled && !infiniteScrollEnabled && !accumulatedRows">
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || currentPage <= 1" @click="emit('firstPage')"><ChevronsLeft class="h-3 w-3" /></Button>
       <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :disabled="loading || currentPage <= 1" @click="emit('previousPage')"><ChevronLeft class="h-3 w-3" /></Button>
       <Input

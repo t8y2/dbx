@@ -27,6 +27,8 @@ export const contentSurfaceEventNames = [
   "reload",
   "paginate",
   "sort",
+  "fetchAllRows",
+  "stopFetchAllRows",
   "executeSql",
   "clickTable",
   "viewTableData",

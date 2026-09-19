@@ -316,6 +316,24 @@ button {
 
 Listen with `window.addEventListener("dbx-plugin-env", handler)` for locale/theme changes. Initialize from `dbxPlugin.locale`/`theme`, then refresh your state on events. DBX includes lightweight `dbx-btn` and `dbx-input` styles, but the development host does not emulate the complete component kit; custom token-based styles work more consistently in both.
 
+#### What the theme payload carries
+
+The env message's `theme` is `{ appearance, tokens, editor? }`. `appearance` is `"light" | "dark"`; `tokens` are the resolved root design variables swept by prefix (`--color-*`, `--radius-*`, `--font-*`); `editor` is a structured snapshot of the SQL editor settings that have no CSS-token carrier. Delivered settings:
+
+| DBX setting | Delivered as |
+| --- | --- |
+| Light/dark/system mode | `theme.appearance` |
+| Palette + custom color sets | `--color-*` tokens |
+| Corner style | `--radius-*` tokens |
+| UI font family | `--font-sans` token |
+| Editor (mono) font family | `--font-mono` token + `theme.editor.fontFamily` |
+| Editor font size | `theme.editor.fontSize` |
+| SQL editor syntax theme | `theme.editor.theme` |
+| UI scale (host window zoom) | not delivered — plugins own their own zoom |
+| Data-grid font / type colors, editor background image | not delivered — DB-domain (`--dbx-*` tokens are excluded from the sweep) |
+
+Treat `terminal.fontSize`-style concerns as plugin-owned: the host never dictates your font size; consume `theme.editor.fontSize` as a default only if it suits your UI. All payload changes push live on the env channel — font-family edits via the theme revision, size/theme via the explicit editor watcher — so no refresh is needed.
+
 Build the UI as packaged static assets, not references to a Vite server or CDN scripts. The host converts the entry and assets into sandbox-loadable content. For CSP errors, verify build outputs and confinement under `ui.root`, and reproduce with the matching CLI version. Use plugin-owned dialogs for delete/rename rather than relying on native `alert`/`confirm`/`prompt` inside the sandbox.
 
 ## Native Sidecars and RPC

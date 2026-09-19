@@ -490,6 +490,11 @@ describe("PluginHostBridge", () => {
 
     bridge.updateTheme({ appearance: "light", tokens: {} });
     expect(messages[1]).toMatchObject({ type: "env", locale: "en", theme: { appearance: "light", tokens: {} } });
+
+    // The structured editor snapshot rides along on every theme push.
+    const editor = { fontFamily: "Fira Code", fontSize: 13, theme: "one-dark" };
+    bridge.updateTheme({ appearance: "light", tokens: {}, editor });
+    expect(messages[2]).toMatchObject({ type: "env", locale: "en", theme: { appearance: "light", tokens: {}, editor } });
   });
 
   it("routes host.saveFile transfers through the host save dialog and reports cancellation", async () => {

@@ -182,6 +182,7 @@ import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
 import { startsQueryEditorRectangularSelection, startsQueryEditorSelectionDrag, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
+import { queryEditorClipboardPasteChange } from "@/lib/editor/queryEditorClipboardPaste";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
@@ -1910,8 +1911,7 @@ async function pasteClipboardSqlFromContextMenu() {
     const selection = currentView.state.selection.main;
     // 粘贴：替换选中内容或在光标处插入
     currentView.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: text },
-      selection: { anchor: selection.from + text.length, head: selection.from + text.length },
+      ...queryEditorClipboardPasteChange(text, selection.from, selection.to),
       scrollIntoView: true,
       userEvent: "input.paste",
     });
@@ -4253,12 +4253,14 @@ interface BatchColumnSelectionActionItem {
   detail: string;
   boost: number;
   batchColumnSelectionAction: true;
+  /** Toggles every candidate checkbox instead of inserting the selection. */
+  batchColumnSelectionToggleAll?: true;
   sessionKey: string;
 }
 
 type QueryCompletionOption = Completion & {
   dbxBatchColumnSelection?: { sessionKey: string; candidateKey: string };
-  dbxBatchColumnSelectionAction?: { sessionKey: string };
+  dbxBatchColumnSelectionAction?: { sessionKey: string; toggleAll?: true };
 };
 
 let batchColumnSelectionSession: BatchColumnSelectionSession | null = null;
@@ -4279,7 +4281,7 @@ interface BatchColumnSelectionDragState {
 }
 
 const batchColumnSelectionCheckboxMarkers = new WeakMap<HTMLElement, BatchColumnSelectionCheckboxMarker>();
-const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, string>();
+const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, { sessionKey: string; toggleAll: boolean }>();
 const batchColumnSelectionTooltipParents = new WeakMap<EditorViewType, HTMLElement>();
 let batchColumnSelectionDragState: BatchColumnSelectionDragState | null = null;
 let batchColumnSelectionRefreshCleanup: (() => void) | null = null;
@@ -4314,17 +4316,35 @@ function setBatchColumnSelectionValue(sessionKey: string, candidateKey: string, 
   if (checkbox) checkbox.checked = selected;
 }
 
+function batchColumnSelectionAllSelected(session: BatchColumnSelectionSession): boolean {
+  return session.candidates.length > 0 && session.selectedKeys.size === session.candidates.length;
+}
+
 function updateBatchColumnSelectionActionLabel(view: EditorViewType, sessionKey: string) {
   const session = batchColumnSelectionSession;
   if (!session || session.key !== sessionKey) return;
-  const label = t("editor.completion.insertSelectedColumns", { count: session.selectedKeys.size });
+  const insertLabel = t("editor.completion.insertSelectedColumns", { count: session.selectedKeys.size });
+  const toggleAllLabel = batchColumnSelectionAllSelected(session) ? t("editor.completion.deselectAllColumns") : t("editor.completion.selectAllColumns");
   const tooltipParent = batchColumnSelectionTooltipParents.get(view) ?? view.dom;
   tooltipParent.querySelectorAll<HTMLElement>(".cm-batch-column-selection-action-marker").forEach((marker) => {
-    if (batchColumnSelectionActionMarkers.get(marker) !== sessionKey) return;
+    const markerState = batchColumnSelectionActionMarkers.get(marker);
+    if (!markerState || markerState.sessionKey !== sessionKey) return;
     const element = marker.closest("li")?.querySelector<HTMLElement>(".cm-completionLabel");
     if (!element) return;
+    const label = markerState.toggleAll ? toggleAllLabel : insertLabel;
     if (element.textContent !== label) element.textContent = label;
   });
+}
+
+/** Check or clear every field checkbox of the active batch selection. */
+function toggleAllBatchColumnSelection(view: EditorViewType, sessionKey: string) {
+  const session = batchColumnSelectionSession;
+  if (!session || session.key !== sessionKey) return;
+  const selectAll = !batchColumnSelectionAllSelected(session);
+  session.selectedKeys = selectAll ? new Set(session.candidates.map((candidate) => candidate.key)) : new Set();
+  updateBatchColumnSelectionActionLabel(view, sessionKey);
+  // Reopen the list so every rendered checkbox and both action rows reflect the new state.
+  scheduleBatchColumnSelectionRefresh(view, sessionKey, session.candidates[0]?.key ?? "");
 }
 
 function scheduleBatchColumnSelectionRefresh(view: EditorViewType, sessionKey: string, focusCandidateKey: string, scrollState?: { element: HTMLElement | null; top: number; left: number }) {
@@ -4684,7 +4704,7 @@ function renderBatchColumnSelectionActionMarker(completion: Completion): Node | 
   const marker = document.createElement("span");
   marker.className = "cm-batch-column-selection-action-marker";
   marker.hidden = true;
-  batchColumnSelectionActionMarkers.set(marker, action.sessionKey);
+  batchColumnSelectionActionMarkers.set(marker, { sessionKey: action.sessionKey, toggleAll: action.toggleAll === true });
   return marker;
 }
 
@@ -4806,19 +4826,32 @@ function buildCompletionResult(items: Array<QueryCompletionItem | BatchColumnSel
 function buildSqlCompletionResult(items: SqlCompletionItem[], completionContext: SqlCompletionContext, fullDoc: string, position: number) {
   const replacement = prepareSqlCompletionReplacement(fullDoc, position, completionContext, items);
   const session = prepareBatchColumnSelectionSession(replacement.items, fullDoc, replacement.from, position);
-  const action: BatchColumnSelectionActionItem | undefined = session
-    ? {
-        label: t("editor.completion.insertSelectedColumns", { count: session.selectedKeys.size }),
-        filterText: completionContext.prefix,
-        type: "text",
-        detail: t("editor.completion.insertSelectedColumnsDetail"),
-        // Keep ordinary single-field completion as the default Enter target.
-        boost: -1000,
-        batchColumnSelectionAction: true,
-        sessionKey: session.key,
-      }
-    : undefined;
-  return buildCompletionResult(action ? [...replacement.items, action] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+  const actions: BatchColumnSelectionActionItem[] = session
+    ? [
+        {
+          label: batchColumnSelectionAllSelected(session) ? t("editor.completion.deselectAllColumns") : t("editor.completion.selectAllColumns"),
+          filterText: completionContext.prefix,
+          type: "text",
+          detail: t("editor.completion.selectAllColumnsDetail"),
+          // Keep ordinary single-field completion as the default Enter target.
+          boost: -1000,
+          batchColumnSelectionAction: true,
+          batchColumnSelectionToggleAll: true,
+          sessionKey: session.key,
+        },
+        {
+          label: t("editor.completion.insertSelectedColumns", { count: session.selectedKeys.size }),
+          filterText: completionContext.prefix,
+          type: "text",
+          detail: t("editor.completion.insertSelectedColumnsDetail"),
+          // Keep ordinary single-field completion as the default Enter target.
+          boost: -1000,
+          batchColumnSelectionAction: true,
+          sessionKey: session.key,
+        },
+      ]
+    : [];
+  return buildCompletionResult(actions.length > 0 ? [...replacement.items, ...actions] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
 }
 
 // CodeMirror's built-in matcher only matches single-character queries against
@@ -4885,11 +4918,17 @@ function completionOptionForItem(item: QueryCompletionItem | BatchColumnSelectio
     return {
       ...labelPresentation,
       ...(sortText ? { sortText } : {}),
-      dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey },
+      dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey, ...(item.batchColumnSelectionToggleAll ? { toggleAll: true as const } : {}) },
       type: item.type,
       detail: item.detail,
       boost: item.boost,
       apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
+        if (item.batchColumnSelectionToggleAll) {
+          // Toggling the selection never edits the document; the checkout rows
+          // (and the insert action) are refreshed in place instead.
+          toggleAllBatchColumnSelection(view, item.sessionKey);
+          return;
+        }
         applyBatchColumnSelection(view, item, from, to);
       },
     };

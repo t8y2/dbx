@@ -604,6 +604,8 @@ export default withEnglishFallback({
     driverName: "Sürücü Adı",
     driverNamePlaceholder: "Sağlayıcı veya ortam adı",
     urlParams: "URL Parametreleri",
+    sessionVariablesHint:
+      "DBX bağlantı sırasında group_concat_max_len oturum değişkenini 1048576 değerine yükseltir; böylece GROUP_CONCAT sonuçları sessizce kesilmez. Sunucu yapılandırmasını izlemek için sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len kullanın (MySQL Connector/J söz dizimi; birden fazla değişkeni virgülle ayırın).",
     localInfilePathHint: "LOAD DATA LOCAL INFILE için her dosyayı localInfilePath=/mutlak/yol/dosya.csv ile açıkça izin listesine ekleyin. Ek dosyalar için parametreyi tekrarlayın.",
     d1AccountId: "Hesap Kimliği",
     d1DatabaseId: "Veritabanı Kimliği",
@@ -1380,6 +1382,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} sütun",
       insertSelectedColumns: "Seçili sütunları ekle ({count})",
       insertSelectedColumnsDetail: "Onay kutularıyla sütunları seçip birlikte ekleyin",
+      selectAllColumns: "Tüm sütunları seç",
+      selectAllColumnsDetail: "Tüm alanları tek seferde işaretle",
+      deselectAllColumns: "Tüm seçimi kaldır",
       selectColumnsBeforeInsert: "Önce en az bir sütun seçin",
       tableAlias: "Tablo takma adı",
       functionDescriptions: {

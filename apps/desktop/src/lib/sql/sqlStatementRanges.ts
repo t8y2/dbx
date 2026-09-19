@@ -1106,8 +1106,13 @@ function isMysqlAlterTableTruncatePartitionContinuation(sql: string, statementFr
 }
 
 function isMergeActionContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  if (keyword !== "INSERT" || !startsWithSqlWords(sql, statementFrom, ["MERGE"], databaseType, parameterOptions)) return false;
+  // Oracle (and friends) allow each MERGE action on its own line after
+  // `WHEN ... MATCHED THEN`, e.g. `UPDATE SET ...` (#9516); only INSERT was
+  // recognized, so UPDATE/DELETE action lines split the statement in two.
+  if (keyword !== "INSERT" && keyword !== "UPDATE" && keyword !== "DELETE" && keyword !== "SET") return false;
+  if (!startsWithSqlWords(sql, statementFrom, ["MERGE"], databaseType, parameterOptions)) return false;
   const words = topLevelWordsBefore(sql, statementFrom, lineStartFrom, 5, databaseType, parameterOptions);
+  if (keyword === "SET") return words[words.length - 1] === "UPDATE" && words.includes("THEN") && words.includes("MATCHED");
   return words[words.length - 1] === "THEN" && words.includes("WHEN") && words.includes("MATCHED");
 }
 

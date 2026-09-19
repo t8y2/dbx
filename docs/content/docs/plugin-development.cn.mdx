@@ -316,6 +316,24 @@ button {
 
 使用 `window.addEventListener("dbx-plugin-env", handler)` 响应语言或主题变化。先读取 `dbxPlugin.locale`/`theme` 初始化，再在事件中刷新自己的状态。DBX 提供轻量 `dbx-btn`、`dbx-input` 等样式，但开发宿主不模拟完整组件 kit，自定义 token 样式在两者中更一致。
 
+#### 主题负载携带什么
+
+env 消息的 `theme` 结构为 `{ appearance, tokens, editor? }`。`appearance` 是 `"light" | "dark"`；`tokens` 是按前缀扫取的根节点设计变量（`--color-*`、`--radius-*`、`--font-*`）；`editor` 是无 CSS 令牌载体的 SQL 编辑器设置结构化快照。投递矩阵：
+
+| DBX 设置 | 投递形式 |
+| --- | --- |
+| 浅色/深色/跟随系统 | `theme.appearance` |
+| 调色板 + 自定义配色 | `--color-*` tokens |
+| 圆角风格 | `--radius-*` tokens |
+| UI 字体 | `--font-sans` token |
+| 编辑器（等宽）字体 | `--font-mono` token + `theme.editor.fontFamily` |
+| 编辑器字号 | `theme.editor.fontSize` |
+| SQL 编辑器语法主题 | `theme.editor.theme` |
+| UI 缩放（宿主窗口级） | 不投递——插件自管缩放 |
+| 数据网格字体/类型配色、编辑器背景图 | 不投递——DB 域（`--dbx-*` 不在扫取范围） |
+
+字体"字号"类关注点归插件所有：宿主不规定你的字号；如适合你的 UI，可把 `theme.editor.fontSize` 当默认值消费。所有负载变化都经 env 通道实时推送——字体族变更走主题修订号，字号/语法主题走显式监听——无需刷新。
+
 UI 必须构建为包内静态资源，不要把 Vite 开发服务器或 CDN 的脚本地址写入发行包。宿主把入口及资源转换成沙箱可加载内容；CSP 报错时检查构建产物是否存在、路径是否落在 `ui.root` 内，并使用匹配版本的 CLI 复现。用插件自己的对话框组件处理删除/重命名，不要依赖沙箱中的原生 `alert`/`confirm`/`prompt`。
 
 ## 原生 Sidecar 和 RPC

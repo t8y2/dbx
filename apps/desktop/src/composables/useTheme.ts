@@ -63,6 +63,39 @@ const isDark = computed(() => resolveAppThemeAppearance(themeMode.value, systemP
 // resolved token set (plugin iframe bridge) watch this revision instead.
 const themeRevision = ref(0);
 
+// Token mutations on the root that happen outside applyTheme() — e.g. the UI
+// and editor font settings write --font-sans / --font-mono inline — bump this
+// so open plugin workbench bridges re-read and re-push the resolved tokens.
+function bumpThemeRevision() {
+  themeRevision.value += 1;
+}
+
+let pendingBumpTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The one sanctioned way to write a design token onto the root outside
+// applyTheme(): writes the inline override AND bumps the theme revision.
+// Writing root tokens directly (documentElement.style.setProperty) skips the
+// bump and open plugin bridges keep stale tokens — always go through here.
+// `debounceMs` coalesces rapid writes (font-family preview keystrokes) into
+// one bump; an immediate write afterwards supersedes the pending one.
+function writeRootToken(cssVar: string, value: string, options?: { debounceMs?: number }) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(cssVar, value);
+  if (options?.debounceMs) {
+    if (pendingBumpTimer) clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = setTimeout(() => {
+      pendingBumpTimer = undefined;
+      bumpThemeRevision();
+    }, options.debounceMs);
+    return;
+  }
+  if (pendingBumpTimer) {
+    clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = undefined;
+  }
+  bumpThemeRevision();
+}
+
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
 let cachedTauriWindow: typeof import("@tauri-apps/api/window") | null = null;
@@ -212,5 +245,25 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, themeRevision, cornerStyle, applyTheme, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
+  return {
+    isDark,
+    themeMode,
+    themePalette,
+    customUiColors,
+    customUiColorsDark,
+    activeCustomUiColors,
+    themeRevision,
+    bumpThemeRevision,
+    writeRootToken,
+    cornerStyle,
+    applyTheme,
+    setThemeMode,
+    setThemePalette,
+    previewThemePalette,
+    clearThemePalettePreview,
+    setCustomUiColors,
+    resetCustomUiColors,
+    setCornerStyle,
+    toggleTheme,
+  };
 }

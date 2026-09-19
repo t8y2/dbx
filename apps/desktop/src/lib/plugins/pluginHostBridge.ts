@@ -10,10 +10,21 @@ const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 // plugin iframe to disk and never traverse plugin frames.
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
 
+/** Structured editor appearance: SQL editor settings that have no CSS-token
+ * carrier (font size is a number, the syntax theme an id). Font families are
+ * additionally mirrored as `--font-sans` / `--font-mono` root tokens. */
+export interface PluginEditorAppearance {
+  fontFamily: string;
+  fontSize: number;
+  theme: string;
+}
+
 export interface PluginBridgeTheme {
   appearance: "light" | "dark";
-  /** Resolved DBX design tokens (`--color-*`, `--radius-*`, ...) for the current theme. */
+  /** Resolved DBX design tokens (`--color-*`, `--radius-*`, `--font-*`, ...) for the current theme. */
   tokens: Record<string, string>;
+  /** Editor appearance snapshot. Optional: older in-flight snapshots omit it. */
+  editor?: PluginEditorAppearance;
 }
 
 export interface PluginWorkbenchContext {

@@ -4118,6 +4118,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.color = form.value.color;
     config.transport_layers = form.value.transport_layers || [];
     config.connect_timeout_secs = form.value.connect_timeout_secs;
+    // buildPluginConnectionConfig rebuilds the config from scratch and drops
+    // the timeout inherit flags, so mirror the Advanced-tab radio state the
+    // same way the built-in branch keeps them via the form spread. Kept ahead
+    // of the resolvedPluginConnectTimeout override below, which intentionally
+    // forces connect inheritance off for providers declaring their own
+    // handshake timeout field.
+    config.connect_timeout_inherit = form.value.connect_timeout_inherit;
     if (resolvedPluginConnectTimeout !== undefined) {
       // A provider declaring its own connect_timeout_secs field makes it the
       // single source of truth (declared default or advanced-form value): the
@@ -4129,6 +4136,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.connect_timeout_inherit = false;
     }
     config.query_timeout_secs = form.value.query_timeout_secs;
+    config.query_timeout_inherit = form.value.query_timeout_inherit;
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
@@ -8192,6 +8200,9 @@ function openExternalUrl(url: string) {
                         <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
                           {{ t("connection.localInfilePathHint") }}
                         </p>
+                        <p v-if="form.db_type === 'mysql'" class="text-xs leading-5 text-muted-foreground">
+                          {{ t("connection.sessionVariablesHint") }}
+                        </p>
                       </div>
                     </div>
 
@@ -8987,7 +8998,11 @@ function openExternalUrl(url: string) {
                     <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.etcdGrpcMaxInboundHint") }}</p>
                   </div>
                 </div>
-                <div class="grid grid-cols-4 items-center gap-4">
+                <!-- query_timeout_secs only feeds the database query pipeline
+                     (dataGrid/queryStore); plugin connections like SSH never
+                     consume it, so the generic radio would only suggest a
+                     budget the provider cannot honor. -->
+                <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
                   <div class="col-span-3 grid grid-cols-2 gap-2">
                     <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">

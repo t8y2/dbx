@@ -1,8 +1,8 @@
 use crate::execution::MAX_ROWS;
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, ObjectStatistics, QueryMessage, QueryResult,
-    SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ColumnInfo, ConstraintInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, LinkedServerInfo, ObjectStatistics,
+    QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use futures::{FutureExt, TryStreamExt};
 use sqlparser::ast::{Expr, Ident, ObjectNamePart, OrderByKind, SelectItem, SetExpr, Statement, TableFactor, Value};
@@ -3107,6 +3107,118 @@ fn sqlserver_triggers_sql(schema: &str, table: &str) -> String {
     )
 }
 
+pub async fn list_constraints(
+    client: &mut SqlServerClient,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ConstraintInfo>, String> {
+    let sql = sqlserver_constraints_sql(schema, table);
+    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let columns = row.get::<&str, _>(3).unwrap_or("");
+            let ref_columns = row.get::<&str, _>(6).unwrap_or("");
+            ConstraintInfo {
+                name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+                constraint_type: row.get::<&str, _>(1).unwrap_or("").to_string(),
+                definition: row.get::<&str, _>(2).unwrap_or("").to_string(),
+                columns: sqlserver_split_name_list(columns),
+                ref_schema: row.get::<&str, _>(4).filter(|value| !value.is_empty()).map(str::to_string),
+                ref_table: row.get::<&str, _>(5).filter(|value| !value.is_empty()).map(str::to_string),
+                ref_columns: sqlserver_split_name_list(ref_columns),
+                match_type: None,
+                on_update: row.get::<&str, _>(7).filter(|value| !value.is_empty()).map(str::to_string),
+                on_delete: row.get::<&str, _>(8).filter(|value| !value.is_empty()).map(str::to_string),
+                deferrable: false,
+                initially_deferred: false,
+                enabled: row.get::<bool, _>(9).unwrap_or(true),
+                valid: row.get::<bool, _>(10).unwrap_or(true),
+            }
+        })
+        .collect())
+}
+
+fn sqlserver_split_name_list(value: &str) -> Vec<String> {
+    value.split(',').filter(|name| !name.is_empty()).map(|name| name.to_string()).collect()
+}
+
+/// One row per constraint (PK / UNIQUE / FOREIGN KEY / CHECK / DEFAULT) for a table.
+///
+/// `sys.key_constraints` and `sys.foreign_keys` are keyed by their backing index
+/// and constraint object respectively, so the participating columns are
+/// aggregated with the same `FOR XML PATH('')` trick the index listing uses.
+fn sqlserver_constraints_sql(schema: &str, table: &str) -> String {
+    let object_id = sqlserver_object_id_expression(schema, table);
+    let key_columns = "STUFF((SELECT ',' + c2.name \
+                FROM sys.index_columns ic2 \
+                JOIN sys.columns c2 ON c2.object_id = ic2.object_id AND c2.column_id = ic2.column_id \
+                WHERE ic2.object_id = kc.parent_object_id AND ic2.index_id = kc.unique_index_id AND ic2.is_included_column = 0 \
+                ORDER BY ic2.key_ordinal \
+                FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '')";
+    let foreign_key_columns = "STUFF((SELECT ',' + pc2.name \
+                FROM sys.foreign_key_columns fkc2 \
+                JOIN sys.columns pc2 ON pc2.object_id = fkc2.parent_object_id AND pc2.column_id = fkc2.parent_column_id \
+                WHERE fkc2.constraint_object_id = fk.object_id \
+                ORDER BY fkc2.constraint_column_id \
+                FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '')";
+    let foreign_key_ref_columns = "STUFF((SELECT ',' + rc2.name \
+                FROM sys.foreign_key_columns fkc2 \
+                JOIN sys.columns rc2 ON rc2.object_id = fkc2.referenced_object_id AND rc2.column_id = fkc2.referenced_column_id \
+                WHERE fkc2.constraint_object_id = fk.object_id \
+                ORDER BY fkc2.constraint_column_id \
+                FOR XML PATH(''), TYPE).value('.', 'nvarchar(max)'), 1, 1, '')";
+    format!(
+        "SELECT c.constraint_name, c.constraint_type, c.definition, c.constraint_columns, \
+         c.ref_schema, c.ref_table, c.ref_columns, c.on_update, c.on_delete, c.is_enabled, c.is_valid \
+         FROM ( \
+         SELECT kc.name AS constraint_name, \
+            CASE WHEN kc.type = 'PK' THEN N'PRIMARY KEY' ELSE N'UNIQUE' END AS constraint_type, \
+            CAST(N'' AS NVARCHAR(MAX)) AS definition, \
+            {key_columns} AS constraint_columns, \
+            CAST(NULL AS NVARCHAR(128)) AS ref_schema, \
+            CAST(NULL AS NVARCHAR(128)) AS ref_table, \
+            CAST(N'' AS NVARCHAR(MAX)) AS ref_columns, \
+            CAST(NULL AS NVARCHAR(60)) AS on_update, \
+            CAST(NULL AS NVARCHAR(60)) AS on_delete, \
+            CAST(CASE WHEN i.is_disabled = 1 THEN 0 ELSE 1 END AS bit) AS is_enabled, \
+            CAST(1 AS bit) AS is_valid \
+         FROM sys.key_constraints kc \
+         JOIN sys.indexes i ON i.object_id = kc.parent_object_id AND i.index_id = kc.unique_index_id \
+         WHERE kc.parent_object_id = {object_id} \
+         UNION ALL \
+         SELECT fk.name, N'FOREIGN KEY', CAST(N'' AS NVARCHAR(MAX)), {foreign_key_columns}, \
+            SCHEMA_NAME(rt.schema_id), rt.name, {foreign_key_ref_columns}, \
+            CASE fk.update_referential_action WHEN 1 THEN N'CASCADE' WHEN 2 THEN N'SET NULL' WHEN 3 THEN N'SET DEFAULT' ELSE N'NO ACTION' END, \
+            CASE fk.delete_referential_action WHEN 1 THEN N'CASCADE' WHEN 2 THEN N'SET NULL' WHEN 3 THEN N'SET DEFAULT' ELSE N'NO ACTION' END, \
+            CAST(CASE WHEN fk.is_disabled = 1 THEN 0 ELSE 1 END AS bit), \
+            CAST(CASE WHEN fk.is_not_trusted = 1 THEN 0 ELSE 1 END AS bit) \
+         FROM sys.foreign_keys fk \
+         JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id \
+         WHERE fk.parent_object_id = {object_id} \
+         UNION ALL \
+         SELECT cc.name, N'CHECK', cc.definition, ISNULL(c.name, N''), \
+            CAST(NULL AS NVARCHAR(128)), CAST(NULL AS NVARCHAR(128)), CAST(N'' AS NVARCHAR(MAX)), \
+            CAST(NULL AS NVARCHAR(60)), CAST(NULL AS NVARCHAR(60)), \
+            CAST(CASE WHEN cc.is_disabled = 1 THEN 0 ELSE 1 END AS bit), \
+            CAST(CASE WHEN cc.is_not_trusted = 1 THEN 0 ELSE 1 END AS bit) \
+         FROM sys.check_constraints cc \
+         LEFT JOIN sys.columns c ON c.object_id = cc.parent_object_id AND c.column_id = cc.parent_column_id \
+         WHERE cc.parent_object_id = {object_id} \
+         UNION ALL \
+         SELECT dc.name, N'DEFAULT', dc.definition, ISNULL(c.name, N''), \
+            CAST(NULL AS NVARCHAR(128)), CAST(NULL AS NVARCHAR(128)), CAST(N'' AS NVARCHAR(MAX)), \
+            CAST(NULL AS NVARCHAR(60)), CAST(NULL AS NVARCHAR(60)), \
+            CAST(1 AS bit), CAST(1 AS bit) \
+         FROM sys.default_constraints dc \
+         LEFT JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id \
+         WHERE dc.parent_object_id = {object_id} \
+         ) c \
+         ORDER BY c.constraint_name",
+    )
+}
+
 pub async fn execute_query(client: &mut SqlServerClient, sql: &str) -> Result<QueryResult, String> {
     execute_query_with_max_rows(client, sql, None).await
 }
@@ -3674,17 +3786,18 @@ mod tests {
         requires_simple_query_batch, restore_sqlserver_blank_column_names, restore_sqlserver_legacy_probe_output_names,
         restore_sqlserver_spatial_column_types, restore_sqlserver_unsafe_column_types, server_messages_query_result,
         sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
-        sqlserver_completion_assistant_sql, sqlserver_dml_output_returns_rows, sqlserver_done_trace_event,
-        sqlserver_filter_definition_error, sqlserver_hidden_schema_names, sqlserver_indexes_sql,
-        sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
+        sqlserver_completion_assistant_sql, sqlserver_constraints_sql, sqlserver_dml_output_returns_rows,
+        sqlserver_done_trace_event, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
+        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
         sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
         sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
         sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
-        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
-        sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
-        sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
-        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_split_name_list,
+        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_table_objects_sql,
+        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
+        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
+        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -4521,6 +4634,32 @@ mod tests {
         assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
         assert!(sql.contains("ORDER BY t.name"));
         assert!(!sql.contains("STRING_AGG"));
+    }
+
+    #[test]
+    fn sqlserver_constraints_sql_unions_every_constraint_catalog() {
+        let sql = sqlserver_constraints_sql("d'bo", "t'able");
+
+        assert!(sql.contains("sys.key_constraints"));
+        assert!(sql.contains("sys.foreign_keys"));
+        assert!(sql.contains("sys.check_constraints"));
+        assert!(sql.contains("sys.default_constraints"));
+        assert!(sql.contains("UNION ALL"));
+        // Participating columns are aggregated with the same FOR XML trick the
+        // index listing uses; SQL Server has no string_agg on 2008-era servers.
+        assert!(sql.contains("FOR XML PATH(''), TYPE"));
+        assert!(!sql.contains("STRING_AGG"));
+        // The constraint order is stable so the tab does not reshuffle per refresh.
+        assert!(sql.contains("ORDER BY c.constraint_name"));
+        // Literals stay escaped through the shared object-id helper.
+        assert!(sql.contains("OBJECT_ID(QUOTENAME(N'd''bo') + N'.' + QUOTENAME(N't''able'))"));
+    }
+
+    #[test]
+    fn sqlserver_split_name_list_drops_trailing_empty_entries() {
+        assert_eq!(sqlserver_split_name_list(""), Vec::<String>::new());
+        assert_eq!(sqlserver_split_name_list("id"), vec!["id".to_string()]);
+        assert_eq!(sqlserver_split_name_list("id,code"), vec!["id".to_string(), "code".to_string()]);
     }
 
     #[test]

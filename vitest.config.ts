@@ -22,8 +22,7 @@ export default defineConfig({
     // import at once, CPU contention can stall a worker's event loop past the
     // old 5s default and flake deferred-promise tests. A 10s timeout absorbs
     // that without capping throughput, so workers can scale past 4. CI keeps
-    // 4 workers: its 4-vCPU runners already run vue-tsc/oxlint/oxfmt
-    // concurrently with vitest via `pnpm check`.
+    // 4 workers to match each runner's CPU count.
     testTimeout: 10_000,
     maxWorkers: process.env.CI ? 4 : 8,
   },

@@ -204,7 +204,7 @@ async function installListing(listing: MarketplacePluginListing): Promise<Plugin
     version: listing.plugin.latestVersion,
   });
   notifyPluginRuntimeReplaced(result.plugin.manifest.id);
-  beaconPluginInstall(listing.plugin.id, listing.plugin.latestVersion);
+  beaconPluginInstall(listing.plugin.id, listing.plugin.latestVersion, listing.status === "update" ? "update" : "install");
   return result;
 }
 

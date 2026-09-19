@@ -9,16 +9,23 @@ export function gateFailures(needs, mode) {
   const flags = ["rust", "agents", "fast", "agent_java", "agent_go_changed", "agent_rust_changed", "agent_integration_changed"];
   if (!flags.every((flag) => typeof plan[flag] === "boolean")) return ["incomplete CI plan"];
   const routedJobs = { frontend: "frontend", packages: "packages", "github-scripts": "github_scripts",
-    "windows-win7-bundle": "windows_win7_bundle", "duckdb-windows-driver": "duckdb_windows",
-    jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
+    "windows-standard-check": "windows_win7_bundle", "windows-win7-bundle": "windows_win7_bundle",
+    "duckdb-windows-driver": "duckdb_windows", jdbc: "jdbc", "offline-jdbc-release": "offline_jdbc", "nix-packaging": "nix" };
   if (mode === "all" && !Object.values(routedJobs).every((output) => ["true", "false"].includes(needs.changes.outputs[output]))) {
     return ["missing or invalid job selection outputs"];
+  }
+  if (mode === "frontend" && !["true", "false"].includes(needs.changes.outputs.frontend)) {
+    return ["missing or invalid frontend selection output"];
   }
   const expected = mode === "rust" ? {
     "fast-checks": plan.fast, "rust-fmt-clippy": plan.rust, "rust-test": plan.rust,
   } : mode === "agents" ? {
     "fast-checks": plan.fast, "agent-checks": plan.agents, "agent-java": plan.agent_java, "agent-go": plan.agent_go_changed,
     "agent-rust": plan.agent_rust_changed, "agent-integration": plan.agent_integration_changed,
+  } : mode === "frontend" ? {
+    "frontend-checks": needs.changes.outputs.frontend === "true",
+    "frontend-typecheck": needs.changes.outputs.frontend === "true",
+    "frontend-test": needs.changes.outputs.frontend === "true",
   } : mode === "all" ? {
     rust: true, agents: true, "fast-checks": plan.fast,
     ...Object.fromEntries(Object.entries(routedJobs)

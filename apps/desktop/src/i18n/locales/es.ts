@@ -724,6 +724,8 @@ export default withEnglishFallback({
     driverName: "Nombre del driver",
     driverNamePlaceholder: "Nombre del proveedor o entorno",
     urlParams: "Parámetros de URL",
+    sessionVariablesHint:
+      "DBX eleva la variable de sesión group_concat_max_len a 1048576 para que los resultados de GROUP_CONCAT no se trunquen de forma silenciosa. Para seguir la configuración del servidor, use sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len (sintaxis de MySQL Connector/J; separe varias variables con comas).",
     d1AccountId: "ID de cuenta",
     d1DatabaseId: "ID de base de datos",
     d1ApiToken: "Token de API",
@@ -1496,6 +1498,9 @@ export default withEnglishFallback({
       starExpansionColumns: "{count} columnas",
       insertSelectedColumns: "Insertar columnas seleccionadas ({count})",
       insertSelectedColumnsDetail: "Selecciona columnas y, después, insértalas juntas",
+      selectAllColumns: "Seleccionar todas las columnas",
+      selectAllColumnsDetail: "Marcar todos los campos a la vez",
+      deselectAllColumns: "Desmarcar todo",
       selectColumnsBeforeInsert: "Selecciona al menos una columna primero",
       tableAlias: "Alias de tabla",
       functionDescriptions: {

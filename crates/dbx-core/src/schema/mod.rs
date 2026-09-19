@@ -7694,7 +7694,8 @@ pub async fn list_triggers_core(
 
 /// Lists structured constraints for a relation. Exposed generically so the
 /// agent protocol and native drivers share one route; the built-in drivers
-/// that implement it today are PostgreSQL, OpenGauss, and the Xugu agent.
+/// that implement it today are PostgreSQL, OpenGauss, SQL Server, and the
+/// Xugu agent.
 pub async fn list_constraints_core(
     state: &AppState,
     connection_id: &str,
@@ -7702,12 +7703,16 @@ pub async fn list_constraints_core(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ConstraintInfo>, String> {
+    if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
+        return Ok(vec![]);
+    }
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
 
         {
             let pool_handle = state.pool_handle(&pool_key).await;
+            try_sqlserver!(pool_handle, list_constraints, schema, table);
             if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
                 let mut client = client.lock().await;
                 return client

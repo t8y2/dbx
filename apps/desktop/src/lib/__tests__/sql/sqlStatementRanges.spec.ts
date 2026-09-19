@@ -1472,6 +1472,45 @@ FROM orders;`;
     }
   });
 
+  it("keeps an Oracle MERGE together when each action starts its own line (#9516)", () => {
+    const merge = `MERGE INTO bom_template t USING (SELECT id, no FROM stage_bom) s ON (t.id = s.id)
+WHEN MATCHED THEN
+UPDATE SET
+  t.no = s.no
+WHERE
+  t.no IS NULL
+WHEN NOT MATCHED THEN
+INSERT (id, no)
+VALUES (s.id, s.no)`;
+    for (const needle of ["MERGE INTO", "UPDATE SET", "WHERE", "INSERT (id, no)", "VALUES (s.id, s.no)"]) {
+      expect(statementRangeAtCursor(merge, indexOf(merge, needle), "oracle")?.sql.trim()).toBe(merge);
+    }
+    expect(rangeSqlTexts(executableStatementRanges(merge, "oracle"))).toEqual([merge]);
+  });
+
+  it("keeps an Oracle MERGE delete action that starts its own line together", () => {
+    const merge = `MERGE INTO bom_template t USING (SELECT id FROM stage_bom) s ON (t.id = s.id)
+WHEN MATCHED THEN
+DELETE WHERE t.no IS NULL`;
+    expect(rangeSqlTexts(executableStatementRanges(merge, "oracle"))).toEqual([merge]);
+  });
+
+  it("keeps an Oracle MERGE together when the UPDATE action's SET starts its own line", () => {
+    const merge = `MERGE INTO bom_template t USING (SELECT id, no FROM stage_bom) s ON (t.id = s.id)
+WHEN MATCHED THEN
+UPDATE
+SET t.no = s.no`;
+    const update = "UPDATE bom_template\nSET no = 'x'";
+    expect(rangeSqlTexts(executableStatementRanges(merge, "oracle"))).toEqual([merge]);
+    expect(rangeSqlTexts(executableStatementRanges(`${merge};\n\n${update};`, "oracle"))).toEqual([merge, update]);
+  });
+
+  it("still splits a standalone UPDATE that follows a terminated MERGE", () => {
+    const merge = "MERGE INTO bom_template t USING (SELECT id FROM stage_bom) s ON (t.id = s.id)\nWHEN MATCHED THEN UPDATE SET t.no = s.no";
+    const update = "UPDATE bom_template SET no = 'x'";
+    expect(rangeSqlTexts(executableStatementRanges(`${merge};\n\n${update};`, "oracle"))).toEqual([merge, update]);
+  });
+
   it("returns the full SAP HANA DO block for cursors inside nested statements", () => {
     const range = statementRangeAtCursor(sapHanaDoBlockFixture, indexOf(sapHanaDoBlockFixture, "Result"), "saphana");
 

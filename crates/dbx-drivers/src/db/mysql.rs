@@ -1298,10 +1298,16 @@ impl MySqlTcpKeepaliveMode {
 const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
 
 impl MySqlSetupMode {
-    fn group_concat_max_len_query(self) -> Option<String> {
+    fn group_concat_max_len_query(self, url: &str) -> Option<String> {
         match self {
-            Self::Standard => Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}")),
-            Self::Compatible => None,
+            // An explicit Connector/J style `sessionVariables=group_concat_max_len=...`
+            // is the user's own choice (for example following the server
+            // configuration with `@@global.group_concat_max_len`), so the built-in
+            // safety default must not overwrite it.
+            Self::Standard if !mysql_session_variables_override_group_concat_max_len(url) => {
+                Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}"))
+            }
+            Self::Standard | Self::Compatible => None,
         }
     }
 }
@@ -1573,8 +1579,9 @@ fn mysql_setup_queries_for_database_with_mode(
     queries.push(format!("SET NAMES {charset}"));
     // MySQL defaults group_concat_max_len to 1024, which silently truncates
     // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
-    // such as old StarRocks versions that reject unknown MySQL variables.
-    if let Some(query) = setup_mode.group_concat_max_len_query() {
+    // such as old StarRocks versions that reject unknown MySQL variables, and
+    // for connections that configure the variable themselves.
+    if let Some(query) = setup_mode.group_concat_max_len_query(url) {
         queries.push(query);
     }
     queries.extend(extra_setup_queries.iter().cloned());
@@ -1718,15 +1725,49 @@ fn mysql_connection_catalog(url: &str) -> Option<String> {
     })
 }
 
-fn mysql_connection_session_variables(url: &str) -> Option<String> {
-    let (_, query) = url.split_once('?')?;
+/// Parses the Connector/J style `sessionVariables=` URL parameter into raw
+/// `name=value` assignments, keeping user variables (`@name=...`) untrimmed.
+fn mysql_connection_session_variable_assignments(url: &str) -> Vec<String> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Vec::new();
+    };
     let query = query.split('#').next().unwrap_or(query);
-    let value = query.split('&').find_map(|segment| {
+    let Some(value) = query.split('&').find_map(|segment| {
         let (key, value) = segment.split_once('=')?;
         percent_decode_str(key).decode_utf8().ok().filter(|key| key.eq_ignore_ascii_case("sessionVariables"))?;
         percent_decode_str(value).decode_utf8().ok().map(|value| value.into_owned())
-    })?;
-    let assignments = split_mysql_session_variables(&value);
+    }) else {
+        return Vec::new();
+    };
+
+    split_mysql_session_variables(&value)
+}
+
+/// Detects an explicit `group_concat_max_len` assignment in the connection URL.
+/// DBX raises the variable during connection setup, but a value the user (or the
+/// server) asks for must always win, independent of statement execution order.
+fn mysql_session_variables_override_group_concat_max_len(url: &str) -> bool {
+    mysql_connection_session_variable_assignments(url).into_iter().any(|assignment| {
+        let Some((name, _)) = assignment.trim().split_once('=') else {
+            return false;
+        };
+        let name = name.trim();
+        // `@@global.name=...` only changes the global value and `@name=...`
+        // declares a session user variable; neither replaces DBX's session SET.
+        if name.starts_with("@@global.") {
+            return false;
+        }
+        let name = name.strip_prefix("@@").unwrap_or(name);
+        if name.starts_with('@') {
+            return false;
+        }
+        let name = name.strip_prefix("session.").unwrap_or(name);
+        name.trim().eq_ignore_ascii_case("group_concat_max_len")
+    })
+}
+
+fn mysql_connection_session_variables(url: &str) -> Option<String> {
+    let assignments = mysql_connection_session_variable_assignments(url);
     if assignments.is_empty() {
         return None;
     }
@@ -8483,6 +8524,70 @@ mod tests {
         assert_eq!(
             mysql_setup_queries("mysql://host:9030/db?sessionVariables=%20%2C%20%3B%20", &[]),
             vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_respect_explicit_group_concat_max_len() {
+        // An explicit value from the connection wins over the safety default.
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?sessionVariables=group_concat_max_len%3D2048", &[]),
+            vec!["USE `db`", "SET SESSION group_concat_max_len=2048", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?sessionVariables=query_timeout%3D60%2Cgroup_concat_max_len%3D512",
+                &[]
+            ),
+            vec!["USE `db`", "SET SESSION query_timeout=60,SESSION group_concat_max_len=512", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_follow_server_group_concat_max_len() {
+        // `@@global.group_concat_max_len` keeps DBX aligned with the server value.
+        assert_eq!(
+            mysql_setup_queries(
+                "mysql://host:3306/db?sessionVariables=group_concat_max_len%3D%40%40global.group_concat_max_len",
+                &[],
+            ),
+            vec!["USE `db`", "SET SESSION group_concat_max_len=@@global.group_concat_max_len", "SET NAMES utf8mb4",]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_match_group_concat_max_len_case_insensitively() {
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?sessionVariables=GROUP_CONCAT_MAX_LEN%3D512", &[]),
+            vec!["USE `db`", "SET SESSION GROUP_CONCAT_MAX_LEN=512", "SET NAMES utf8mb4"]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?sessionVariables=%40%40session.group_concat_max_len%3D512", &[],),
+            vec!["USE `db`", "SET @@session.group_concat_max_len=512", "SET NAMES utf8mb4"]
+        );
+    }
+
+    #[test]
+    fn mysql_setup_queries_keep_group_concat_default_for_other_session_variables() {
+        // A session user variable (or a global-only assignment) must not disable
+        // the built-in safety default.
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?sessionVariables=%40group_concat_max_len%3D2048", &[]),
+            vec![
+                "USE `db`",
+                "SET @group_concat_max_len=2048",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576",
+            ]
+        );
+        assert_eq!(
+            mysql_setup_queries("mysql://host:3306/db?sessionVariables=%40%40global.group_concat_max_len%3D512", &[]),
+            vec![
+                "USE `db`",
+                "SET @@global.group_concat_max_len=512",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576",
+            ]
         );
     }
 

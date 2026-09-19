@@ -14,7 +14,7 @@ env:
   RUSTFLAGS: -C debuginfo=line-tables-only
 
 jobs:
-  frontend:
+  frontend-checks:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-22.04
@@ -38,8 +38,14 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --filter dbx... install --frozen-lockfile
 
-      - name: Frontend check
-        run: pnpm check
+      - name: Check generated connection types
+        run: pnpm check:connection-types
+
+      - name: Check frontend formatting
+        run: pnpm exec oxfmt --check "apps/desktop/src/**/*.{ts,vue}"
+
+      - name: Lint frontend
+        run: pnpm lint
 
       # Rebuild and diff the committed docs-export bundle after the frontend
       # checks so source changes cannot silently leave stale generated assets.
@@ -55,6 +61,89 @@ jobs:
       - name: Report any docs export bundle drift
         run: git diff --exit-code -- crates/dbx-core/assets/
         continue-on-error: true
+
+  frontend-typecheck:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      NPM_CONFIG_LOGLEVEL: error
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm --filter dbx... install --frozen-lockfile
+
+      - name: Type-check frontend
+        run: pnpm exec vue-tsc --noEmit --project apps/desktop/tsconfig.json
+
+  frontend-test:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      NPM_CONFIG_LOGLEVEL: error
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    name: frontend-test (${{ matrix.shard }}/2)
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm --filter dbx... install --frozen-lockfile
+
+      - name: Run frontend test shard
+        env:
+          VITEST_SHARD: ${{ matrix.shard }}/2
+        run: >-
+          pnpm exec vitest run
+          --shard=${{ matrix.shard }}/2
+          --reporter=default
+          --reporter=github-actions
+          --reporter=./.github/scripts/ci-vitest-file-timing-reporter.mjs
+
+  frontend:
+    needs:
+      - changes
+      - frontend-checks
+      - frontend-typecheck
+      - frontend-test
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+      - name: Check selected frontend jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node .github/scripts/ci-gate.mjs frontend
 
   github-scripts:
     needs: changes
@@ -180,6 +269,35 @@ jobs:
         continue-on-error: true
         run: ${SCCACHE_PATH} --show-stats
 
+  windows-standard-check:
+    needs: changes
+    if: needs.changes.outputs.windows_win7_bundle == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: windows-standard-v1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust for standard Windows
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
+      - name: Check standard Windows dependency path
+        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
   windows-win7-bundle:
     needs: changes
     if: needs.changes.outputs.windows_win7_bundle == 'true'
@@ -204,12 +322,6 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Setup Rust for standard Windows
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - name: Check standard Windows dependency path
-        run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
 
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
@@ -286,6 +398,11 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: duckdb-windows-v1
+      # libduckdb-sys uses cc-rs for its bundled C++ sources.
+      CC: "sccache cl.exe"
+      CXX: "sccache cl.exe"
     steps:
       - uses: actions/checkout@v5
 
@@ -295,25 +412,23 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Build DuckDB Windows driver
-        shell: bash
-        run: |
-          pushd agents/drivers/duckdb
-          cargo build \
-            --locked \
-            --release \
-            --bin dbx-duckdb-driver \
-            --target x86_64-win7-windows-msvc \
-            -Z build-std=std,panic_abort
-          popd
+        shell: pwsh
+        working-directory: agents/drivers/duckdb
+        run: cargo build --locked --release --bin dbx-duckdb-driver --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
 
       - name: Validate DuckDB Windows driver
         shell: bash
@@ -927,7 +1042,9 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: agents/drivers/${{ matrix.driver }} -> target
-          cache-on-failure: true
+          # A failed bundled native build can leave link-compatible but invalid artifacts.
+          shared-key: ci-agent-rust-v2-${{ matrix.driver }}
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # mold -run wraps the whole process tree (see the packages job note);
       # the duckdb sidecar links a large bundled C++ static library.
@@ -1022,6 +1139,7 @@ jobs:
       - frontend
       - github-scripts
       - packages
+      - windows-standard-check
       - windows-win7-bundle
       - duckdb-windows-driver
       - jdbc

@@ -129,6 +129,7 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Questdb
                 | DatabaseType::Dameng
                 | DatabaseType::Oracle
+                | DatabaseType::OceanbaseOracle
                 | DatabaseType::SqlServer
         )
     )
@@ -1381,6 +1382,26 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_nonexecuting_oceanbase_oracle_json_explain() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            format: Some(ExplainFormat::Json),
+            analyze: Some(true),
+            sql: "SELECT * FROM events;".to_string(),
+        });
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN FORMAT=JSON SELECT * FROM events"));
+        assert!(result.ok);
+
+        let unsafe_result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            format: None,
+            analyze: None,
+            sql: "DELETE FROM events".to_string(),
+        });
+        assert_eq!(unsafe_result.reason.as_deref(), Some("unsafe"));
     }
 
     #[test]

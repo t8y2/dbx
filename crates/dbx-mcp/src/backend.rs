@@ -587,7 +587,12 @@ impl LocalBackend {
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
-        Self::open_with_app_version(path, env!("CARGO_PKG_VERSION")).await
+        // The standalone MCP binary and CLI are versioned independently from
+        // the DBX app, so their crate version must not stand in for the app
+        // version during plugin `engines.dbx` checks: a plugin requiring
+        // DBX >= 0.5.68 would be rejected against e.g. 0.4.90 (#9595). An
+        // empty version makes the compatibility check skip that requirement.
+        Self::open_with_app_version(path, "").await
     }
 
     /// Same as [`open`], but lets tests and embedded callers pin the app version
@@ -3826,6 +3831,43 @@ mod tests {
         let backend = LocalBackend::open(&database_path).await.unwrap();
 
         assert_eq!(backend.state().agent_manager.base_dir(), &agent_dir);
+    }
+
+    #[tokio::test]
+    async fn local_backend_standalone_open_skips_plugin_dbx_engine_gate() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let plugin_dir = data_dir.path().join("plugins").join("io.dbx.gated");
+        std::fs::create_dir_all(plugin_dir.join("ui")).unwrap();
+        std::fs::write(plugin_dir.join("ui").join("index.html"), "<!doctype html>").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{
+                "manifest_version": 1,
+                "id": "io.dbx.gated",
+                "name": "Gated",
+                "version": "1.0.0",
+                "publisher": "example",
+                "engines": { "dbx": ">=999.0.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+                "permissions": ["host.events"]
+            }"#,
+        )
+        .unwrap();
+        let storage = Storage::open(&database_path).await.unwrap();
+        drop(storage);
+
+        // The standalone host has no app version to compare against (#9595).
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+        let installed = backend.state().plugins.list_installed().unwrap();
+        let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
+        assert!(plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
+
+        // A host that knows the app version keeps enforcing the requirement.
+        let backend = LocalBackend::open_with_app_version(&database_path, "0.6.16").await.unwrap();
+        let installed = backend.state().plugins.list_installed().unwrap();
+        let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
+        assert!(!plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
     }
 
     #[test]

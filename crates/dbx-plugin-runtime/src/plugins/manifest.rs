@@ -1009,6 +1009,13 @@ fn validate_engine_requirement(label: &str, requirement: &str, actual: &str, err
     if requirement.trim().is_empty() {
         return;
     }
+    // An empty installed version means the host could not identify itself (the
+    // standalone MCP binary and CLI are versioned independently from the DBX
+    // app). The requirement is unverifiable there, not unsatisfied, so skip it
+    // instead of failing every plugin (#9595).
+    if actual.trim().is_empty() {
+        return;
+    }
     let requirement = match VersionReq::parse(requirement.trim()) {
         Ok(requirement) => requirement,
         Err(error) => {
@@ -1606,6 +1613,34 @@ mod tests {
 
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
         assert_eq!(manifest.localizations["zh-CN"].name.as_deref(), Some("本地化插件"));
+    }
+
+    #[test]
+    fn compatibility_skips_dbx_engine_gate_for_unknown_host_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=999.0.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.events"]
+        }))
+        .unwrap();
+
+        // A standalone host reports no app version: the requirement is
+        // unverifiable there, not unsatisfied (#9595).
+        let compatibility = manifest.compatibility(dir.path(), "");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        // A host that knows the app version keeps enforcing the gate.
+        let compatibility = manifest.compatibility(dir.path(), "0.6.16");
+        assert!(!compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.errors.iter().any(|error| error.contains(">=999.0.0")), "{:?}", compatibility.errors);
     }
 
     #[test]

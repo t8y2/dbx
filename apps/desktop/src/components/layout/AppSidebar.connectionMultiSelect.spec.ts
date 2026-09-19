@@ -135,6 +135,7 @@ const mountedApps: Array<{ unmount: () => void; host: HTMLElement }> = [];
 function createStore() {
   return reactive({
     connections: [{ id: "conn-visible" }, { id: "conn-hidden" }, { id: "conn-next" }],
+    connectedIds: new Set<string>(),
     sidebarLayout: {
       groups: [{ id: "group-a", name: "Group A" }],
       order: [{ type: "group", id: "group-a", children: [] }],
@@ -298,5 +299,36 @@ describe("AppSidebar connection multi-select moves", () => {
     ]);
     expect(mocks.store.selectedTreeNodeIds).toEqual([]);
     expect(mocks.store.connectionMultiSelectActive).toBe(false);
+  });
+
+  it("closes only connected selected connections and keeps the selection", async () => {
+    setSelection(["conn-visible", "conn-hidden"]);
+    mocks.store.connectedIds = new Set(["conn-visible"]);
+    const host = await mountSidebar();
+
+    const closeTooltip = host.querySelector('[data-tooltip="contextMenu.closeSelectedConnections"]');
+    expect(closeTooltip).not.toBeNull();
+    const closeButton = closeTooltip!.querySelector("button");
+    expect((closeButton as HTMLButtonElement)!.disabled).toBe(false);
+    click(closeButton);
+    await nextTick();
+    await Promise.resolve();
+
+    expect(mocks.store.disconnect.mock.calls).toEqual([["conn-visible"]]);
+    // Selection survives so a further batch can be closed without re-selecting.
+    expect(mocks.store.selectedTreeNodeIds).toEqual(["conn-visible", "conn-hidden"]);
+  });
+
+  it("disables the close button when none of the selected connections is connected", async () => {
+    setSelection(["conn-visible", "conn-hidden"]);
+    mocks.store.connectedIds = new Set();
+    const host = await mountSidebar();
+
+    const closeButton = host.querySelector('[data-tooltip="contextMenu.closeSelectedConnections"] button') as HTMLButtonElement;
+    expect(closeButton.disabled).toBe(true);
+    click(closeButton);
+    await nextTick();
+
+    expect(mocks.store.disconnect).not.toHaveBeenCalled();
   });
 });

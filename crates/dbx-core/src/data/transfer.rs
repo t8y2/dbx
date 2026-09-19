@@ -2822,6 +2822,9 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
             if let Some(binary_literal) = format_sqlserver_binary_sql_literal(s, db_type, column_type) {
                 return binary_literal;
             }
+            if let Some(binary_literal) = format_xugu_binary_sql_literal(s, db_type, column_type) {
+                return binary_literal;
+            }
             if let Some(numeric_literal) = format_mysql_numeric_string_literal(s, db_type, column_type) {
                 return numeric_literal;
             }
@@ -2971,6 +2974,19 @@ fn format_sqlserver_binary_sql_literal(
     // that a direct typed conversion would produce.
     let escaped = value.replace('\'', "''");
     Some(format!("CONVERT({column_type}, N'{escaped}')"))
+}
+
+fn format_xugu_binary_sql_literal(value: &str, db_type: &DatabaseType, column_type: Option<&str>) -> Option<String> {
+    if !matches!(db_type, DatabaseType::Xugu) || !column_type.is_some_and(is_binary_transfer_column_type) {
+        return None;
+    }
+
+    let hex = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X"))?;
+    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    Some(format!("HEXTORAW('{hex}')"))
 }
 
 fn format_oracle_temporal_sql_literal(
@@ -3687,6 +3703,7 @@ pub(crate) fn generate_insert_typed_from_value_rows(
 struct InsertSqlTemplate {
     standard_prefix: String,
     oracle_into_prefix: Option<String>,
+    xugu_multirow_values: bool,
 }
 
 impl InsertSqlTemplate {
@@ -3727,6 +3744,9 @@ impl InsertSqlTemplate {
             standard_prefix: format!("INSERT INTO {full_table} ({col_list}){overriding} VALUES\n"),
             oracle_into_prefix: matches!(db_type, DatabaseType::Oracle)
                 .then(|| format!("INTO {full_table} ({col_list}) VALUES ")),
+            // Xugu accepts consecutive row constructors (`VALUES (...) (...)`) but rejects
+            // the comma-separated multi-row form emitted by the generic template.
+            xugu_multirow_values: matches!(db_type, DatabaseType::Xugu),
         }
     }
 
@@ -3760,7 +3780,11 @@ impl InsertSqlTemplate {
         sql.push_str(&self.standard_prefix);
         for (index, values) in value_rows.iter().enumerate() {
             if index > 0 {
-                sql.push_str(",\n");
+                if self.xugu_multirow_values {
+                    sql.push('\n');
+                } else {
+                    sql.push_str(",\n");
+                }
             }
             sql.push_str(values);
         }
@@ -3776,9 +3800,10 @@ impl InsertSqlTemplate {
                 .saturating_add(sql_text_bytes("\nSELECT 1 FROM dual", db_type));
         }
 
+        let separator = if self.xugu_multirow_values { "\n" } else { ",\n" };
         sql_text_bytes(&self.standard_prefix, db_type)
             .saturating_add(value_rows_bytes)
-            .saturating_add(sql_text_bytes(",\n", db_type).saturating_mul(row_count.saturating_sub(1)))
+            .saturating_add(sql_text_bytes(separator, db_type).saturating_mul(row_count.saturating_sub(1)))
     }
 }
 
@@ -10600,6 +10625,15 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
     }
 
     #[test]
+    fn xugu_transfer_uses_consecutive_row_constructors() {
+        let sql =
+            InsertSqlTemplate::new(&["ID".into(), "NAME".into()], "ITEMS", "APP", &DatabaseType::Xugu, None, false)
+                .build(&["(1, 'Ada')".into(), "(2, 'Grace')".into()]);
+
+        assert_eq!(sql, "INSERT INTO \"APP\".\"ITEMS\" (\"ID\", \"NAME\") VALUES\n(1, 'Ada')\n(2, 'Grace')");
+    }
+
+    #[test]
     fn h2_transfer_defaults_empty_schemas_to_public() {
         assert_eq!(
             rewrite_transfer_source_table_ddl(
@@ -15483,6 +15517,35 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             r#"INSERT INTO `files` (`id`, `payload`) VALUES
 (1, '0xnothex')"#
         );
+    }
+
+    #[test]
+    fn xugu_insert_formats_prefixed_hex_for_binary_and_blob() {
+        let sql = generate_insert_typed(
+            &[String::from("id"), String::from("binary_payload"), String::from("blob_payload"), String::from("note")],
+            &[
+                Some(String::from("integer")),
+                Some(String::from("BINARY")),
+                Some(String::from("BLOB")),
+                Some(String::from("varchar(64)")),
+            ],
+            &[vec![json!(1), json!("0x0001ABff"), json!("0X1020"), json!("0x0001ABff")]],
+            "files",
+            "AppSchema",
+            &DatabaseType::Xugu,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "AppSchema"."files" ("id", "binary_payload", "blob_payload", "note") VALUES
+(1, HEXTORAW('0001ABff'), HEXTORAW('1020'), '0x0001ABff')"#
+        );
+    }
+
+    #[test]
+    fn xugu_insert_keeps_invalid_binary_hex_as_string_literal() {
+        assert_eq!(escape_value_typed(&json!("0xnothex"), &DatabaseType::Xugu, Some("BLOB")), "'0xnothex'");
     }
 
     #[test]

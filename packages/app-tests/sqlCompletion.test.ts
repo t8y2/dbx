@@ -2776,6 +2776,7 @@ test("suggests package members after package qualifier", () => {
     objects: [
       { name: "PAYROLL", schema: "HR", type: "package" },
       { name: "calculate_bonus", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL" },
+      { name: "CALCULATE_TAX", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL" },
     ],
     databaseType: "oracle",
   });
@@ -2783,7 +2784,12 @@ test("suggests package members after package qualifier", () => {
   const member = items.find((item) => item.label === "calculate_bonus");
   assert.ok(member);
   assert.equal(member.type, "function");
-  assert.equal(member.apply, "calculate_bonus()");
+  // The lowercase metadata name is the stored form, so it must stay quoted to survive Oracle folding (#9526).
+  assert.equal(member.apply, '"calculate_bonus"()');
+
+  const upperMember = items.find((item) => item.label === "CALCULATE_TAX");
+  assert.ok(upperMember);
+  assert.equal(upperMember.apply, "CALCULATE_TAX()");
 });
 
 test("keeps Oracle functions available in qualified expression routine context", () => {

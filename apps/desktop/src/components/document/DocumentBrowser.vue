@@ -339,7 +339,20 @@ function documentDataSignature(): string | undefined {
   }
 }
 
-const documentLocalColumnFilterRestoreKey = computed(() => documentDataSignature());
+// Local value filters describe column values, not the rows that happen to be
+// loaded, so paging and page-size changes must not drop them. Only a new query
+// (collection, filter or sort) invalidates the snapshot; restored filters are
+// mapped back by column name, so a changed column set is handled as well.
+function documentLocalColumnFilterSignature(): string | undefined {
+  try {
+    return JSON.stringify([documentStoreProvider.value.kind, props.connectionId, props.database, props.collection, currentDocumentFilter() ?? null, currentDocumentSortJson(sortInput.value) ?? null]);
+  } catch {
+    // Malformed filter/sort JSON: nothing stable to key filters against.
+    return undefined;
+  }
+}
+
+const documentLocalColumnFilterRestoreKey = computed(() => documentLocalColumnFilterSignature());
 
 let loadedDocumentDataSignature: string | undefined;
 
@@ -391,13 +404,11 @@ function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFi
   persistDocumentBrowserState({ includeData: true });
 }
 
-// Keep these sources in lockstep with documentDataSignature(): every input that
-// invalidates held rows (including pageSize and the infinite-scroll setting, which
-// can change mid-session at page 0 without moving `page`) must also drop the
-// local-filter snapshot, or a tab switch would replay filters the user watched
-// DataGrid clear on its own restore-key change.
+// Keep these sources in lockstep with documentLocalColumnFilterSignature(): a
+// changed query means the local-filter snapshot no longer describes what the
+// user is looking at.
 watch(
-  [filterInput, sortInput, appliedDocumentFilter, page, pageSize, () => settingsStore.editorSettings.infiniteScroll],
+  [filterInput, sortInput, appliedDocumentFilter],
   () => {
     localColumnFilters.value = {};
     localColumnFilterColumns.value = undefined;
@@ -405,6 +416,8 @@ watch(
   },
   { deep: true },
 );
+// Paging and page-size changes reload rows, but the local value filters stay put.
+watch([page, pageSize, () => settingsStore.editorSettings.infiniteScroll], () => persistDocumentBrowserState());
 watch(documentFilterRules, () => persistDocumentBrowserState(), { deep: true });
 
 // Seed the grid from the cached page so a tab switch costs no round trip

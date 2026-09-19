@@ -63,9 +63,16 @@ pub struct SqlFileRequest {
     pub selected_tables: Option<Vec<dbx_types::sql_file::SqlFileTable>>,
     #[serde(default)]
     pub part_cooldown_ms: u64,
-    /// Temporarily disable MySQL `FOREIGN_KEY_CHECKS` for this import and
-    /// restore them on completion, error, or cancellation. Only applies to
-    /// MySQL-compatible connections that reuse one pinned session.
+    /// Temporarily disable relational constraint enforcement across the entire
+    /// target database for this import, and restore it on completion, error,
+    /// or cancellation. The mechanism is engine-specific: MySQL-compatible
+    /// connections toggle session-scoped `FOREIGN_KEY_CHECKS`; PostgreSQL-family
+    /// connections (Postgres, GaussDB, openGauss) run `ALTER TABLE ... DISABLE
+    /// TRIGGER ALL` / `ENABLE TRIGGER ALL` for every table; SQL Server runs
+    /// `ALTER TABLE ... NOCHECK CONSTRAINT ALL` / `WITH NOCHECK CHECK CONSTRAINT
+    /// ALL` for every table. Has no effect on other connection types. This does
+    /// not bypass unique/primary-key violations on any engine — only foreign-key
+    /// and (on PostgreSQL) other trigger-enforced constraints.
     #[serde(default)]
     pub skip_relational_constraints: bool,
 }

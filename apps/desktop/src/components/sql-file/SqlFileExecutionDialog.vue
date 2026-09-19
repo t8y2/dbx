@@ -134,14 +134,23 @@ function resetPerFileState() {
 }
 
 const sqlConnections = computed(() => store.connections.filter((c) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(c.db_type)));
-// Mirrors the core executor gate (`supports_connection_level_database_bootstrap_target`): the
-// MySQL-family types it runs for, so the constraint toggle appears wherever the backend honors it.
+// Mirrors the core executor gate (`relational_constraint_bypass_kind` in
+// sql_file_import.rs): MySQL-family types use the session-scoped
+// FOREIGN_KEY_CHECKS toggle, PostgreSQL-family types use DISABLE/ENABLE
+// TRIGGER ALL, and SQL Server uses NOCHECK/CHECK CONSTRAINT ALL. The toggle
+// appears wherever the backend implements one of those mechanisms.
 const MYSQL_BOOTSTRAP_IMPORT_TYPES = new Set(["mysql", "doris", "starrocks", "goldendb"]);
 const MYSQL_BOOTSTRAP_IMPORT_PROFILES = new Set(["mariadb", "tidb", "oceanbase", "custom_mysql", "doris", "starrocks", "selectdb", "goldendb"]);
+const POSTGRES_CONSTRAINT_BYPASS_TYPES = new Set(["postgres", "gaussdb", "opengauss"]);
 const isMysqlCompatibleTarget = computed(() => {
   const config = store.getConfig(connectionId.value);
   if (!config) return false;
   return MYSQL_BOOTSTRAP_IMPORT_TYPES.has(config.db_type) || (!!config.driver_profile && MYSQL_BOOTSTRAP_IMPORT_PROFILES.has(config.driver_profile.toLowerCase()));
+});
+const supportsRelationalConstraintBypass = computed(() => {
+  const config = store.getConfig(connectionId.value);
+  if (!config) return false;
+  return isMysqlCompatibleTarget.value || POSTGRES_CONSTRAINT_BYPASS_TYPES.has(config.db_type) || config.db_type === "sqlserver";
 });
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
@@ -799,7 +808,7 @@ watch(
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
             {{ t("sqlFile.continueOnError") }}
           </button>
-          <button v-if="isMysqlCompatibleTarget" type="button" class="flex items-center gap-2 text-xs text-left" :disabled="running" @click="skipRelationalConstraints = !skipRelationalConstraints">
+          <button v-if="supportsRelationalConstraintBypass" type="button" class="flex items-center gap-2 text-xs text-left" :disabled="running" @click="skipRelationalConstraints = !skipRelationalConstraints">
             <CheckSquare v-if="skipRelationalConstraints" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
             {{ t("sqlFile.skipRelationalConstraints") }}

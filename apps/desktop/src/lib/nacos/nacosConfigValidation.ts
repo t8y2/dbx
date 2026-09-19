@@ -2,7 +2,7 @@ import { htmlLanguage } from "@codemirror/lang-html";
 import { jsonLanguage } from "@codemirror/lang-json";
 import { XMLValidator } from "fast-xml-parser";
 import { parse as parseToml, TomlError } from "smol-toml";
-import { parseDocument } from "yaml";
+import { analyzeNacosYaml, type NacosYamlDiagnosticCode, type NacosYamlDiagnosticSeverity } from "@/lib/nacos/nacosYamlDiagnostics";
 
 export type NacosConfigValidationFormat = "text" | "json" | "xml" | "yaml" | "html" | "properties" | "toml";
 
@@ -12,6 +12,25 @@ export interface NacosConfigDiagnostic {
   column: number;
   from: number;
   to: number;
+  /** Diagnostics without a severity are errors, which is how every producer behaved before YAML gained warnings (#9405). */
+  severity?: NacosYamlDiagnosticSeverity;
+  /** Structured code for hosts that localize the message; only the YAML analyzer produces one. */
+  code?: NacosYamlDiagnosticCode;
+  /** Interpolation values for the localized message. */
+  params?: Record<string, string>;
+}
+
+/** Severity of a diagnostic, defaulting to the error every non-YAML producer reports. */
+export function nacosConfigDiagnosticSeverity(diagnostic: NacosConfigDiagnostic): NacosYamlDiagnosticSeverity {
+  return diagnostic.severity ?? "error";
+}
+
+/**
+ * Whether a configuration must not be published. Only errors block: a parser
+ * warning is a note about content the user is still entitled to publish (#9405).
+ */
+export function nacosConfigValidationBlocksPublish(diagnostics: readonly NacosConfigDiagnostic[]): boolean {
+  return diagnostics.some((diagnostic) => nacosConfigDiagnosticSeverity(diagnostic) === "error");
 }
 
 function lineColumnAt(text: string, offset: number) {
@@ -197,24 +216,17 @@ function nextNonWhitespaceOffset(text: string, offset: number): number {
   return index;
 }
 
-function validateYaml(text: string): NacosConfigDiagnostic | null {
-  const lines = text.split(/\r?\n/);
-  let offset = 0;
-  for (const line of lines) {
-    const indentation = /^[ \t]*/.exec(line)?.[0] ?? "";
-    const tabIndex = indentation.indexOf("\t");
-    if (tabIndex >= 0) {
-      return diagnosticAt(text, offset + tabIndex, "YAML indentation must use spaces, not tabs");
-    }
-    offset += line.length + 1;
-  }
-  const document = parseDocument(text);
-  const error = document.errors[0];
-  if (error) {
-    const offsetFromError = Array.isArray(error.pos) ? error.pos[0] : 0;
-    return diagnosticAt(text, offsetFromError, error.message);
-  }
-  return null;
+function validateYaml(text: string): NacosConfigDiagnostic[] {
+  return analyzeNacosYaml(text).map((diagnostic) => ({
+    message: diagnostic.message,
+    line: diagnostic.line,
+    column: diagnostic.column,
+    from: diagnostic.from,
+    to: diagnostic.to,
+    severity: diagnostic.severity,
+    code: diagnostic.code,
+    params: diagnostic.params,
+  }));
 }
 
 function validateXml(text: string): NacosConfigDiagnostic | null {
@@ -254,10 +266,10 @@ function validateToml(text: string): NacosConfigDiagnostic | null {
 export function validateNacosConfigContent(text: string, format: string): NacosConfigDiagnostic[] {
   const rawFormat = format.trim().toLowerCase();
   const normalized = (rawFormat === "yml" ? "yaml" : rawFormat === "props" ? "properties" : rawFormat) as NacosConfigValidationFormat;
-  let diagnostic: NacosConfigDiagnostic | null = null;
   if (normalized === "json") return validateJson(text);
-  else if (normalized === "yaml") diagnostic = validateYaml(text);
-  else if (normalized === "xml") diagnostic = validateXml(text);
+  if (normalized === "yaml") return validateYaml(text);
+  let diagnostic: NacosConfigDiagnostic | null = null;
+  if (normalized === "xml") diagnostic = validateXml(text);
   else if (normalized === "html") diagnostic = validateHtml(text);
   else if (normalized === "properties") diagnostic = validateProperties(text);
   else if (normalized === "toml") diagnostic = validateToml(text);

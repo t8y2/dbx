@@ -711,7 +711,8 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
-    expect(table?.apply).toBe("order_items oi");
+    // The lowercase table name must stay quoted (#9526); the generated alias is a new identifier and stays bare.
+    expect(table?.apply).toBe('"order_items" oi');
   });
 
   it("never adds generated aliases to Cassandra table completions", () => {

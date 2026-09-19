@@ -4,13 +4,15 @@ use dbx_core::cloud_sync::{
     apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets, finalize_snippet_migration,
     forget_snippet_token, forget_webdav_password,
     forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
-    resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
+    resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, s3_get_snapshot,
+    s3_put_snapshot, s3_sync_buckets, s3_sync_test as core_s3_sync_test,
     save_snippet_sync_id as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
     save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, snippet_saved_token_status,
     snippet_sync_settings as core_snippet_sync_settings, webdav_saved_password_status,
     webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
-    SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
-    WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
+    S3SyncBucket, S3SyncConfig, S3SyncSummary, SnippetProvider, SnippetSyncClient, SnippetSyncConfig,
+    SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus, WebDavClient, WebDavConfig, WebDavPasswordStatus,
+    WebDavSyncSecretsStatus, WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,75 @@ pub struct SnippetDownloadResult {
     pub editor_settings: Option<serde_json::Value>,
     pub desktop_settings: DesktopSettings,
     pub apply_summary: ApplySnapshotSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3DownloadResult {
+    pub summary: S3SyncSummary,
+    pub editor_settings: Option<serde_json::Value>,
+    pub desktop_settings: DesktopSettings,
+    pub apply_summary: ApplySnapshotSummary,
+}
+
+#[tauri::command]
+pub async fn s3_sync_test(state: State<'_, Arc<AppState>>, config: S3SyncConfig) -> Result<(), String> {
+    core_s3_sync_test(&state, &config).await
+}
+
+#[tauri::command]
+pub async fn s3_sync_list_buckets(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<Vec<S3SyncBucket>, String> {
+    s3_sync_buckets(&state, &connection_id).await
+}
+
+#[tauri::command]
+pub async fn s3_sync_upload(
+    state: State<'_, Arc<AppState>>,
+    config: S3SyncConfig,
+    editor_settings: Option<serde_json::Value>,
+    secrets_passphrase: Option<String>,
+) -> Result<S3SyncSummary, String> {
+    let snapshot = build_sync_snapshot_with_saved_secrets(
+        &state.storage,
+        env!("CARGO_PKG_VERSION"),
+        editor_settings,
+        secrets_passphrase.as_deref(),
+    )
+    .await?;
+    s3_put_snapshot(&state, &config, &snapshot).await
+}
+
+#[tauri::command]
+pub async fn s3_sync_download(
+    state: State<'_, Arc<AppState>>,
+    config: S3SyncConfig,
+    secrets_passphrase: Option<String>,
+) -> Result<S3DownloadResult, String> {
+    let (snapshot, summary) = s3_get_snapshot(&state, &config).await?;
+    let explicit_passphrase = secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved_passphrase = if explicit_passphrase.is_some() {
+        None
+    } else {
+        resolve_webdav_sync_secrets_passphrase(&state.storage).await?
+    };
+    let apply_summary = apply_sync_snapshot(
+        &state.storage,
+        &snapshot,
+        ApplySnapshotOptions {
+            secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()),
+            restore_secrets: true,
+        },
+    )
+    .await?;
+    Ok(S3DownloadResult {
+        summary,
+        editor_settings: snapshot.editor_settings,
+        desktop_settings: snapshot.desktop_settings,
+        apply_summary,
+    })
 }
 
 #[tauri::command]

@@ -2243,6 +2243,30 @@ export interface WebDavDownloadResult {
   };
 }
 
+export interface S3SyncConfig {
+  connectionId: string;
+  bucket?: string;
+  remotePath?: string;
+}
+
+export interface S3SyncBucket {
+  name: string;
+}
+
+export interface S3SyncSummary {
+  objectUri: string;
+  bytes: number;
+  exportedAt?: string;
+  appVersion?: string;
+}
+
+export interface S3DownloadResult {
+  summary: S3SyncSummary;
+  editorSettings?: unknown;
+  desktopSettings: DesktopSettings;
+  applySummary: WebDavDownloadResult["applySummary"];
+}
+
 export interface WebDavPasswordStatus {
   hasSavedPassword: boolean;
 }
@@ -2327,6 +2351,22 @@ export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: un
 
 export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string): Promise<WebDavDownloadResult> {
   return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase });
+}
+
+export async function s3SyncTest(config: S3SyncConfig): Promise<void> {
+  return post("/api/cloud-sync/s3/test", { config });
+}
+
+export async function s3SyncListBuckets(connectionId: string): Promise<S3SyncBucket[]> {
+  return post("/api/cloud-sync/s3/buckets", { connectionId });
+}
+
+export async function s3SyncUpload(config: S3SyncConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<S3SyncSummary> {
+  return post("/api/cloud-sync/s3/upload", { config, editorSettings, secretsPassphrase });
+}
+
+export async function s3SyncDownload(config: S3SyncConfig, secretsPassphrase?: string): Promise<S3DownloadResult> {
+  return post("/api/cloud-sync/s3/download", { config, secretsPassphrase });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {

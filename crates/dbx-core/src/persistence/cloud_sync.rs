@@ -10,14 +10,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 use crate::ai::AiConfigItem;
+use crate::connection::AppState;
 use crate::connection_secrets::{
     plugin_connection_secret_key, CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
     MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
+use crate::plugins::PluginConnectionHandle;
 use crate::saved_sql::SavedSqlLibrary;
 use crate::storage::{DesktopSettings, SnippetPendingCleanup, Storage};
 
@@ -28,6 +31,13 @@ const DEFAULT_REMOTE_PATH: &str = "DBX/sync/snapshot.json";
 const DEFAULT_SNIPPET_FILE_NAME: &str = "dbx-sync.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITEE_API_BASE: &str = "https://gitee.com/api/v5";
+pub const S3_SYNC_PLUGIN_ID: &str = "io.github.t8y2.s3";
+pub const S3_SYNC_CONNECTION_PROVIDER_ID: &str = "io.github.t8y2.s3.connection";
+pub const S3_SYNC_FILESYSTEM_PROVIDER_ID: &str = "io.github.t8y2.s3.files";
+const S3_SYNC_MAX_BYTES: usize = 256 * 1024 * 1024;
+const S3_SYNC_CHUNK_BYTES: usize = 256 * 1024;
+const S3_SYNC_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const S3_SYNC_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SECRET_KEYS: &[&str] = &[
     "password",
     "ssh_password",
@@ -56,6 +66,20 @@ pub struct WebDavConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub remote_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3SyncConfig {
+    pub connection_id: String,
+    pub bucket: Option<String>,
+    pub remote_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct S3SyncBucket {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +243,15 @@ pub struct ApplySnapshotSummary {
 #[serde(rename_all = "camelCase")]
 pub struct WebDavSyncSummary {
     pub remote_path: String,
+    pub bytes: usize,
+    pub exported_at: Option<String>,
+    pub app_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3SyncSummary {
+    pub object_uri: String,
     pub bytes: usize,
     pub exported_at: Option<String>,
     pub app_version: Option<String>,
@@ -521,6 +554,381 @@ pub async fn resolve_webdav_sync_secrets_passphrase(storage: &Storage) -> Result
     let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
     let secret = storage.load_or_create_local_device_secret().await?;
     decrypt_text_with_secret(&blob, &secret).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct S3FilesystemListResult {
+    #[serde(default)]
+    entries: Vec<S3FilesystemEntry>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct S3FilesystemEntry {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct S3UploadOpenResult {
+    upload_id: String,
+    channel: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct S3StreamOpenResult {
+    stream_id: String,
+    size: u64,
+}
+
+struct S3PluginSession<'a> {
+    state: &'a AppState,
+    connection_id: String,
+    config: ConnectionConfig,
+    handle: PluginConnectionHandle,
+}
+
+impl<'a> S3PluginSession<'a> {
+    async fn open(state: &'a AppState, connection_id: &str) -> Result<Self, String> {
+        let requested_id = connection_id.trim();
+        if requested_id.is_empty() {
+            return Err("An S3 connection is required".to_string());
+        }
+        let mut config = state
+            .storage
+            .load_connections()
+            .await?
+            .into_iter()
+            .find(|config| config.id == requested_id)
+            .ok_or_else(|| format!("S3 connection not found: {requested_id}"))?;
+        validate_s3_connection(&config)?;
+
+        // A separate runtime id prevents a settings-page sync from replacing
+        // or disconnecting an S3 workbench session that is already open.
+        config.id = format!("{}-sync-{}", config.id, uuid::Uuid::new_v4());
+        let connection_id = config.id.clone();
+        let (host, port) = match state.connection_host_port(&connection_id, &config).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                state.reset_connection_transport_for_config(&connection_id, &config).await;
+                return Err(error);
+            }
+        };
+        let handle = match state.plugin_host.connect_connection(&config, &host, port).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                state.reset_connection_transport_for_config(&connection_id, &config).await;
+                return Err(error);
+            }
+        };
+        Ok(Self { state, connection_id, config, handle })
+    }
+
+    async fn invoke<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let mut params = params.as_object().cloned().ok_or("S3 plugin parameters must be an object")?;
+        params.insert("providerId".to_string(), serde_json::json!(S3_SYNC_FILESYSTEM_PROVIDER_ID));
+        params.insert("connectionId".to_string(), serde_json::json!(self.connection_id));
+        self.state
+            .plugin_host
+            .invoke(S3_SYNC_PLUGIN_ID, method, serde_json::Value::Object(params), None, Some(timeout))
+            .await
+    }
+
+    async fn close(self) -> Result<(), String> {
+        let disconnect = self.handle.disconnect().await;
+        self.state.reset_connection_transport_for_config(&self.connection_id, &self.config).await;
+        disconnect
+    }
+}
+
+fn validate_s3_connection(config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::Plugin
+        || config.plugin_id.as_deref() != Some(S3_SYNC_PLUGIN_ID)
+        || config.plugin_connection_provider.as_deref() != Some(S3_SYNC_CONNECTION_PROVIDER_ID)
+        || config.plugin_connection_type.as_deref() != Some("s3")
+    {
+        return Err("The selected connection is not owned by the official S3 plugin".to_string());
+    }
+    Ok(())
+}
+
+async fn finish_s3_session<T>(session: S3PluginSession<'_>, result: Result<T, String>) -> Result<T, String> {
+    let cleanup = session.close().await;
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(error)) => Err(format!("S3 sync succeeded, but closing the temporary connection failed: {error}")),
+        (Err(error), _) => Err(error),
+    }
+}
+
+async fn resolve_s3_target(state: &AppState, config: &S3SyncConfig) -> Result<(String, String), String> {
+    let connection = state
+        .storage
+        .load_connections()
+        .await?
+        .into_iter()
+        .find(|connection| connection.id == config.connection_id.trim())
+        .ok_or_else(|| format!("S3 connection not found: {}", config.connection_id.trim()))?;
+    validate_s3_connection(&connection)?;
+    let fixed_bucket = connection.database.as_deref().map(str::trim).filter(|bucket| !bucket.is_empty());
+    let requested_bucket = config.bucket.as_deref().map(str::trim).filter(|bucket| !bucket.is_empty());
+    let bucket = match (fixed_bucket, requested_bucket) {
+        (Some(fixed), Some(requested)) if fixed != requested => {
+            return Err(format!("S3 connection is fixed to bucket '{fixed}'"));
+        }
+        (Some(fixed), _) => fixed,
+        (None, Some(requested)) => requested,
+        (None, None) => return Err("An S3 bucket is required".to_string()),
+    };
+    let remote_path = normalized_remote_path(config.remote_path.as_deref());
+    Ok((bucket.to_string(), s3_object_uri(bucket, &remote_path)?))
+}
+
+fn s3_object_uri(bucket: &str, remote_path: &str) -> Result<String, String> {
+    if bucket.is_empty()
+        || bucket.len() > 255
+        || bucket.chars().any(|character| character.is_control() || matches!(character, '/' | '\\' | '?' | '#'))
+    {
+        return Err("S3 bucket name is invalid".to_string());
+    }
+    let segments = remote_path.trim_matches('/').split('/').filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    if segments.is_empty() || segments.iter().any(|segment| matches!(*segment, "." | "..")) {
+        return Err("S3 remote path must identify an object".to_string());
+    }
+    let mut uri = Url::parse(&format!("s3://{bucket}/")).map_err(|error| error.to_string())?;
+    uri.path_segments_mut().map_err(|_| "S3 object URI cannot contain path segments".to_string())?.extend(segments);
+    Ok(uri.to_string())
+}
+
+pub async fn s3_sync_test(state: &AppState, config: &S3SyncConfig) -> Result<(), String> {
+    let (bucket, _) = resolve_s3_target(state, config).await?;
+    let session = S3PluginSession::open(state, &config.connection_id).await?;
+    let result: Result<(), String> = session
+        .invoke::<S3FilesystemListResult>(
+            "filesystem/list",
+            serde_json::json!({ "uri": format!("s3://{bucket}/"), "limit": 1 }),
+            S3_SYNC_OPERATION_TIMEOUT,
+        )
+        .await
+        .map(|_| ());
+    finish_s3_session(session, result).await
+}
+
+pub async fn s3_sync_buckets(state: &AppState, connection_id: &str) -> Result<Vec<S3SyncBucket>, String> {
+    let connection = state
+        .storage
+        .load_connections()
+        .await?
+        .into_iter()
+        .find(|connection| connection.id == connection_id.trim())
+        .ok_or_else(|| format!("S3 connection not found: {}", connection_id.trim()))?;
+    validate_s3_connection(&connection)?;
+    if let Some(bucket) = connection.database.as_deref().map(str::trim).filter(|bucket| !bucket.is_empty()) {
+        return Ok(vec![S3SyncBucket { name: bucket.to_string() }]);
+    }
+
+    let session = S3PluginSession::open(state, connection_id).await?;
+    let result = async {
+        let mut buckets = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page: S3FilesystemListResult = session
+                .invoke(
+                    "filesystem/list",
+                    serde_json::json!({ "uri": "s3:/", "cursor": cursor, "limit": 1000 }),
+                    S3_SYNC_OPERATION_TIMEOUT,
+                )
+                .await?;
+            buckets.extend(
+                page.entries
+                    .into_iter()
+                    .filter(|entry| entry.kind == "bucket" || entry.kind == "directory")
+                    .map(|entry| S3SyncBucket { name: entry.name }),
+            );
+            let next = page.next_cursor.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+            if next.is_none() || next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+        buckets.sort_by(|left, right| left.name.cmp(&right.name));
+        buckets.dedup_by(|left, right| left.name == right.name);
+        Ok(buckets)
+    }
+    .await;
+    finish_s3_session(session, result).await
+}
+
+pub async fn s3_put_snapshot(
+    state: &AppState,
+    config: &S3SyncConfig,
+    snapshot: &SyncSnapshot,
+) -> Result<S3SyncSummary, String> {
+    let (_, object_uri) = resolve_s3_target(state, config).await?;
+    let bytes = serde_json::to_vec_pretty(snapshot).map_err(|error| error.to_string())?;
+    if bytes.len() > S3_SYNC_MAX_BYTES {
+        return Err(format!("S3 sync snapshots are limited to {S3_SYNC_MAX_BYTES} bytes"));
+    }
+    let session = S3PluginSession::open(state, &config.connection_id).await?;
+    let result = async {
+        let upload_id = format!("dbx-sync-{}", uuid::Uuid::new_v4());
+        let opened: S3UploadOpenResult = session
+            .invoke(
+                "filesystem/upload/open",
+                serde_json::json!({
+                    "uploadId": upload_id,
+                    "uri": object_uri,
+                    "contentType": "application/json",
+                    "create": true,
+                    "overwrite": true
+                }),
+                S3_SYNC_OPERATION_TIMEOUT,
+            )
+            .await?;
+        let transfer = async {
+            for chunk in bytes.chunks(S3_SYNC_CHUNK_BYTES) {
+                state.plugin_host.send_binary(S3_SYNC_PLUGIN_ID, &opened.channel, chunk, None).await?;
+            }
+            let _: serde_json::Value = session
+                .invoke(
+                    "filesystem/upload/finish",
+                    serde_json::json!({ "uploadId": opened.upload_id }),
+                    S3_SYNC_TRANSFER_TIMEOUT,
+                )
+                .await?;
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = transfer {
+            let _: Result<serde_json::Value, String> = session
+                .invoke(
+                    "filesystem/upload/abort",
+                    serde_json::json!({ "uploadId": opened.upload_id }),
+                    S3_SYNC_OPERATION_TIMEOUT,
+                )
+                .await;
+            return Err(error);
+        }
+        Ok(S3SyncSummary {
+            object_uri,
+            bytes: bytes.len(),
+            exported_at: Some(snapshot.exported_at.clone()),
+            app_version: Some(snapshot.app_version.clone()),
+        })
+    }
+    .await;
+    finish_s3_session(session, result).await
+}
+
+pub async fn s3_get_snapshot(state: &AppState, config: &S3SyncConfig) -> Result<(SyncSnapshot, S3SyncSummary), String> {
+    let (_, object_uri) = resolve_s3_target(state, config).await?;
+    let session = S3PluginSession::open(state, &config.connection_id).await?;
+    let mut events = state.plugin_host.subscribe_events();
+    let result = async {
+        let stream_id = format!("dbx-sync-{}", uuid::Uuid::new_v4());
+        let transfer_result: Result<(S3StreamOpenResult, Vec<u8>), String> = async {
+            // Start consuming events before waiting for the open response. The
+            // official sidecar begins emitting chunks as soon as the stream is
+            // opened; consuming concurrently prevents the bounded host event
+            // buffer from overflowing on larger (up to 256 MiB) snapshots.
+            let open_call = session.invoke::<S3StreamOpenResult>(
+                "filesystem/stream/open",
+                serde_json::json!({ "streamId": stream_id, "uri": object_uri, "maxBytes": S3_SYNC_MAX_BYTES }),
+                S3_SYNC_OPERATION_TIMEOUT,
+            );
+            tokio::pin!(open_call);
+            let mut opened: Option<S3StreamOpenResult> = None;
+            let mut stream_finished = false;
+            let mut bytes = Vec::new();
+            while opened.is_none() || !stream_finished {
+                tokio::select! {
+                    result = &mut open_call, if opened.is_none() => {
+                        opened = Some(result?);
+                    }
+                    received = tokio::time::timeout(S3_SYNC_OPERATION_TIMEOUT, events.recv()) => {
+                        let event = received
+                            .map_err(|_| "Timed out while downloading the S3 sync snapshot".to_string())?
+                            .map_err(|error| format!("S3 sync event stream failed: {error}"))?;
+                        if event.plugin_id != S3_SYNC_PLUGIN_ID
+                            || event.params.get("streamId").and_then(serde_json::Value::as_str) != Some(stream_id.as_str())
+                        {
+                            continue;
+                        }
+                        match event.method.as_str() {
+                            "host.stream.chunk" => {
+                                let data = event
+                                    .params
+                                    .get("dataBase64")
+                                    .and_then(serde_json::Value::as_str)
+                                    .ok_or("S3 sync stream returned a chunk without data")?;
+                                let chunk = BASE64
+                                    .decode(data)
+                                    .map_err(|error| format!("S3 sync stream returned invalid data: {error}"))?;
+                                if bytes.len().saturating_add(chunk.len()) > S3_SYNC_MAX_BYTES {
+                                    return Err(format!("S3 sync snapshot exceeds the {S3_SYNC_MAX_BYTES} byte limit"));
+                                }
+                                bytes.extend_from_slice(&chunk);
+                            }
+                            "host.stream.end" => {
+                                if event.params.get("truncated").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+                                    return Err(format!("S3 sync snapshot exceeds the {S3_SYNC_MAX_BYTES} byte limit"));
+                                }
+                                stream_finished = true;
+                            }
+                            "host.stream.error" => {
+                                return Err(event
+                                    .params
+                                    .get("message")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or("S3 sync download failed")
+                                    .to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let opened = opened.ok_or("S3 stream did not return an open result")?;
+            if opened.stream_id != stream_id || opened.size > S3_SYNC_MAX_BYTES as u64 {
+                return Err(format!("S3 sync snapshot exceeds the {S3_SYNC_MAX_BYTES} byte limit"));
+            }
+            if bytes.len() as u64 != opened.size {
+                return Err(format!(
+                    "S3 sync snapshot download was incomplete: expected {} bytes, received {}",
+                    opened.size,
+                    bytes.len()
+                ));
+            }
+            Ok((opened, bytes))
+        }
+        .await;
+        let _: Result<serde_json::Value, String> = session
+            .invoke(
+                "filesystem/stream/close",
+                serde_json::json!({ "streamId": stream_id }),
+                S3_SYNC_OPERATION_TIMEOUT,
+            )
+            .await;
+        let (_, bytes) = transfer_result?;
+        let snapshot: SyncSnapshot = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let summary = S3SyncSummary {
+            object_uri,
+            bytes: bytes.len(),
+            exported_at: Some(snapshot.exported_at.clone()),
+            app_version: Some(snapshot.app_version.clone()),
+        };
+        Ok((snapshot, summary))
+    }
+    .await;
+    finish_s3_session(session, result).await
 }
 
 impl WebDavClient {
@@ -1654,11 +2062,12 @@ mod tests {
         encrypt_snippet_snapshot, finalize_snippet_migration, forget_webdav_sync_secrets_passphrase,
         gitee_snippet_payload, is_legacy_dbx_snapshot, normalized_remote_path, parent_collection_paths,
         parse_legacy_dbx_snapshot, parse_snippet_snapshot, prepare_legacy_snippet_snapshot,
-        resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, save_snippet_sync_id,
+        resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, s3_object_uri, save_snippet_sync_id,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snapshot_for_snippet_upload,
         snippet_file_content, snippet_response_id, snippet_sync_settings, webdav_endpoint_uses_direct_connection,
         webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload,
         SnippetProvider, SnippetSyncClient, SnippetSyncConfig, WebDavClient, WebDavConfig, DEFAULT_SNIPPET_FILE_NAME,
+        S3_SYNC_CONNECTION_PROVIDER_ID, S3_SYNC_FILESYSTEM_PROVIDER_ID, S3_SYNC_PLUGIN_ID,
     };
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::{
@@ -1669,6 +2078,23 @@ mod tests {
         default_redis_key_separator, ConnectionConfig, DatabaseType, SshTunnelConfig, TransportLayerConfig,
     };
     use crate::storage::Storage;
+
+    #[test]
+    fn s3_sync_object_uri_normalizes_and_encodes_path() {
+        assert_eq!(
+            s3_object_uri("archive", "DBX/sync snapshot.json").unwrap(),
+            "s3://archive/DBX/sync%20snapshot.json"
+        );
+        assert!(s3_object_uri("", "snapshot.json").is_err());
+        assert!(s3_object_uri("archive", "../snapshot.json").is_err());
+    }
+
+    #[test]
+    fn s3_sync_protocol_constants_match_official_plugin() {
+        assert_eq!(S3_SYNC_PLUGIN_ID, "io.github.t8y2.s3");
+        assert_eq!(S3_SYNC_CONNECTION_PROVIDER_ID, "io.github.t8y2.s3.connection");
+        assert_eq!(S3_SYNC_FILESYSTEM_PROVIDER_ID, "io.github.t8y2.s3.files");
+    }
 
     fn make_test_config(name: &str, is_default: bool) -> AiConfigItem {
         AiConfigItem {

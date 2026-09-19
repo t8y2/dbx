@@ -151,6 +151,10 @@ import {
   saveWebdavSavedPassword,
   saveSnippetSavedToken,
   saveSnippetSyncId,
+  s3SyncDownload,
+  s3SyncListBuckets,
+  s3SyncTest,
+  s3SyncUpload,
   retrySnippetLegacyCleanup,
   snippetSyncDownload,
   snippetSyncSettings,
@@ -162,6 +166,7 @@ import {
   webdavSyncSecretsStatus,
   webdavSyncTest,
   webdavSyncUpload,
+  listPlugins,
   listInstalledAgentsLocal,
   type AppSupportInfo,
   type McpHttpServerSettings,
@@ -170,6 +175,7 @@ import {
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
+  type S3SyncConfig,
   type WebDavConfig,
 } from "@/lib/backend/api";
 import { eventToModifierOnlyShortcut, eventToShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -208,7 +214,7 @@ import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COL
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
-import type { DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
+import type { DatabaseType, InstalledPlugin, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
@@ -272,6 +278,7 @@ import {
 } from "@/lib/settings/settingsSearch";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
+import { DEFAULT_S3_SYNC_REMOTE_PATH, S3_SYNC_CONNECTION_PROVIDER_ID, S3_SYNC_PLUGIN_ID, fixedS3Bucket, hasS3SyncPlugin, s3SyncConnections, s3SyncObjectUri } from "@/lib/sync/s3Sync";
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, normalizeCustomFontFamilyInput, readableFontFamily, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
@@ -404,6 +411,7 @@ const emit = defineEmits<{
   "open-mcp-settings": [];
   "open-update-center": [];
   "ai-config-deep-link-handled": [];
+  "new-plugin-connection": [pluginId: string, providerId: string];
 }>();
 
 const hasAnyUpdate = computed(() => Boolean(props.appUpdateAvailable || (props.driverUpdateCount || 0) > 0 || props.jdbcUpdateAvailable || props.mcpUpdateAvailable || (props.pluginUpdateCount || 0) > 0));
@@ -3796,7 +3804,31 @@ const webdavAutoUploadIntervalMinutes = ref(Number(localStorage.getItem("dbx-web
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
-const syncMethodTab = ref<"webdav" | "snippet">("webdav");
+const syncMethodTab = ref<"webdav" | "s3" | "snippet">("webdav");
+
+const syncPlugins = ref<InstalledPlugin[]>([]);
+const s3PluginInstalled = computed(() => hasS3SyncPlugin(syncPlugins.value));
+const availableS3Connections = computed(() => s3SyncConnections(connectionStore.connections));
+const s3ConnectionId = ref(localStorage.getItem("dbx-s3-sync-connection-id") || "");
+const selectedS3Connection = computed(() => availableS3Connections.value.find((connection) => connection.id === s3ConnectionId.value));
+const s3ConnectionBucket = computed(() => fixedS3Bucket(selectedS3Connection.value));
+const s3AddressingStyle = computed(() => {
+  const config = selectedS3Connection.value?.external_config;
+  if (!config || typeof config !== "object" || Array.isArray(config)) return "auto";
+  const value = (config as Record<string, unknown>).addressing_style;
+  return typeof value === "string" && value ? value : "auto";
+});
+const s3Buckets = ref<string[]>([]);
+const s3Bucket = ref("");
+const s3BucketsBusy = ref(false);
+const s3BucketsError = ref("");
+const s3RemotePath = ref(localStorage.getItem("dbx-s3-sync-remote-path") || DEFAULT_S3_SYNC_REMOTE_PATH);
+const s3Busy = ref<"" | "test" | "upload" | "download">("");
+const s3Message = ref("");
+const s3Error = ref(false);
+const s3EffectiveBucket = computed(() => s3ConnectionBucket.value || s3Bucket.value.trim());
+const s3ObjectUri = computed(() => s3SyncObjectUri(s3EffectiveBucket.value, s3RemotePath.value));
+const s3Ready = computed(() => !!selectedS3Connection.value && !!s3EffectiveBucket.value && !!s3RemotePath.value.trim() && !s3BucketsBusy.value && !s3Busy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim() || webdavHasSavedSecretsPassphrase.value));
 
 const snippetProvider = ref<SnippetProvider>((localStorage.getItem("dbx-snippet-provider") as SnippetProvider) || "github");
 const snippetId = ref("");
@@ -4079,6 +4111,10 @@ async function applyWebDavSyncSecretsPreference() {
     await saveWebdavSyncSecretsPreference(false);
     return;
   }
+  // Keeping the saved passphrase while the field is intentionally blank is
+  // important for both WebDAV and S3 actions; an empty input means "reuse the
+  // encrypted local value", not "delete it".
+  if (!passphrase && webdavHasSavedSecretsPassphrase.value) return;
   await saveWebdavSyncSecretsPreference(true, passphrase || undefined);
   if (passphrase) {
     webdavHasSavedSecretsPassphrase.value = true;
@@ -4136,6 +4172,106 @@ async function downloadWebDavSnapshot() {
     if (result.applySummary.secretsApplied) {
       return `${message} ${t("settings.syncSecretsApplied")}`;
     }
+    return message;
+  });
+}
+
+function currentS3SyncConfig(): S3SyncConfig {
+  return {
+    connectionId: s3ConnectionId.value,
+    bucket: s3EffectiveBucket.value || undefined,
+    remotePath: s3RemotePath.value.trim() || DEFAULT_S3_SYNC_REMOTE_PATH,
+  };
+}
+
+async function refreshS3Integration() {
+  try {
+    syncPlugins.value = await listPlugins();
+  } catch {
+    syncPlugins.value = [];
+  }
+  if (!s3PluginInstalled.value) {
+    if (syncMethodTab.value === "s3") syncMethodTab.value = "webdav";
+    return;
+  }
+  if (!availableS3Connections.value.some((connection) => connection.id === s3ConnectionId.value)) {
+    s3ConnectionId.value = availableS3Connections.value[0]?.id || "";
+  }
+  await refreshS3Buckets();
+}
+
+async function refreshS3Buckets() {
+  s3Buckets.value = [];
+  s3BucketsError.value = "";
+  if (!selectedS3Connection.value) {
+    s3Bucket.value = "";
+    return;
+  }
+  localStorage.setItem("dbx-s3-sync-connection-id", selectedS3Connection.value.id);
+  if (s3ConnectionBucket.value) {
+    s3Bucket.value = s3ConnectionBucket.value;
+    return;
+  }
+  s3BucketsBusy.value = true;
+  try {
+    const buckets = await s3SyncListBuckets(selectedS3Connection.value.id);
+    s3Buckets.value = buckets.map(({ name }) => name);
+    const saved = localStorage.getItem(`dbx-s3-sync-bucket-${selectedS3Connection.value.id}`)?.trim() || "";
+    s3Bucket.value = s3Buckets.value.includes(saved) ? saved : s3Buckets.value[0] || "";
+  } catch (error: any) {
+    s3Bucket.value = "";
+    s3BucketsError.value = error?.message || String(error);
+  } finally {
+    s3BucketsBusy.value = false;
+  }
+}
+
+async function runS3Action(kind: "test" | "upload" | "download", action: () => Promise<string>) {
+  s3Busy.value = kind;
+  s3Message.value = "";
+  s3Error.value = false;
+  localStorage.setItem("dbx-s3-sync-remote-path", s3RemotePath.value.trim() || DEFAULT_S3_SYNC_REMOTE_PATH);
+  if (!s3ConnectionBucket.value && s3ConnectionId.value && s3Bucket.value) {
+    localStorage.setItem(`dbx-s3-sync-bucket-${s3ConnectionId.value}`, s3Bucket.value);
+  }
+  try {
+    await applyWebDavSyncSecretsPreference();
+    s3Message.value = await action();
+  } catch (error: any) {
+    s3Message.value = error?.message || String(error);
+    s3Error.value = true;
+  } finally {
+    s3Busy.value = "";
+  }
+}
+
+async function testS3Sync() {
+  await runS3Action("test", async () => {
+    await s3SyncTest(currentS3SyncConfig());
+    return t("settings.syncS3TestSuccess");
+  });
+}
+
+async function uploadS3Snapshot() {
+  await runS3Action("upload", async () => {
+    const summary = await s3SyncUpload(currentS3SyncConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
+    return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.objectUri });
+  });
+}
+
+async function downloadS3Snapshot() {
+  if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
+  await runS3Action("download", async () => {
+    const result = await s3SyncDownload(currentS3SyncConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
+    if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
+    await settingsStore.updateDesktopSettings(result.desktopSettings);
+    await connectionStore.initFromDisk();
+    await savedSqlStore.initFromStorage();
+    await tunnelProfileStore.refresh();
+    await settingsStore.reloadAiConfigs();
+    let message = t("settings.syncDownloadSuccess", { bytes: result.summary.bytes, path: result.summary.objectUri });
+    if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
+    if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
     return message;
   });
 }
@@ -4276,6 +4412,18 @@ watch([webdavAutoUploadEnabled, webdavAutoUploadIntervalMinutes], () => {
   webdavAutoUploadIntervalMinutes.value = normalizedWebDavAutoUploadInterval(webdavAutoUploadIntervalMinutes.value);
   rememberWebDavFields();
 });
+watch(s3ConnectionId, () => {
+  void refreshS3Buckets();
+});
+watch(
+  () => availableS3Connections.value.map((connection) => connection.id).join("\0"),
+  () => {
+    if (!s3PluginInstalled.value) return;
+    if (!availableS3Connections.value.some((connection) => connection.id === s3ConnectionId.value)) {
+      s3ConnectionId.value = availableS3Connections.value[0]?.id || "";
+    }
+  },
+);
 watch(snippetProvider, (provider) => {
   localStorage.setItem("dbx-snippet-provider", provider);
   snippetId.value = "";
@@ -4302,6 +4450,7 @@ watch(activeSettingsTab, async (tab) => {
   }
   if (tab === "data" && isWeb) void loadWebSqlFileUploadMaxMbSetting();
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
+  if (tab === "sync") void refreshS3Integration();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
   }
@@ -4331,6 +4480,7 @@ watch(
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
+  void refreshS3Integration();
   checkLayoutDescTruncation();
   initTruncationObservers();
   void checkBackgroundImageFileExists();
@@ -8352,9 +8502,10 @@ LIMIT 100;</pre
 
             <section v-else-if="activeSettingsTab === 'sync'" data-settings-search-id="sync" :class="['py-2', settingsSearchTargetClass('sync')]">
               <Tabs v-model="syncMethodTab" class="w-full">
-                <TabsList v-if="!isWeb" class="grid w-full grid-cols-2">
+                <TabsList v-if="!isWeb" class="grid w-full" :class="s3PluginInstalled ? 'grid-cols-3' : 'grid-cols-2'">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
-                  <TabsTrigger value="snippet">GitHub / Gitee</TabsTrigger>
+                  <TabsTrigger v-if="s3PluginInstalled" value="s3">S3</TabsTrigger>
+                  <TabsTrigger v-if="!isWeb" value="snippet">GitHub / Gitee</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="webdav" data-settings-search-id="sync-webdav" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-webdav')]">
@@ -8453,6 +8604,89 @@ LIMIT 100;</pre
                       <Upload v-else class="mr-1 h-3 w-3" />
                       {{ t("settings.syncUpload") }}
                     </Button>
+                  </div>
+                </TabsContent>
+
+                <TabsContent v-if="s3PluginInstalled" value="s3" data-settings-search-id="sync-s3" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-s3')]">
+                  <div class="space-y-1">
+                    <div class="flex items-center gap-2 text-sm font-medium">
+                      <Cloud class="h-4 w-4 text-muted-foreground" />
+                      {{ t("settings.syncS3Title") }}
+                    </div>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.syncS3Description") }}</p>
+                  </div>
+
+                  <div v-if="!availableS3Connections.length" class="rounded-md border border-dashed p-6 text-center">
+                    <p class="text-sm text-muted-foreground">{{ t("settings.syncS3NoConnections") }}</p>
+                    <Button type="button" size="sm" class="mt-3" @click="emit('new-plugin-connection', S3_SYNC_PLUGIN_ID, S3_SYNC_CONNECTION_PROVIDER_ID)">
+                      <Plus class="mr-1 h-3.5 w-3.5" />
+                      {{ t("settings.syncS3CreateConnection") }}
+                    </Button>
+                  </div>
+
+                  <div v-else class="grid gap-4 rounded-md border p-4 md:grid-cols-2">
+                    <div class="space-y-2 md:col-span-2">
+                      <div class="flex items-center justify-between gap-2">
+                        <Label>{{ t("settings.syncS3Connection") }}</Label>
+                        <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="emit('new-plugin-connection', S3_SYNC_PLUGIN_ID, S3_SYNC_CONNECTION_PROVIDER_ID)"> <Plus class="mr-1 h-3 w-3" />{{ t("settings.syncS3CreateConnection") }} </Button>
+                      </div>
+                      <Select v-model="s3ConnectionId" :disabled="!!s3Busy">
+                        <SelectTrigger><SelectValue :placeholder="t('settings.syncS3SelectConnection')" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="connection in availableS3Connections" :key="connection.id" :value="connection.id">{{ connection.name }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div class="space-y-2">
+                      <Label>{{ t("settings.syncS3Bucket") }}</Label>
+                      <Input v-if="s3ConnectionBucket" :model-value="s3ConnectionBucket" disabled />
+                      <Select v-else v-model="s3Bucket" :disabled="s3BucketsBusy || !!s3Busy || !s3Buckets.length">
+                        <SelectTrigger>
+                          <Loader2 v-if="s3BucketsBusy" class="mr-1 h-3 w-3 animate-spin" />
+                          <SelectValue :placeholder="t('settings.syncS3SelectBucket')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="bucket in s3Buckets" :key="bucket" :value="bucket">{{ bucket }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p class="text-xs text-muted-foreground">
+                        {{ s3ConnectionBucket ? t("settings.syncS3FixedBucket") : t("settings.syncS3BucketDescription") }}
+                      </p>
+                    </div>
+
+                    <div class="space-y-2">
+                      <Label>{{ t("settings.syncS3AddressingStyle") }}</Label>
+                      <Input :model-value="s3AddressingStyle" disabled />
+                      <p class="text-xs text-muted-foreground">{{ t("settings.syncS3AddressingStyleDescription") }}</p>
+                    </div>
+
+                    <div class="space-y-2 md:col-span-2">
+                      <Label for="s3-sync-remote-path">{{ t("settings.syncRemotePath") }}</Label>
+                      <Input id="s3-sync-remote-path" v-model="s3RemotePath" autocomplete="off" />
+                      <p class="break-all text-xs text-muted-foreground">{{ t("settings.syncS3ObjectUri") }}: {{ s3ObjectUri || "—" }}</p>
+                    </div>
+
+                    <div v-if="s3BucketsError" class="text-xs text-destructive md:col-span-2">
+                      {{ s3BucketsError }}
+                      <Button type="button" variant="ghost" size="sm" class="ml-1 h-7 px-2 text-xs" @click="refreshS3Buckets"> <RefreshCw class="mr-1 h-3 w-3" />{{ t("common.retry") }} </Button>
+                    </div>
+
+                    <div class="flex flex-wrap items-center justify-between gap-3 md:col-span-2">
+                      <div v-if="s3Message" class="min-w-0 flex-1 text-xs" :class="s3Error ? 'text-destructive' : 'text-green-600 dark:text-green-400'">{{ s3Message }}</div>
+                      <div v-else class="flex-1" />
+                      <div class="flex shrink-0 flex-wrap justify-end gap-2">
+                        <Button variant="outline" size="sm" :disabled="!s3Ready" @click="testS3Sync"> <Loader2 v-if="s3Busy === 'test'" class="mr-1 h-3 w-3 animate-spin" />{{ t("settings.syncTest") }} </Button>
+                        <Button variant="outline" size="sm" :disabled="!s3Ready" @click="downloadS3Snapshot">
+                          <Loader2 v-if="s3Busy === 'download'" class="mr-1 h-3 w-3 animate-spin" />
+                          <Download v-else class="mr-1 h-3 w-3" />{{ t("settings.syncDownload") }}
+                        </Button>
+                        <Button size="sm" :disabled="!s3Ready" @click="uploadS3Snapshot">
+                          <Loader2 v-if="s3Busy === 'upload'" class="mr-1 h-3 w-3 animate-spin" />
+                          <Upload v-else class="mr-1 h-3 w-3" />{{ t("settings.syncUpload") }}
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 </TabsContent>
 

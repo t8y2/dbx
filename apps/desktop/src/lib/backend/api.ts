@@ -381,6 +381,10 @@ export const saveWebdavSyncSecretsPreference = forward("saveWebdavSyncSecretsPre
 export const forgetWebdavSyncSecretsPassphrase = forward("forgetWebdavSyncSecretsPassphrase");
 export const webdavSyncUpload = forward("webdavSyncUpload");
 export const webdavSyncDownload = forward("webdavSyncDownload");
+export const s3SyncTest = forward("s3SyncTest");
+export const s3SyncListBuckets = forward("s3SyncListBuckets");
+export const s3SyncUpload = forward("s3SyncUpload");
+export const s3SyncDownload = forward("s3SyncDownload");
 export const snippetSyncTest = forward("snippetSyncTest");
 export const snippetTokenStatus = forward("snippetTokenStatus");
 export const saveSnippetSavedToken = forward("saveSnippetSavedToken");
@@ -941,6 +945,10 @@ export type {
   WebDavPasswordStatus,
   WebDavSyncSummary,
   WebDavDownloadResult,
+  S3SyncConfig,
+  S3SyncBucket,
+  S3SyncSummary,
+  S3DownloadResult,
   SnippetProvider,
   SnippetSyncConfig,
   SnippetSyncSettings,

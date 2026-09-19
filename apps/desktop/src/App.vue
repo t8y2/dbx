@@ -4022,6 +4022,7 @@ onUnmounted(() => {
                   "
                   @open-mcp-settings="openSettings('mcp')"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
+                  @new-plugin-connection="openPluginConnectionDialog"
                 />
               </AppTabBar>
               <DetachedTabHeader

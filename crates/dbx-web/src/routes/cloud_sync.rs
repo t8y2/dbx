@@ -6,13 +6,15 @@ use dbx_core::cloud_sync::{
     apply_sync_snapshot, build_sync_snapshot, build_sync_snapshot_with_saved_secrets, finalize_snippet_migration,
     forget_snippet_token, forget_webdav_password,
     forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
-    resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
+    resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, s3_get_snapshot,
+    s3_put_snapshot, s3_sync_buckets, s3_sync_test as core_s3_sync_test,
     save_snippet_sync_id as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
     save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, snippet_saved_token_status,
     snippet_sync_settings as core_snippet_sync_settings, webdav_saved_password_status,
     webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
-    SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
-    WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
+    S3SyncBucket, S3SyncConfig, S3SyncSummary, SnippetProvider, SnippetSyncClient, SnippetSyncConfig,
+    SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus, WebDavClient, WebDavConfig, WebDavPasswordStatus,
+    WebDavSyncSecretsStatus, WebDavSyncSummary,
 };
 use dbx_core::storage::DesktopSettings;
 use serde::{Deserialize, Serialize};
@@ -33,6 +35,15 @@ pub struct WebDavDownloadResult {
 #[serde(rename_all = "camelCase")]
 pub struct SnippetDownloadResult {
     pub summary: SnippetSyncSummary,
+    pub editor_settings: Option<serde_json::Value>,
+    pub desktop_settings: DesktopSettings,
+    pub apply_summary: ApplySnapshotSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3DownloadResult {
+    pub summary: S3SyncSummary,
     pub editor_settings: Option<serde_json::Value>,
     pub desktop_settings: DesktopSettings,
     pub apply_summary: ApplySnapshotSummary,
@@ -63,6 +74,33 @@ pub struct WebDavUploadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct WebDavDownloadRequest {
     pub config: WebDavConfig,
+    pub secrets_passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3ConfigRequest {
+    pub config: S3SyncConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3BucketListRequest {
+    pub connection_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3UploadRequest {
+    pub config: S3SyncConfig,
+    pub editor_settings: Option<serde_json::Value>,
+    pub secrets_passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3DownloadRequest {
+    pub config: S3SyncConfig,
     pub secrets_passphrase: Option<String>,
 }
 
@@ -212,6 +250,65 @@ pub async fn webdav_sync_download(
     .await
     .map_err(AppError::from)?;
     Ok(Json(WebDavDownloadResult {
+        summary,
+        editor_settings: snapshot.editor_settings,
+        desktop_settings: snapshot.desktop_settings,
+        apply_summary,
+    }))
+}
+
+pub async fn s3_sync_test(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<S3ConfigRequest>,
+) -> Result<Json<()>, AppError> {
+    core_s3_sync_test(&state.app, &req.config).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn s3_sync_list_buckets(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<S3BucketListRequest>,
+) -> Result<Json<Vec<S3SyncBucket>>, AppError> {
+    s3_sync_buckets(&state.app, &req.connection_id).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn s3_sync_upload(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<S3UploadRequest>,
+) -> Result<Json<S3SyncSummary>, AppError> {
+    let snapshot = build_sync_snapshot_with_saved_secrets(
+        &state.app.storage,
+        env!("CARGO_PKG_VERSION"),
+        req.editor_settings,
+        req.secrets_passphrase.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    s3_put_snapshot(&state.app, &req.config, &snapshot).await.map(Json).map_err(AppError::from)
+}
+
+pub async fn s3_sync_download(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<S3DownloadRequest>,
+) -> Result<Json<S3DownloadResult>, AppError> {
+    let (snapshot, summary) = s3_get_snapshot(&state.app, &req.config).await.map_err(AppError::from)?;
+    let explicit_passphrase = req.secrets_passphrase.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let saved_passphrase = if explicit_passphrase.is_some() {
+        None
+    } else {
+        resolve_webdav_sync_secrets_passphrase(&state.app.storage).await.map_err(AppError::from)?
+    };
+    let apply_summary = apply_sync_snapshot(
+        &state.app.storage,
+        &snapshot,
+        ApplySnapshotOptions {
+            secrets_passphrase: explicit_passphrase.or(saved_passphrase.as_deref()),
+            restore_secrets: true,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(S3DownloadResult {
         summary,
         editor_settings: snapshot.editor_settings,
         desktop_settings: snapshot.desktop_settings,

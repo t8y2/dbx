@@ -737,6 +737,8 @@ export default withEnglishFallback({
     driverName: "드라이버 이름",
     driverNamePlaceholder: "공급자 또는 환경 이름",
     urlParams: "URL 매개변수",
+    sessionVariablesHint:
+      "DBX는 연결 시 세션 변수 group_concat_max_len을 1048576으로 올려 GROUP_CONCAT 결과가 조용히 잘리는 것을 방지합니다. 서버 설정을 따르려면 sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len를 입력하세요(MySQL Connector/J 문법, 여러 변수는 쉼표로 구분).",
     localInfilePathHint: "For LOAD DATA LOCAL INFILE, whitelist each file explicitly with localInfilePath=/absolute/path/file.csv. Repeat the parameter for additional files.",
     d1AccountId: "계정 ID",
     d1DatabaseId: "데이터베이스 ID",

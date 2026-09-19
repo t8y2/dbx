@@ -723,6 +723,8 @@ export default withEnglishFallback({
     driverName: "Nome Driver",
     driverNamePlaceholder: "Nome del fornitore o dell'ambiente",
     urlParams: "Parametri URL",
+    sessionVariablesHint:
+      "DBX innalza la variabile di sessione group_concat_max_len a 1048576 per evitare che i risultati di GROUP_CONCAT vengano troncati silenziosamente. Per seguire la configurazione del server, usare sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len (sintassi MySQL Connector/J; separare più variabili con virgole).",
     d1AccountId: "ID account",
     d1DatabaseId: "ID database",
     d1ApiToken: "Token API",

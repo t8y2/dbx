@@ -745,6 +745,8 @@ export default {
     driverName: "Driver Name",
     driverNamePlaceholder: "Vendor or environment name",
     urlParams: "URL Params",
+    sessionVariablesHint:
+      "DBX raises the session variable group_concat_max_len to 1048576 so GROUP_CONCAT results are not silently truncated. To follow the server configuration instead, use sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len (MySQL Connector/J syntax; separate multiple variables with commas).",
     localInfilePathHint: "For LOAD DATA LOCAL INFILE, whitelist each file explicitly with localInfilePath=/absolute/path/file.csv. Repeat the parameter for additional files.",
     d1AccountId: "Account ID",
     d1DatabaseId: "Database ID",

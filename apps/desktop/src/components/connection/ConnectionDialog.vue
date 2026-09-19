@@ -8192,6 +8192,9 @@ function openExternalUrl(url: string) {
                         <p v-if="showGenericUrlParamsHint" class="text-xs leading-5 text-muted-foreground">
                           {{ t("connection.localInfilePathHint") }}
                         </p>
+                        <p v-if="form.db_type === 'mysql'" class="text-xs leading-5 text-muted-foreground">
+                          {{ t("connection.sessionVariablesHint") }}
+                        </p>
                       </div>
                     </div>
 

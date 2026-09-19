@@ -723,6 +723,8 @@ export default withEnglishFallback({
     driverName: "ドライバー名",
     driverNamePlaceholder: "ベンダー名または環境名",
     urlParams: "URLパラメータ",
+    sessionVariablesHint:
+      "DBX は接続時にセッション変数 group_concat_max_len を 1048576 に引き上げ、GROUP_CONCAT の結果が黙って切り捨てられるのを防ぎます。サーバー設定に合わせる場合は sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len を指定してください（MySQL Connector/J と同じ構文、複数の変数はカンマ区切り）。",
     d1AccountId: "アカウントID",
     d1DatabaseId: "データベースID",
     d1ApiToken: "APIトークン",

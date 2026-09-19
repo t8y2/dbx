@@ -602,6 +602,8 @@ export default withEnglishFallback({
     driverName: "Drayverin adı",
     driverNamePlaceholder: "Təchizatçının və ya mühitin adı",
     urlParams: "URL parametrləri",
+    sessionVariablesHint:
+      "DBX qoşulma zamanı group_concat_max_len sessiya dəyişənini 1048576-ya qaldırır ki, GROUP_CONCAT nəticələri səssizcə kəsilməsin. Server konfiqurasiyasına uyğun olmaq üçün sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len yazın (MySQL Connector/J sintaksisi; bir neçə dəyişəni vergüllə ayırın).",
     localInfilePathHint: "LOAD DATA LOCAL INFILE üçün hər faylı localInfilePath=/absolute/path/file.csv ilə ayrıca icazə siyahısına əlavə edin. Əlavə fayllar üçün parametri təkrarlayın.",
     d1AccountId: "Hesabın ID-si",
     d1DatabaseId: "Verilənlər bazasının ID-si",

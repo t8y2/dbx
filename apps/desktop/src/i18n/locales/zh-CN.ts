@@ -661,6 +661,7 @@ export default withEnglishFallback({
     driverName: "驱动名称",
     driverNamePlaceholder: "厂商或环境名称",
     urlParams: "URL 参数",
+    sessionVariablesHint: "DBX 连接时会把会话变量 group_concat_max_len 提升到 1048576，避免 GROUP_CONCAT 结果被静默截断。如需跟随服务端配置，可填写 sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len（语法同 MySQL Connector/J，多个变量用逗号分隔）。",
     localInfilePathHint: "使用 LOAD DATA LOCAL INFILE 时，请通过 localInfilePath=/绝对路径/file.csv 明确授权文件；多个文件需重复填写该参数。",
     d1AccountId: "Account ID",
     d1DatabaseId: "Database ID",

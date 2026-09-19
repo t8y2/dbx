@@ -727,6 +727,7 @@ export default withEnglishFallback({
     driverName: "驅動程式名稱",
     driverNamePlaceholder: "廠商或環境名稱",
     urlParams: "URL 參數",
+    sessionVariablesHint: "DBX 連線時會把工作階段變數 group_concat_max_len 提升到 1048576，避免 GROUP_CONCAT 結果被靜默截斷。若要跟隨伺服器設定，可填寫 sessionVariables=group_concat_max_len={'@'}{'@'}global.group_concat_max_len（語法同 MySQL Connector/J，多個變數以逗號分隔）。",
     d1AccountId: "帳戶 ID",
     d1DatabaseId: "資料庫 ID",
     d1ApiToken: "API Token",

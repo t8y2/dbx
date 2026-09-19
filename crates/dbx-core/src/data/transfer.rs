@@ -5288,6 +5288,7 @@ fn transfer_copy_fast_path_supported(
 /// Builds the COPY read/write statements for the fast path. The column lists
 /// mirror the quoting rules of the paged SELECT / multi-row INSERT statements,
 /// so identifier folding behaves identically on both paths.
+#[allow(clippy::too_many_arguments)]
 fn postgres_copy_transfer_sql(
     col_names: &[String],
     target_col_names: &[String],

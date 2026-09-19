@@ -208,6 +208,9 @@ const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
 const SIDEBAR_TABLE_NAME_FILTERS_STORAGE_KEY = "dbx-sidebar-table-name-filters";
 const CONNECTION_HEALTH_CHECK_TTL_MS = 2000;
 const CONNECTION_HEALTH_CHECK_TIMEOUT_MS = 5000;
+/** How long a successful driver/pool warm-up is trusted before the next tab
+ * activation warms the same pool target again. */
+const CONNECTION_PREWARM_TTL_MS = 30_000;
 const METADATA_LOAD_MIN_TIMEOUT_MS = 15_000;
 const METADATA_LOAD_DISABLED_QUERY_TIMEOUT_MS = 60_000;
 const DISCONNECT_REQUEST_TIMEOUT_MS = 5_000;
@@ -494,6 +497,11 @@ export const useConnectionStore = defineStore("connection", () => {
   const databaseCompatibilityModes = ref<Record<string, string>>({});
   const databaseCompatibilityRefreshes = new Map<string, Promise<void>>();
   const lastConnectionHealthCheckAt = ref<Record<string, number>>({});
+  /** Per pool-target timestamp of the last successful driver/pool warm-up (see
+   * `warmConnection`). Fire-and-forget: a skipped warm-up only means the pool is
+   * created by the first real request instead. */
+  const lastConnectionPrewarmAt = ref<Record<string, number>>({});
+  const connectionPrewarmInFlight = new Map<string, Promise<void>>();
   const agentDrivers = ref<AgentDriverInstallState[]>([]);
   let agentDriversRefreshPromise: Promise<void> | null = null;
   let localAgentDriversRefreshPromise: Promise<void> | null = null;
@@ -1294,6 +1302,58 @@ export const useConnectionStore = defineStore("connection", () => {
   function hasRecentConnectionHealthCheck(connectionId: string) {
     const checkedAt = lastConnectionHealthCheckAt.value[connectionId];
     return typeof checkedAt === "number" && Date.now() - checkedAt < CONNECTION_HEALTH_CHECK_TTL_MS;
+  }
+
+  /**
+   * Forgets warm-up bookkeeping for a connection. The backend pool is gone once a
+   * connection is torn down, so a remembered timestamp must not make
+   * `warmConnection` skip a warm-up that the next execution would then pay for.
+   */
+  function clearConnectionPrewarmState(connectionId: string) {
+    const prefix = `${connectionId}\u0000`;
+    for (const key of Object.keys(lastConnectionPrewarmAt.value)) {
+      if (key.startsWith(prefix)) delete lastConnectionPrewarmAt.value[key];
+    }
+    for (const key of connectionPrewarmInFlight.keys()) {
+      if (key.startsWith(prefix)) connectionPrewarmInFlight.delete(key);
+    }
+  }
+
+  function connectionPrewarmKey(connectionId: string, target: { database?: string; catalog?: string; clientSessionId?: string }) {
+    return [connectionId, target.database ?? "", target.catalog ?? "", target.clientSessionId ?? ""].join("\u0000");
+  }
+
+  /**
+   * Warm the driver and connection pool for a connection a tab is about to use.
+   *
+   * Opening a SQL editor tab used to do nothing until the user pressed Run, so
+   * the first execution paid pool creation, tunnel setup, and — for externally
+   * driven databases such as Oracle — JDBC driver/agent startup. Those seconds
+   * were visible in the loading indicator but are outside the statement timer,
+   * which is why the summary could read "23ms" after a multi-second wait.
+   * Warming in the background moves that cost off the critical path. Failures
+   * are ignored here because the real request reports them with full context.
+   */
+  function warmConnection(connectionId: string, target: { database?: string; catalog?: string; clientSessionId?: string } = {}) {
+    if (!connectionId || !connectedIds.value.has(connectionId)) return;
+    const key = connectionPrewarmKey(connectionId, target);
+    const warmedAt = lastConnectionPrewarmAt.value[key];
+    if (typeof warmedAt === "number" && Date.now() - warmedAt < CONNECTION_PREWARM_TTL_MS) return;
+    if (connectionPrewarmInFlight.has(key)) return;
+    const promise = api
+      .prewarmConnection(connectionId, target.database, target.catalog, target.clientSessionId)
+      .then(() => {
+        lastConnectionPrewarmAt.value[key] = Date.now();
+      })
+      .catch(() => {
+        // A failed warm-up is not a user-facing error: the next real request
+        // rebuilds the pool and surfaces any genuine failure itself.
+      })
+      .finally(() => {
+        connectionPrewarmInFlight.delete(key);
+      });
+    connectionPrewarmInFlight.set(key, promise);
+    void promise;
   }
 
   function clearConnectionNodeLoading(connectionId: string) {
@@ -4250,6 +4310,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearPrimaryVisibleObjectNames(connectionId);
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionHealthCheck(connectionId);
+    clearConnectionPrewarmState(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
     invalidateCompletionCache(connectionId);
     cancelObjectDdlLoadsForConnection(connectionId);
@@ -4271,6 +4332,7 @@ export const useConnectionStore = defineStore("connection", () => {
       node.isLoading = false;
     }
     clearConnectionHealthCheck(connectionId);
+    clearConnectionPrewarmState(connectionId);
   }
 
   async function disconnect(connectionId: string) {
@@ -4287,6 +4349,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionIdentifierQuote(connectionId);
     forgetSuccessfulLocalConnectionAttempt(connectionId);
     clearConnectionHealthCheck(connectionId);
+    clearConnectionPrewarmState(connectionId);
     const node = findConnectionNode(connectionId);
     if (node) {
       node.isLoading = false;
@@ -9556,6 +9619,7 @@ export const useConnectionStore = defineStore("connection", () => {
     hasSessionCredential,
     closeDatabaseConnection,
     ensureConnected,
+    warmConnection,
     loadConnectedConnectionRootForSidebarSearch,
     isTreeNodeChildrenLoaded,
     canUseLoadedTreeNodeToggle,

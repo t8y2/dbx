@@ -1662,6 +1662,13 @@ async fn do_execute_typed(
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
     let pool = state.pool_handle(pool_key).await.ok_or("Connection not found")?;
+    // Everything the driver dispatch does for this statement — pool checkout,
+    // schema/search_path setup, the statement, and the post-statement cleanup —
+    // is what the user actually waited for. Report that span instead of the
+    // driver-internal timer, which starts only after a client is in hand and
+    // therefore hides connection-pool stalls from the summary (#6097 fixed the
+    // same mismatch for SQL Server's shared-connection lock).
+    let dispatch_start = std::time::Instant::now();
 
     let mut typed_agent_error = None;
     #[cfg(feature = "duckdb-sidecar")]
@@ -2148,6 +2155,10 @@ async fn do_execute_typed(
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
     };
     result
+        .map(|mut result| {
+            result.execution_time_ms = result.execution_time_ms.max(dispatch_start.elapsed().as_millis());
+            result
+        })
         .map_err(|error| {
             #[cfg(feature = "duckdb-sidecar")]
             if let Some(duckdb_error) = typed_duckdb_error {
@@ -2597,6 +2608,10 @@ pub async fn execute_sql_statement_with_options_typed(
 ) -> Result<db::QueryResult, QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    // Same contract as the multi-statement entry point: a single statement is
+    // reported with the duration of the whole request, including creating or
+    // reconnecting the pool, so the summary matches the loading indicator.
+    let request_start = std::time::Instant::now();
     let result = execute_sql_statement_with_options_typed_inner(
         state,
         connection_id,
@@ -2610,7 +2625,10 @@ pub async fn execute_sql_statement_with_options_typed(
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
-    result
+    result.map(|mut result| {
+        result.execution_time_ms = result.execution_time_ms.max(request_start.elapsed().as_millis());
+        result
+    })
 }
 
 async fn recover_postgres_create_table_after_connection_error(
@@ -3039,6 +3057,11 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
 ) -> Result<Vec<ExecuteMultiResult>, QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
     let invalidate = crate::object_cache::sql_may_change_object_metadata(sql, db_type);
+    // A run that produced a single statement result is reported back as one
+    // duration, so make it the duration of the whole request: pool creation or
+    // reconnection for a cold pool happens outside the statement dispatcher and
+    // would otherwise be invisible while the loading indicator counts it.
+    let request_start = std::time::Instant::now();
     let result = execute_multi_core_with_options_for_client_and_progress_typed_inner(
         state,
         connection_id,
@@ -3053,7 +3076,14 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     if invalidate {
         crate::object_cache::invalidate_connection_object_cache(&state.storage, connection_id).await;
     }
-    result
+    result.map(|mut results| {
+        if results.len() == 1 {
+            if let Some(item) = results.first_mut() {
+                item.result.execution_time_ms = item.result.execution_time_ms.max(request_start.elapsed().as_millis());
+            }
+        }
+        results
+    })
 }
 
 async fn execute_multi_core_with_options_for_client_and_progress_typed_inner(

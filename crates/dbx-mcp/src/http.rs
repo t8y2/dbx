@@ -155,6 +155,7 @@ mod tests {
         },
     };
     use serde_json::{json, Value};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
     use crate::{
@@ -372,6 +373,42 @@ mod tests {
         .expect("HTTP session cleanup must roll back and disconnect the owner");
     }
 
+    async fn open_and_drop_raw_sse(url: &str, outer_session_id: &str) {
+        let parsed = url::Url::parse(url).unwrap();
+        let host = parsed.host_str().unwrap();
+        let port = parsed.port_or_known_default().unwrap();
+        let mut stream = tokio::net::TcpStream::connect((host, port)).await.unwrap();
+        let path = match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_string(),
+        };
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer http-test-token\r\nAccept: text/event-stream\r\nMcp-Session-Id: {outer_session_id}\r\nMcp-Protocol-Version: 2025-06-18\r\nConnection: keep-alive\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let headers = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut response = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "raw SSE connection closed before HTTP headers");
+                response.extend_from_slice(&buffer[..read]);
+                if response.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break response;
+                }
+                assert!(response.len() <= 16 * 1024, "raw SSE response headers exceeded 16 KiB");
+            }
+        })
+        .await
+        .expect("raw SSE GET must return HTTP headers");
+        let headers = std::str::from_utf8(&headers).unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200 "), "raw SSE GET did not return HTTP 200: {headers}");
+        assert!(headers.to_ascii_lowercase().contains("content-type: text/event-stream"));
+
+        drop(stream);
+    }
+
     #[tokio::test]
     async fn authenticated_http_delete_rolls_back_and_disconnects_inner_owner() {
         let backend = Arc::new(HttpTestBackend::new());
@@ -422,6 +459,9 @@ mod tests {
         let (url, manager, cancellation, server_task) =
             start_http_test_server(backend.clone(), std::time::Duration::from_secs(30)).await;
         let (client, inner_session_id) = open_active_transaction(&url).await;
+        let outer_session_id = manager.sessions.read().await.keys().next().unwrap().to_string();
+
+        open_and_drop_raw_sse(&url, &outer_session_id).await;
 
         let query = client
             .call_tool(
@@ -438,9 +478,11 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(query.is_error, Some(true));
+        assert_eq!(query.structured_content.as_ref().unwrap()["transaction_state"], "active");
         assert_eq!(manager.sessions.read().await.len(), 1);
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
+        assert!(!backend.sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK"));
 
-        let outer_session_id = manager.sessions.read().await.keys().next().unwrap().to_string();
         let response = reqwest::Client::new()
             .delete(&url)
             .bearer_auth("http-test-token")

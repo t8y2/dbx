@@ -84,16 +84,20 @@ fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
 
+fn result_error_code(result: &rmcp::model::CallToolResult) -> Option<&str> {
+    result.content.iter().find_map(|content| {
+        let text = content.as_text()?.text.strip_prefix("Error [")?;
+        text.split_once(']').map(|(code, _)| code)
+    })
+}
+
 fn redacted_result_diagnostics(result: &rmcp::model::CallToolResult) -> String {
     let structured_keys = result.structured_content.as_ref().and_then(Value::as_object).map(|object| {
         let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
         keys.sort_unstable();
         keys
     });
-    let error_code = result.content.iter().find_map(|content| {
-        let text = content.as_text()?.text.strip_prefix("Error [")?;
-        text.split_once(']').map(|(code, _)| code)
-    });
+    let error_code = result_error_code(result);
     let transaction_state =
         result.structured_content.as_ref().and_then(|value| value.get("transaction_state")).and_then(Value::as_str);
     let mysql_code =
@@ -169,6 +173,48 @@ macro_rules! call_tool {
             .await
             .map_err(|error| format!("{} transport failure: {error}", $name))
     };
+}
+
+async fn read_fixture_cell(
+    fixture: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    database: &str,
+    sql: String,
+    operation: &str,
+) -> Result<Value, String> {
+    let opened = call_tool!(
+        fixture.peer(),
+        "dbx_open_session",
+        json!({
+            "connection_id": "mcp-session-transaction-fixture",
+            "database": database,
+            "enable_transactions": true
+        })
+    )?;
+    expect_success(&opened, &format!("open fixture session for {operation}"))?;
+    let session = structured(&opened, &format!("open fixture session for {operation}"))?["session_id"]
+        .as_str()
+        .ok_or_else(|| format!("fixture session for {operation} omitted session_id"))?
+        .to_string();
+
+    let read = async {
+        let result = call_tool!(
+            fixture.peer(),
+            "dbx_execute_query",
+            json!({
+                "connection_id": "mcp-session-transaction-fixture",
+                "database": database,
+                "session_id": session.clone(),
+                "sql": sql
+            })
+        )?;
+        expect_success(&result, operation)?;
+        Ok::<Value, String>(result_cell(&result, operation, 0, 0)?.clone())
+    }
+    .await;
+
+    let closed = call_tool!(fixture.peer(), "dbx_close_session", json!({"session_id": session}))?;
+    expect_success(&closed, &format!("close fixture session for {operation}"))?;
+    read
 }
 
 async fn run_contention_trace(
@@ -532,25 +578,34 @@ async fn run_fault_proxy_traces(
         return Err("COMMIT with a dropped server ACK unexpectedly reported success".to_string());
     }
     expect_state(&commit, "COMMIT with dropped server ACK", "unknown")?;
-    if !proxy.commit_forwarded() || !proxy.commit_ok_observed() || !proxy.commit_ack_dropped() {
-        return Err("wire proxy did not prove forwarded COMMIT + observed server OK + dropped ACK".to_string());
+    if proxy.commit_forward_count() != 1 || !proxy.commit_ok_observed() || !proxy.commit_ack_dropped() {
+        return Err(
+            "wire proxy did not prove exactly one forwarded COMMIT + observed server OK + dropped ACK".to_string()
+        );
     }
-    let committed = call_tool!(
-        fixture.peer(),
-        "dbx_execute_query",
-        json!({
-            "connection_id": "mcp-session-transaction-fixture",
-            "database": database,
-            "sql": format!("SELECT payload FROM {table} WHERE id = 10")
-        })
-    )?;
-    expect_success(&committed, "verify commit after dropped ACK")?;
-    if result_cell(&committed, "verify commit after dropped ACK", 0, 0)?.as_str() != Some("commit_ack_dropped") {
+    let committed = read_fixture_cell(
+        fixture,
+        database,
+        format!("SELECT payload FROM {table} WHERE id = 10"),
+        "verify commit after dropped ACK",
+    )
+    .await?;
+    if committed.as_str() != Some("commit_ack_dropped") {
         return Err("fixture channel did not observe the COMMIT whose ACK was dropped".to_string());
     }
+
+    let rejected_retry =
+        call_tool!(candidate.peer(), "dbx_commit_transaction", json!({"session_id": session.clone()}))?;
+    if rejected_retry.is_error != Some(true) {
+        return Err("retrying COMMIT after an unknown outcome unexpectedly succeeded".to_string());
+    }
+    expect_state(&rejected_retry, "retry COMMIT after unknown outcome", "unknown")?;
     let close = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
     expect_success(&close, "close unknown lost-commit-ack session")?;
     expect_state(&close, "close unknown lost-commit-ack session", "unknown")?;
+    if proxy.commit_forward_count() != 1 {
+        return Err("COMMIT was forwarded more than once across retry refusal or cleanup".to_string());
+    }
 
     let open = call_tool!(
         candidate.peer(),
@@ -667,6 +722,10 @@ async fn run_permission_refusal_trace(
         )?;
         expect_success(&state, "read transaction state after read-only refusal")?;
         expect_state(&state, "read transaction state after read-only refusal", "active")?;
+        if result_cell(&state, "read transaction state after read-only refusal", 0, 0)?.as_str() != Some("policy_seed")
+        {
+            return Err("read-only refusal changed the row inside the active transaction".to_string());
+        }
         Result::<(), String>::Ok(())
     }
     .await;
@@ -709,6 +768,11 @@ async fn run_permission_refusal_trace(
         )?;
         expect_success(&state, "read transaction state after confirmed-SQL refusal")?;
         expect_state(&state, "read transaction state after confirmed-SQL refusal", "active")?;
+        if result_cell(&state, "read transaction state after confirmed-SQL refusal", 0, 0)?.as_str()
+            != Some("policy_seed")
+        {
+            return Err("confirmed-SQL refusal changed the row inside the active transaction".to_string());
+        }
         Result::<(), String>::Ok(())
     }
     .await;
@@ -720,21 +784,6 @@ async fn run_permission_refusal_trace(
     }
     confirmation_check?;
 
-    let unchanged = call_tool!(
-        fixture.peer(),
-        "dbx_execute_query",
-        json!({
-            "connection_id": "mcp-session-transaction-fixture",
-            "database": database,
-            "sql": format!("SELECT payload FROM {table} WHERE id = 30")
-        })
-    )?;
-    expect_success(&unchanged, "verify permission refusals left target data unchanged")?;
-    if result_cell(&unchanged, "verify permission refusals left target data unchanged", 0, 0)?.as_str()
-        != Some("policy_seed")
-    {
-        return Err("permission refusal trace changed the target fixture row".to_string());
-    }
     expect_success(
         &call_tool!(candidate.peer(), "dbx_rollback_transaction", json!({"session_id": session}))?,
         "rollback permission-refusal transaction",
@@ -743,6 +792,17 @@ async fn run_permission_refusal_trace(
         &call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?,
         "close permission-refusal transaction",
     )?;
+
+    let unchanged = read_fixture_cell(
+        fixture,
+        database,
+        format!("SELECT payload FROM {table} WHERE id = 30"),
+        "verify permission refusals left target data unchanged",
+    )
+    .await?;
+    if unchanged.as_str() != Some("policy_seed") {
+        return Err("permission refusal trace changed the target fixture row".to_string());
+    }
     Ok(())
 }
 
@@ -795,15 +855,15 @@ async fn run_idle_ttl_trace(
     expect_success(&locked, "hold idle-TTL row lock")?;
 
     let fixture_peer = fixture.peer().clone();
-    let database = database.to_string();
-    let table = table.to_string();
+    let fixture_database = database.to_string();
+    let fixture_table = table.to_string();
     let mut conditional_update = tokio::spawn(async move {
         fixture_peer
             .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments(json!({
                 "connection_id": "mcp-session-transaction-fixture",
-                "database": database,
+                "database": fixture_database,
                 "sql": format!(
-                    "UPDATE {table} SET payload = 'ttl_released' WHERE id = 20 AND payload = 'ttl_seed'"
+                    "UPDATE {fixture_table} SET payload = 'ttl_released' WHERE id = 20 AND payload = 'ttl_seed'"
                 )
             }))))
             .await
@@ -817,13 +877,36 @@ async fn run_idle_ttl_trace(
         .map_err(|error| format!("idle-TTL fixture task failed: {error}"))?
         .map_err(|error| format!("idle-TTL fixture transport failed: {error}"))?;
     expect_success(&released, "conditional update after idle-TTL rollback")?;
-    if structured(&released, "conditional update after idle-TTL rollback")?
-        .pointer("/result/affected_rows")
-        .and_then(Value::as_u64)
-        != Some(1)
-    {
-        return Err("idle-TTL conditional fixture update did not affect exactly one row".to_string());
+
+    let expired = call_tool!(
+        candidate.peer(),
+        "dbx_execute_query",
+        json!({
+            "connection_id": "mcp-session-transaction-live",
+            "database": database,
+            "session_id": session.clone(),
+            "sql": "SELECT 1"
+        })
+    )?;
+    if expired.is_error != Some(true) || result_error_code(&expired) != Some("TRANSACTION_CLOSED") {
+        return Err(format!(
+            "idle-TTL session accepted SQL after terminal cleanup ({})",
+            redacted_result_diagnostics(&expired)
+        ));
     }
+    expect_state(&expired, "query expired idle-TTL session", "idle")?;
+
+    let released_payload = read_fixture_cell(
+        fixture,
+        &database,
+        format!("SELECT payload FROM {table} WHERE id = 20"),
+        "verify idle-TTL rollback released exactly the seeded fixture row",
+    )
+    .await?;
+    if released_payload.as_str() != Some("ttl_released") {
+        return Err("idle-TTL conditional fixture update did not change the seeded row exactly once".to_string());
+    }
+
     let closed = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
     expect_success(&closed, "close idle-TTL session")?;
     Ok(())

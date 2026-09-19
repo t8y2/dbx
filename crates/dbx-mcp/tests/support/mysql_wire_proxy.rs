@@ -2,7 +2,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -30,7 +30,8 @@ struct ProxyState {
     contention_marker: Mutex<Option<String>>,
     contention_forwarded: AtomicBool,
     contention_response_pending: AtomicBool,
-    commit_forwarded: AtomicBool,
+    commit_tracking: AtomicBool,
+    commit_forward_count: AtomicUsize,
     commit_ok_observed: AtomicBool,
     commit_ack_dropped: AtomicBool,
     dropped_query_forwarded: AtomicBool,
@@ -43,7 +44,8 @@ impl Default for ProxyState {
             contention_marker: Mutex::new(None),
             contention_forwarded: AtomicBool::new(false),
             contention_response_pending: AtomicBool::new(false),
-            commit_forwarded: AtomicBool::new(false),
+            commit_tracking: AtomicBool::new(false),
+            commit_forward_count: AtomicUsize::new(0),
             commit_ok_observed: AtomicBool::new(false),
             commit_ack_dropped: AtomicBool::new(false),
             dropped_query_forwarded: AtomicBool::new(false),
@@ -104,13 +106,14 @@ impl MysqlWireProxy {
 
     pub async fn arm_drop_commit_ack(&self) {
         *self.state.fault.lock().await = FaultDirective::DropCommitAck;
-        self.state.commit_forwarded.store(false, Ordering::SeqCst);
+        self.state.commit_tracking.store(true, Ordering::SeqCst);
+        self.state.commit_forward_count.store(0, Ordering::SeqCst);
         self.state.commit_ok_observed.store(false, Ordering::SeqCst);
         self.state.commit_ack_dropped.store(false, Ordering::SeqCst);
     }
 
-    pub fn commit_forwarded(&self) -> bool {
-        self.state.commit_forwarded.load(Ordering::SeqCst)
+    pub fn commit_forward_count(&self) -> usize {
+        self.state.commit_forward_count.load(Ordering::SeqCst)
     }
 
     pub fn commit_ok_observed(&self) -> bool {
@@ -180,10 +183,12 @@ async fn proxy_connection(
 
             let mut drop_after_forward = false;
             if let Some(sql) = sql {
+                if sql.trim().eq_ignore_ascii_case("COMMIT") && client_state.commit_tracking.load(Ordering::SeqCst) {
+                    client_state.commit_forward_count.fetch_add(1, Ordering::SeqCst);
+                }
                 let mut fault = client_state.fault.lock().await;
                 match &*fault {
                     FaultDirective::DropCommitAck if sql.trim().eq_ignore_ascii_case("COMMIT") => {
-                        client_state.commit_forwarded.store(true, Ordering::SeqCst);
                         *client_pending.lock().await = Some(PendingResponse::DropCommitAck);
                         *fault = FaultDirective::None;
                     }
@@ -321,9 +326,38 @@ mod tests {
         client.write_all(&packet(0, b"\x03COMMIT")).await.unwrap();
         assert!(read_mysql_packet(&mut client).await.unwrap().is_none());
         upstream.await.unwrap();
-        assert!(proxy.commit_forwarded());
+        assert_eq!(proxy.commit_forward_count(), 1);
         assert!(proxy.commit_ok_observed());
         assert!(proxy.commit_ack_dropped());
+        proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn commit_counter_tracks_every_forward_after_the_fault_is_consumed() {
+        use tokio::io::AsyncWriteExt;
+
+        let upstream_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream_listener.local_addr().unwrap();
+        let proxy = MysqlWireProxy::start(upstream_address.ip().to_string(), upstream_address.port()).await.unwrap();
+        proxy.arm_drop_commit_ack().await;
+        let upstream = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = upstream_listener.accept().await.unwrap();
+                assert_eq!(read_mysql_packet(&mut socket).await.unwrap().unwrap(), packet(0, b"\x03COMMIT"));
+                socket.write_all(&packet(1, &[0x00, 0x00, 0x00])).await.unwrap();
+            }
+        });
+
+        let mut first = tokio::net::TcpStream::connect(proxy.listen_addr()).await.unwrap();
+        first.write_all(&packet(0, b"\x03COMMIT")).await.unwrap();
+        assert!(read_mysql_packet(&mut first).await.unwrap().is_none());
+
+        let mut second = tokio::net::TcpStream::connect(proxy.listen_addr()).await.unwrap();
+        second.write_all(&packet(0, b"\x03COMMIT")).await.unwrap();
+        assert!(read_mysql_packet(&mut second).await.unwrap().is_some());
+
+        upstream.await.unwrap();
+        assert_eq!(proxy.commit_forward_count(), 2);
         proxy.shutdown().await;
     }
 

@@ -84,31 +84,82 @@ fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
 
-fn structured(result: &rmcp::model::CallToolResult) -> Result<&Value, String> {
-    result.structured_content.as_ref().ok_or_else(|| "tool response omitted structured content".to_string())
+fn redacted_result_diagnostics(result: &rmcp::model::CallToolResult) -> String {
+    let structured_keys = result.structured_content.as_ref().and_then(Value::as_object).map(|object| {
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
+    });
+    let error_code = result.content.iter().find_map(|content| {
+        let text = content.as_text()?.text.strip_prefix("Error [")?;
+        text.split_once(']').map(|(code, _)| code)
+    });
+    let transaction_state =
+        result.structured_content.as_ref().and_then(|value| value.get("transaction_state")).and_then(Value::as_str);
+    let mysql_code =
+        result.structured_content.as_ref().and_then(|value| value.get("mysql_code")).and_then(Value::as_u64);
+    format!(
+        "is_error={:?}, structured_keys={structured_keys:?}, error_code={error_code:?}, transaction_state={transaction_state:?}, mysql_code={mysql_code:?}",
+        result.is_error
+    )
+}
+
+fn structured<'a>(result: &'a rmcp::model::CallToolResult, operation: &str) -> Result<&'a Value, String> {
+    result.structured_content.as_ref().ok_or_else(|| {
+        format!("{operation} response omitted structured content ({})", redacted_result_diagnostics(result))
+    })
 }
 
 fn expect_success(result: &rmcp::model::CallToolResult, operation: &str) -> Result<(), String> {
     if result.is_error == Some(true) {
-        Err(format!("{operation} failed (database details redacted)"))
+        Err(format!("{operation} failed ({})", redacted_result_diagnostics(result)))
     } else {
         Ok(())
     }
 }
 
-fn expect_state(result: &rmcp::model::CallToolResult, state: &str) -> Result<(), String> {
-    let actual = structured(result)?.get("transaction_state").and_then(Value::as_str);
+fn expect_state(result: &rmcp::model::CallToolResult, operation: &str, state: &str) -> Result<(), String> {
+    let actual = structured(result, operation)?.get("transaction_state").and_then(Value::as_str);
     if actual == Some(state) {
         Ok(())
     } else {
-        Err(format!("expected transaction_state={state}, got {actual:?}"))
+        Err(format!(
+            "{operation} expected transaction_state={state}, got {actual:?} ({})",
+            redacted_result_diagnostics(result)
+        ))
     }
 }
 
-fn result_cell(result: &rmcp::model::CallToolResult, row: usize, column: usize) -> Result<&Value, String> {
-    structured(result)?
-        .pointer(&format!("/result/rows/{row}/{column}"))
-        .ok_or_else(|| format!("missing result cell {row}/{column}"))
+fn result_cell<'a>(
+    result: &'a rmcp::model::CallToolResult,
+    operation: &str,
+    row: usize,
+    column: usize,
+) -> Result<&'a Value, String> {
+    structured(result, operation)?.pointer(&format!("/result/rows/{row}/{column}")).ok_or_else(|| {
+        format!("{operation} missing result cell {row}/{column} ({})", redacted_result_diagnostics(result))
+    })
+}
+
+#[test]
+fn result_diagnostics_expose_only_redacted_envelope_metadata() {
+    let mut result = rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+        "Error [TRANSACTION_CLOSED]: sensitive endpoint and database details",
+    )]);
+    result.structured_content = Some(json!({
+        "session_id": "sensitive-session-id",
+        "transaction_state": "idle",
+        "mysql_code": 2013,
+        "error": "sensitive backend message"
+    }));
+
+    let diagnostic = redacted_result_diagnostics(&result);
+
+    assert_eq!(
+        diagnostic,
+        "is_error=Some(true), structured_keys=Some([\"error\", \"mysql_code\", \"session_id\", \"transaction_state\"]), error_code=Some(\"TRANSACTION_CLOSED\"), transaction_state=Some(\"idle\"), mysql_code=Some(2013)"
+    );
+    assert!(!diagnostic.contains("sensitive"));
 }
 
 macro_rules! call_tool {
@@ -140,12 +191,16 @@ async fn run_contention_trace(
     )?;
     expect_success(&open_a, "open A")?;
     expect_success(&open_b, "open B")?;
-    expect_state(&open_a, "idle")?;
-    expect_state(&open_b, "idle")?;
-    let session_a =
-        structured(&open_a)?["session_id"].as_str().ok_or_else(|| "open A omitted session_id".to_string())?.to_string();
-    let session_b =
-        structured(&open_b)?["session_id"].as_str().ok_or_else(|| "open B omitted session_id".to_string())?.to_string();
+    expect_state(&open_a, "open A", "idle")?;
+    expect_state(&open_b, "open B", "idle")?;
+    let session_a = structured(&open_a, "open A")?["session_id"]
+        .as_str()
+        .ok_or_else(|| "open A omitted session_id".to_string())?
+        .to_string();
+    let session_b = structured(&open_b, "open B")?["session_id"]
+        .as_str()
+        .ok_or_else(|| "open B omitted session_id".to_string())?
+        .to_string();
 
     let id_a_before = call_tool!(
         peer,
@@ -157,15 +212,17 @@ async fn run_contention_trace(
         "dbx_execute_query",
         json!({"connection_id": connection, "database": database, "session_id": session_b, "sql": "SELECT CONNECTION_ID() AS connection_id"})
     )?;
-    let id_a_before = result_cell(&id_a_before, 0, 0)?.to_string();
-    let id_b_before = result_cell(&id_b_before, 0, 0)?.to_string();
+    expect_success(&id_a_before, "read A physical connection ID before contention")?;
+    expect_success(&id_b_before, "read B physical connection ID before contention")?;
+    let id_a_before = result_cell(&id_a_before, "read A physical connection ID before contention", 0, 0)?.to_string();
+    let id_b_before = result_cell(&id_b_before, "read B physical connection ID before contention", 0, 0)?.to_string();
     if id_a_before == id_b_before {
         return Err("A and B unexpectedly share one physical MySQL connection".to_string());
     }
 
     let begin_b = call_tool!(peer, "dbx_begin_transaction", json!({"session_id": session_b}))?;
     expect_success(&begin_b, "B.begin")?;
-    expect_state(&begin_b, "active")?;
+    expect_state(&begin_b, "B.begin", "active")?;
     let b_absent = call_tool!(
         peer,
         "dbx_execute_query",
@@ -177,8 +234,8 @@ async fn run_contention_trace(
         })
     )?;
     expect_success(&b_absent, "B initial snapshot read")?;
-    expect_state(&b_absent, "active")?;
-    let rows = structured(&b_absent)?
+    expect_state(&b_absent, "B initial snapshot read", "active")?;
+    let rows = structured(&b_absent, "B initial snapshot read")?
         .pointer("/result/rows")
         .and_then(Value::as_array)
         .ok_or_else(|| "B initial read omitted rows".to_string())?;
@@ -188,7 +245,7 @@ async fn run_contention_trace(
 
     let begin_a = call_tool!(peer, "dbx_begin_transaction", json!({"session_id": session_a}))?;
     expect_success(&begin_a, "A.begin")?;
-    expect_state(&begin_a, "active")?;
+    expect_state(&begin_a, "A.begin", "active")?;
     let a_insert = call_tool!(
         peer,
         "dbx_execute_query",
@@ -200,7 +257,7 @@ async fn run_contention_trace(
         })
     )?;
     expect_success(&a_insert, "A.insert")?;
-    expect_state(&a_insert, "active")?;
+    expect_state(&a_insert, "A.insert", "active")?;
 
     let pending_peer = peer.clone();
     let pending_database = database.to_string();
@@ -230,8 +287,8 @@ async fn run_contention_trace(
 
     let commit_a = call_tool!(peer, "dbx_commit_transaction", json!({"session_id": session_a}))?;
     expect_success(&commit_a, "A.commit")?;
-    expect_state(&commit_a, "idle")?;
-    if structured(&commit_a)?["transaction_outcome"] != "committed" {
+    expect_state(&commit_a, "A.commit", "idle")?;
+    if structured(&commit_a, "A.commit")?["transaction_outcome"] != "committed" {
         return Err("A.commit did not report committed".to_string());
     }
     let b_duplicate = tokio::time::timeout(Duration::from_secs(5), b_insert)
@@ -242,8 +299,8 @@ async fn run_contention_trace(
     if b_duplicate.is_error != Some(true) {
         return Err("B.insert unexpectedly succeeded".to_string());
     }
-    expect_state(&b_duplicate, "active")?;
-    if structured(&b_duplicate)?["mysql_code"] != 1062 {
+    expect_state(&b_duplicate, "B.insert duplicate response", "active")?;
+    if structured(&b_duplicate, "B.insert duplicate response")?["mysql_code"] != 1062 {
         return Err("B.insert did not preserve MySQL 1062".to_string());
     }
 
@@ -258,8 +315,8 @@ async fn run_contention_trace(
         })
     )?;
     expect_success(&b_winner, "B locking read")?;
-    expect_state(&b_winner, "active")?;
-    if result_cell(&b_winner, 0, 0)?.as_str() != Some("exact_winner") {
+    expect_state(&b_winner, "B locking read", "active")?;
+    if result_cell(&b_winner, "B locking read", 0, 0)?.as_str() != Some("exact_winner") {
         return Err("B locking read did not return A's exact winner".to_string());
     }
 
@@ -273,17 +330,19 @@ async fn run_contention_trace(
         "dbx_execute_query",
         json!({"connection_id": connection, "database": database, "session_id": session_b, "sql": "SELECT CONNECTION_ID() AS connection_id"})
     )?;
-    if result_cell(&id_a_after, 0, 0)?.to_string() != id_a_before {
+    expect_success(&id_a_after, "read A physical connection ID after commit")?;
+    expect_success(&id_b_during, "read B physical connection ID during transaction")?;
+    if result_cell(&id_a_after, "read A physical connection ID after commit", 0, 0)?.to_string() != id_a_before {
         return Err("A physical connection identity changed".to_string());
     }
-    if result_cell(&id_b_during, 0, 0)?.to_string() != id_b_before {
+    if result_cell(&id_b_during, "read B physical connection ID during transaction", 0, 0)?.to_string() != id_b_before {
         return Err("B physical connection identity changed".to_string());
     }
 
     let rollback_b = call_tool!(peer, "dbx_rollback_transaction", json!({"session_id": session_b}))?;
     expect_success(&rollback_b, "B.rollback")?;
-    expect_state(&rollback_b, "idle")?;
-    if structured(&rollback_b)?["transaction_outcome"] != "rolled_back" {
+    expect_state(&rollback_b, "B.rollback", "idle")?;
+    if structured(&rollback_b, "B.rollback")?["transaction_outcome"] != "rolled_back" {
         return Err("B.rollback did not report rolled_back".to_string());
     }
     let close_a = call_tool!(peer, "dbx_close_session", json!({"session_id": session_a}))?;
@@ -318,7 +377,7 @@ async fn run_native_cleanup_traces(
         json!({"connection_id": connection, "database": database, "enable_transactions": true})
     )?;
     expect_success(&opened, "open close-test session")?;
-    let session = structured(&opened)?["session_id"]
+    let session = structured(&opened, "open close-test session")?["session_id"]
         .as_str()
         .ok_or_else(|| "close-test open omitted session_id".to_string())?
         .to_string();
@@ -379,7 +438,7 @@ async fn run_native_cleanup_traces(
         json!({"connection_id": connection, "database": database, "enable_transactions": true})
     )?;
     expect_success(&opened, "open cancellation-test session")?;
-    let session = structured(&opened)?["session_id"]
+    let session = structured(&opened, "open cancellation-test session")?["session_id"]
         .as_str()
         .ok_or_else(|| "cancellation-test open omitted session_id".to_string())?
         .to_string();
@@ -446,7 +505,7 @@ async fn run_fault_proxy_traces(
         json!({"connection_id": connection, "database": database, "enable_transactions": true})
     )?;
     expect_success(&open, "open lost-commit-ack session")?;
-    let session = structured(&open)?["session_id"]
+    let session = structured(&open, "open lost-commit-ack session")?["session_id"]
         .as_str()
         .ok_or_else(|| "lost-commit-ack open omitted session_id".to_string())?
         .to_string();
@@ -472,7 +531,7 @@ async fn run_fault_proxy_traces(
     if commit.is_error != Some(true) {
         return Err("COMMIT with a dropped server ACK unexpectedly reported success".to_string());
     }
-    expect_state(&commit, "unknown")?;
+    expect_state(&commit, "COMMIT with dropped server ACK", "unknown")?;
     if !proxy.commit_forwarded() || !proxy.commit_ok_observed() || !proxy.commit_ack_dropped() {
         return Err("wire proxy did not prove forwarded COMMIT + observed server OK + dropped ACK".to_string());
     }
@@ -486,12 +545,12 @@ async fn run_fault_proxy_traces(
         })
     )?;
     expect_success(&committed, "verify commit after dropped ACK")?;
-    if result_cell(&committed, 0, 0)?.as_str() != Some("commit_ack_dropped") {
+    if result_cell(&committed, "verify commit after dropped ACK", 0, 0)?.as_str() != Some("commit_ack_dropped") {
         return Err("fixture channel did not observe the COMMIT whose ACK was dropped".to_string());
     }
     let close = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
     expect_success(&close, "close unknown lost-commit-ack session")?;
-    expect_state(&close, "unknown")?;
+    expect_state(&close, "close unknown lost-commit-ack session", "unknown")?;
 
     let open = call_tool!(
         candidate.peer(),
@@ -499,7 +558,7 @@ async fn run_fault_proxy_traces(
         json!({"connection_id": connection, "database": database, "enable_transactions": true})
     )?;
     expect_success(&open, "open non-COMMIT transport-loss session")?;
-    let session = structured(&open)?["session_id"]
+    let session = structured(&open, "open non-COMMIT transport-loss session")?["session_id"]
         .as_str()
         .ok_or_else(|| "non-COMMIT transport-loss open omitted session_id".to_string())?
         .to_string();
@@ -521,13 +580,13 @@ async fn run_fault_proxy_traces(
     if lost.is_error != Some(true) {
         return Err("non-COMMIT transport loss unexpectedly reported success".to_string());
     }
-    expect_state(&lost, "unknown")?;
+    expect_state(&lost, "non-COMMIT transport loss", "unknown")?;
     if !proxy.dropped_query_forwarded() {
         return Err("wire proxy did not prove the non-COMMIT command was forwarded".to_string());
     }
     let close = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
     expect_success(&close, "close unknown non-COMMIT transport-loss session")?;
-    expect_state(&close, "unknown")?;
+    expect_state(&close, "close unknown non-COMMIT transport-loss session", "unknown")?;
     Ok(())
 }
 
@@ -567,7 +626,7 @@ async fn run_permission_refusal_trace(
         })
     )?;
     expect_success(&open, "open permission-refusal transaction")?;
-    let session = structured(&open)?["session_id"]
+    let session = structured(&open, "open permission-refusal transaction")?["session_id"]
         .as_str()
         .ok_or_else(|| "permission-refusal open omitted session_id".to_string())?
         .to_string();
@@ -607,7 +666,7 @@ async fn run_permission_refusal_trace(
             })
         )?;
         expect_success(&state, "read transaction state after read-only refusal")?;
-        expect_state(&state, "active")?;
+        expect_state(&state, "read transaction state after read-only refusal", "active")?;
         Result::<(), String>::Ok(())
     }
     .await;
@@ -649,7 +708,7 @@ async fn run_permission_refusal_trace(
             })
         )?;
         expect_success(&state, "read transaction state after confirmed-SQL refusal")?;
-        expect_state(&state, "active")?;
+        expect_state(&state, "read transaction state after confirmed-SQL refusal", "active")?;
         Result::<(), String>::Ok(())
     }
     .await;
@@ -671,7 +730,9 @@ async fn run_permission_refusal_trace(
         })
     )?;
     expect_success(&unchanged, "verify permission refusals left target data unchanged")?;
-    if result_cell(&unchanged, 0, 0)?.as_str() != Some("policy_seed") {
+    if result_cell(&unchanged, "verify permission refusals left target data unchanged", 0, 0)?.as_str()
+        != Some("policy_seed")
+    {
         return Err("permission refusal trace changed the target fixture row".to_string());
     }
     expect_success(
@@ -713,7 +774,7 @@ async fn run_idle_ttl_trace(
         })
     )?;
     expect_success(&open, "open idle-TTL transaction session")?;
-    let session = structured(&open)?["session_id"]
+    let session = structured(&open, "open idle-TTL transaction session")?["session_id"]
         .as_str()
         .ok_or_else(|| "idle-TTL open omitted session_id".to_string())?
         .to_string();
@@ -756,7 +817,11 @@ async fn run_idle_ttl_trace(
         .map_err(|error| format!("idle-TTL fixture task failed: {error}"))?
         .map_err(|error| format!("idle-TTL fixture transport failed: {error}"))?;
     expect_success(&released, "conditional update after idle-TTL rollback")?;
-    if structured(&released)?.pointer("/result/affected_rows").and_then(Value::as_u64) != Some(1) {
+    if structured(&released, "conditional update after idle-TTL rollback")?
+        .pointer("/result/affected_rows")
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
         return Err("idle-TTL conditional fixture update did not affect exactly one row".to_string());
     }
     let closed = call_tool!(candidate.peer(), "dbx_close_session", json!({"session_id": session}))?;
@@ -897,7 +962,7 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
         .map_err(|_| "fixture capability probe timed out".to_string())?
         .map_err(|error| format!("fixture capability probe transport failed: {error}"))?;
         expect_success(&fixture_open, "fixture capability session open")?;
-        let fixture_session = structured(&fixture_open)?["session_id"]
+        let fixture_session = structured(&fixture_open, "fixture capability session open")?["session_id"]
             .as_str()
             .ok_or_else(|| "fixture session omitted session_id".to_string())?
             .to_string();
@@ -912,8 +977,8 @@ async fn native_mysql_fixed_sessions_preserve_identity_and_real_contention() {
             })
         )?;
         expect_success(&capability, "read MySQL version/isolation")?;
-        let version = result_cell(&capability, 0, 0)?.as_str().unwrap_or_default();
-        let isolation = result_cell(&capability, 0, 1)?.as_str().unwrap_or_default();
+        let version = result_cell(&capability, "read MySQL version/isolation", 0, 0)?.as_str().unwrap_or_default();
+        let isolation = result_cell(&capability, "read MySQL version/isolation", 0, 1)?.as_str().unwrap_or_default();
         if !version.starts_with("5.7.") || !isolation.eq_ignore_ascii_case("REPEATABLE-READ") {
             return Err("live gate requires MySQL 5.7 with REPEATABLE READ".to_string());
         }

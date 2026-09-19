@@ -140,6 +140,16 @@ pub(crate) fn native_mysql_transaction_connection(connection: &ConnectionConfig)
         })
 }
 
+fn transaction_operation_timeout(
+    connection: &ConnectionConfig,
+    configured: std::time::Duration,
+) -> std::time::Duration {
+    match connection.effective_query_timeout_secs() {
+        0 => configured,
+        seconds => std::time::Duration::from_secs(seconds),
+    }
+}
+
 impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
     fn from(result: dbx_core::query::ExecuteMultiResult) -> Self {
         let error_message = result.error.as_ref().and_then(|error| error.detail().map(str::to_owned)).or_else(|| {
@@ -1001,7 +1011,7 @@ impl DbxBackend for LocalBackend {
             }
         };
         let mut owner_config = self.transaction_owner_config;
-        owner_config.operation_timeout = std::time::Duration::from_secs(connection.effective_query_timeout_secs());
+        owner_config.operation_timeout = transaction_operation_timeout(connection, owner_config.operation_timeout);
         let owner = TransactionOwner::spawn_with_resource_permit(
             MysqlTransactionIo::new(
                 conn,
@@ -2673,6 +2683,25 @@ mod tests {
             connection.driver_profile = Some(profile.to_string());
             assert!(!native_mysql_transaction_connection(&connection), "unexpectedly accepted {profile}");
         }
+    }
+
+    #[test]
+    fn unlimited_connection_timeout_preserves_bounded_transaction_default() {
+        let mut connection: ConnectionConfig = serde_json::from_value(json!({
+            "id": "mysql",
+            "name": "mysql",
+            "db_type": "mysql",
+            "host": "",
+            "port": 3306,
+            "username": "",
+            "password": "",
+            "database": "test",
+            "ssl": false
+        }))
+        .unwrap();
+        connection.query_timeout_secs = 0;
+
+        assert_eq!(transaction_operation_timeout(&connection, Duration::from_secs(300)), Duration::from_secs(300));
     }
 
     #[test]

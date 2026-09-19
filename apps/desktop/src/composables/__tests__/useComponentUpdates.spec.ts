@@ -87,6 +87,16 @@ describe("useComponentUpdates", () => {
     expect(updates.totalUpdateCount.value).toBe(4);
   });
 
+  it("clears the driver count after a successful update and refresh", async () => {
+    mocks.listInstalledAgents.mockResolvedValueOnce([{ db_type: "mysql", update_available: true }]).mockResolvedValueOnce([{ db_type: "mysql", update_available: false }]);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    await updates.installCategories(["drivers"]);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(updates.driverUpdateCount.value).toBe(0);
+  });
+
   it("installs every enabled component category after an app update", async () => {
     const updates = useComponentUpdates({ isDesktop: true });
 

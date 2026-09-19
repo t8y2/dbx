@@ -28,7 +28,7 @@ import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useApp
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useComponentUpdates, type ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge } from "@/lib/updates/updateBadges";
-import { markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, takePendingComponentUpdatesAfterAppRestart, type PendingComponentUpdatePlan } from "@/lib/updates/componentUpdateOrchestration";
+import { markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, shouldCloseUpdateCenterAfterComponentUpdate, takePendingComponentUpdatesAfterAppRestart, type PendingComponentUpdatePlan } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
@@ -1215,9 +1215,22 @@ function handleToolbarUpdateClick() {
 
 function reportComponentUpdateResult(result: Awaited<ReturnType<typeof componentUpdates.installCategory>>) {
   const updatedComponents = [result.drivers > 0 ? t("settings.updateDrivers") : "", result.jdbc ? t("settings.updateJdbc") : "", result.mcp ? t("settings.updateMcp") : "", result.plugins > 0 ? t("settings.updatePlugins") : ""].filter(Boolean);
+  // Only a clean refresh is authoritative; a failed registry check must not clear the toolbar count.
+  if (result.failed.length === 0) agentDriverUpdateCount.value = componentUpdates.driverUpdateCount.value;
   if (updatedComponents.length) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
   if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
   if (result.failed.length) toast(t("updates.componentsAutoUpdateFailed", { count: result.failed.length }), 6000);
+
+  if (
+    shouldCloseUpdateCenterAfterComponentUpdate({
+      failedCount: result.failed.length,
+      skippedDriverCount: result.skippedDrivers,
+      hasAppUpdate: hasUpdateAvailable.value,
+      remainingComponentUpdateCount: componentUpdates.totalUpdateCount.value,
+    })
+  ) {
+    showUpdateDialog.value = false;
+  }
 }
 
 async function rememberComponentUpdatesForRestartedApp(plan: PendingComponentUpdatePlan = { kind: "auto" }) {

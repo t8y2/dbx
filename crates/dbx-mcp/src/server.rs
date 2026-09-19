@@ -2217,10 +2217,14 @@ impl DbxMcpServer {
         }
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
         self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn validate_transaction_control(&self, session: &McpSession, operation: &str) -> Result<(), CallToolResult> {
         let resolved = self
             .resolve_connection(&ConnectionSelector {
@@ -2262,6 +2266,8 @@ impl DbxMcpServer {
         Ok(())
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn ensure_tool_allowed(&self, tool_name: &str) -> Result<(), CallToolResult> {
         let policy = self.load_policy().await?;
         if policy_allows_tool(&policy, tool_name) {
@@ -2361,6 +2367,8 @@ impl DbxMcpServer {
         Ok(database)
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
         let policy = self.load_policy().await?;
         let group_paths = self
@@ -4725,9 +4733,7 @@ mod tests {
 
     #[tokio::test]
     async fn opted_in_session_exposes_transaction_tools_and_structured_state() {
-        let mut policy = McpGlobalPolicy::default();
-        policy.read_only = false;
-        policy.allow_dangerous_sql = true;
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() };
         let backend = Arc::new(FakeBackend {
             connections: vec![connection("mysql", "mysql", "mysql", "app")],
             policy,
@@ -4887,8 +4893,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_transaction_query_rechecks_revoked_policy_before_io() {
-        let mut policy = McpGlobalPolicy::default();
-        policy.allow_dangerous_sql = true;
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
         let backend = Arc::new(FakeBackend {
             connections: vec![connection("mysql", "mysql", "mysql", "app")],
             policy: policy.clone(),
@@ -4967,8 +4972,7 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_batch_keeps_one_lease_and_reports_each_resulting_state() {
-        let mut policy = McpGlobalPolicy::default();
-        policy.allow_dangerous_sql = true;
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
         let backend = Arc::new(FakeBackend {
             connections: vec![connection("mysql", "mysql", "mysql", "app")],
             policy,
@@ -5045,8 +5049,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_protocol_server_rolls_back_its_active_transaction_sessions() {
-        let mut policy = McpGlobalPolicy::default();
-        policy.allow_dangerous_sql = true;
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
         let backend = Arc::new(FakeBackend {
             connections: vec![connection("mysql", "mysql", "mysql", "app")],
             policy,
@@ -5079,8 +5082,7 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_cancellation_drops_a_busy_transaction_tool_request() {
-        let mut policy = McpGlobalPolicy::default();
-        policy.allow_dangerous_sql = true;
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
         let backend = Arc::new(FakeBackend {
             connections: vec![connection("mysql", "mysql", "mysql", "app")],
             policy,

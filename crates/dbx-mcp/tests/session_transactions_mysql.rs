@@ -260,8 +260,8 @@ async fn run_contention_trace(
     )?;
     expect_success(&id_a_before, "read A physical connection ID before contention")?;
     expect_success(&id_b_before, "read B physical connection ID before contention")?;
-    let id_a_before = result_cell(&id_a_before, "read A physical connection ID before contention", 0, 0)?.to_string();
-    let id_b_before = result_cell(&id_b_before, "read B physical connection ID before contention", 0, 0)?.to_string();
+    let id_a_before = result_cell(&id_a_before, "read A physical connection ID before contention", 0, 0)?.clone();
+    let id_b_before = result_cell(&id_b_before, "read B physical connection ID before contention", 0, 0)?.clone();
     if id_a_before == id_b_before {
         return Err("A and B unexpectedly share one physical MySQL connection".to_string());
     }
@@ -378,10 +378,10 @@ async fn run_contention_trace(
     )?;
     expect_success(&id_a_after, "read A physical connection ID after commit")?;
     expect_success(&id_b_during, "read B physical connection ID during transaction")?;
-    if result_cell(&id_a_after, "read A physical connection ID after commit", 0, 0)?.to_string() != id_a_before {
+    if result_cell(&id_a_after, "read A physical connection ID after commit", 0, 0)? != &id_a_before {
         return Err("A physical connection identity changed".to_string());
     }
-    if result_cell(&id_b_during, "read B physical connection ID during transaction", 0, 0)?.to_string() != id_b_before {
+    if result_cell(&id_b_during, "read B physical connection ID during transaction", 0, 0)? != &id_b_before {
         return Err("B physical connection identity changed".to_string());
     }
 

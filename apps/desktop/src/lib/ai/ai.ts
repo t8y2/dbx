@@ -820,6 +820,17 @@ export function resolveAiNamespaceSelection(tab: QueryTab, connection: Connectio
   return { kind: "database", value: tab.database || "" };
 }
 
+/**
+ * Database that `@` table mentions are listed from and resolved against. It has
+ * to match the request database (`selectedDatabases[0] ?? tab.database`), so a
+ * database picked in the composer wins over the query tab's own database.
+ */
+export function resolveAiMentionDatabase(tab: QueryTab, connection: ConnectionConfig, selectedDatabases: string[]): string {
+  const namespace = resolveAiNamespaceSelection(tab, connection);
+  if (namespace.kind !== "database") return tab.database || "";
+  return selectedDatabases[0] ?? tab.database ?? "";
+}
+
 export function resolveDefaultAiSchema(connection: ConnectionConfig, schemaOptions: string[]): string | undefined {
   if (connection.db_type !== "dameng") return undefined;
   const username = connection.username.trim().toLowerCase();

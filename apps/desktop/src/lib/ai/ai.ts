@@ -32,6 +32,7 @@ function dbLabel(dbType: DatabaseType): string {
     milvus: "Milvus",
     weaviate: "Weaviate",
     chromadb: "ChromaDB",
+    solr: "Apache Solr",
   };
   return labels[dbType] || dbType;
 }
@@ -318,6 +319,9 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
   if (context.databaseType === "redis") {
     return buildRedisSystemPrompt(context, mode, custom);
   }
+  if (context.databaseType === "solr") {
+    return buildSolrSystemPrompt(context, mode, custom);
+  }
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
   const lastError = context.lastError ? `\nLast error:\n${context.lastError}\n` : "";
@@ -393,6 +397,59 @@ function buildRedisSystemPrompt(context: AiContext, mode: AiAssistantMode, custo
     lastError,
     resultPreview,
   ];
+
+  return lines.filter(Boolean).join("\n");
+}
+
+/**
+ * Solr prompt: Solr speaks REST, not SQL, so the generic dialect instructions
+ * would push the model toward SELECT statements that the Solr driver rejects.
+ * The query surface is the DBX REST console (`METHOD /path` + optional JSON
+ * body); schema context entries are Solr cores whose "columns" are schema
+ * fields (the PK-flagged field is the core's uniqueKey).
+ */
+function buildSolrSystemPrompt(context: AiContext, mode: AiAssistantMode, custom?: CustomPromptContext): string {
+  const isZh = isChineseLocale(currentLocale());
+  const schema = formatSchema(context);
+  const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
+  const lastError = context.lastError ? `\nLast error:\n${context.lastError}\n` : "";
+  const referencedSqlFiles = formatReferencedSqlFiles(context);
+  const lines: string[] = [
+    isZh ? "你是 DBX 内置的 Apache Solr 助手。用中文回复。" : "You are DBX's built-in Apache Solr assistant. Reply in English.",
+    isZh
+      ? 'Solr 不使用 SQL。查询一律使用 DBX REST 控制台格式：首行 `METHOD /path`，后续可选 JSON 请求体，例如 `GET /{core}/select?q=*:*&rows=20`、`POST /{core}/query` 加 {"query":"..."} JSON body。路径可以省略开头的 /solr 段，wt=json 会自动补上。'
+      : 'Solr does not use SQL. Always express queries in the DBX REST-console format: `METHOD /path` on the first line plus an optional JSON body, e.g. `GET /{core}/select?q=*:*&rows=20` or `POST /{core}/query` with a body such as {"query":"..."}. A leading /solr path segment may be omitted and wt=json is appended automatically.',
+    isZh
+      ? "Schema 上下文中每个条目是一个 Solr core（类型标注为 CORE）；其下列出的是 schema fields，标记为 PK 的字段是该 core 的唯一键（uniqueKey）。用真实字段名构造 q/fq 参数，不要编造不存在的字段。"
+      : "Each entry in the schema context is a Solr core (marked CORE); the listed items are its schema fields and the PK-flagged field is the core's uniqueKey. Build q/fq parameters from real field names and never invent fields that are not listed.",
+    ...buildModePromptLines(mode, isZh, context.databaseType),
+    ...buildRichContentPromptLines(isZh),
+    ...buildCustomInstructionLines(custom, isZh),
+    attachmentSafetyInstruction(isZh),
+    // The ```sql fence is only a transport convention: the editor treats the
+    // block content as a Solr REST request, never as SQL.
+    isZh ? "返回请求时放在 ```sql 代码块中，块内容是 Solr REST 请求文本而非 SQL。额外说明简短实用。" : "Put the request in a fenced ```sql code block; the block holds Solr REST request text, not SQL. Keep extra explanation short and practical.",
+    "",
+    "Database type: solr",
+    `Connection: ${context.connectionName}`,
+    `Database: ${context.database}`,
+    context.schema ? `Selected schema: ${context.schema}` : "",
+    schemaCoverageLine(context, isZh),
+    "",
+    `Current request:\n${context.currentSql.trim() || "(empty)"}`,
+    referencedSqlFiles,
+    lastError,
+    resultPreview,
+    `Schema:\n${schema}`,
+  ];
+
+  if (context.schemaScope === "focused_table") {
+    lines.push(
+      isZh
+        ? "Schema 上下文只覆盖当前打开的 core；连接中可能还有其他 core。用户询问有哪些 core 或提到上下文中不存在的 core 时，不要直接断言不存在，先用 list_tables 确认。"
+        : "Schema context covers only the currently opened core; the connection may contain other cores. When the user asks what cores exist or mentions a core absent from context, do not conclude it is missing; use list_tables to verify first.",
+    );
+  }
 
   return lines.filter(Boolean).join("\n");
 }
@@ -551,6 +608,28 @@ function buildModePromptLines(mode: AiAssistantMode, isZh: boolean, databaseType
     }
     return [
       isZh ? "你处于 MongoDB Ask 模式。只生成 MongoDB shell 风格命令和说明，不要生成 SQL，也不要暗示已经执行或即将自动执行。" : "You are in MongoDB Ask mode. Generate MongoDB shell-style commands and explanations, not SQL, and do not imply that anything has run or will auto-run.",
+      currentTimeGuidance,
+    ];
+  }
+  if (databaseType === "solr") {
+    if (mode === "agent") {
+      return [
+        isZh
+          ? "你处于 Solr Agent 模式。你有以下工具可用：list_tables（列出 Solr cores）、get_columns（返回某个 core 的 schema fields）、execute_query、get_current_time。"
+          : "You are in Solr Agent mode. You have the following tools available: list_tables (lists Solr cores), get_columns (returns a core's schema fields), execute_query, get_current_time.",
+        isZh
+          ? "execute_query 接受 DBX REST 控制台格式的 Solr 请求而不是 SQL：首行 `METHOD /path`，后续可选 JSON body，例如 `GET /{core}/select?q=*:*&rows=20` 或 `POST /{core}/query` 加 JSON body。用户提出数据查询意图时，必须调用该工具获取真实结果后再回答。"
+          : "execute_query accepts Solr REST-console requests, not SQL: `METHOD /path` on the first line plus an optional JSON body, for example `GET /{core}/select?q=*:*&rows=20` or `POST /{core}/query` with a JSON body. For data queries, call the tool and answer from its actual results.",
+        currentTimeGuidance,
+        isZh
+          ? "禁止不经确认直接执行 Solr 写请求（`/{core}/update`、commit、schema/admin 变更）；如果安全执行条件不满足，先说明原因，再给出只读替代方案。"
+          : "Never execute Solr write requests (`/{core}/update`, commits, schema/admin changes) without confirmation. If safe execution requirements are not met, explain why and provide a read-only alternative.",
+      ];
+    }
+    return [
+      isZh
+        ? "你处于 Solr Ask 模式。只生成 Solr REST 请求（`METHOD /path` + 可选 JSON body）和说明，不要生成 SQL，也不要暗示已经执行或即将自动执行。"
+        : "You are in Solr Ask mode. Generate Solr REST requests (`METHOD /path` plus optional JSON body) and explanations only, not SQL, and do not imply that anything has run or will auto-run.",
       currentTimeGuidance,
     ];
   }

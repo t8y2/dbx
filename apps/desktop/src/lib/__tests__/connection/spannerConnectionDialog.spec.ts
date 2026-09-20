@@ -28,7 +28,7 @@ describe("Cloud Spanner connection dialog", () => {
     // database that opts out of one of them means updating the string here too.
     expect(dialogSource).toContain("<div v-if=\"form.db_type !== 'meilisearch' && form.db_type !== 'spanner'\" class=\"grid grid-cols-4 items-center gap-4\">");
     expect(dialogSource).toContain('<div v-if="form.db_type !== \'spanner\'" class="grid grid-cols-4 items-center gap-4">');
-    expect(dialogSource).toContain("<div v-if=\"form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'spanner'\" class=\"grid grid-cols-4 items-center gap-4\">");
+    expect(dialogSource).toContain("<div v-if=\"form.db_type !== 'hbase' && form.db_type !== 'meilisearch' && form.db_type !== 'solr' && form.db_type !== 'spanner'\" class=\"grid grid-cols-4 items-center gap-4\">");
     // Switching to the Spanner profile clears host and credentials.
     expect(dialogSource).toContain('if (profile.type === "spanner") {');
     // Save/Test gating and submit-time normalization.

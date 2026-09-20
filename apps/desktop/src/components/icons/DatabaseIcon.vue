@@ -31,6 +31,7 @@ const assetIcons: Record<string, string> = {
   elasticsearch: "elasticsearch",
   easysearch: "easysearch",
   meilisearch: "meilisearch",
+  solr: "solr",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",

@@ -2663,7 +2663,30 @@ mod tests {
     fn parses_database_type_using_dbx_protocol_names() {
         assert_eq!(parse_database_type("Postgres").unwrap(), DatabaseType::Postgres);
         assert_eq!(parse_database_type("mongodb").unwrap(), DatabaseType::MongoDb);
+        assert_eq!(parse_database_type("Solr").unwrap(), DatabaseType::Solr);
+        assert_eq!(parse_database_type("solr").unwrap(), DatabaseType::Solr);
         assert!(parse_database_type("unknown").is_err());
+    }
+
+    #[test]
+    fn new_connection_config_accepts_solr() {
+        // Solr connections are created through the generic descriptor path; the
+        // REST core lives in the query text, not a database field.
+        let connection = new_connection_config(
+            "solr".to_string(),
+            "solr".to_string(),
+            DatabaseType::Solr,
+            "localhost".to_string(),
+            8983,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(connection.db_type, DatabaseType::Solr);
+        assert_eq!(connection.port, 8983);
     }
 
     #[test]

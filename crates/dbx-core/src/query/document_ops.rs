@@ -1,7 +1,7 @@
 use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::document_result::DocumentQueryResult;
-use crate::db::{dynamodb_driver, easysearch_driver, elasticsearch_driver, mongo_driver, vector_driver};
+use crate::db::{dynamodb_driver, easysearch_driver, elasticsearch_driver, mongo_driver, solr_driver, vector_driver};
 
 pub use crate::db::vector_driver::CollectionInfo;
 
@@ -61,6 +61,7 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
         PoolKind::DynamoDb(client) => Ok(vec![client.region.clone()]),
         PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::Easysearch(_) => Ok(vec!["default".to_string()]),
+        PoolKind::Solr(_) => Ok(vec!["default".to_string()]),
         PoolKind::Meilisearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::VectorDb(client) => vector_driver::list_databases(client).await,
         PoolKind::Agent(client) => {
@@ -270,6 +271,18 @@ pub async fn list_collections_core(
         PoolKind::Easysearch(client) => {
             Ok(elasticsearch_collection_infos(easysearch_driver::list_indices_with_aliases(client).await?))
         }
+        PoolKind::Solr(client) => {
+            let names = sort_names(solr_driver::list_cores(client).await?);
+            Ok(names
+                .into_iter()
+                .map(|n| CollectionInfo {
+                    name: n.clone(),
+                    id: n,
+                    kind: Some("core".to_string()),
+                    ..Default::default()
+                })
+                .collect())
+        }
         PoolKind::Meilisearch(client) => {
             let names = sort_names(crate::db::meilisearch_driver::list_indexes(client).await?);
             Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
@@ -459,6 +472,15 @@ pub async fn find_documents_core(
                 easysearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
             }
         }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            let _ = projection;
+            if cursor_pagination {
+                solr_driver::find_documents_with_cursor(&client, collection, limit, filter, sort, cursor).await
+            } else {
+                solr_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+            }
+        }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
             crate::db::meilisearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
@@ -516,6 +538,10 @@ pub async fn count_document_store_documents_core(
         PoolKind::Easysearch(client) => {
             let client = client.clone();
             easysearch_driver::count_documents(&client, collection, filter).await
+        }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            solr_driver::count_documents(&client, collection, filter).await
         }
         _ => Err("Document count is not supported for this connection".to_string()),
     }
@@ -614,6 +640,19 @@ pub async fn elasticsearch_delete_all_documents_core(
     }
 }
 
+/// 清空 Solr core 中的全部文档（保留 core 与 schema）。
+pub async fn solr_delete_all_documents_core(state: &AppState, connection_id: &str, core: &str) -> Result<(), String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            solr_driver::delete_all_documents(&client, core).await
+        }
+        _ => Err("Not a Solr connection".to_string()),
+    }
+}
+
 fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains(method) && (lower.contains("unknown method") || lower.contains("method not found"))
@@ -642,6 +681,11 @@ pub async fn insert_document_core(
         PoolKind::Easysearch(client) => {
             let client = client.clone();
             easysearch_driver::insert_document(&client, collection, doc_json, routing).await
+        }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            let _ = routing;
+            solr_driver::insert_document(&client, collection, doc_json).await
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
@@ -707,6 +751,11 @@ pub async fn update_document_core(
             let client = client.clone();
             easysearch_driver::update_document(&client, collection, id, doc_json, routing).await
         }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            let _ = routing;
+            solr_driver::update_document(&client, collection, id, doc_json).await
+        }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
             crate::db::meilisearch_driver::update_document(&client, collection, id, doc_json).await
@@ -764,6 +813,11 @@ pub async fn delete_document_core_with_type(
         PoolKind::Easysearch(client) => {
             let client = client.clone();
             easysearch_driver::delete_document(&client, collection, id, document_type, routing).await
+        }
+        PoolKind::Solr(client) => {
+            let client = client.clone();
+            let _ = (document_type, routing);
+            solr_driver::delete_document(&client, collection, id).await
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();

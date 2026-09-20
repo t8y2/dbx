@@ -6128,6 +6128,23 @@ mod tests {
     }
 
     #[test]
+    fn solr_rest_requests_stay_on_the_single_request_path() {
+        // Solr speaks the DBX REST-console format (`METHOD /path` + optional
+        // JSON body), not SQL. A single request must not be routed through the
+        // `;`-splitting batch executor.
+        assert!(!sql_requires_batch_execution("GET /mycore/select?q=*:*&rows=20", DatabaseType::Solr));
+        assert!(!sql_requires_batch_execution(
+            "POST /mycore/update\n{\"add\":{\"doc\":{\"id\":\"1\",\"title\":\"x\"}}}",
+            DatabaseType::Solr
+        ));
+        // A REST request is never a forbidden database switch.
+        assert!(!mcp_sql_has_forbidden_database_switch(
+            "GET /mycore/select?q=*:*",
+            DatabaseType::Solr
+        ));
+    }
+
+    #[test]
     fn format_batch_results_renders_failed_statement() {
         let results = vec![crate::backend::BatchStatementResult {
             result: dbx_core::db::QueryResult {

@@ -878,7 +878,7 @@ function stripSqlServerDefaultOuterParens(defaultValue: string): string {
   return value;
 }
 
-function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+function columnDefaultForEditor(column: Pick<ColumnInfo, "column_default" | "data_type">, databaseType?: DatabaseType): string {
   if (column.column_default === null) return "";
   const defaultValue = column.column_default;
   if (databaseType === "mysql" && defaultValue === "" && isMysqlCharacterDataType(column.data_type)) {

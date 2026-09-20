@@ -108,6 +108,22 @@ describe("omitDdlIdentifierQuotes", () => {
     const ddl = 'ALTER TABLE "SYSTEM"."TEST" RENAME COLUMN "ABCD" TO "AbCd";';
     expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", true)).toBe(ddl);
   });
+
+  it("keeps case-sensitive Oracle identifiers quoted when the edited table preserves case (#9649)", () => {
+    const ddl = 'ALTER TABLE "DBX_TEST"."T_9649" MODIFY ("cName" VARCHAR2(120 BYTE));\nALTER TABLE "DBX_TEST"."T_9649" ADD ("cNabcs" clob);\nCOMMENT ON COLUMN "DBX_TEST"."T_9649"."cName" IS \'中文名\';';
+    const expected = 'ALTER TABLE DBX_TEST.T_9649 MODIFY ("cName" VARCHAR2(120 BYTE));\nALTER TABLE DBX_TEST.T_9649 ADD ("cNabcs" clob);\nCOMMENT ON COLUMN DBX_TEST.T_9649."cName" IS \'中文名\';';
+    expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", false, { preserveCaseSensitiveIdentifiers: true })).toBe(expected);
+  });
+
+  it("still folds plain Oracle identifiers while preserving case-sensitive ones (#9649)", () => {
+    const ddl = 'ALTER TABLE "SYSTEM"."TEST" ADD ("ID" NUMBER(10), "NEW_COL" VARCHAR2(20), "with space" VARCHAR2(20));';
+    expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", false, { preserveCaseSensitiveIdentifiers: true })).toBe('ALTER TABLE SYSTEM.TEST ADD (ID NUMBER(10), NEW_COL VARCHAR2(20), "with space" VARCHAR2(20));');
+  });
+
+  it("ignores the case-preservation option for dialects that keep their own rules", () => {
+    const ddl = 'ALTER TABLE "user_login_log" ADD "status" INT;';
+    expect(formatGeneratedDdlIdentifierQuotes(ddl, "dameng", false, { preserveCaseSensitiveIdentifiers: true })).toBe(ddl);
+  });
 });
 
 describe("ddlFormatDialectFor", () => {

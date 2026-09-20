@@ -248,7 +248,7 @@ import TableStructureEditor from "@/components/structure/TableStructureEditor.vu
 
 const mountedApps: App[] = [];
 
-function draft(isPrimaryKey = false, identity?: { seed: number; increment: number }) {
+function draft(isPrimaryKey = false, identity?: { seed: number; increment: number }, columnName = "id") {
   const isNullable = identity ? false : !isPrimaryKey;
   return {
     initialized: true,
@@ -259,7 +259,7 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
     columns: [
       {
         id: "existing:id",
-        name: "id",
+        name: columnName,
         dataType: "INT",
         isNullable,
         defaultValue: "",
@@ -267,7 +267,7 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
         isPrimaryKey,
         extra: identity ? { autoIncrement: true, identity: { ...identity } } : {},
         original: {
-          name: "id",
+          name: columnName,
           data_type: "INT",
           is_nullable: isNullable,
           column_default: null,
@@ -285,7 +285,11 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
   };
 }
 
-async function mountEditor(databaseType: "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix", isPrimaryKey = false, options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number } } = {}) {
+async function mountEditor(
+  databaseType: "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix",
+  isPrimaryKey = false,
+  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string } = {},
+) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
   mocks.connection.driver_label = databaseType;
@@ -299,8 +303,8 @@ async function mountEditor(databaseType: "sqlserver" | "postgres" | "sqlite" | "
     connectionId: mocks.connection.id,
     database: options.database ?? "test",
     schema: "SYSDBA",
-    tableName: "users",
-    draft: draft(isPrimaryKey, options.identity),
+    tableName: options.tableName ?? "users",
+    draft: draft(isPrimaryKey, options.identity, options.columnName),
   });
   mountedApps.push(app);
   app.mount(root);
@@ -595,6 +599,44 @@ describe("TableStructureEditor primary key editing", () => {
 
     await vi.waitFor(() => expect(root.textContent).toContain(`ALTER TABLE ${schema}.demo_table ADD abc VARCHAR(20) DEFAULT 'quoted value'`));
     expect(root.textContent).not.toContain(`"${schema}"."demo_table"`);
+  });
+
+  it("keeps case-sensitive Oracle identifiers quoted when quoting is disabled (#9649)", async () => {
+    mocks.editorSettings.generateSqlQuoteIdentifiers = false;
+    const root = await mountEditor("oracle", false, { tableName: "T_9649", columnName: "cName" });
+    mocks.buildTableStructureChangeSql.mockResolvedValueOnce({
+      statements: ['ALTER TABLE "DBX_TEST"."T_9649" MODIFY ("cName" VARCHAR2(120 BYTE))', 'ALTER TABLE "DBX_TEST"."T_9649" ADD ("cNabcs" clob)', 'COMMENT ON COLUMN "DBX_TEST"."T_9649"."cName" IS \'中文名\''],
+      warnings: [],
+    });
+
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(root.textContent).toContain('MODIFY ("cName" VARCHAR2(120 BYTE))'));
+    expect(root.textContent).toContain('ADD ("cNabcs" clob)');
+    expect(root.textContent).toContain("COMMENT ON COLUMN DBX_TEST.T_9649.\"cName\" IS '中文名'");
+    expect(root.textContent).not.toContain("CNAME");
+  });
+
+  it("keeps a quoted Oracle table name when quoting is disabled (#9649)", async () => {
+    mocks.editorSettings.generateSqlQuoteIdentifiers = false;
+    const root = await mountEditor("oracle", false, { tableName: "t_9649_lower", columnName: "ID" });
+    mocks.buildTableStructureChangeSql.mockResolvedValueOnce({ statements: ['ALTER TABLE "DBX_TEST"."t_9649_lower" MODIFY ("ID" NUMBER(12))'], warnings: [] });
+
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(root.textContent).toContain('ALTER TABLE DBX_TEST."t_9649_lower" MODIFY (ID NUMBER(12))'));
+    expect(root.textContent).not.toContain("T_9649_LOWER");
+  });
+
+  it("still folds plain Oracle identifiers when quoting is disabled (#8997)", async () => {
+    mocks.editorSettings.generateSqlQuoteIdentifiers = false;
+    const root = await mountEditor("oracle", false, { tableName: "TEST", columnName: "ID" });
+    mocks.buildTableStructureChangeSql.mockResolvedValueOnce({ statements: ['ALTER TABLE "SYSTEM"."TEST" ADD ("NEW_COL" VARCHAR2(20))'], warnings: [] });
+
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE SYSTEM.TEST ADD (NEW_COL VARCHAR2(20))"));
+    expect(root.textContent).not.toContain('"NEW_COL"');
   });
 
   it("keeps SQLite rebuild SQL aligned with the guarded apply plan", async () => {

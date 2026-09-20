@@ -609,10 +609,7 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     let statements = if options.insert_mode == DataGridCopyInsertMode::RowByRow
         || options.database_type.is_some_and(uses_single_row_insert_statements)
     {
-        value_rows
-            .iter()
-            .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
-            .collect::<Vec<_>>()
+        value_rows.iter().map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};")).collect::<Vec<_>>()
     } else {
         vec![format!(
             "INSERT INTO {table} ({columns}) VALUES{}{};",
@@ -627,9 +624,7 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     // individually executable, matching the SQL export path.
     let needs_identity_insert_wrapper =
         matches!(options.database_type, Some(DatabaseType::SqlServer | DatabaseType::Dameng))
-            && insert_columns
-                .iter()
-                .any(|(_, _, info)| info.as_ref().is_some_and(is_auto_generated_column));
+            && insert_columns.iter().any(|(_, _, info)| info.as_ref().is_some_and(is_auto_generated_column));
     if needs_identity_insert_wrapper {
         return Some(
             statements
@@ -4710,10 +4705,8 @@ mod tests {
             vec![vec![json!(1), json!("t_destype")]],
             DataGridCopyInsertMode::Merged,
         );
-        options.table_meta.as_mut().expect("table meta").columns = Some(vec![
-            column("table_id", "int", false, None),
-            column("table_name", "nvarchar(200)", false, None),
-        ]);
+        options.table_meta.as_mut().expect("table meta").columns =
+            Some(vec![column("table_id", "int", false, None), column("table_name", "nvarchar(200)", false, None)]);
         let statement = build_data_grid_copy_insert_statement(options);
         assert_eq!(
             statement.as_deref(),

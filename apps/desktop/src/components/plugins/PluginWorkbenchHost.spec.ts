@@ -161,7 +161,7 @@ describe("PluginWorkbenchHost initialization", () => {
       const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
       expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t7" && file.name === "a.txt"))).toBe(true);
     });
-    expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("/tmp/a.txt", false);
+    expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("sample", "/tmp/a.txt", false);
     elementFromPoint.mockRestore();
   });
 

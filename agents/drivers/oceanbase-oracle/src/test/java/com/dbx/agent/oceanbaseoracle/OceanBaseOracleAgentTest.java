@@ -482,6 +482,76 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void synonymSourcePreservesOwnersQuotedNamesAndRemoteLinkDomains() {
+        for (String owner : List.of("Mixed.Owner", "PUBLIC")) {
+            List<String> sql = new ArrayList<>();
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(sql, params, resultSet(
+                new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"},
+                new Object[][]{{"Target.Owner", "A\"B", "REMOTE.EXAMPLE"}}
+            )));
+            ObjectSource source = agent.getObjectSource(owner, "Syn.Name", "SYNONYM");
+            String declaration = owner.equals("PUBLIC") ? "PUBLIC SYNONYM \"Syn.Name\"" : "SYNONYM \"Mixed.Owner\".\"Syn.Name\"";
+            Assertions.assertEquals("CREATE OR REPLACE " + declaration + " FOR \"Target.Owner\".\"A\"\"B\"@REMOTE.EXAMPLE;", source.getSource());
+            Assertions.assertEquals(List.of(owner, "Syn.Name"), params);
+            Assertions.assertEquals(1, sql.size());
+            Assertions.assertTrue(sql.get(0).contains("ALL_SYNONYMS"));
+        }
+    }
+
+    @Test
+    void synonymSourceHandlesMissingAndLocalTargetsWithoutGuessing() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{{null, "T", null}}
+        )));
+        Assertions.assertEquals("CREATE OR REPLACE SYNONYM \"APP\".\"S\" FOR \"T\";", agent.getObjectSource("APP", "S", "SYNONYM").getSource());
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{}
+        )));
+        Assertions.assertEquals("", agent.getObjectSource("APP", "missing", "SYNONYM").getSource());
+    }
+
+    @Test
+    void synonymSourceRejectsUnsafeRemoteMetadata() {
+        for (String link : List.of("x; DROP TABLE T", "x--", "a..b")) {
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+                new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{{"APP", "T", link}}
+            )));
+            Assertions.assertThrows(RuntimeException.class, () -> agent.getObjectSource("APP", "S", "SYNONYM"));
+        }
+    }
+
+    @Test
+    void sequenceFallbackUsesExactIntegerMetadataWithoutConsumingNextValue() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(sql, params, resultSet(
+            new String[]{"MIN_VALUE", "MAX_VALUE", "INCREMENT_BY", "CYCLE_FLAG", "ORDER_FLAG", "CACHE_SIZE", "LAST_NUMBER"},
+            new Object[][]{{"-999", "9999999999999999999999999999", "-2", "N", "Y", "0", "40"}}
+        )));
+        String source = agent.getObjectSource("Mixed.Owner", "S\"Q", "SEQUENCE").getSource();
+        Assertions.assertEquals("CREATE SEQUENCE \"Mixed.Owner\".\"S\"\"Q\"\n  MINVALUE -999\n  MAXVALUE 9999999999999999999999999999\n  INCREMENT BY -2\n  START WITH 40\n  NOCACHE\n  NOCYCLE\n  ORDER;", source);
+        Assertions.assertEquals(List.of("SEQUENCE", "S\"Q", "Mixed.Owner", "Mixed.Owner", "S\"Q"), params);
+        Assertions.assertFalse(sql.stream().anyMatch(query -> query.contains("NEXTVAL")));
+    }
+
+    @Test
+    void sequenceFallbackRejectsIncompleteOrNonIntegerMetadata() {
+        for (String maximum : Arrays.asList(null, "1.5", "1E28", "1; DROP TABLE T")) {
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(new ArrayList<>(), new ArrayList<>(), resultSet(
+                new String[]{"MIN_VALUE", "MAX_VALUE", "INCREMENT_BY", "CYCLE_FLAG", "ORDER_FLAG", "CACHE_SIZE", "LAST_NUMBER"},
+                new Object[][]{{"1", maximum, "1", "N", "N", "20", "40"}}
+            )));
+            Assertions.assertThrows(RuntimeException.class, () -> agent.getObjectSource("APP", "SEQ", "SEQUENCE"));
+        }
+    }
+
+    @Test
     void rejectsUnsupportedObjectSourceTypesBeforeQuerying() {
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
 

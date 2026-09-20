@@ -163,6 +163,7 @@ import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
+import { createShowWhitespaceExtension } from "@/lib/editor/codemirrorShowWhitespace";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, completionReplacementTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
@@ -701,6 +702,7 @@ let hoverCloseEffect: StateEffect<unknown> | null = null;
 let fontThemeComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorTheme: import("@codemirror/state").Compartment | null = null;
 let wordWrapComp: import("@codemirror/state").Compartment | null = null;
+let showWhitespaceComp: import("@codemirror/state").Compartment | null = null;
 let lineNumbersComp: import("@codemirror/state").Compartment | null = null;
 let vimModeComp: import("@codemirror/state").Compartment | null = null;
 let closeBracketsComp: import("@codemirror/state").Compartment | null = null;
@@ -1022,6 +1024,7 @@ const queryEditorAppearanceSettings = computed(() => {
     customThemes: settings.customThemes,
     activeCustomThemeId: settings.activeCustomThemeId,
     wordWrap: settings.wordWrap,
+    showWhitespace: settings.showWhitespace,
     vimModeEnabled: settings.vimModeEnabled,
     autoCloseBrackets: settings.autoCloseBrackets,
     showLineNumbers: settings.showLineNumbers,
@@ -2780,6 +2783,11 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 function wordWrapExtension() {
   if (!editorViewModule) return [];
   return props.forceWordWrap || settingsStore.editorSettings.wordWrap ? editorViewModule.EditorView.lineWrapping : [];
+}
+
+function showWhitespaceExtension(enabled = settingsStore.editorSettings.showWhitespace) {
+  if (!editorViewModule) return [];
+  return createShowWhitespaceExtension(editorViewModule, enabled);
 }
 
 function lineNumbersExtension(enabled = settingsStore.editorSettings.showLineNumbers) {
@@ -6307,6 +6315,8 @@ onMounted(async () => {
       lineNumbers,
       highlightActiveLineGutter,
       highlightSpecialChars,
+      highlightWhitespace,
+      WidgetType,
       drawSelection,
       dropCursor,
       crosshairCursor,
@@ -6343,6 +6353,10 @@ onMounted(async () => {
     EditorView,
     keymap,
     rectangularSelection,
+    highlightWhitespace,
+    WidgetType,
+    Decoration,
+    ViewPlugin,
   } as typeof import("@codemirror/view");
   hoverCloseEffect = closeHoverTooltips;
   codeMirrorLineNumbers = lineNumbers;
@@ -6352,6 +6366,7 @@ onMounted(async () => {
   fontThemeComp = new Compartment();
   codeMirrorTheme = new Compartment();
   wordWrapComp = new Compartment();
+  showWhitespaceComp = new Compartment();
   lineNumbersComp = new Compartment();
   vimModeComp = new Compartment();
   closeBracketsComp = new Compartment();
@@ -7083,6 +7098,7 @@ onMounted(async () => {
         }),
       ),
       wordWrapComp.of(props.forceWordWrap || initialSettings.wordWrap ? EditorView.lineWrapping : []),
+      showWhitespaceComp.of(showWhitespaceExtension(initialSettings.showWhitespace)),
       readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
       indentComp.of(indentExtension()),
       // Alt+drag belongs exclusively to rectangular selection. Registering the
@@ -7885,6 +7901,7 @@ async function applyEditorAppearance() {
     effects: [
       codeMirrorTheme.reconfigure(themeExt),
       wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
+      ...(showWhitespaceComp ? [showWhitespaceComp.reconfigure(showWhitespaceExtension(ss.showWhitespace))] : []),
       lineNumbersComp.reconfigure(lineNumbersExtension(ss.showLineNumbers)),
       vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
       closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),

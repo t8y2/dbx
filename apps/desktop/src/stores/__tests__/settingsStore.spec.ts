@@ -313,6 +313,41 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ restoreOpenTabsOnLaunch: true } as any).openTabsRestoreMode).toBe("all");
   });
 
+  it("defaults the delete-time tab handling to closing tabs and preserves explicit modes", () => {
+    expect(normalizeEditorSettings({}).deleteConnectionTabHandlingMode).toBe("close-tabs");
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-sql-tabs" }).deleteConnectionTabHandlingMode).toBe("keep-sql-tabs");
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-pinned-sql-tabs" }).deleteConnectionTabHandlingMode).toBe("keep-pinned-sql-tabs");
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-all-tabs" }).deleteConnectionTabHandlingMode).toBe("keep-all-tabs");
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "invalid" as any }).deleteConnectionTabHandlingMode).toBe("close-tabs");
+    // 早期试验值收敛到最接近的正式取值。
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-tabs" } as any).deleteConnectionTabHandlingMode).toBe("keep-sql-tabs");
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-pinned" } as any).deleteConnectionTabHandlingMode).toBe("keep-pinned-sql-tabs");
+    expect(normalizeEditorSettings({ deleteConnectionTabHandlingMode: "keep-all" } as any).deleteConnectionTabHandlingMode).toBe("keep-all-tabs");
+  });
+
+  it("remembers connection databases by default and sanitizes the stored map", () => {
+    expect(normalizeEditorSettings({}).rememberConnectionDatabaseOnDelete).toBe(true);
+    expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: false }).rememberConnectionDatabaseOnDelete).toBe(false);
+    expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: "true" } as any).rememberConnectionDatabaseOnDelete).toBe(true);
+    expect(normalizeEditorSettings({ rememberedConnectionDatabases: { prod: { database: "app", dbType: "postgres" } } }).rememberedConnectionDatabases).toEqual({ prod: { database: "app", dbType: "postgres" } });
+    // 空名、缺库名/类型、以及非对象条目全部丢弃。
+    expect(
+      normalizeEditorSettings({
+        rememberedConnectionDatabases: {
+          "  ": { database: "app", dbType: "postgres" },
+          dev: { database: "shop", dbType: "mysql" },
+          noDb: { database: "   ", dbType: "mysql" },
+          noType: { database: "shop" },
+          legacyString: "shop",
+          bad: 3,
+          other: null,
+        },
+      } as any).rememberedConnectionDatabases,
+    ).toEqual({ dev: { database: "shop", dbType: "mysql" } });
+    expect(normalizeEditorSettings({ rememberedConnectionDatabases: [] } as any).rememberedConnectionDatabases).toEqual({});
+    expect(normalizeEditorSettings({ rememberedConnectionDatabases: "prod" } as any).rememberedConnectionDatabases).toEqual({});
+  });
+
   it("keeps unsaved SQL drafts on quit by default and preserves explicit modes", () => {
     expect(normalizeEditorSettings({}).appCloseUnsavedTabsMode).toBe("keep-drafts");
     expect(normalizeEditorSettings({ appCloseUnsavedTabsMode: "prompt" }).appCloseUnsavedTabsMode).toBe("prompt");

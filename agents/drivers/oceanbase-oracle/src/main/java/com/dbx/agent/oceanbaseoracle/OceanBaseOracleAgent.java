@@ -383,6 +383,10 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
+        if ("SYNONYM".equals(objectType)) {
+            // GET_DDL does not cover synonyms on every supported OB version.
+            return OceanBaseSchemaObjects.synonymSource(requireConnection(), owner, name);
+        }
         String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
         try (var stmt = requireConnection().prepareStatement(sql)) {
             stmt.setString(1, objectType);
@@ -395,6 +399,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private String queryDictionarySource(String owner, String name, String objectType) throws SQLException {
+        if ("SEQUENCE".equals(objectType)) {
+            return OceanBaseSchemaObjects.sequenceSource(requireConnection(), owner, name);
+        }
         if ("VIEW".equals(objectType)) {
             String sql = "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?";
             try (var stmt = requireConnection().prepareStatement(sql)) {
@@ -435,7 +442,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             ? ""
             : objectType.trim().toUpperCase(Locale.ROOT).replace(' ', '_');
         return switch (normalized) {
-            case "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE",
+            case "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM",
                 "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> normalized;
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
         };
@@ -443,7 +450,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     private static boolean supportsDictionarySource(String objectType) {
         return switch (objectType) {
-            case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> true;
+            case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY", "SEQUENCE" -> true;
             default -> false;
         };
     }

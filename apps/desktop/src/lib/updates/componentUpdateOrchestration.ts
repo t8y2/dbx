@@ -96,6 +96,10 @@ export function resolveUpdateAllAction(options: { hasAppUpdate: boolean; appUpda
   return options.appUpdatePrepared ? "defer-components" : "download-app";
 }
 
+export function shouldCloseUpdateCenterAfterComponentUpdate(options: { failedCount: number; skippedDriverCount: number; hasAppUpdate: boolean; remainingComponentUpdateCount: number }): boolean {
+  return options.failedCount === 0 && options.skippedDriverCount === 0 && !options.hasAppUpdate && options.remainingComponentUpdateCount === 0;
+}
+
 export function runPendingComponentUpdatePlan<T>(pending: PendingComponentUpdates, updates: { installCategories: (categories: ComponentUpdateCategory[]) => Promise<T>; autoUpdateEnabledComponents: () => Promise<T> }): Promise<T> {
   return pending.plan.kind === "manual" ? updates.installCategories(pending.plan.categories) : updates.autoUpdateEnabledComponents();
 }

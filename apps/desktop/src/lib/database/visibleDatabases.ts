@@ -300,3 +300,8 @@ const DRAFT_VISIBLE_SCHEMAS_PREFIX = "__visible_schema_draft_";
 export function buildDraftVisibleSchemasConnectionId(seed: string): string {
   return `${DRAFT_VISIBLE_SCHEMAS_PREFIX}${seed}`;
 }
+
+/** 可见 schema 选择器用的临时连接：只存在于弹窗交互期间，不是用户保存的连接。 */
+export function isDraftVisibleSchemasConnectionId(connectionId: string): boolean {
+  return connectionId.startsWith(DRAFT_VISIBLE_SCHEMAS_PREFIX);
+}

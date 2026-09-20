@@ -85,7 +85,7 @@ for (const entry of integrationCases) {
       assert.equal(tests[0].env.DBX_ZOOKEEPER_TEST_USERNAME, "dbx");
       assert.ok(start.args.some((arg) => arg.includes("sessionRequireClientSASLAuth=true")));
     } else if (entry.scenario === "tdengine") {
-      assert.deepEqual(tests[0].args, ["test", "--manifest-path", "drivers/tdengine/Cargo.toml", "--locked", "--test", "live", "--", "--nocapture"]);
+      assert.deepEqual(tests[0].args, ["nextest", "run", "--manifest-path", "drivers/tdengine/Cargo.toml", "--locked", "--test", "live", "--no-capture", "--no-fail-fast"]);
       assert.equal(tests[0].env.TDENGINE_INTEGRATION, "1");
       assert.equal(tests[0].env.TDENGINE_TEST_PORT, "6041");
     } else if (entry.scenario === "cassandra") assert.ok(tests[0].args.includes("^TestCassandraIntegration$"));
@@ -103,6 +103,13 @@ test("failed live tests stay failed and still clean their container", () => with
   assert.equal(result.status, 23);
   assert.deepEqual(commands().at(-1).args.slice(0, 2), ["rm", "-fv"]);
 }, { CI_STUB_FAIL: "go" }));
+
+test("failed nextest live tests propagate failure and still clean their container", () => withToolStubs((env, commands) => {
+  const result = spawnSync("/bin/bash", [".github/scripts/ci-agent-integration.sh", "tdengine", "3.4.2.2"], { cwd: root, env, encoding: "utf8" });
+  assert.equal(result.status, 23);
+  assert.deepEqual(commands().find((command) => command.tool === "cargo").args.slice(0, 2), ["nextest", "run"]);
+  assert.deepEqual(commands().at(-1).args.slice(0, 2), ["rm", "-fv"]);
+}, { CI_STUB_FAIL: "cargo" }));
 
 test("lock preflight resolves full graphs, keeps --locked and propagates failures", () => {
   const plan = { rust: true, agent_rust: { include: [{ driver: "duckdb" }, { driver: "tdengine" }] } };

@@ -105,7 +105,7 @@ import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject,
 import { usesOracleCurrentSchemaCompletion } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
-import { ORACLE_DATABASE_LINKS_SQL, oracleDatabaseLinksFromResult } from "@/lib/database/oracleDatabaseLinks";
+import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
@@ -132,8 +132,9 @@ import { loadTimeoutInheritanceBackup, saveTimeoutInheritanceBackup } from "@/li
 import { migrateSqlServerLegacyCompatibilityConfig, requiresSqlServerLegacyCompatibilityComponent, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { deleteTabResultSnapshotsForOwner } from "@/lib/tabs/tabResultCache";
+import { deletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionTabs";
 import { disposeSqlServerActivityTracesForConnection, hasSqlServerActivityTraceForConnection } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
-import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection, visibleDatabasePatternsAreEnabled } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterDatabaseNamesForConnection, filterSchemaNamesForConnection, filterVisibleDatabaseNames, isDraftVisibleSchemasConnectionId, normalizeVisibleDatabaseSelection, visibleDatabasePatternsAreEnabled } from "@/lib/database/visibleDatabases";
 import {
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
@@ -1118,27 +1119,43 @@ export const useConnectionStore = defineStore("connection", () => {
 
   /**
    * A one-time connection is deleted outright rather than left behind for a
-   * reconnect, so its tabs have nothing to point at once it is gone: executing in
-   * one would fail with "Connection config not found". Close them regardless of
-   * `disconnectTabHandlingMode`, which only makes sense for connections that can
-   * still be reconnected.
+   * reconnect, so its runtime record has nothing left to point at.
+   *
+   * Tab handling is deliberately NOT done here: `applyDeletedConnectionTabHandling`
+   * already applied `deleteConnectionTabHandlingMode` to these connections, so
+   * force-closing here would silently override the user's policy (and discard
+   * unsaved SQL drafts) — exactly what that setting exists to prevent.
    */
-  async function closeOneTimeConnectionTabs(connectionIds: string[]) {
-    if (!connectionIds.length) return;
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const queryStore = useQueryStore();
-    for (const connectionId of connectionIds) {
-      queryStore.closeConnectionTabs(connectionId, { force: true });
-    }
+  async function cleanupRemovedOneTimeConnections(connectionIds: string[]) {
+    releaseOneTimeRuntimeConnections(connectionIds);
   }
 
-  async function cleanupRemovedOneTimeConnections(connectionIds: string[]) {
-    try {
-      await closeOneTimeConnectionTabs(connectionIds);
-    } catch (error) {
-      console.warn("[DBX][connection:delete:one-time-tab-cleanup-failed]", { connectionIds, error });
+  /**
+   * 删除连接后的页签处理：按 `deleteConnectionTabHandlingMode` 决定保留哪些 SQL 页签，
+   * 并在开启「记住连接名与数据库」时记录 连接名 → { 数据库名, 类型 }，供新建同名连接回填与重绑。
+   *
+   * `one_time` 临时连接同样走这套策略：它的页签虽然无法再执行，但里面的 SQL 文本是用户的工作，
+   * 不该被静默丢弃。
+   *
+   * 只排除可见 schema 选择器的临时草稿连接——它们只活在弹窗交互期间，不会出现在页签里。
+   * 空名连接无法按名字重绑，只跳过「记住连接名」；页签本身仍要按策略关闭/保留，
+   * 否则会留下指向已删除连接的孤儿页签。
+   */
+  async function applyDeletedConnectionTabHandling(configs: readonly ConnectionConfig[]) {
+    const targets = configs.filter((config) => !isDraftVisibleSchemasConnectionId(config.id));
+    if (!targets.length) return;
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const keep = deletedConnectionTabKeepMode(settingsStore.editorSettings.deleteConnectionTabHandlingMode);
+    const remember = settingsStore.editorSettings.rememberConnectionDatabaseOnDelete;
+    const namedTargets = targets.filter((config) => config.name.trim() !== "");
+    if (remember && namedTargets.length) settingsStore.rememberConnectionDatabases(namedTargets.map((config) => [config.name, config.database, config.db_type] as const));
+    for (const config of targets) {
+      queryStore.detachConnectionTabsForDelete(config.id, { keep, connectionName: remember && config.name.trim() !== "" ? config.name : undefined });
     }
-    releaseOneTimeRuntimeConnections(connectionIds);
+    // 页签处理是同步的内存操作，但落盘是防抖的。这里立即冲刷，避免随后重启恢复出
+    // 已被策略关闭的页签。
+    await queryStore.flushPendingPersist().catch(() => undefined);
   }
 
   function cancelDisconnectKey(connectionId: string, attempt: number): string {
@@ -1984,15 +2001,16 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function buildOracleDatabaseLinksNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
     const config = getConfig(connectionId);
-    if (effectiveDatabaseTypeForConnection(config) !== "oracle") return undefined;
+    if (!supportsOracleDatabaseLinks(effectiveDatabaseTypeForConnection(config))) return undefined;
     const existing = existingConnectionNode?.children?.find((child) => child.type === "oracle-db-links");
     return { ...existing, id: `${connectionId}:__oracle_db_links`, label: "tree.databaseLinks", type: "oracle-db-links", connectionId, database: config?.database || "", isExpanded: existing?.isExpanded ?? false, children: existing?.children ?? [] };
   }
 
   async function listOracleDatabaseLinks(connectionId: string, database: string) {
-    if (effectiveDatabaseTypeForConnection(getConfig(connectionId)) !== "oracle") return [];
+    const databaseType = effectiveDatabaseTypeForConnection(getConfig(connectionId));
+    if (!supportsOracleDatabaseLinks(databaseType)) return [];
     await ensureConnected(connectionId);
-    return oracleDatabaseLinksFromResult(await api.executeQuery(connectionId, database, ORACLE_DATABASE_LINKS_SQL, undefined, undefined, { maxRows: 10000, timeoutSecs: 15 }));
+    return oracleDatabaseLinksFromResult(await api.executeQuery(connectionId, database, oracleDatabaseLinksSql(databaseType), undefined, undefined, { maxRows: 10000, timeoutSecs: 15 }));
   }
 
   async function refreshOracleDatabaseLinks(connectionId: string) {
@@ -3453,6 +3471,12 @@ export const useConnectionStore = defineStore("connection", () => {
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
     if (normalized.save_password === false) normalized.password = "";
+    const isNewConnection = !connections.value.some((c) => c.id === normalized.id);
+    // 新建同名同类型连接时回填「记住的数据库」，让删除连接后重建的流程少一步手选。
+    if (isNewConnection && !normalized.database?.trim()) {
+      const remembered = settingsStore.rememberedDatabaseForConnection(normalized.name, normalized.db_type);
+      if (remembered) normalized.database = remembered;
+    }
     await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
@@ -3469,6 +3493,14 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
     stopCreatingConnectionInGroup();
+    // 删除连接时保留下来的 SQL 页签按连接名重新绑定到新连接上（含数据库回填）。
+    if (isNewConnection) {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      const queryStore = useQueryStore();
+      if (queryStore.rebindDetachedTabs(normalized.name, normalized.id, normalized.database) > 0) {
+        await queryStore.flushPendingPersist().catch(() => undefined);
+      }
+    }
   }
 
   function copyConnectionsToTreeClipboard(connectionIds: Iterable<string>): number {
@@ -3589,12 +3621,20 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const removedIds = new Set(connectionIds);
     const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
+    // 连接配置在 applyConnectionRemoval 后就读不到了，先抓取快照供删除策略使用。
+    const removedConfigs = connectionIds.map((id) => getConfig(id)).filter((config): config is ConnectionConfig => !!config);
     const nextConnections = connections.value.filter((c) => !removedIds.has(c.id));
     let nextLayout = sidebarLayout.value;
     for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);
     await persistConnectionDeletion(nextConnections, nextLayout);
     applyConnectionRemoval(removedIds, nextConnections, nextLayout);
     purgeTableVGroupsForConnections(removedIds);
+    // 删除已经落盘完成；页签处理失败只告警，不能让已成功的删除以异常收场。
+    try {
+      await applyDeletedConnectionTabHandling(removedConfigs);
+    } catch (error) {
+      console.warn("[DBX][connection:delete:tab-handling-failed]", { connectionIds: [...removedIds], error });
+    }
     await cleanupRemovedOneTimeConnections(oneTimeIds);
   }
 
@@ -4273,7 +4313,14 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionHealthCheck(connectionId);
   }
 
-  async function disconnect(connectionId: string) {
+  /**
+   * 断开连接。
+   *
+   * `options.skipTabHandling` 用于「删除连接」流程：删除时页签已按
+   * `deleteConnectionTabHandlingMode` 处理过，这里只做会话清理，不能再套用
+   * `disconnectTabHandlingMode`，否则会把刚保留下来的 SQL 页签又关掉。
+   */
+  async function disconnect(connectionId: string, options: { skipTabHandling?: boolean } = {}) {
     const stateRevision = bumpConnectionStateRevision(connectionId);
     const shouldRemoveOneTimeConnection = getConfig(connectionId)?.one_time === true;
     if (hasSqlServerActivityTraceForConnection(connectionId)) await disposeSqlServerActivityTracesForConnection(connectionId);
@@ -4313,16 +4360,18 @@ export const useConnectionStore = defineStore("connection", () => {
     // 同表必须重新拉取结构）。completion/object-browser 缓存上面已清；
     // 这里再走统一 helper，bump 连接代次并清 data-tab freshness。
     invalidateConnectionMetadataLifetime(connectionId);
-    switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
-      case "close-tabs":
-        queryStore.closeConnectionTabs(connectionId);
-        break;
-      case "keep-tabs-clear-results":
-        queryStore.releaseConnectionTabs(connectionId);
-        break;
-      case "keep-tabs-keep-results":
-        queryStore.rollbackConnectionTransactions(connectionId);
-        break;
+    if (!options.skipTabHandling) {
+      switch (settingsStore.editorSettings.disconnectTabHandlingMode) {
+        case "close-tabs":
+          queryStore.closeConnectionTabs(connectionId);
+          break;
+        case "keep-tabs-clear-results":
+          queryStore.releaseConnectionTabs(connectionId);
+          break;
+        case "keep-tabs-keep-results":
+          queryStore.rollbackConnectionTransactions(connectionId);
+          break;
+      }
     }
     // Tab handling is synchronous in memory, but persistence is debounced. Flush
     // the scoped tab state before disconnect returns so a quick reconnect/restart
@@ -8943,6 +8992,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const connectionIds = deleteConnections ? connectionIdsInGroupsOp(sidebarLayout.value, uniqueGroupIds).filter((id) => connections.value.some((connection) => connection.id === id)) : [];
     const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const removedConnectionIds = new Set(connectionIds);
+    // 删除策略需要连接配置，applyConnectionRemoval 之后就读不到了，先抓快照。
+    const removedConnectionConfigs = connectionIds.map((id) => getConfig(id)).filter((config): config is ConnectionConfig => !!config);
     const nextConnections = removedConnectionIds.size ? connections.value.filter((connection) => !removedConnectionIds.has(connection.id)) : connections.value;
     let layoutAfterConnectionRemoval = previousLayout;
     for (const id of removedConnectionIds) layoutAfterConnectionRemoval = removeConnectionFromSidebarLayout(layoutAfterConnectionRemoval, id);
@@ -8953,6 +9004,12 @@ export const useConnectionStore = defineStore("connection", () => {
     if (removedConnectionIds.size) {
       applyConnectionRemoval(removedConnectionIds, nextConnections, nextLayout);
       purgeTableVGroupsForConnections(removedConnectionIds);
+      // 删除已经落盘完成；页签处理失败只告警，不能让已成功的删除以异常收场。
+      try {
+        await applyDeletedConnectionTabHandling(removedConnectionConfigs);
+      } catch (error) {
+        console.warn("[DBX][connection:delete:tab-handling-failed]", { connectionIds: [...removedConnectionIds], error });
+      }
     } else {
       sidebarLayout.value = nextLayout;
       rebuildTreeNodes();

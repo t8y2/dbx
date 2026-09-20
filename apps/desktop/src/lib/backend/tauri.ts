@@ -17,7 +17,7 @@ import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 import type { XuguTablespaceInfo } from "@/types/database";
-import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
+import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchCreateIndexInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
@@ -438,6 +438,7 @@ export interface QueryPaginationExecutionPlan {
   countSql?: string;
   exactQueryRowBound?: number;
   useAgentResultSession: boolean;
+  paginationRowNumberColumn?: string;
 }
 
 export type QuerySortDirection = "asc" | "desc";
@@ -4662,6 +4663,10 @@ export async function meilisearchGetIndexOverview(connectionId: string, index: s
     connectionId,
     index,
   });
+}
+
+export async function meilisearchCreateIndex(connectionId: string, input: MeilisearchCreateIndexInput): Promise<void> {
+  return invoke("meilisearch_create_index", { connectionId, input });
 }
 
 export async function meilisearchDeleteIndex(connectionId: string, index: string): Promise<void> {

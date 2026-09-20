@@ -1457,7 +1457,7 @@ async function openSource(row: ObjectBrowserRow) {
   try {
     const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
     if (sidePanelGuard.isStale(epoch)) return;
-    sourceCanEdit.value = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type);
+    sourceCanEdit.value = result.editable !== false && !["TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type) && (row.type !== "SEQUENCE" || effectiveDatabaseType.value === "oceanbase-oracle");
     const editable = sourceCanEdit.value
       ? await api.buildEditableObjectSource({
           databaseType: effectiveDatabaseType.value,
@@ -1471,9 +1471,9 @@ async function openSource(row: ObjectBrowserRow) {
     // Viewing database source must preserve its original whitespace and comments;
     // formatting remains an explicit editor action instead of altering it on open.
     sourceEditableText.value = editable;
-    sourceContent.value = editable;
+    sourceContent.value = row.type === "SEQUENCE" ? result.source : editable;
     sourceDraft.value = editable;
-    sourceEditing.value = sourceCanEdit.value;
+    sourceEditing.value = sourceCanEdit.value && row.type !== "SEQUENCE";
     if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
       toast(t("objects.sourceReadOnly"), 3000);
     }

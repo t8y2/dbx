@@ -7,7 +7,8 @@ const mocks = vi.hoisted(() => {
   const connectionStore = {
     activeConnectionId: null as string | null,
     ensureConnected: vi.fn(async () => {}),
-    getConfig: (connectionId: string) => (connectionId ? { id: connectionId, name: connectionId, db_type: "oracle" } : undefined),
+    dbType: "oracle",
+    getConfig: (connectionId: string) => (connectionId ? { id: connectionId, name: connectionId, db_type: connectionStore.dbType } : undefined),
   };
   return {
     connectionStore,
@@ -36,7 +37,7 @@ const CONNECTION_ID = "ora-1";
 const DATABASE = "ORCL";
 const SCHEMA = "APP";
 
-const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION"; signature?: string }) => ({
+const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE"; signature?: string }) => ({
   connectionId: CONNECTION_ID,
   database: DATABASE,
   title: `Source - ${request.name}`,
@@ -59,6 +60,7 @@ describe("queryStore pending object source tab", () => {
     vi.clearAllMocks();
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
     setActivePinia(createPinia());
+    mocks.connectionStore.dbType = "oracle";
   });
 
   it("creates a visible loading tab before the source arrives", async () => {
@@ -268,5 +270,33 @@ describe("queryStore pending object source tab", () => {
     expect(tab.sourceView).toBe(true);
     expect(tab.objectSource).toBeUndefined();
     expect(tab.sourceLoad).toBeUndefined();
+  });
+
+  it("keeps OceanBase sequence CREATE source for viewing and uses ALTER only for editing", async () => {
+    mocks.connectionStore.dbType = "oceanbase-oracle";
+    mocks.getObjectSource.mockResolvedValue(objectSource('CREATE SEQUENCE "APP"."SEQ_USERS" START WITH 10 INCREMENT BY 2'));
+    mocks.buildEditableObjectSource.mockResolvedValue('ALTER SEQUENCE "APP"."SEQ_USERS" INCREMENT BY 2');
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const base = pendingOptions({ name: "SEQ_USERS", objectType: "SEQUENCE" });
+
+    store.openObjectSourceTabPending({ ...base, initialEditing: false });
+    await settle();
+    expect(store.tabs[0]?.sql).toContain("CREATE SEQUENCE");
+    expect(store.tabs[0]?.sql).toContain("START WITH 10");
+    expect(store.tabs[0]?.objectSource).toBeUndefined();
+
+    store.openObjectSourceTabPending({ ...base, initialEditing: true });
+    await settle();
+    expect(store.tabs).toHaveLength(2);
+    expect(store.tabs[1]?.sql).toBe('ALTER SEQUENCE "APP"."SEQ_USERS" INCREMENT BY 2');
+    expect(store.tabs[1]?.objectSource).toMatchObject({ schema: SCHEMA, name: "SEQ_USERS", objectType: "SEQUENCE" });
+
+    mocks.buildEditableObjectSource.mockResolvedValue('ALTER SEQUENCE "APP"."SEQ_USERS" INCREMENT BY 4');
+    const editId = store.tabs[1]!.id;
+    expect(store.openObjectSourceTabPending({ ...base, initialEditing: true })).toBe(editId);
+    await settle();
+    expect(store.tabs).toHaveLength(2);
+    expect(store.tabs[1]?.sql).toBe('ALTER SEQUENCE "APP"."SEQ_USERS" INCREMENT BY 4');
   });
 });

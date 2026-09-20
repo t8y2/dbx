@@ -57,7 +57,7 @@ import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoS
 import type { MongoBulkWriteResult } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
-import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
+import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchCreateIndexInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
@@ -4860,6 +4860,10 @@ export async function meilisearchGetIndexOverview(connectionId: string, index: s
     connectionId,
     index,
   });
+}
+
+export async function meilisearchCreateIndex(connectionId: string, input: MeilisearchCreateIndexInput): Promise<void> {
+  return post("/api/document-store/meilisearch/index/create", { connectionId, input });
 }
 
 export async function meilisearchDeleteIndex(connectionId: string, index: string): Promise<void> {

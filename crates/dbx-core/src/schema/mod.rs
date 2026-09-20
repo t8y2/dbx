@@ -18,6 +18,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 mod kingbase;
+mod mongodb_columns;
 
 macro_rules! extract_pool {
     ($pool:expr, $variant:ident) => {
@@ -7001,6 +7002,9 @@ pub async fn get_columns_core_for_session(
     table: &str,
     client_session_id: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
+    if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
+        return Box::pin(mongodb_columns::get_columns(state, connection_id, database, table)).await;
+    }
     if client_session_id.is_none() {
         let metadata_session =
             EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "columns").await;

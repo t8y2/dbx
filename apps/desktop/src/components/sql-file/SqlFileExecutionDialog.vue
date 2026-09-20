@@ -21,6 +21,7 @@ import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
+import { parseSqlFilePathInput } from "./sqlFilePathInput";
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -73,6 +74,32 @@ const filePathDisplay = computed(() => {
   if (isDesktopRuntime) return previews.value.map((item) => item.filePath).join("; ");
   return previews.value.map((item) => displayFileNames.value.get(item.filePath) ?? item.fileName).join("; ");
 });
+
+// Desktop only: the path input is editable so a path can be pasted instead of
+// browsing. The draft follows the loaded previews and is committed on Enter/blur.
+const pathInput = ref("");
+watch(filePathDisplay, (value) => (pathInput.value = value), { immediate: true });
+
+async function commitPathInput() {
+  if (!isDesktopRuntime || running.value || selectingFile.value || loadingPreview.value) return;
+  const paths = parseSqlFilePathInput(pathInput.value);
+  if (paths.length === 0 || paths.join("; ") === filePathDisplay.value) {
+    pathInput.value = filePathDisplay.value;
+    return;
+  }
+  const typed = pathInput.value;
+  await loadPreviews(paths);
+  // Failed load: keep what was typed so the path can be corrected.
+  pathInput.value = previews.value.length > 0 ? filePathDisplay.value : typed;
+}
+
+// Ignore the Enter that confirms an IME composition (e.g. Chinese paths) so it
+// does not commit a half-typed path; only a real Enter commits.
+function commitPathInputOnEnter(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  event.preventDefault();
+  void commitPathInput();
+}
 
 // Desktop tooltip shows the real file path; Web tooltip shows the user-facing
 // label only — never the server temp path (which contains a meaningless UUID).
@@ -673,7 +700,8 @@ watch(
 
           <div class="flex items-center gap-2">
             <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
-            <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
+            <Input v-if="isDesktopRuntime" v-model="pathInput" :disabled="running" class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" @keydown.enter="commitPathInputOnEnter" @blur="commitPathInput" />
+            <Input v-else :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
               <FolderOpen v-else class="w-3.5 h-3.5 mr-1.5" />

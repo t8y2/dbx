@@ -73,6 +73,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import {
   buildAiContext,
   resolveAiDatabaseTarget,
+  resolveAiMentionDatabase,
   resolveAiNamespaceSelection,
   resolveDefaultAiSchema,
   aiDatabaseTypeForConnection,
@@ -2072,10 +2073,15 @@ function normalizeMentionQuery(query: string): { schemaPrefix: string; tableFilt
   };
 }
 
-async function loadMentionCandidates(query: string) {
-  if (!props.connection || !props.tab?.connectionId || !props.tab.database) return;
+function mentionTargetDatabase(): string {
+  return props.tab && props.connection ? resolveAiMentionDatabase(props.tab, props.connection, selectedDatabases.value) : "";
+}
 
-  const key = mentionCacheKey(props.tab.connectionId, props.tab.database, query);
+async function loadMentionCandidates(query: string) {
+  const mentionDatabase = mentionTargetDatabase();
+  if (!props.connection || !props.tab?.connectionId || !mentionDatabase) return;
+
+  const key = mentionCacheKey(props.tab.connectionId, mentionDatabase, query);
   if (mentionCache.value[key]) {
     mentionCandidates.value = mentionCache.value[key];
     return;
@@ -2092,11 +2098,11 @@ async function loadMentionCandidates(query: string) {
     await connectionStore.ensureConnected(props.tab.connectionId);
     let tableCandidates: AiMentionCandidate[] = [];
     if (isSchemaAware(props.connection.db_type)) {
-      const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, props.tab.database));
+      const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, mentionDatabase));
       const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
       const results = await Promise.all(
         filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
-          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+          const tables = await listTables(props.tab!.connectionId, mentionDatabase, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
           return filterAiTableMentionCandidates(
             tables.map((table) => mentionCandidateFromTable(table, schema)),
             tableFilter,
@@ -2106,7 +2112,7 @@ async function loadMentionCandidates(query: string) {
       );
       tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
     } else {
-      const database = props.connection.db_type === "sqlite" ? normalizeSqliteNamespace(props.tab.database || props.connection.database, props.connection) : props.tab.database;
+      const database = props.connection.db_type === "sqlite" ? normalizeSqliteNamespace(mentionDatabase || props.connection.database, props.connection) : mentionDatabase;
       const schema = database || props.connection.database || "main";
       const tables = await listTables(props.tab.connectionId, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
       tableCandidates = filterAiTableMentionCandidates(
@@ -2340,7 +2346,7 @@ function imageAttachmentSupportErrorMessage(error: "provider" | "format"): strin
 
 function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMentions: AiSqlFileMention[], csvAttachments: AiCsvFileContext[] = [], imageAttachments: AiImageAttachment[] = []): AiMessageMention[] {
   const connectionId = props.tab?.connectionId || props.connection?.id || "";
-  const database = props.tab?.database || props.connection?.database || "";
+  const database = mentionTargetDatabase() || props.connection?.database || "";
   return [
     ...tableMentions.map((mention) => ({
       kind: "table" as const,
@@ -2441,7 +2447,7 @@ function refreshMentionState() {
   commandOpen.value = false;
 
   const mention = activeMentionAtCursor();
-  if (!mention || !props.connection || !props.tab?.database) {
+  if (!mention || !props.connection || !mentionTargetDatabase()) {
     mentionOpen.value = false;
     return;
   }
@@ -2452,6 +2458,10 @@ function refreshMentionState() {
     loadMentionCandidates(mention.query).catch(() => {});
   }, 120);
 }
+
+watch(selectedDatabases, () => {
+  if (mentionOpen.value) refreshMentionState();
+});
 
 function onPromptKeyup(event: KeyboardEvent) {
   if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;

@@ -139,6 +139,7 @@ test("test groups partition every current workspace package exactly once", () =>
 test("workspace Cargo flags preserve full versus fast coverage and strict clippy", () => {
   for (const mode of ["fast", "full"]) {
     const command = rustCommand("test", "workspace", mode);
+    assert.deepEqual(command.slice(0, 3), ["nextest", "run", "--no-fail-fast"]);
     const features = command.at(-1).split(",");
     assert.ok(command.includes("--workspace"));
     assert.ok(command.includes("--locked"));
@@ -147,10 +148,28 @@ test("workspace Cargo flags preserve full versus fast coverage and strict clippy
       assert.equal(features.includes(`${pkg}/system-fonts`), mode === "full");
     }
     assert.deepEqual(rustCommand("clippy", "workspace", mode).slice(-3), ["--", "-D", "warnings"]);
+    assert.equal(rustCommand("clippy", "workspace", mode)[0], "clippy");
   }
   for (const group of Object.keys(rustGroups)) assert.ok(rustCommand("test", group, "fast").includes("--package"));
   assert.throws(() => rustCommand("test", "unknown", "full"));
   assert.throws(() => rustCommand("clippy", "foundation", "full"));
+});
+
+test("nextest, doctests and coverage select identical packages and features in every Rust lane", () => {
+  for (const group of ["workspace", ...Object.keys(rustGroups)]) {
+    for (const mode of ["fast", "full"]) {
+      const nextest = rustCommand("test", group, mode);
+      const doctest = rustCommand("doctest", group, mode);
+      assert.deepEqual(nextest.slice(0, 3), ["nextest", "run", "--no-fail-fast"]);
+      assert.deepEqual(doctest, ["test", "--doc", ...nextest.slice(3)]);
+      assert.deepEqual(rustCommand("tree", group, mode), ["tree", ...nextest.slice(3)]);
+      assert.ok(nextest.includes("--no-default-features"));
+      assert.ok(nextest.includes("--locked"));
+    }
+  }
+  assert.throws(() => rustCommand("doctest", "unknown", "full"));
+  assert.throws(() => rustCommand("doctest", "workspace", "unknown"));
+  assert.throws(() => rustCommand("unknown", "workspace", "full"));
 });
 
 function results(files) {

@@ -1541,10 +1541,10 @@ DISTRIBUTED BY HASH(product_id) BUCKETS 1`;
   });
 
   it("returns Redis executable command lines", () => {
-    const sql = "GET user:1\n# comment\n  DEL user:2  ";
+    const sql = "GET user:1\n# comment\n  DEL user:2  \n-- another note\nPING";
     const ranges = executableStatementRanges(sql, "redis");
-    expect(rangeSqlTexts(ranges)).toEqual(["GET user:1", "DEL user:2"]);
-    expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL")]);
+    expect(rangeSqlTexts(ranges)).toEqual(["GET user:1", "DEL user:2", "PING"]);
+    expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL"), sql.indexOf("PING")]);
   });
 
   it("keeps MySQL REPLACE INTO as an executable statement start", () => {
@@ -1618,10 +1618,11 @@ describe("currentExecutableStatementRange", () => {
   });
 
   it("uses the current Redis command line", () => {
-    const sql = "GET user:1\n  DEL user:2\n# comment";
+    const sql = "GET user:1\n  DEL user:2\n# comment\n-- note";
 
     expect(currentExecutableStatementRange(sql, indexOf(sql, "DEL"), "redis")?.sql).toBe("DEL user:2");
     expect(currentExecutableStatementRange(sql, indexOf(sql, "comment"), "redis")).toBeNull();
+    expect(currentExecutableStatementRange(sql, indexOf(sql, "note"), "redis")).toBeNull();
   });
 
   it("uses the current MongoDB command range", () => {

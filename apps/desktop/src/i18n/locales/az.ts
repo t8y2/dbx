@@ -7415,6 +7415,8 @@ export default withEnglishFallback({
     previewStatementRunButton: "Əmri işlətmə düyməsinə önbaxış",
     wordWrap: "Sətirləri bük",
     wordWrapDescription: "Uzun sətirləri redaktorun eninə uyğun bük",
+    showWhitespace: "Boşluq simvollarını göstər",
+    showWhitespaceDescription: "SQL redaktorunda boşluqları ·, tabulyasiyaları → kimi göstərir. Yalnız görünüş dəyişir, SQL mətni dəyişmir.",
     vimMode: "Vim rejimi",
     vimModeDescription: "SQL redaktorunda Vim üslublu modal redaktədən istifadə et",
     autoCloseBrackets: "Mötərizələri avtomatik bağla",

@@ -942,6 +942,15 @@ pub async fn meilisearch_get_index_overview_core(
     }
 }
 
+pub async fn meilisearch_create_index_core(
+    state: &AppState,
+    connection_id: &str,
+    input: &crate::db::meilisearch_driver::MeilisearchCreateIndexInput,
+) -> Result<(), String> {
+    let client = meilisearch_client_core(state, connection_id).await?;
+    crate::db::meilisearch_driver::create_index(&client, input).await
+}
+
 pub async fn meilisearch_delete_index_core(state: &AppState, connection_id: &str, index: &str) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;

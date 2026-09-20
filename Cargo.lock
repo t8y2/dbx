@@ -10656,9 +10656,8 @@ dependencies = [
 [[package]]
 name = "webview2-com-sys"
 version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c"
 dependencies = [
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "windows 0.61.3",
  "windows-core 0.61.2",

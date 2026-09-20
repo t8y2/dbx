@@ -838,6 +838,7 @@ export const meilisearchGetIndexSettings = forward("meilisearchGetIndexSettings"
 export const meilisearchUpdateIndexSettings = forward("meilisearchUpdateIndexSettings");
 export const meilisearchGetIndexStats = forward("meilisearchGetIndexStats");
 export const meilisearchGetIndexOverview = forward("meilisearchGetIndexOverview");
+export const meilisearchCreateIndex = forward("meilisearchCreateIndex");
 export const meilisearchDeleteIndex = forward("meilisearchDeleteIndex");
 export const meilisearchDeleteAllDocuments = forward("meilisearchDeleteAllDocuments");
 export const meilisearchGetSystemOverview = forward("meilisearchGetSystemOverview");

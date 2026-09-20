@@ -1,19 +1,32 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { Activity, Database, FileText, KeyRound, RefreshCcw, Tags } from "@lucide/vue";
+import { Activity, Database, FileText, KeyRound, Loader2, Plus, RefreshCcw, Tags } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import type { MeilisearchSystemOverview, OverviewSection } from "@/types/meilisearchManagement";
+import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{ connectionId: string }>();
 const { t } = useI18n();
+const { toast } = useToast();
+const connectionStore = useConnectionStore();
 const loading = ref(false);
 const error = ref("");
 const overview = ref<MeilisearchSystemOverview | null>(null);
+const createOpen = ref(false);
+const createWorking = ref(false);
+const createError = ref("");
+const createUid = ref("");
+const createPrimaryKey = ref("");
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 
 const stats = computed(() => overview.value?.stats.data ?? null);
 const cards = computed(() => [
@@ -42,6 +55,42 @@ async function load() {
   }
 }
 
+function openCreate() {
+  createUid.value = "";
+  createPrimaryKey.value = "";
+  createError.value = "";
+  createOpen.value = true;
+}
+
+async function createIndex() {
+  const uid = createUid.value.trim();
+  if (!uid) {
+    createError.value = t("meilisearch.createIndexUidRequired");
+    return;
+  }
+
+  createWorking.value = true;
+  createError.value = "";
+  try {
+    await api.meilisearchCreateIndex(props.connectionId, {
+      uid,
+      ...(createPrimaryKey.value.trim() ? { primaryKey: createPrimaryKey.value.trim() } : {}),
+    });
+    createOpen.value = false;
+    toast(t("meilisearch.indexCreated"));
+    await load();
+    try {
+      await connectionStore.loadElasticsearchIndices(props.connectionId);
+    } catch (refreshError) {
+      console.warn("[DBX][meilisearch-index-refresh:error]", refreshError);
+    }
+  } catch (cause: any) {
+    createError.value = cause?.message || String(cause);
+  } finally {
+    createWorking.value = false;
+  }
+}
+
 onMounted(() => void load());
 </script>
 
@@ -52,7 +101,10 @@ onMounted(() => void load());
         <h2 class="text-base font-semibold">{{ t("meilisearch.overview") }}</h2>
         <p class="text-xs text-muted-foreground">{{ t("meilisearch.overviewDescription") }}</p>
       </div>
-      <Button size="sm" variant="outline" :disabled="loading" @click="load"><RefreshCcw class="mr-1 h-3.5 w-3.5" />{{ t("meilisearch.refresh") }}</Button>
+      <div class="flex items-center gap-2">
+        <Button size="sm" variant="outline" :disabled="readOnly" @click="openCreate"><Plus class="mr-1 h-3.5 w-3.5" />{{ t("meilisearch.createIndex") }}</Button>
+        <Button size="sm" variant="outline" :disabled="loading" @click="load"><RefreshCcw class="mr-1 h-3.5 w-3.5" />{{ t("meilisearch.refresh") }}</Button>
+      </div>
     </div>
     <QueryLoadingState v-if="loading && !overview" class="py-12" />
     <ErrorBanner v-else-if="error && !overview" :message="error" />
@@ -120,5 +172,27 @@ onMounted(() => void load());
         <p v-else class="p-4 text-xs text-muted-foreground">{{ sectionLabel(overview.topIndexes) }}</p>
       </section>
     </template>
+    <Dialog v-model:open="createOpen">
+      <DialogContent class="max-w-md">
+        <DialogHeader
+          ><DialogTitle>{{ t("meilisearch.createIndex") }}</DialogTitle></DialogHeader
+        >
+        <div class="grid gap-3 text-xs">
+          <label class="grid gap-1"
+            ><span class="font-medium">{{ t("meilisearch.uid") }}</span
+            ><Input v-model="createUid" :disabled="createWorking" :placeholder="t('meilisearch.createIndexUidPlaceholder')"
+          /></label>
+          <label class="grid gap-1"
+            ><span class="font-medium">{{ t("meilisearch.primaryKey") }}</span
+            ><Input v-model="createPrimaryKey" :disabled="createWorking" :placeholder="t('meilisearch.createIndexPrimaryKeyPlaceholder')" /><span class="text-[11px] text-muted-foreground">{{ t("meilisearch.createIndexPrimaryKeyHelp") }}</span></label
+          >
+          <ErrorBanner v-if="createError" :message="createError" />
+        </div>
+        <DialogFooter
+          ><Button variant="outline" :disabled="createWorking" @click="createOpen = false">{{ t("common.cancel") }}</Button
+          ><Button :disabled="createWorking || readOnly" @click="createIndex"><Loader2 v-if="createWorking" class="mr-1 h-3.5 w-3.5 animate-spin" />{{ t("meilisearch.createIndex") }}</Button></DialogFooter
+        >
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

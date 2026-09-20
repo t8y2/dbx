@@ -416,13 +416,14 @@ function tabTitleText(tab: QueryTab) {
 }
 
 function tabConnectionLabel(tab: QueryTab) {
-  return connectionStore.getConfig(tab.connectionId)?.name || tab.connectionId;
+  // 连接已删除但页签被保留时，回退到原连接名，避免显示成裸 uuid。
+  return connectionStore.getConfig(tab.connectionId)?.name || tab.detachedConnectionName || tab.connectionId;
 }
 
 function tabConnectionTargetLabel(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
   const host = connection?.host.trim();
-  return connection && host ? `${host}:${connection.port}` : tab.connectionId;
+  return connection && host ? `${host}:${connection.port}` : tab.detachedConnectionName || tab.connectionId;
 }
 
 function databaseTabGroupBaseLabel(tab: QueryTab) {

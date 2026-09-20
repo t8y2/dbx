@@ -1787,6 +1787,71 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeUndefined();
   });
 
+  it("removes the generated row number before appending OceanBase Oracle pages", async () => {
+    const sql = "SELECT LEVEL AS N FROM DUAL CONNECT BY LEVEL <= 4";
+    getConnectionConfig.mockReturnValue({ id: "ob-1", name: "OceanBase", db_type: "oceanbase-oracle", database: "app" });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false });
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: options.pagination.limit,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: false,
+      paginationRowNumberColumn: options.pagination.offset > 0 ? "__dbx_row_num" : undefined,
+    }));
+    executeMulti.mockResolvedValueOnce([{ columns: ["N"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }]).mockResolvedValueOnce([
+      {
+        columns: ["N", "__dbx_row_num"],
+        rows: [
+          [3, 3],
+          [4, 4],
+        ],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ob-1", "app", "Query");
+    await store.executeTabSql(tabId, sql, { pagination: { limit: 2, offset: 0 } });
+    await store.executeTabSql(tabId, sql, {
+      pagination: { limit: 2, offset: 2 },
+      preserveResultDuringExecution: true,
+      appendResult: { maxRows: 10 },
+    });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.columns).toEqual(["N"]);
+    expect(tab.result?.rows).toEqual([[1], [2], [3], [4]]);
+
+    prepareQueryPaginationExecutionPlan.mockImplementation(async (options) => ({
+      sqlToExecute: options.sql,
+      pageSql: options.sql,
+      pageLimit: 2,
+      pageOffset: options.pagination.offset,
+      countSql: undefined,
+      useAgentResultSession: false,
+      paginationRowNumberColumn: options.pagination.offset > 0 ? "__dbx_row_num" : undefined,
+    }));
+    executeMulti
+      .mockResolvedValueOnce([{ columns: ["N"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }])
+      .mockResolvedValueOnce([
+        {
+          columns: ["N", "__dbx_row_num"],
+          rows: [
+            [3, 3],
+            [4, 4],
+          ],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ])
+      .mockResolvedValueOnce([{ columns: ["N", "__dbx_row_num"], rows: [], affected_rows: 0, execution_time_ms: 1 }]);
+    const exported = await store.fetchTabResultForExport(tabId);
+    expect(exported?.columns).toEqual(["N"]);
+    expect(exported?.rows).toEqual([[1], [2], [3], [4]]);
+  });
+
   it("records the returned row count when a page is known to be incomplete without count sql", async () => {
     prepareQueryPaginationExecutionPlan.mockResolvedValue({
       sqlToExecute: "SELECT name FROM users LIMIT 100 OFFSET 0",

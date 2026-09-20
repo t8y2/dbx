@@ -224,6 +224,38 @@ describe("openTabsPersistence originalSql round-trip", () => {
     });
   });
 
+  it("preserves a result-view tab's entry contribution id and result snapshot", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        id: "plugin-result-view",
+        title: "Chart",
+        connectionId: "plugin-connection",
+        database: "dbx_test",
+        mode: "plugin-workbench",
+        pluginWorkbench: {
+          pluginId: "dbx.example.graph",
+          contributionId: "dbx.example.graph.chart",
+          context: {
+            connectionId: "plugin-connection",
+            database: "dbx_test",
+            sql: "SELECT 1",
+            result: { columns: ["id"], rows: [[1]], truncated: false },
+          },
+        },
+      }),
+    ]);
+
+    // `contributionId` names the entry contribution, not a workbench: a restored
+    // result-view tab must keep its own id so the renderer can resolve it again.
+    expect(restored.pluginWorkbench?.contributionId).toBe("dbx.example.graph.chart");
+    expect(restored.pluginWorkbench?.context).toEqual({
+      connectionId: "plugin-connection",
+      database: "dbx_test",
+      sql: "SELECT 1",
+      result: { columns: ["id"], rows: [[1]], truncated: false },
+    });
+  });
+
   it("preserves host-owned plugin filesystem navigation", () => {
     const [restored] = roundTrip([
       queryTab({
@@ -248,5 +280,30 @@ describe("openTabsPersistence originalSql round-trip", () => {
       rootUri: "s3://bucket/",
       currentUri: "s3://bucket/reports/",
     });
+  });
+});
+
+describe("openTabsPersistence detached connection tabs", () => {
+  it("preserves the original connection name of a kept SQL tab across a round-trip", () => {
+    const [restored] = roundTrip([queryTab({ connectionId: "deleted-conn", detachedConnectionName: "prod" })]);
+
+    expect(restored.connectionId).toBe("deleted-conn");
+    expect(restored.detachedConnectionName).toBe("prod");
+  });
+
+  it("keeps a detached SQL tab even though its connection no longer exists", () => {
+    const saved = serializeOpenTabs([queryTab({ id: "orphan", connectionId: "deleted-conn", detachedConnectionName: "prod" })]);
+
+    const { tabs } = restoreOpenTabsPayload({ tabs: saved, activeTabId: "orphan" }, { validConnectionIds: ["other-conn"] });
+
+    // SQL 页签不受 validConnectionIds 过滤，删除连接后保留下来的草稿页签才能跨重启存活。
+    expect(tabs.map((tab) => tab.id)).toEqual(["orphan"]);
+    expect(tabs[0].detachedConnectionName).toBe("prod");
+  });
+
+  it("omits the detached connection name when the tab is bound to a live connection", () => {
+    const [saved] = serializeOpenTabs([queryTab({})]);
+
+    expect(saved.detachedConnectionName).toBeUndefined();
   });
 });

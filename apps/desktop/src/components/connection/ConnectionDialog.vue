@@ -2820,6 +2820,30 @@ watch(
   },
 );
 
+// 删除连接时若开启了「记住连接名与数据库」，新建同名**同类型**连接会自动选中记住的数据库。
+// 只在数据库字段为空、或仍是上一次自动回填的值时才覆盖，避免抢走用户手输的内容。
+const lastRememberedDatabaseAutofill = ref("");
+watch(
+  () => [open.value, editingId.value, form.value.name, form.value.db_type] as const,
+  ([isOpen, editing, rawName, dbType]) => {
+    if (!isOpen || editing) {
+      lastRememberedDatabaseAutofill.value = "";
+      return;
+    }
+    const name = (rawName ?? "").trim();
+    const remembered = name ? settingsStore.rememberedDatabaseForConnection(name, dbType) : "";
+    const current = (form.value.database ?? "").trim();
+    if (current === remembered) {
+      lastRememberedDatabaseAutofill.value = remembered;
+      return;
+    }
+    if (current && current !== lastRememberedDatabaseAutofill.value) return;
+    form.value.database = remembered || undefined;
+    lastRememberedDatabaseAutofill.value = remembered;
+  },
+  { immediate: true },
+);
+
 const databaseLabel = computed(() => {
   if (form.value.db_type === "oracle" && form.value.oracle_connection_type === "tns") return t("connection.oracleTnsAlias");
   if (form.value.db_type === "oracle") return t("connection.serviceName");

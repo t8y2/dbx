@@ -1180,6 +1180,7 @@ async fn execute_explain_query(
             default_schema,
             sql,
             Some("explain"),
+            None,
         )
         .await
         {

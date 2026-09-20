@@ -2472,7 +2472,9 @@ pub fn format_grid_sql_literal_with_identifier_quote(
     }
     let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
-    } else if is_sqlite_literal_database(database_type) || database_type == Some(DatabaseType::Dameng) {
+    } else if is_sqlite_literal_database(database_type)
+        || matches!(database_type, Some(DatabaseType::Dameng | DatabaseType::Oracle))
+    {
         // These engines keep backslashes literal in ordinary string literals,
         // so only the quote delimiter needs escaping.
         literal_text.replace('\'', "''")
@@ -7817,6 +7819,38 @@ mod tests {
                 r#"UPDATE "DBX_TEST"."DBX_NEWLINE_REPRO" SET "VAL" = 'line\n''s' WHERE "ID" = 1;"#,
                 r#"INSERT INTO "DBX_TEST"."DBX_NEWLINE_REPRO" ("ID", "VAL") VALUES (2, '\n');"#,
             ]
+        );
+    }
+
+    #[test]
+    fn oracle_data_grid_writes_do_not_double_escape_backslashes() {
+        assert_eq!(format_grid_sql_literal(&json!(r"\n"), Some(DatabaseType::Oracle), None), r"'\n'");
+        assert_eq!(format_grid_sql_literal(&json!(r"line\n's"), Some(DatabaseType::Oracle), None), r"'line\n''s'");
+
+        let nested_json = r#"{"ext":"{\"v1\":\"123\",\"v3\":\"{\\\"vl1\\\":\\\"x\\\"}\"}"}"#;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("DBX_TEST".to_string()),
+                table_name: "DBX9708_JSON".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), column("VAL", "VARCHAR2(400)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "VAL".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!(nested_json))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![format!(r#"UPDATE "DBX_TEST"."DBX9708_JSON" SET "VAL" = '{nested_json}' WHERE "ID" = 1;"#)]
         );
     }
 

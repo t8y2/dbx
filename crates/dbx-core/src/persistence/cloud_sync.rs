@@ -28,6 +28,7 @@ const DEFAULT_REMOTE_PATH: &str = "DBX/sync/snapshot.json";
 const DEFAULT_SNIPPET_FILE_NAME: &str = "dbx-sync.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITEE_API_BASE: &str = "https://gitee.com/api/v5";
+const GITLAB_DEFAULT_INSTANCE: &str = "https://gitlab.com";
 const SECRET_KEYS: &[&str] = &[
     "password",
     "ssh_password",
@@ -64,12 +65,16 @@ pub enum SnippetProvider {
     GitHub,
     #[serde(rename = "gitee")]
     Gitee,
+    #[serde(rename = "gitlab")]
+    GitLab,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnippetSyncConfig {
     pub provider: SnippetProvider,
+    #[serde(default)]
+    pub instance_url: Option<String>,
     pub token: Option<String>,
     pub snippet_id: Option<String>,
     /// Explicitly requested one-time migration for a legacy plaintext snippet.
@@ -395,7 +400,7 @@ pub async fn snippet_saved_token_status(
     storage: &Storage,
     config: &SnippetSyncConfig,
 ) -> Result<SnippetTokenStatus, String> {
-    let account = snippet_token_account(config.provider);
+    let account = snippet_token_account(config)?;
     Ok(SnippetTokenStatus { has_saved_token: storage.load_webdav_password_blob(&account).await?.is_some() })
 }
 
@@ -403,18 +408,27 @@ pub async fn save_snippet_token(storage: &Storage, config: &SnippetSyncConfig, t
     let secret = storage.load_or_create_local_device_secret().await?;
     let blob = encrypt_text_with_secret(token, &secret)?;
     let value = serde_json::to_value(blob).map_err(|e| e.to_string())?;
-    storage.save_webdav_password_blob(&snippet_token_account(config.provider), &value).await
+    storage.save_webdav_password_blob(&snippet_token_account(config)?, &value).await
 }
 
 pub async fn forget_snippet_token(storage: &Storage, config: &SnippetSyncConfig) -> Result<(), String> {
-    storage.delete_webdav_password_blob(&snippet_token_account(config.provider)).await
+    storage.delete_webdav_password_blob(&snippet_token_account(config)?).await
 }
 
 pub async fn snippet_sync_settings(
     storage: &Storage,
     provider: SnippetProvider,
 ) -> Result<SnippetSyncSettings, String> {
-    let state = storage.load_snippet_sync_state(snippet_provider_storage_key(provider)).await?;
+    snippet_sync_settings_for_instance(storage, provider, None).await
+}
+
+pub async fn snippet_sync_settings_for_instance(
+    storage: &Storage,
+    provider: SnippetProvider,
+    instance_url: Option<&str>,
+) -> Result<SnippetSyncSettings, String> {
+    let key = snippet_provider_storage_key(provider, instance_url)?;
+    let state = storage.load_snippet_sync_state(&key).await?;
     Ok(SnippetSyncSettings {
         snippet_id: state.snippet_id,
         legacy_cleanup_required_id: state.pending_cleanup.map(|cleanup| cleanup.snippet_id),
@@ -426,7 +440,20 @@ pub async fn save_snippet_sync_id(
     provider: SnippetProvider,
     snippet_id: Option<&str>,
 ) -> Result<(), String> {
-    storage.save_snippet_sync_id(snippet_provider_storage_key(provider), snippet_id).await
+    save_snippet_sync_id_for_instance(storage, provider, None, snippet_id).await
+}
+
+pub async fn save_snippet_sync_id_for_instance(
+    storage: &Storage,
+    provider: SnippetProvider,
+    instance_url: Option<&str>,
+    snippet_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(id) = normalized_snippet_id(snippet_id) {
+        validate_snippet_id(provider, id)?;
+    }
+    let key = snippet_provider_storage_key(provider, instance_url)?;
+    storage.save_snippet_sync_id(&key, snippet_id).await
 }
 
 pub async fn finalize_snippet_migration(
@@ -437,17 +464,17 @@ pub async fn finalize_snippet_migration(
     let Some(pending_cleanup) = snippet_pending_cleanup(summary)? else {
         return Ok(());
     };
-    let provider_key = snippet_provider_storage_key(summary.provider);
+    let provider_key = client.storage_key()?;
     storage
         .save_snippet_migration_state(
-            provider_key,
+            &provider_key,
             &summary.snippet_id,
             &pending_cleanup.snippet_id,
             &pending_cleanup.expected_content_hash,
         )
         .await?;
     if client.delete_legacy_snippet_if_unchanged(&pending_cleanup).await.unwrap_or(false)
-        && storage.clear_snippet_pending_cleanup_if_matches(provider_key, &pending_cleanup).await?
+        && storage.clear_snippet_pending_cleanup_if_matches(&provider_key, &pending_cleanup).await?
     {
         summary.legacy_cleanup_required_id = None;
         summary.legacy_cleanup_expected_content_hash = None;
@@ -460,21 +487,24 @@ pub async fn retry_pending_snippet_cleanup(
     provider: SnippetProvider,
     client: &SnippetSyncClient,
 ) -> Result<SnippetSyncSettings, String> {
-    let provider_key = snippet_provider_storage_key(provider);
-    let state = storage.load_snippet_sync_state(provider_key).await?;
+    if provider != client.config.provider {
+        return Err("Snippet provider mismatch".to_string());
+    }
+    let provider_key = client.storage_key()?;
+    let state = storage.load_snippet_sync_state(&provider_key).await?;
     if let Some(pending_cleanup) = state.pending_cleanup {
         if client.delete_legacy_snippet_if_unchanged(&pending_cleanup).await? {
-            storage.clear_snippet_pending_cleanup_if_matches(provider_key, &pending_cleanup).await?;
+            storage.clear_snippet_pending_cleanup_if_matches(&provider_key, &pending_cleanup).await?;
         }
     }
-    snippet_sync_settings(storage, provider).await
+    snippet_sync_settings_for_instance(storage, provider, client.config.instance_url.as_deref()).await
 }
 
 pub async fn resolve_snippet_token(storage: &Storage, config: &mut SnippetSyncConfig) -> Result<(), String> {
     if config.token.as_deref().is_some_and(|token| !token.trim().is_empty()) {
         return Ok(());
     }
-    let Some(value) = storage.load_webdav_password_blob(&snippet_token_account(config.provider)).await? else {
+    let Some(value) = storage.load_webdav_password_blob(&snippet_token_account(config)?).await? else {
         return Ok(());
     };
     let blob: EncryptedSecretsBlob = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -623,12 +653,23 @@ impl WebDavClient {
 }
 
 impl SnippetSyncClient {
-    pub fn new(config: SnippetSyncConfig) -> Self {
+    pub fn new(config: SnippetSyncConfig) -> Result<Self, String> {
         let api_base = match config.provider {
             SnippetProvider::GitHub => GITHUB_API_BASE,
             SnippetProvider::Gitee => GITEE_API_BASE,
+            SnippetProvider::GitLab => {
+                let instance = gitlab_instance_url(config.instance_url.as_deref())?;
+                return Ok(Self {
+                    http: Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .map_err(|e| e.to_string())?,
+                    config,
+                    api_base: format!("{instance}/api/v4"),
+                });
+            }
         };
-        Self { http: Client::new(), config, api_base: api_base.to_string() }
+        Ok(Self { http: Client::new(), config, api_base: api_base.to_string() })
     }
 
     #[cfg(test)]
@@ -636,10 +677,24 @@ impl SnippetSyncClient {
         Self { http: Client::new(), config, api_base }
     }
 
+    fn storage_key(&self) -> Result<String, String> {
+        snippet_provider_storage_key(self.config.provider, self.config.instance_url.as_deref())
+    }
+
+    fn snippet_url(&self, id: Option<&str>) -> Result<String, String> {
+        let path = if self.config.provider == SnippetProvider::GitLab { "snippets" } else { "gists" };
+        if let Some(id) = id {
+            validate_snippet_id(self.config.provider, id)?;
+            Ok(format!("{}/{path}/{id}", self.api_base))
+        } else {
+            Ok(format!("{}/{path}", self.api_base))
+        }
+    }
+
     pub async fn test(&self) -> Result<(), String> {
         self.require_token()?;
         let url = match (self.config.provider, normalized_snippet_id(self.config.snippet_id.as_deref())) {
-            (_, Some(id)) => format!("{}/gists/{id}", self.api_base),
+            (_, Some(id)) => self.snippet_url(Some(id))?,
             (_, None) => format!("{}/user", self.api_base),
         };
         let response = self.request(Method::GET, &url)?.send().await.map_err(|e| e.to_string())?;
@@ -703,8 +758,9 @@ impl SnippetSyncClient {
         // snippet would retain its plaintext revision history on the provider.
         let update_id = if legacy_snapshot.is_some() { None } else { existing_id };
         let (method, url) = match (self.config.provider, update_id) {
-            (_, Some(id)) => (Method::PATCH, format!("{}/gists/{id}", self.api_base)),
-            (_, None) => (Method::POST, format!("{}/gists", self.api_base)),
+            (SnippetProvider::GitLab, Some(id)) => (Method::PUT, self.snippet_url(Some(id))?),
+            (_, Some(id)) => (Method::PATCH, self.snippet_url(Some(id))?),
+            (_, None) => (Method::POST, self.snippet_url(None)?),
         };
 
         let response = match self.config.provider {
@@ -719,6 +775,14 @@ impl SnippetSyncClient {
             SnippetProvider::Gitee => {
                 let payload = gitee_snippet_payload(content);
                 // Gitee validates `files` as a nested object; form encoding turns it into a string and is rejected.
+                self.request(method, &url)?.json(&payload).send().await
+            }
+            SnippetProvider::GitLab => {
+                let payload = if update_id.is_some() {
+                    serde_json::json!({"files": [{"action": "update", "file_path": DEFAULT_SNIPPET_FILE_NAME, "content": content}]})
+                } else {
+                    serde_json::json!({"title": "DBX encrypted configuration sync", "visibility": "private", "files": [{"file_path": DEFAULT_SNIPPET_FILE_NAME, "content": content}]})
+                };
                 self.request(method, &url)?.json(&payload).send().await
             }
         }
@@ -770,11 +834,41 @@ impl SnippetSyncClient {
     }
 
     async fn load_snippet_content(&self, snippet_id: &str) -> Result<String, String> {
-        let url = format!("{}/gists/{snippet_id}", self.api_base);
+        let url = self.snippet_url(Some(snippet_id))?;
         let response = self.request(Method::GET, &url)?.send().await.map_err(|e| e.to_string())?;
         let status = response.status();
         let response_body = response.text().await.map_err(|e| e.to_string())?;
         ensure_snippet_response_success(status, "download", &response_body)?;
+        if self.config.provider == SnippetProvider::GitLab {
+            let value: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
+            let files = value
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "Snippet response did not include files".to_string())?;
+            let file = files
+                .iter()
+                .find(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
+                .ok_or_else(|| format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"))?;
+            // Snippet repositories default to `main` on current instances but
+            // `master` on older ones; the per-file `raw_url` always carries the
+            // snippet's actual default branch, so prefer it over guessing.
+            let constructed_main = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
+            let raw_url = file
+                .get("raw_url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| constructed_main.clone());
+            let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
+            if response.status() == StatusCode::NOT_FOUND && raw_url == constructed_main {
+                let master_url = format!("{url}/files/master/{DEFAULT_SNIPPET_FILE_NAME}/raw");
+                let response = self.request(Method::GET, &master_url)?.send().await.map_err(|e| e.to_string())?;
+                ensure_snippet_success(response.status(), "raw download")?;
+                return response.text().await.map_err(|e| e.to_string());
+            }
+            ensure_snippet_success(response.status(), "raw download")?;
+            return response.text().await.map_err(|e| e.to_string());
+        }
         let value: serde_json::Value = serde_json::from_str(&response_body).map_err(|e| e.to_string())?;
         let (content, raw_url) = snippet_file_content(&value, DEFAULT_SNIPPET_FILE_NAME)?;
         let content = match content {
@@ -801,7 +895,7 @@ impl SnippetSyncClient {
         {
             return Ok(false);
         }
-        let url = format!("{}/gists/{}", self.api_base, pending_cleanup.snippet_id);
+        let url = self.snippet_url(Some(&pending_cleanup.snippet_id))?;
         let response = self.request(Method::DELETE, &url)?.send().await.map_err(|e| e.to_string())?;
         // If the provider reports that the old snippet is already absent, the
         // cleanup goal is satisfied and the newly created encrypted snippet is
@@ -833,6 +927,7 @@ impl SnippetSyncClient {
                 .bearer_auth(token),
             // Gitee API v5 documents access_token as a request parameter rather than an Authorization header.
             SnippetProvider::Gitee => request.query(&[("access_token", token)]),
+            SnippetProvider::GitLab => request.header("PRIVATE-TOKEN", token),
         })
     }
 }
@@ -1486,26 +1581,49 @@ fn snippet_pending_cleanup(summary: &SnippetSyncSummary) -> Result<Option<Snippe
 
 fn required_snippet_passphrase(passphrase: Option<&str>) -> Result<&str, String> {
     normalized_passphrase(passphrase)
-        .ok_or_else(|| "A snippet encryption password is required for GitHub and Gitee sync.".to_string())
+        .ok_or_else(|| "A snippet encryption password is required for snippet sync.".to_string())
 }
 
 fn required_sync_passphrase(passphrase: Option<&str>) -> Result<&str, String> {
-    normalized_passphrase(passphrase)
-        .ok_or_else(|| "A sync password is required for GitHub and Gitee snippet sync.".to_string())
+    normalized_passphrase(passphrase).ok_or_else(|| "A sync password is required for snippet sync.".to_string())
 }
 
-fn snippet_provider_storage_key(provider: SnippetProvider) -> &'static str {
-    match provider {
-        SnippetProvider::GitHub => "github",
-        SnippetProvider::Gitee => "gitee",
+fn gitlab_instance_url(value: Option<&str>) -> Result<String, String> {
+    let value = value.unwrap_or(GITLAB_DEFAULT_INSTANCE).trim();
+    let url = Url::parse(value).map_err(|_| "Enter a valid GitLab HTTPS instance URL".to_string())?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("GitLab instance must be an HTTP or HTTPS URL without credentials, query, or fragment".to_string());
     }
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-fn snippet_token_account(provider: SnippetProvider) -> String {
-    match provider {
-        SnippetProvider::GitHub => "snippet-token:github".to_string(),
-        SnippetProvider::Gitee => "snippet-token:gitee".to_string(),
+fn snippet_provider_storage_key(provider: SnippetProvider, instance_url: Option<&str>) -> Result<String, String> {
+    Ok(match provider {
+        SnippetProvider::GitHub => "github".to_string(),
+        SnippetProvider::Gitee => "gitee".to_string(),
+        SnippetProvider::GitLab => {
+            format!("gitlab:{:x}", Sha256::digest(gitlab_instance_url(instance_url)?.as_bytes()))
+        }
+    })
+}
+
+fn snippet_token_account(config: &SnippetSyncConfig) -> Result<String, String> {
+    Ok(format!("snippet-token:{}", snippet_provider_storage_key(config.provider, config.instance_url.as_deref())?))
+}
+
+fn validate_snippet_id(provider: SnippetProvider, id: &str) -> Result<(), String> {
+    if provider == SnippetProvider::GitLab
+        && (id.is_empty() || id.bytes().all(|byte| byte == b'0') || !id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("GitLab snippet ID must be a positive numeric ID".to_string());
     }
+    Ok(())
 }
 
 fn ensure_snippet_success(status: StatusCode, operation: &str) -> Result<(), String> {
@@ -1539,6 +1657,9 @@ fn ensure_snippet_response_success(status: StatusCode, operation: &str, response
 
 fn snippet_response_id(value: &serde_json::Value) -> Option<String> {
     if let Some(id) = value.get("id").and_then(serde_json::Value::as_str) {
+        return Some(id.to_string());
+    }
+    if let Some(id) = value.get("id").and_then(serde_json::Value::as_u64) {
         return Some(id.to_string());
     }
     // Some Gitee endpoints historically document an array response despite returning one created snippet.
@@ -1652,13 +1773,16 @@ mod tests {
         apply_sensitive_payload, apply_sync_snapshot, build_sensitive_payload, build_sync_snapshot,
         build_sync_snapshot_with_saved_secrets, decrypt_sensitive_payload, encrypt_sensitive_payload,
         encrypt_snippet_snapshot, finalize_snippet_migration, forget_webdav_sync_secrets_passphrase,
-        gitee_snippet_payload, is_legacy_dbx_snapshot, normalized_remote_path, parent_collection_paths,
-        parse_legacy_dbx_snapshot, parse_snippet_snapshot, prepare_legacy_snippet_snapshot,
-        resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup, save_snippet_sync_id,
+        gitee_snippet_payload, gitlab_instance_url, is_legacy_dbx_snapshot, normalized_remote_path,
+        parent_collection_paths, parse_legacy_dbx_snapshot, parse_snippet_snapshot, prepare_legacy_snippet_snapshot,
+        resolve_snippet_token, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
+        save_snippet_sync_id, save_snippet_sync_id_for_instance, save_snippet_token,
         save_webdav_sync_secrets_preference, scrub_connection_secrets, snapshot_for_snippet_upload,
-        snippet_file_content, snippet_response_id, snippet_sync_settings, webdav_endpoint_uses_direct_connection,
-        webdav_sync_secrets_status, ApplySnapshotOptions, ConnectionSecretSnapshot, SensitiveSyncPayload,
-        SnippetProvider, SnippetSyncClient, SnippetSyncConfig, WebDavClient, WebDavConfig, DEFAULT_SNIPPET_FILE_NAME,
+        snippet_file_content, snippet_provider_storage_key, snippet_response_id, snippet_saved_token_status,
+        snippet_sync_settings, snippet_sync_settings_for_instance, validate_snippet_id,
+        webdav_endpoint_uses_direct_connection, webdav_sync_secrets_status, ApplySnapshotOptions,
+        ConnectionSecretSnapshot, SensitiveSyncPayload, SnippetProvider, SnippetSyncClient, SnippetSyncConfig,
+        WebDavClient, WebDavConfig, DEFAULT_SNIPPET_FILE_NAME,
     };
     use crate::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiConfigItem};
     use crate::connection_secrets::{
@@ -1744,6 +1868,66 @@ mod tests {
             methods
         });
         (format!("http://{address}"), server)
+    }
+
+    async fn spawn_gitlab_server(responses: Vec<String>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        spawn_gitlab_server_with_status(responses.into_iter().map(|body| (200, body)).collect()).await
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn spawn_gitlab_server_with_status(
+        responses: Vec<(u16, String)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let size = socket.read(&mut chunk).await.unwrap();
+                    assert!(size > 0, "request ended before headers were complete");
+                    request.extend_from_slice(&chunk[..size]);
+                    if let Some(pos) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                while request.len() - header_end < content_length {
+                    let mut chunk = [0_u8; 4096];
+                    let size = socket.read(&mut chunk).await.unwrap();
+                    assert!(size > 0, "request ended before body was complete");
+                    request.extend_from_slice(&chunk[..size]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let (status, body) = response;
+                let body = body.replace("{SERVER_BASE}", &format!("http://{address}"));
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Status",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{address}/api/v4"), server)
     }
 
     async fn spawn_webdav_server(
@@ -2385,6 +2569,7 @@ mod tests {
         let client = SnippetSyncClient::with_api_base(
             SnippetSyncConfig {
                 provider: SnippetProvider::GitHub,
+                instance_url: None,
                 token: Some("test-token".to_string()),
                 snippet_id: Some("existing-id".to_string()),
                 replace_legacy_snippet: false,
@@ -2409,6 +2594,7 @@ mod tests {
         let client = SnippetSyncClient::with_api_base(
             SnippetSyncConfig {
                 provider: SnippetProvider::GitHub,
+                instance_url: None,
                 token: Some("test-token".to_string()),
                 snippet_id: Some("existing-id".to_string()),
                 replace_legacy_snippet: false,
@@ -2436,6 +2622,7 @@ mod tests {
         let client = SnippetSyncClient::with_api_base(
             SnippetSyncConfig {
                 provider: SnippetProvider::GitHub,
+                instance_url: None,
                 token: Some("test-token".to_string()),
                 snippet_id: Some("legacy-id".to_string()),
                 replace_legacy_snippet: true,
@@ -2471,6 +2658,7 @@ mod tests {
         let client = SnippetSyncClient::with_api_base(
             SnippetSyncConfig {
                 provider: SnippetProvider::GitHub,
+                instance_url: None,
                 token: Some("test-token".to_string()),
                 snippet_id: Some("legacy-id".to_string()),
                 replace_legacy_snippet: true,
@@ -2494,6 +2682,7 @@ mod tests {
         let retry_client = SnippetSyncClient::with_api_base(
             SnippetSyncConfig {
                 provider: SnippetProvider::GitHub,
+                instance_url: None,
                 token: Some("test-token".to_string()),
                 snippet_id: Some("new-id".to_string()),
                 replace_legacy_snippet: false,
@@ -2582,6 +2771,285 @@ mod tests {
             snippet_sync_settings(&storage, SnippetProvider::Gitee).await.unwrap().snippet_id.as_deref(),
             Some("gitee-id")
         );
+    }
+
+    #[test]
+    fn gitlab_instance_validation_and_state_key() {
+        assert_eq!(gitlab_instance_url(None).unwrap(), "https://gitlab.com");
+        assert_eq!(
+            gitlab_instance_url(Some(" HTTPS://GITLAB.EXAMPLE.COM:443/ ")).unwrap(),
+            "https://gitlab.example.com"
+        );
+        assert_eq!(
+            snippet_provider_storage_key(SnippetProvider::GitLab, Some("https://gitlab.example.com/")).unwrap(),
+            snippet_provider_storage_key(SnippetProvider::GitLab, Some("https://gitlab.example.com")).unwrap()
+        );
+        for url in [
+            "ftp://gitlab.example.com",
+            "https://user:password@gitlab.example.com",
+            "https://gitlab.example.com/?token=x",
+            "https://gitlab.example.com/#fragment",
+        ] {
+            assert!(gitlab_instance_url(Some(url)).is_err(), "accepted {url}");
+        }
+        assert_eq!(gitlab_instance_url(Some("http://gitlab.internal:8080/")).unwrap(), "http://gitlab.internal:8080");
+        assert_ne!(
+            snippet_provider_storage_key(SnippetProvider::GitLab, Some("http://gitlab.example.com")).unwrap(),
+            snippet_provider_storage_key(SnippetProvider::GitLab, Some("https://gitlab.example.com")).unwrap()
+        );
+        assert!(validate_snippet_id(SnippetProvider::GitLab, "12/evil").is_err());
+        assert_eq!(snippet_response_id(&serde_json::json!({"id": 42})).as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_instances_keep_saved_tokens_ids_and_cleanup_separate() {
+        let storage = Storage::open(&temp_db_path("gitlab-instance-isolation")).await.unwrap();
+        let first = "https://gitlab.example.com";
+        let second = "https://gitlab.other.com";
+        let config = |instance: &str| SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: Some(instance.to_string()),
+            token: None,
+            snippet_id: None,
+            replace_legacy_snippet: false,
+        };
+        save_snippet_token(&storage, &config(first), "first-secret").await.unwrap();
+        save_snippet_sync_id_for_instance(&storage, SnippetProvider::GitLab, Some(first), Some("42")).await.unwrap();
+        let first_key = snippet_provider_storage_key(SnippetProvider::GitLab, Some(first)).unwrap();
+        storage.save_snippet_migration_state(&first_key, "43", "42", "hash").await.unwrap();
+        assert!(!snippet_saved_token_status(&storage, &config(second)).await.unwrap().has_saved_token);
+        assert!(snippet_sync_settings_for_instance(&storage, SnippetProvider::GitLab, Some(second))
+            .await
+            .unwrap()
+            .snippet_id
+            .is_none());
+        assert!(snippet_sync_settings_for_instance(&storage, SnippetProvider::GitLab, Some(second))
+            .await
+            .unwrap()
+            .legacy_cleanup_required_id
+            .is_none());
+        let mut first_config = config("https://gitlab.example.com/");
+        resolve_snippet_token(&storage, &mut first_config).await.unwrap();
+        assert_eq!(first_config.token.as_deref(), Some("first-secret"));
+        assert_eq!(
+            snippet_sync_settings_for_instance(&storage, SnippetProvider::GitLab, Some(first))
+                .await
+                .unwrap()
+                .snippet_id
+                .as_deref(),
+            Some("43")
+        );
+    }
+
+    #[tokio::test]
+    async fn gitlab_create_and_download_use_private_personal_snippet_and_raw_file() {
+        let storage = Storage::open(&temp_db_path("gitlab-create-download")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = encrypt_snippet_snapshot(&snapshot, "password").unwrap();
+        let (base, server) = spawn_gitlab_server(vec![
+            serde_json::json!({"id": 42}).to_string(),
+            serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string(),
+            serde_json::to_string(&encrypted).unwrap(),
+        ])
+        .await;
+        let config = SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: None,
+            token: Some("test-token".to_string()),
+            snippet_id: None,
+            replace_legacy_snippet: false,
+        };
+        let client = SnippetSyncClient::with_api_base(config.clone(), base.clone());
+        let summary = client.put_snapshot(&snapshot, Some("password"), None).await.unwrap();
+        assert_eq!(summary.snippet_id, "42");
+        let download =
+            SnippetSyncClient::with_api_base(SnippetSyncConfig { snippet_id: Some("42".to_string()), ..config }, base);
+        let (restored, _) = download.get_snapshot(Some("password")).await.unwrap();
+        assert_eq!(restored.app_version, snapshot.app_version);
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("POST /api/v4/snippets HTTP/1.1"));
+        assert!(requests[0].to_ascii_lowercase().contains("private-token: test-token"));
+        let body: serde_json::Value = serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["visibility"], "private");
+        assert_eq!(body["files"][0]["file_path"], "dbx-sync.json");
+        assert!(body["files"][0]["content"].as_str().unwrap().contains("dbx-encrypted-sync-snapshot"));
+        assert!(requests[1].starts_with("GET /api/v4/snippets/42 HTTP/1.1"));
+        assert!(requests[2].starts_with("GET /api/v4/snippets/42/files/main/dbx-sync.json/raw HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_uses_snippet_raw_url_branch() {
+        let storage = Storage::open(&temp_db_path("gitlab-raw-url-branch")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        let (base, server) = spawn_gitlab_server_with_status(vec![
+            (
+                200,
+                serde_json::json!({"files": [{"path": "dbx-sync.json", "raw_url": "{SERVER_BASE}/api/v4/snippets/42/files/master/dbx-sync.json/raw"}]}).to_string(),
+            ),
+            (200, encrypted),
+        ])
+        .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: None,
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            },
+            base,
+        );
+        let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+        assert_eq!(restored.app_version, snapshot.app_version);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /api/v4/snippets/42 HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_falls_back_to_master_when_main_raw_file_is_missing() {
+        let storage = Storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        let (base, server) = spawn_gitlab_server_with_status(vec![
+            (200, serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string()),
+            (404, String::new()),
+            (200, encrypted),
+        ])
+        .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: None,
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            },
+            base,
+        );
+        let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+        assert_eq!(restored.app_version, snapshot.app_version);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/main/dbx-sync.json/raw HTTP/1.1"));
+        assert!(requests[2].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_http_instance_uses_configured_api_base() {
+        let (base, server) = spawn_gitlab_server(vec![serde_json::json!({"id": 42}).to_string()]).await;
+        let instance = base.strip_suffix("/api/v4").unwrap();
+        let client = SnippetSyncClient::new(SnippetSyncConfig {
+            provider: SnippetProvider::GitLab,
+            instance_url: Some(instance.to_string()),
+            token: Some("test-token".to_string()),
+            snippet_id: Some("42".to_string()),
+            replace_legacy_snippet: false,
+        })
+        .unwrap();
+        client.test().await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /api/v4/snippets/42 HTTP/1.1"));
+        assert!(requests[0].to_ascii_lowercase().contains("private-token: test-token"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_update_checks_existing_password_before_put() {
+        let storage = Storage::open(&temp_db_path("gitlab-password-guard")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        let (base, server) = spawn_gitlab_server(vec![
+            serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string(),
+            encrypted,
+            serde_json::json!({"id": 42}).to_string(),
+        ])
+        .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: None,
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            },
+            base,
+        );
+        client.put_snapshot(&snapshot, Some("password"), None).await.unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].starts_with("PUT /api/v4/snippets/42 HTTP/1.1"));
+        let body: serde_json::Value = serde_json::from_str(requests[2].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["files"][0]["action"], "update");
+    }
+
+    #[tokio::test]
+    async fn gitlab_wrong_password_never_updates_existing_snippet() {
+        let storage = Storage::open(&temp_db_path("gitlab-wrong-password")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "correct").unwrap()).unwrap();
+        let (base, server) =
+            spawn_gitlab_server(vec![serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string(), encrypted])
+                .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: None,
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            },
+            base,
+        );
+        assert!(client.put_snapshot(&snapshot, Some("wrong"), None).await.is_err());
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn gitlab_legacy_migration_creates_before_deleting_and_tracks_instance() {
+        let storage = Storage::open(&temp_db_path("gitlab-legacy-migration")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let legacy_content = serde_json::to_string(&snapshot).unwrap();
+        let metadata = serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string();
+        let (base, server) = spawn_gitlab_server(vec![
+            metadata.clone(),
+            legacy_content.clone(),
+            serde_json::json!({"id": 43}).to_string(),
+            metadata,
+            legacy_content,
+            String::new(),
+        ])
+        .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: Some("https://gitlab.example.com".to_string()),
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: true,
+            },
+            base,
+        );
+        let mut summary = client.put_snapshot(&snapshot, Some("password"), None).await.unwrap();
+        assert_eq!(summary.snippet_id, "43");
+        finalize_snippet_migration(&storage, &client, &mut summary).await.unwrap();
+        assert!(summary.legacy_cleanup_required_id.is_none());
+        assert_eq!(
+            snippet_sync_settings_for_instance(
+                &storage,
+                SnippetProvider::GitLab,
+                client.config.instance_url.as_deref()
+            )
+            .await
+            .unwrap()
+            .snippet_id
+            .as_deref(),
+            Some("43")
+        );
+        let requests = server.await.unwrap();
+        assert!(requests[2].starts_with("POST /api/v4/snippets HTTP/1.1"));
+        assert!(requests[5].starts_with("DELETE /api/v4/snippets/42 HTTP/1.1"));
     }
 
     #[test]

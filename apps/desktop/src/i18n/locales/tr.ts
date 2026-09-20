@@ -2530,6 +2530,7 @@ export default withEnglishFallback({
     close: "Kapat",
     sqlFile: "SQL Dosyası",
     sqlLibraryFile: "SQL Kitaplığı",
+    pluginWorkbench: "Eklenti",
     searchingContent: "Dosya içerikleri aranıyor…",
     globalSearchHint: "Genel dosya içeriği arama",
     modeObjects: "Nesne ve dosya ara",

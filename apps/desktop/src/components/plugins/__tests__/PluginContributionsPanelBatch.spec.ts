@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
-import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
   listPlugins: vi.fn(),
@@ -243,6 +243,24 @@ describe("PluginContributionsPanel batch source validation", () => {
       { repositoryId: "second", pluginId: "b", version },
     ]);
     expect(state.selectedListingKeys.size).toBe(0);
+  });
+});
+
+describe("PluginContributionsPanel update center synchronization", () => {
+  it("notifies after a single marketplace update without duplicating per batch item", async () => {
+    const listener = vi.fn();
+    window.addEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
+    try {
+      await state.installMarketplaceListing(state.marketplaceListings[0]);
+      expect(listener).toHaveBeenCalledOnce();
+
+      listener.mockClear();
+      state.selectAllUpdatable();
+      await state.runBatchInstallUpdate();
+      expect(listener).toHaveBeenCalledOnce();
+    } finally {
+      window.removeEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
+    }
   });
 });
 

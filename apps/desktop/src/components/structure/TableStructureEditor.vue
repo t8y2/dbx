@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardList, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -34,6 +34,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -104,8 +105,12 @@ import {
   structureColumnSelectionRange,
   isSyntheticContextMenuClick,
   resolveColumnSelectionActiveId,
+  structureColumnCommentsForCopy,
+  structureColumnNamesForCopy,
   tableStructureIdentifierComparisonKey,
   toColumnNames,
+  copySourceColumnDetails,
+  matchesCopySourceColumnSearch,
 } from "@/lib/table/tableStructureEditorState";
 import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
@@ -2498,14 +2503,14 @@ const copyableSourceColumns = computed(() => {
   const existingNames = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)));
   return copySourceColumns.value.map((column) => ({
     column,
+    details: copySourceColumnDetails(column, databaseType.value),
     alreadyExists: existingNames.has(tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)),
   }));
 });
 
 const filteredCopyableSourceColumns = computed(() => {
-  const search = normalizedColumnSearch(copySourceColumnSearch.value);
-  if (!search) return copyableSourceColumns.value;
-  return copyableSourceColumns.value.filter(({ column }) => [column.name, column.data_type, column.comment ?? ""].some((value) => normalizedColumnSearch(value).includes(search)));
+  if (!normalizedColumnSearch(copySourceColumnSearch.value)) return copyableSourceColumns.value;
+  return copyableSourceColumns.value.filter(({ column }) => matchesCopySourceColumnSearch(column, copySourceColumnSearch.value, databaseType.value));
 });
 
 const copyableSourceColumnNames = computed(() => copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name));
@@ -3706,6 +3711,20 @@ async function recordStructureHistory(sql: string, start: number, success: boole
   }
 }
 
+const copyColumnNamesDialogOpen = ref(false);
+// Fields marked for drop no longer exist after saving, so they are excluded.
+const copyableStructureColumnNames = computed(() => structureColumnNamesForCopy(columns.value));
+const copyableStructureColumnComments = computed(() => structureColumnCommentsForCopy(columns.value));
+
+async function copyColumnNamesText(text: string) {
+  try {
+    await copyToClipboard(text);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function copyPreviewSql() {
   if (sqlPreviewPending.value || sqlPreviewLoading.value || !previewSqlText.value.trim()) return;
   try {
@@ -4437,6 +4456,10 @@ watch(
               <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.copyColumns") }}
+              </Button>
+              <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="copyableStructureColumnNames.length === 0" @click="copyColumnNamesDialogOpen = true">
+                <ClipboardList :class="structureIconClass" />
+                {{ t("grid.copyColumnNames") }}
               </Button>
               <Button v-if="isCreateMode && activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="applyColumnTemplate(PRESET_FIELDS_TEMPLATE_ID)">
                 <Copy :class="structureIconClass" />
@@ -5340,6 +5363,7 @@ watch(
       </Button>
     </div>
 
+    <DataGridCopyColumnNamesDialog v-model:open="copyColumnNamesDialogOpen" :column-names="copyableStructureColumnNames" :database-type="databaseType" :column-comments="copyableStructureColumnComments" @copy="copyColumnNamesText" />
     <Dialog v-model:open="copyColumnsDialogOpen">
       <DialogContent class="max-w-xl">
         <DialogHeader>
@@ -5419,10 +5443,18 @@ watch(
               {{ t("structureEditor.copyColumnsNoMatchingFields") }}
             </div>
             <div v-else class="max-h-72 overflow-y-auto rounded-md border">
-              <label v-for="{ column, alreadyExists } in filteredCopyableSourceColumns" :key="column.name" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50" :class="alreadyExists ? 'cursor-not-allowed opacity-60' : ''">
-                <input v-model="selectedCopySourceColumnNames" type="checkbox" :value="column.name" :disabled="alreadyExists" class="size-4 rounded border-input" />
-                <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ column.name }}</span>
-                <span class="shrink-0 text-xs text-muted-foreground">{{ column.data_type }}</span>
+              <label v-for="{ column, details, alreadyExists } in filteredCopyableSourceColumns" :key="column.name" class="flex cursor-pointer items-start gap-2 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50" :class="alreadyExists ? 'cursor-not-allowed opacity-60' : ''">
+                <input v-model="selectedCopySourceColumnNames" type="checkbox" :value="column.name" :disabled="alreadyExists" class="mt-0.5 size-4 shrink-0 rounded border-input" />
+                <span class="min-w-0 flex-1">
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span class="min-w-0 flex-1 truncate font-mono text-sm">{{ column.name }}</span>
+                    <span class="shrink-0 text-xs text-muted-foreground">{{ column.data_type }}</span>
+                  </span>
+                  <span v-if="(columnEditorControls.defaultValue && details.defaultValue) || (columnEditorControls.comment && details.comment)" class="mt-0.5 flex min-w-0 items-center gap-3 text-xs text-muted-foreground">
+                    <span v-if="columnEditorControls.defaultValue && details.defaultValue" class="min-w-0 truncate" :title="`${t('structureEditor.defaultValue')}: ${details.defaultValue}`">{{ t("structureEditor.defaultValue") }}: {{ details.defaultValue }}</span>
+                    <span v-if="columnEditorControls.comment && details.comment" class="min-w-0 truncate" :title="`${t('structureEditor.comment')}: ${details.comment}`">{{ t("structureEditor.comment") }}: {{ details.comment }}</span>
+                  </span>
+                </span>
                 <Badge v-if="alreadyExists" variant="secondary" class="shrink-0 text-[10px]">{{ t("structureEditor.copyColumnsAlreadyExists") }}</Badge>
               </label>
             </div>

@@ -92,6 +92,7 @@ import { configuredDatabaseProductName, connectionConfigFingerprint, databaseInf
 import { agentDriverInstallKey, appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, showAgentDriverInstallHint, type AgentDriverInstallState, type DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import { prestoSqlBuiltinDriverPaths } from "@/lib/database/prestoSqlBuiltinDriver";
 import { JDBCX_DEFAULT_URL, JDBCX_DRIVER_PROFILE, JDBCX_JDBC_DRIVER_CLASS, ensureJdbcxRuntimeDrivers, isJdbcxRuntimeBundle, isJdbcxRuntimePath, jdbcxHighPrivilegeExtensionsEnabled, setJdbcxHighPrivilegeExtensionsEnabled } from "@/lib/database/jdbcxBuiltinDriver";
+import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { SQLITE_DATABASE_FILE_EXTENSIONS } from "@/lib/database/databaseFileDetection";
 import { connectionAttemptOriginalErrorMessage, connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connection/connectionAttemptTimeout";
 import { consulAgentAddressesMatch } from "@/lib/consul/agentTarget";
@@ -1964,6 +1965,7 @@ async function ensureRequiredAgentDriverInstalled(config: ConnectionConfig): Pro
   const operationId = beginAgentDriverInstall(driverKey, label);
   try {
     await api.installAgent(driverKey, operationId);
+    notifyComponentUpdatesChanged();
     await refreshLocalAgentDrivers();
     // A stale promise (cancelled then retried) must not close the retry's dialog.
     if (agentInstallOperationId.value === operationId) finishAgentDriverInstall(operationId);
@@ -1999,6 +2001,7 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
     testResult.value = { ok: true, message: "Installing JDBC plugin..." };
   });
   if (!result) return;
+  notifyComponentUpdatesChanged();
 
   jdbcMavenBundles.value = result.bundles;
   addJdbcDriverPaths(result.paths);
@@ -2012,6 +2015,7 @@ async function ensureRequiredJdbcxDriverInstalled(config: ConnectionConfig): Pro
 async function ensureRequiredJdbcProductRuntimeInstalled(config: ConnectionConfig): Promise<void> {
   const result = await ensureRegisteredJdbcProductRuntimeDrivers(config, api);
   if (!result) return;
+  notifyComponentUpdatesChanged();
 
   jdbcMavenBundles.value = result.bundles;
   jdbcDriverPathsInput.value = result.paths.join("\n");
@@ -2031,6 +2035,7 @@ async function ensureRequiredGaussdbMJdbcRuntime(config: ConnectionConfig): Prom
   if (status.installed && status.compatible) return;
   testResult.value = { ok: true, message: t("connection.gaussdbMJdbcPluginInstalling") };
   await api.installJdbcPlugin();
+  notifyComponentUpdatesChanged();
 }
 
 async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<boolean> {
@@ -2040,6 +2045,7 @@ async function installSqlServerLegacyCompatibilityComponentIfNeeded(): Promise<b
   const operationId = beginAgentDriverInstall(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, label);
   try {
     await api.installAgent(SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY, operationId);
+    notifyComponentUpdatesChanged();
     await refreshLocalAgentDrivers();
     // A stale promise (cancelled then retried) must not close the retry's dialog.
     if (agentInstallOperationId.value === operationId) finishAgentDriverInstall(operationId);

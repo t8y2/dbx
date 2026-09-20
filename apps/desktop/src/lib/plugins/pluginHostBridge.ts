@@ -1,5 +1,6 @@
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
+import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -9,6 +10,8 @@ const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 // Distinct from the sidecar binary cap: saved files go straight from the
 // plugin iframe to disk and never traverse plugin frames.
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
+// Mirrors MAX_PLUGIN_PLAN_NAME_CHARS in crates/dbx-core/src/query/plugin_plan.rs.
+const MAX_PLUGIN_PLAN_IDENTIFIER_CHARS = 256;
 
 /** Structured editor appearance: SQL editor settings that have no CSS-token
  * carrier (font size is a number, the syntax theme an id). Font families are
@@ -58,6 +61,17 @@ export interface PluginHostBridgeApi {
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
+  /**
+   * Estimated plan capability metadata for one connection. Requires the plugin
+   * to declare `host.plans:read`. The host only reads the stored connection
+   * config; it never connects or probes the server.
+   */
+  getPlanCapabilities?(connectionId: string): Promise<PluginPlanCapabilities>;
+  /**
+   * Read-only estimated plan acquisition. Requires `host.plans:read`. The host
+   * generates and owns the EXPLAIN statement; the plugin cannot pass one.
+   */
+  explainPlan?(request: PluginPlanRequest): Promise<PluginPlanResult>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
@@ -177,7 +191,9 @@ export class PluginHostBridge {
       locale: this.locale,
       theme: this.theme ? clonePluginData(this.theme) : undefined,
       permissions: [...(this.plugin.manifest.permissions || [])],
-      capabilities: { downloadFile: !!this.api.downloadFile },
+      // Additive capability advertisement: an older host omits `planApi`, and a
+      // plugin must treat the absence as "unsupported" rather than probing.
+      capabilities: { downloadFile: !!this.api.downloadFile, planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan },
       context: snapshotPluginWorkbenchContext(this.context),
     });
   }
@@ -296,6 +312,17 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.openFilesystem params");
       await this.api.openFilesystem(this.plugin.manifest.id, requireProtocolName(input.providerId, "filesystem provider"), isRecord(input.context) ? input.context : undefined);
       return null;
+    }
+    if (method === "host.getPlanCapabilities") {
+      this.requirePermission(PLUGIN_PLAN_PERMISSION);
+      if (!this.api.getPlanCapabilities) throw new Error("Host plan API is unavailable");
+      const input = requireRecord(params, "host.getPlanCapabilities params");
+      return this.api.getPlanCapabilities(requirePluginPlanIdentifier(input.connectionId, "connectionId"));
+    }
+    if (method === "host.explainPlan") {
+      this.requirePermission(PLUGIN_PLAN_PERMISSION);
+      if (!this.api.explainPlan) throw new Error("Host plan API is unavailable");
+      return this.api.explainPlan(requirePluginPlanRequest(requireRecord(params, "host.explainPlan params")));
     }
     if (method === "host.saveFile") {
       const input = isRecord(params) ? params : {};
@@ -606,6 +633,10 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
+      // Estimated plans only: mode must be sent explicitly so a plugin states
+      // its intent, and the host refuses anything other than "estimated".
+      getPlanCapabilities: (connectionId) => request('host.getPlanCapabilities', { connectionId }),
+      explainPlan: (planRequest) => request('host.explainPlan', planRequest),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
@@ -685,6 +716,59 @@ function requireProtocolName(value: unknown, label: string): string {
 function requireTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(120_000, Math.max(1, Math.round(value)));
+}
+
+/** A connection id, database, or schema name: bounded, trimmed, never empty. */
+function requirePluginPlanIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const identifier = value.trim();
+  if (!identifier) throw new Error(`${label} must not be empty`);
+  if (identifier.length > MAX_PLUGIN_PLAN_IDENTIFIER_CHARS) {
+    throw new Error(`${label} must be at most ${MAX_PLUGIN_PLAN_IDENTIFIER_CHARS} characters`);
+  }
+  return identifier;
+}
+
+function optionalPluginPlanScope(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value.trim() ? requirePluginPlanIdentifier(value, label) : undefined;
+}
+
+/**
+ * Validates one `host.explainPlan` request. The host owns the EXPLAIN text, so
+ * the only accepted shape is the caller's own SQL plus a connection reference
+ * and an explicit `estimated` mode; anything else is refused here rather than
+ * forwarded and downgraded. The backend re-checks every one of these bounds.
+ */
+function requirePluginPlanRequest(input: Record<string, unknown>): PluginPlanRequest {
+  if (input.mode !== "estimated") throw new Error('host.explainPlan serves mode "estimated" only');
+  if (typeof input.sql !== "string") throw new Error("host.explainPlan requires sql");
+  const sql = input.sql.trim();
+  if (!sql) throw new Error("host.explainPlan requires a non-empty sql");
+  if (sql.length > MAX_PLUGIN_PLAN_SQL_CHARS) {
+    throw new Error(`sql must be at most ${MAX_PLUGIN_PLAN_SQL_CHARS} characters`);
+  }
+
+  const request: PluginPlanRequest = {
+    connectionId: requirePluginPlanIdentifier(input.connectionId, "connectionId"),
+    sql,
+    mode: "estimated",
+  };
+  const database = optionalPluginPlanScope(input.database, "database");
+  if (database !== undefined) request.database = database;
+  const schema = optionalPluginPlanScope(input.schema, "schema");
+  if (schema !== undefined) request.schema = schema;
+  if (input.timeoutMs !== undefined && input.timeoutMs !== null) {
+    request.timeoutMs = clampPluginPlanTimeout(input.timeoutMs);
+  }
+  return request;
+}
+
+/** Pre-clamps to the host ceiling; the backend additionally clamps to the connection's own timeout. */
+function clampPluginPlanTimeout(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
+  return Math.min(MAX_PLUGIN_PLAN_TIMEOUT_MS, Math.max(1, Math.round(value)));
 }
 
 function base64ToBytes(value: string): ArrayBuffer {

@@ -19,7 +19,7 @@ import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
 import { beaconPluginInstall, buildMarketplacePluginListings, filterMarketplacePluginListings, listingRepositoryCanVerify, marketplaceHomepageUrl, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { isBatchSelectableListing, runBatch } from "@/lib/plugins/pluginBatch";
-import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_PLUGINS_UPDATED_EVENT, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -216,6 +216,7 @@ async function installMarketplaceListing(listing: MarketplacePluginListing) {
     const result = await installListing(listing);
     toast(t(listing.status === "update" ? "pluginPlatform.updateSuccess" : "pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
     installedPlugins.value = await api.listPlugins();
+    notifyComponentUpdatesChanged();
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
     toast(translateBackendError(t, cause), 8000);
@@ -223,6 +224,7 @@ async function installMarketplaceListing(listing: MarketplacePluginListing) {
     // instance), so re-read the installed list instead of leaving the card on state it may no longer
     // describe.
     installedPlugins.value = await api.listPlugins().catch(() => installedPlugins.value);
+    notifyComponentUpdatesChanged();
   } finally {
     marketplaceInstallingKey.value = "";
   }
@@ -325,6 +327,7 @@ async function runBatchInstallUpdate() {
     clearBatchSelection();
     reportBatchSummary(outcome);
     await refreshAfterBatch();
+    notifyComponentUpdatesChanged();
   } finally {
     batchRunning.value = false;
   }
@@ -348,6 +351,7 @@ async function runBatchUninstall() {
     clearBatchSelection();
     reportBatchSummary(outcome);
     await refreshAfterBatch();
+    notifyComponentUpdatesChanged();
   } finally {
     batchRunning.value = false;
   }
@@ -543,6 +547,7 @@ async function finishInstall(result: PluginInstallResult) {
   toast(t("pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
   clearPluginIconCache();
   installedPlugins.value = await api.listPlugins();
+  notifyComponentUpdatesChanged();
   selectPlugin(result.plugin.manifest.id);
   activeSection.value = "installed";
 }
@@ -689,6 +694,7 @@ async function rollbackSelectedPlugin() {
     toast(t("pluginPlatform.rollbackSuccess", { version: result.plugin.manifest.version }));
     clearPluginIconCache();
     installedPlugins.value = await api.listPlugins();
+    notifyComponentUpdatesChanged();
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
     toast(translateBackendError(t, cause), 8000);
@@ -703,6 +709,7 @@ async function uninstallSelectedPlugin() {
   operating.value = true;
   try {
     installedPlugins.value = await api.uninstallPlugin(definition.plugin.manifest.id);
+    notifyComponentUpdatesChanged();
     clearPluginIconCache();
     toast(t("pluginPlatform.uninstallSuccess", { name: definition.plugin.manifest.name }));
     selectFirstProvider();

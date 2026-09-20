@@ -5292,6 +5292,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       });
       return buildSqlCompletionResult(items, completionContext, fullDoc, position);
     }
@@ -5353,6 +5354,7 @@ async function provideSqlCompletions(context: CompletionContext) {
         keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
         functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
         autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       });
       return buildSqlCompletionResult(items, completionContext, fullDoc, position);
     }
@@ -5693,6 +5695,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
     functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
   });
 
   return buildSqlCompletionResult(items, completionContext, fullDoc, position);
@@ -6196,6 +6199,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
     functionCase: settingsStore.editorSettings.sqlFormatter.functionCase,
     autoAliasTables: settingsStore.editorSettings.autoAliasTables,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
   });
 
   return buildSqlCompletionResult(items, completionContext, fullDoc, position);

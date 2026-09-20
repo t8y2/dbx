@@ -2552,6 +2552,7 @@ export default withEnglishFallback({
     close: "Bağla",
     sqlFile: "SQL faylı",
     sqlLibraryFile: "SQL kitabxanası",
+    pluginWorkbench: "Plagin",
     searchingContent: "Fayl məzmunu axtarılır…",
     globalSearchHint: "Qlobal fayl məzmunu axtarışı",
     modeObjects: "Obyektlər və faylları axtar",

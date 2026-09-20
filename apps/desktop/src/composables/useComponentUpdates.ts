@@ -20,6 +20,10 @@ export interface ComponentUpdateResult {
   failed: string[];
 }
 
+interface ComponentUpdateRefreshOptions {
+  force?: boolean;
+}
+
 function emptyResult(): ComponentUpdateResult {
   return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [] };
 }
@@ -44,16 +48,18 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   const totalUpdateCount = computed(() => driverUpdateCount.value + (jdbcUpdateAvailable.value ? 1 : 0) + (mcpUpdateAvailable.value ? 1 : 0) + pluginUpdateCount.value);
 
   let refreshPromise: Promise<boolean> | null = null;
+  let refreshVersion = 0;
   let activeUpdatePromise: Promise<ComponentUpdateResult> | null = null;
 
-  function refresh() {
+  function startRefresh(): Promise<boolean> {
     if (!options.isDesktop) return Promise.resolve(false);
-    if (refreshPromise) return refreshPromise;
-    refreshPromise = (async () => {
+    const version = ++refreshVersion;
+    refreshPromise = Promise.resolve().then(async () => {
       loading.value = true;
       lastError.value = "";
       try {
         if (isUpdatePreviewMockEnabled()) {
+          if (version !== refreshVersion) return false;
           drivers.value = previewDriverUpdates();
           jdbcPluginStatus.value = previewJdbcUpdate();
           mcpStatus.value = previewMcpUpdate();
@@ -61,6 +67,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
           return true;
         }
         const [agentResult, jdbcResult, mcpResult, installedPluginsResult, catalogsResult] = await Promise.allSettled([api.listInstalledAgents(), api.jdbcPluginStatus(), api.checkMcpServerStatus(), api.listPlugins(), api.fetchPluginMarketplaceCatalogs()]);
+        if (version !== refreshVersion) return false;
         const errors: string[] = [];
         if (agentResult.status === "fulfilled") drivers.value = agentResult.value;
         else {
@@ -87,14 +94,22 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
         lastError.value = errors.join("; ");
         return errors.length === 0;
       } catch (error) {
+        if (version !== refreshVersion) return false;
         lastError.value = error instanceof Error ? error.message : String(error);
         return false;
       } finally {
-        loading.value = false;
-        refreshPromise = null;
+        if (version === refreshVersion) {
+          loading.value = false;
+          refreshPromise = null;
+        }
       }
-    })();
+    });
     return refreshPromise;
+  }
+
+  function refresh(refreshOptions: ComponentUpdateRefreshOptions = {}) {
+    if (!refreshOptions.force && refreshPromise) return refreshPromise;
+    return startRefresh();
   }
 
   async function updateDrivers(result: ComponentUpdateResult) {

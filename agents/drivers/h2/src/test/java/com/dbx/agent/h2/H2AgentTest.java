@@ -21,6 +21,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
+import java.util.jar.Manifest;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -128,6 +129,89 @@ class H2AgentMigrationTest {
     }
 
     @Test
+    void closedFileConnectionsDoNotPinTheDetectedVersion() throws Exception {
+        Path base = tempDirectory.resolve("replaceable");
+        H2Agent first = new H2Agent();
+        first.connect(profileParams("h2", "file:" + base));
+        first.disconnect();
+        Files.delete(Path.of(base + ".mv.db"));
+        H2Agent older = new H2Agent();
+        older.connect(profileParams("h2-v2", "file:" + base));
+        older.disconnect();
+        H2Agent detected = new H2Agent();
+        try {
+            detected.connect(profileParams("h2", "file:" + base + ";IFEXISTS=TRUE"));
+            Assertions.assertEquals(H2DriverVersion.V2, detected.driverVersion());
+        } finally {
+            detected.disconnect();
+        }
+    }
+
+    @Test
+    void activeFileRejectsDifferentDriverAndWrongCredentials() {
+        Path base = tempDirectory.resolve("protected");
+        H2Agent owner = new H2Agent();
+        H2Agent other = new H2Agent();
+        try {
+            ConnectParams params = profileParams("h2-v3", "file:" + base);
+            params.setPassword("owner-secret");
+            owner.connect(params);
+            RuntimeException mismatch = Assertions.assertThrows(RuntimeException.class,
+                () -> other.connect(profileParams("h2-v2", "file:" + base)));
+            Assertions.assertTrue(hasCauseMessage(mismatch, "different driver"));
+            Assertions.assertThrows(RuntimeException.class,
+                () -> other.testConnectionWithInfo(profileParams("h2", "file:" + base)));
+            Assertions.assertEquals(List.of(List.of(1)), owner.executeQuery("SELECT 1", null, new ExecuteQueryOptions()).getRows());
+        } finally {
+            other.disconnect();
+            owner.disconnect();
+        }
+    }
+
+    @Test
+    void autoServerOptionsUseH2ParsingRules() throws Exception {
+        String base = "file:" + tempDirectory.resolve("options");
+        Assertions.assertFalse(H2DriverLoader.autoServerEnabled(profileParams("h2", base)));
+        Assertions.assertFalse(H2DriverLoader.autoServerEnabled(profileParams("h2", base + ";AUTO_SERVER=FALSE")));
+        Assertions.assertTrue(H2DriverLoader.autoServerEnabled(profileParams("h2", base + ";auto_server=TRUE")));
+        Assertions.assertTrue(H2DriverLoader.autoServerEnabled(profileParams("h2", base + ";AUTO_SERVER=1")));
+        Assertions.assertFalse(H2DriverLoader.autoServerEnabled(profileParams("h2", base
+            + ";INIT=SET @NOTE 'x\\;AUTO_SERVER=TRUE'")));
+        Assertions.assertThrows(Exception.class, () -> H2DriverLoader.autoServerEnabled(profileParams("h2", base
+            + ";AUTO_SERVER=FALSE;AUTO_SERVER=TRUE")));
+    }
+
+    @Test
+    void autoServerLockDoesNotBypassCorruptHeaderValidation() throws Exception {
+        Path base = tempDirectory.resolve("corrupt-auto-server");
+        Path file = Path.of(base + ".mv.db");
+        byte[] corrupt = new byte[8192];
+        java.util.Arrays.fill(corrupt, (byte) 0x5a);
+        Files.write(file, corrupt);
+        Files.writeString(Path.of(base + ".lock.db"), "server=127.0.0.1:1\nid=test-key\n");
+        String url = "jdbc:h2:file:" + base + ";AUTO_SERVER=TRUE";
+        Assertions.assertTrue(H2FileFormatDetector.hasAutoServerLock(url));
+        RuntimeException error = Assertions.assertThrows(RuntimeException.class,
+            () -> new H2Agent().connect(profileParams("h2", "file:" + base + ";AUTO_SERVER=TRUE")));
+        Assertions.assertTrue(hasCauseMessage(error, "Cannot determine the H2 MVStore format"));
+        Assertions.assertArrayEquals(corrupt, Files.readAllBytes(file));
+    }
+
+    @Test
+    void autoServerLockRequiresValidServerAndKeyProperties() throws Exception {
+        Path base = tempDirectory.resolve("invalid-lock");
+        Path lock = Path.of(base + ".lock.db");
+        String url = "jdbc:h2:file:" + base;
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+        Files.writeString(lock, "server=127.0.0.1:1\n");
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+        Files.writeString(lock, "id=test-key\n");
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+        Files.writeString(lock, "server=\\uZZZZ\nid=test-key\n");
+        Assertions.assertFalse(H2FileFormatDetector.hasAutoServerLock(url));
+    }
+
+    @Test
     void autoRejectsCorruptMvStoreWithoutModifyingIt() throws Exception {
         Path base = tempDirectory.resolve("corrupt");
         Path file = Path.of(base + ".mv.db");
@@ -232,6 +316,23 @@ class H2AgentMigrationTest {
     }
 
     @Test
+    void customDriverPreservesManifestRelativeClasspath() throws Exception {
+        Path driverJar = copyBundledDriver("h2-2.1.214.jar");
+        Path entryJar = tempDirectory.resolve("driver-entry.jar");
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
+        manifest.getMainAttributes().putValue("Class-Path", driverJar.getFileName().toString());
+        try (JarOutputStream ignored = new JarOutputStream(Files.newOutputStream(entryJar), manifest)) {
+        }
+        H2DriverLoader.LoadedDriver driver = H2DriverLoader.loadExternal(List.of(entryJar.toString()), "org.h2.Driver");
+        try (java.sql.Connection connection = driver.driver().connect("jdbc:h2:mem:manifest-classpath", new java.util.Properties())) {
+            Assertions.assertTrue(connection.getMetaData().getDriverVersion().startsWith("2.1.214"));
+        } finally {
+            driver.classLoader().close();
+        }
+    }
+
+    @Test
     void loadsCustomH2DriverFromExternalClasspath() throws Exception {
         Path helperJar = tempDirectory.resolve("helper.jar");
         try (JarOutputStream ignored = new JarOutputStream(Files.newOutputStream(helperJar))) {
@@ -250,6 +351,30 @@ class H2AgentMigrationTest {
             Assertions.assertEquals(List.of("CUSTOM_DRIVER_PROBE"), agent.listTables("PUBLIC").stream().map(TableInfo::getName).toList());
         } finally {
             agent.disconnect();
+            H2DriverLoader.loadExternal(params.getJdbc_driver_paths(), params.getJdbc_driver_class()).classLoader().close();
+        }
+    }
+
+    @Test
+    void customFileConnectionsShareDriver() throws Exception {
+        Path jar = copyBundledDriver("h2-2.1.214.jar");
+        ConnectParams params = profileParams("h2-custom", "file:" + tempDirectory.resolve("custom-shared"));
+        params.setJdbc_driver_paths(List.of(jar.toString()));
+        params.setJdbc_driver_class("org.h2.Driver");
+        H2Agent first = new H2Agent();
+        H2Agent second = new H2Agent();
+        try {
+            first.connect(params);
+            first.executeQuery("CREATE TABLE SHARED_CUSTOM (ID INT)", null, new ExecuteQueryOptions());
+            first.executeQuery("INSERT INTO SHARED_CUSTOM VALUES (42)", null, new ExecuteQueryOptions());
+            second.connect(params);
+            Assertions.assertEquals(List.of(List.of(42)), second.executeQuery("SELECT ID FROM SHARED_CUSTOM", null, new ExecuteQueryOptions()).getRows());
+            first.disconnect();
+            Assertions.assertEquals(List.of(List.of(42)), second.executeQuery("SELECT ID FROM SHARED_CUSTOM", null, new ExecuteQueryOptions()).getRows());
+        } finally {
+            first.disconnect();
+            second.disconnect();
+            H2DriverLoader.loadExternal(params.getJdbc_driver_paths(), params.getJdbc_driver_class()).classLoader().close();
         }
     }
 

@@ -13,6 +13,7 @@ import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, processListExecutionError, processListSessionCount } from "@/lib/database/mysqlProcessList";
 import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/database/processListDrivers";
+import { processListSelectionAfterClick } from "@/lib/database/processListSelection";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
@@ -55,6 +56,8 @@ const cancelTarget = ref<ProcessRow | null>(null);
 const canceling = ref(false);
 const batchSupported = computed(() => driver.value?.supportsBatchCancel === true);
 const selectedIds = ref(new Set<number>());
+// Anchor row for Shift+click range selection, in the current display order.
+const selectionAnchorId = ref<number | null>(null);
 const batchTargets = ref<ProcessRow[] | null>(null);
 const batchResult = ref<{ succeeded: number; failures: { id: number; message: string }[] } | null>(null);
 const refreshing = ref(false);
@@ -108,21 +111,31 @@ watch(
   (visible) => {
     const available = new Set(visible.map((row) => row.id));
     selectedIds.value = new Set([...selectedIds.value].filter((id) => available.has(id)));
+    if (selectionAnchorId.value !== null && !available.has(selectionAnchorId.value)) selectionAnchorId.value = null;
   },
   { flush: "sync" },
 );
 
-function toggleSelection(id: number, checked: boolean) {
+function clearSelection() {
+  selectedIds.value = new Set();
+  selectionAnchorId.value = null;
+}
+
+/** Row checkbox click: a plain click toggles one row, Shift+click extends from the anchor. */
+function toggleSelection(id: number, event: MouseEvent) {
   if (actionsLocked.value || refreshing.value) return;
-  const next = new Set(selectedIds.value);
-  if (checked && selectableRows.value.some((row) => row.id === id)) next.add(id);
-  else next.delete(id);
-  selectedIds.value = next;
+  // The browser toggles the clicked checkbox before this handler runs, so the
+  // next state comes from the selection; both agree because the click is never
+  // cancelled (cancelling it would leave the DOM checkbox out of sync).
+  const next = processListSelectionAfterClick(selectableRows.value, { selected: selectedIds.value, anchorId: selectionAnchorId.value }, id, event);
+  selectedIds.value = next.selected;
+  selectionAnchorId.value = next.anchorId;
 }
 
 function toggleAll(checked: boolean) {
   if (actionsLocked.value || refreshing.value) return;
   selectedIds.value = new Set(checked ? selectableRows.value.map((row) => row.id) : []);
+  selectionAnchorId.value = null;
 }
 
 function requestBatchCancel() {
@@ -168,7 +181,7 @@ async function confirmBatchCancel() {
     if (result === undefined || !isCurrent()) return;
     batchResult.value = result;
     batchTargets.value = null;
-    selectedIds.value = new Set();
+    clearSelection();
   } catch (error: unknown) {
     if (isCurrent()) toast(t("processList.killFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
   } finally {
@@ -327,7 +340,7 @@ watch(
   () => props.connection.id,
   () => {
     connectionGeneration++;
-    selectedIds.value = new Set();
+    clearSelection();
     batchTargets.value = null;
     batchResult.value = null;
     cancelTarget.value = null;
@@ -432,7 +445,7 @@ onBeforeUnmount(() => {
                 :checked="selectedIds.has(row.id)"
                 :disabled="actionsLocked || refreshing || ownSessionId === null || isOwnSession(row) || !Number.isInteger(row.id) || row.id <= 0"
                 :aria-label="t('processList.selectSession', { id: row.id })"
-                @change="toggleSelection(row.id, ($event.target as HTMLInputElement).checked)"
+                @click="toggleSelection(row.id, $event as MouseEvent)"
               />
             </td>
             <td

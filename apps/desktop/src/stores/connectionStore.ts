@@ -661,6 +661,11 @@ export const useConnectionStore = defineStore("connection", () => {
   const tableListSourceRevisions = new Map<string, number>();
   const treeNodeLoads = new TreeNodeLoadRegistry();
   const filteredObjectGroupChildrenIds = new Set<string>();
+  // A remote sidebar search swaps an object group's children for a filtered
+  // projection. The pre-search children — including extra pages the user loaded
+  // through "load more" — are captured here so clearing the query restores the
+  // browsing state instead of silently dropping those pages back to page one.
+  const filteredObjectGroupChildrenSnapshots = new Map<string, { children: TreeNode[]; objectCount?: number }>();
   const primaryVisibleObjectRefreshInFlight = new Set<string>();
   let nextLocalConnectionAttempt = 0;
   let beforeConnectHandler: BeforeConnectHandler | null = null;
@@ -1742,9 +1747,16 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  // Forget both the filtered marker and its captured pre-search children, so a
+  // later restore cannot resurrect a stale projection or an outdated list.
+  function forgetFilteredObjectGroupChildren(nodeId: string) {
+    filteredObjectGroupChildrenIds.delete(nodeId);
+    filteredObjectGroupChildrenSnapshots.delete(nodeId);
+  }
+
   /** Drop loaded/confirmed-empty markers, metadata caches, and generations for a discarded shell. */
   function forgetTreeNodeLoadState(nodeId: string) {
-    filteredObjectGroupChildrenIds.delete(nodeId);
+    forgetFilteredObjectGroupChildren(nodeId);
     clearLoadedChildrenCache(nodeId);
     treeNodeLoads.invalidatePrefix(nodeId);
   }
@@ -3305,6 +3317,25 @@ export const useConnectionStore = defineStore("connection", () => {
     return true;
   }
 
+  // Remote sidebar search is a temporary projection over an object group. When the
+  // query is cleared, put the captured pre-search children back — including the
+  // pages loaded through "load more" — instead of refetching page one. Returns
+  // false when nothing was captured (the group was never loaded before the
+  // search), so the caller can fall back to a normal load.
+  function restoreFilteredObjectGroupChildren(node: TreeNode): boolean {
+    const snapshot = filteredObjectGroupChildrenSnapshots.get(node.id);
+    const liveNode = treeNodeInSidebarTree(node);
+    if (!snapshot || !liveNode) {
+      if (!liveNode) forgetFilteredObjectGroupChildren(node.id);
+      return false;
+    }
+    setChildren(liveNode, snapshot.children);
+    liveNode.objectCount = snapshot.objectCount;
+    liveNode.isExpanded = true;
+    forgetFilteredObjectGroupChildren(liveNode.id);
+    return true;
+  }
+
   function treeNodeInSidebarTree(node: TreeNode): TreeNode | null {
     return findNode(treeNodes.value, node.id);
   }
@@ -3351,6 +3382,11 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of filteredObjectGroupChildrenIds) {
       if (id === prefix || id.startsWith(`${prefix}:`)) {
         filteredObjectGroupChildrenIds.delete(id);
+      }
+    }
+    for (const id of filteredObjectGroupChildrenSnapshots.keys()) {
+      if (id === prefix || id.startsWith(`${prefix}:`)) {
+        filteredObjectGroupChildrenSnapshots.delete(id);
       }
     }
     invalidateMetadataCachesByTreePrefix(prefix);
@@ -6123,7 +6159,7 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     if (!options?.force && !searchFilter && !options?.sidebarTableSearchParentId && !tableNameFilterForScope) {
       if (await hydrateTreeNodeFromCache(node, objectGroupCacheKey(node))) {
-        filteredObjectGroupChildrenIds.delete(node.id);
+        forgetFilteredObjectGroupChildren(node.id);
         void loadObjectGroupChildren(node, { ...options, force: true }).catch(() => undefined);
         return;
       }
@@ -6150,7 +6186,7 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(node.connectionId);
           load = reclaimTreeNodeLoad(load, node);
           if (useCachedChildren(node, options, load)) {
-            filteredObjectGroupChildrenIds.delete(node.id);
+            forgetFilteredObjectGroupChildren(node.id);
             return;
           }
           const objectTypes = objectTypesForGroupNode(node.type);
@@ -6173,7 +6209,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (!options?.force && !searchFilter && !tableNameFilter) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
             if (cached.hit) {
-              filteredObjectGroupChildrenIds.delete(node.id);
+              forgetFilteredObjectGroupChildren(node.id);
               if (cached.isStale) refreshStaleTreeNode(node);
               return;
             }
@@ -6217,10 +6253,18 @@ export const useConnectionStore = defineStore("connection", () => {
           if (!tableNameFilterRevisionMatches(options)) return;
           const targetNode = treeNodeLoadTarget(load);
           if (!targetNode) return;
+          if (searchFilter && !filteredObjectGroupChildrenIds.has(targetNode.id) && isTreeNodeChildrenLoaded(targetNode.id)) {
+            // Capture the first transition into a filtered projection only; later
+            // keystrokes re-filter the same group and must keep the original list.
+            filteredObjectGroupChildrenSnapshots.set(targetNode.id, {
+              children: targetNode.children ?? [],
+              objectCount: targetNode.objectCount,
+            });
+          }
           targetNode.objectCount = nextObjectCount;
           setChildren(targetNode, children);
           if (searchFilter) filteredObjectGroupChildrenIds.add(targetNode.id);
-          else filteredObjectGroupChildrenIds.delete(targetNode.id);
+          else forgetFilteredObjectGroupChildren(targetNode.id);
           options?.onChildrenApplied?.(targetNode);
           if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
@@ -9613,6 +9657,7 @@ export const useConnectionStore = defineStore("connection", () => {
     canUseLoadedTreeNodeToggle,
     releaseCollapsedTreeNodeChildren,
     discardFilteredTreeNodeChildren,
+    restoreFilteredObjectGroupChildren,
     cancelTreeNodeLoad,
     setBeforeConnectHandler,
     initFromDisk,

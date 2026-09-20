@@ -79,7 +79,8 @@ import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePa
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TabOutputView, TreeNode } from "@/types/database";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
-import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
+import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import { resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
 import {
@@ -330,6 +331,7 @@ const setupRequired = ref(false);
 
 const showConnectionDialog = ref(false);
 const connectionDialogPrefill = ref<ConnectionDeepLinkDraft | null>(null);
+const connectionDialogUpdate = ref<ConnectionDeepLinkUpdate | null>(null);
 const connectionDialogInitialTab = ref<ConfigTab | undefined>(undefined);
 const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
@@ -2486,8 +2488,23 @@ async function openPendingDbFiles() {
 async function openConnectionDeepLink(url: string) {
   await connectionStore.initFromDisk();
   try {
+    const update = parseConnectionDeepLinkUpdate(url);
+    if (update) {
+      const config = resolveConnectionDeepLinkUpdate(update, connectionStore.connections, showConnectionDialog.value || !!connectionStore.editingConnectionId);
+      connectionDialogPrefill.value = null;
+      connectionDialogUpdate.value = update;
+      connectionPluginProvider.value = null;
+      connectionDialogInitialTab.value = "connection";
+      connectionStore.stopCreatingConnectionInGroup();
+      connectionStore.startEditing(config.id);
+      showConnectionDialog.value = true;
+      return;
+    }
     const draft = parseConnectionDeepLink(url);
     if (!draft) return;
+    // Do not let another external URL replace an unconfirmed update draft.
+    if (connectionDialogUpdate.value && showConnectionDialog.value) throw new Error("Close the current connection dialog before opening another connection link.");
+    connectionDialogUpdate.value = null;
     connectionStore.stopEditing();
     connectionStore.stopCreatingConnectionInGroup();
     connectionPluginProvider.value = null;
@@ -2579,6 +2596,7 @@ function setConnectionDialogOpen(value: boolean) {
   showConnectionDialog.value = value;
   if (!value) {
     connectionDialogPrefill.value = null;
+    connectionDialogUpdate.value = null;
     connectionPluginProvider.value = null;
     connectionDialogInitialTab.value = undefined;
   }
@@ -2586,6 +2604,8 @@ function setConnectionDialogOpen(value: boolean) {
 
 function openConnectionSettings(connectionId: string, initialTab: ConfigTab = "connection") {
   if (!connectionStore.getConfig(connectionId)) return;
+  connectionDialogUpdate.value = null;
+  connectionDialogPrefill.value = null;
   connectionPluginProvider.value = null;
   connectionDialogInitialTab.value = initialTab;
   connectionStore.startEditing(connectionId);
@@ -4339,6 +4359,7 @@ onUnmounted(() => {
         <AppDialogs
           :show-connection-dialog="showConnectionDialog"
           :connection-prefill="connectionDialogPrefill"
+          :connection-update="connectionDialogUpdate"
           :connection-plugin-provider="connectionPluginProvider"
           :connection-initial-tab="connectionDialogInitialTab"
           :show-danger-dialog="showDangerDialog"

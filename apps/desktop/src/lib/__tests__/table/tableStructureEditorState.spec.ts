@@ -28,6 +28,8 @@ import {
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   splitDataType,
+  structureColumnCommentsForCopy,
+  structureColumnNamesForCopy,
   tableStructureIdentifierComparisonKey,
 } from "@/lib/table/tableStructureEditorState";
 
@@ -751,5 +753,44 @@ describe("matchesCopySourceColumnSearch", () => {
     expect(matchesCopySourceColumnSearch(column, "启用")).toBe(true);
     expect(matchesCopySourceColumnSearch(column, "1")).toBe(true);
     expect(matchesCopySourceColumnSearch({ ...column, column_default: null, comment: null }, "1")).toBe(false);
+  });
+});
+
+describe("structureColumnNamesForCopy", () => {
+  const column = (name: string, markedForDrop = false) => ({ name, markedForDrop });
+
+  it("keeps the visible field order", () => {
+    expect(structureColumnNamesForCopy([column("id"), column("name"), column("note")])).toEqual(["id", "name", "note"]);
+  });
+
+  it("drops fields marked for drop and blank names", () => {
+    expect(structureColumnNamesForCopy([column("id"), column("drop_me", true), column("  "), column(" name ")])).toEqual(["id", "name"]);
+  });
+
+  it("returns nothing for an empty table", () => {
+    expect(structureColumnNamesForCopy([])).toEqual([]);
+  });
+});
+
+describe("structureColumnCommentsForCopy", () => {
+  it("maps trimmed names to trimmed comments", () => {
+    const comments = structureColumnCommentsForCopy([
+      { name: "id", comment: " 主键 ", markedForDrop: false },
+      { name: "name", comment: "名称", markedForDrop: false },
+    ]);
+    expect([...comments]).toEqual([
+      ["id", "主键"],
+      ["name", "名称"],
+    ]);
+  });
+
+  it("skips dropped fields, blank comments and blank names", () => {
+    const comments = structureColumnCommentsForCopy([
+      { name: "gone", comment: "已删除", markedForDrop: true },
+      { name: "empty", comment: "   ", markedForDrop: false },
+      { name: "blank-name", comment: null, markedForDrop: false },
+      { name: "  ", comment: "没有字段名", markedForDrop: false },
+    ]);
+    expect(comments.size).toBe(0);
   });
 });

@@ -394,6 +394,7 @@ export default withEnglishFallback({
     restart: "Çık ve Yeniden Başlat",
     updateAction: "Güncelle",
     updateNow: "Şimdi Güncelle",
+    updateInBackground: "Arka planda güncelle",
     updating: "Güncelleniyor…",
     notInstalled: "Kurulu değil",
     componentsAutoUpdated: "Otomatik güncellendi: {components}.",

@@ -451,6 +451,7 @@ export default withEnglishFallback({
     restart: "退出并重启",
     updateAction: "更新",
     updateNow: "立即更新",
+    updateInBackground: "后台更新",
     updating: "正在更新…",
     notInstalled: "未安装",
     componentsAutoUpdated: "已自动更新：{components}。",

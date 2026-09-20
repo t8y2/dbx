@@ -523,6 +523,7 @@ export default withEnglishFallback({
     restart: "Sair e Reiniciar",
     updateAction: "Atualizar",
     updateNow: "Atualizar agora",
+    updateInBackground: "Atualizar em segundo plano",
     updating: "Atualizando…",
     notInstalled: "Não instalado",
     componentsAutoUpdated: "Atualizados automaticamente: {components}.",

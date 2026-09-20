@@ -530,6 +530,7 @@ export default withEnglishFallback({
     restart: "종료 후 다시 시작",
     updateAction: "업데이트",
     updateNow: "지금 업데이트",
+    updateInBackground: "백그라운드에서 업데이트",
     updating: "업데이트 중…",
     notInstalled: "설치되지 않음",
     componentsAutoUpdated: "자동 업데이트 완료: {components}.",

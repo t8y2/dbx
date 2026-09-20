@@ -523,6 +523,7 @@ export default withEnglishFallback({
     restart: "終了して再起動",
     updateAction: "更新",
     updateNow: "今すぐ更新",
+    updateInBackground: "バックグラウンドで更新",
     updating: "更新中…",
     notInstalled: "未インストール",
     componentsAutoUpdated: "自動更新しました: {components}。",

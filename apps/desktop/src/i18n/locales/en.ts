@@ -535,6 +535,7 @@ export default {
     restart: "Exit & Restart",
     updateAction: "Update",
     updateNow: "Update Now",
+    updateInBackground: "Run in Background",
     updating: "Updating…",
     notInstalled: "Not installed",
     componentsAutoUpdated: "Automatically updated: {components}.",

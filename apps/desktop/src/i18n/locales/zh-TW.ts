@@ -526,6 +526,7 @@ export default withEnglishFallback({
     restart: "結束並重新啟動",
     updateAction: "更新",
     updateNow: "立即更新",
+    updateInBackground: "背景下更新",
     updating: "正在更新…",
     notInstalled: "未安裝",
     componentsAutoUpdated: "已自動更新：{components}。",

@@ -371,6 +371,7 @@ export default withEnglishFallback({
     commit: "コミット",
     rollback: "ロールバック",
     txnAutoRolledBack: "5分間操作がなかったため、トランザクションは自動的にロールバックされました",
+    autoCommitTxnRolledBack: "このタブに残っていた明示的トランザクションは自動的にロールバックされました。実行をまたいで保持するには設定の「自動コミットでも明示的なトランザクションを保持」を有効にしてください",
     previewSql: "SQLをプレビュー",
     previewQuery: "クエリをプレビュー",
     hidePreviewSql: "SQLプレビューを非表示",
@@ -7326,6 +7327,9 @@ export default withEnglishFallback({
       "新しい SQL エディタを開いたときに既定で使用するトランザクションモード。「手動トランザクション」を選択すると、新しいエディタは手動トランザクションモードで開始され、手動でコミットまたはロールバックします。「自動コミット」を選択すると、各ステートメントが自動的にコミットされます。トランザクションをサポートするデータベースにのみ適用されます。",
     defaultTransactionModeAuto: "自動コミット",
     defaultTransactionModeManual: "手動トランザクション",
+    keepExplicitTransactionInAutoCommit: "自動コミットでも明示的なトランザクションを保持",
+    keepExplicitTransactionInAutoCommitDescription:
+      "自動コミットのタブで BEGIN / START TRANSACTION を実行した後、COMMIT または ROLLBACK を実行するまでトランザクションを保持します。オフの場合、実行が終わるたびに未確定の明示的トランザクションがロールバックされ、残留トランザクションがタブの読み取りスナップショットを固定するのを防ぎます。",
     executeAllOnBlankLine: "空行ではすべてのSQLを実行",
     executeAllOnBlankLineDescription: "現在の文を実行するモードで、カーソル位置に文がない場合はすべてのSQLを実行します。既定では無効です。",
     showExecutionTargetPicker: "実行対象ピッカーを表示",

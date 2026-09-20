@@ -216,6 +216,7 @@ export default withEnglishFallback({
     commit: "Commit",
     rollback: "Rollback",
     txnAutoRolledBack: "İşlem, 5 dakikalık hareketsizlik sonrası otomatik olarak geri alındı",
+    autoCommitTxnRolledBack: 'Bu sekmenin açık bıraktığı açık işlem otomatik olarak geri alındı; yürütmeler arasında korumak için ayarlardan "Otomatik işlemede açık işlemleri koru" seçeneğini açın',
     previewSql: "SQL Önizleme",
     previewQuery: "Sorguyu önizle",
     hidePreviewSql: "SQL Önizlemesini Gizle",
@@ -7346,6 +7347,9 @@ export default withEnglishFallback({
       'Yeni bir SQL düzenleyici açıldığında varsayılan olarak kullanılan işlem modu. "Manuel işlem" ile yeni düzenleyiciler manuel işlem modunda başlar ve elle commit ya da rollback gerektirir; "Otomatik commit" ile her ifade otomatik olarak uygulanır. Yalnızca işlemleri destekleyen veritabanları için geçerlidir.',
     defaultTransactionModeAuto: "Otomatik commit",
     defaultTransactionModeManual: "Manuel işlem",
+    keepExplicitTransactionInAutoCommit: "Otomatik işlemede açık işlemleri koru",
+    keepExplicitTransactionInAutoCommitDescription:
+      "Otomatik işlem (autocommit) sekmesinde BEGIN / START TRANSACTION çalıştırdıktan sonra işlem, siz COMMIT veya ROLLBACK çalıştırana kadar açık kalır. Kapalıyken her yürütme, açık kalan açık işlemi geri alır; böylece kalan bir işlemin sekmenin okuma anlık görüntüsünü sabitlemesi engellenir.",
     executeAllOnBlankLine: "Boş satırlarda tüm SQL'i çalıştır",
     executeAllOnBlankLineDescription: "Geçerli ifade modunda, imleçte bir ifade yoksa tüm SQL'i çalıştır. Varsayılan olarak kapalıdır.",
     showExecutionTargetPicker: "Yürütme hedefi seçicisini göster",

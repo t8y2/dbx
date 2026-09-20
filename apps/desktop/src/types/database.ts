@@ -1118,6 +1118,16 @@ export interface QueryResult {
   /** Manual-transaction UX marker for the same dialects: set on the synthetic
    *  successful result of an empty/whitespace/comments-only manual script. */
   manual_transaction_no_statement?: true;
+  /** MySQL auto-commit tab session state reported by the backend for this
+   *  execution: true = the tab connection still holds a transaction the user
+   *  opened explicitly (`BEGIN` / `START TRANSACTION`) and DBX kept it open;
+   *  false = the backend settled the connection and no such transaction is
+   *  open. Absent when the execution never observed a tab-scoped MySQL
+   *  connection, so the tab must keep its previous state. */
+  auto_commit_open_transaction?: boolean;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the user
+   *  opened explicitly and left open (the tab did not opt into keeping them). */
+  auto_commit_explicit_transaction_rolled_back?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -1994,6 +2004,15 @@ export interface QueryTab {
    *  statement DBX cannot prove read-only. Commit/Rollback actions are hidden
    *  while a session is clean. Never cleared by a later read. */
   txnPossiblyDirty?: boolean;
+  /** Auto-commit tabs (`Tx:A`) with a MySQL-family connection: whether the tab's
+   *  connection currently holds a transaction the user opened explicitly
+   *  (`BEGIN` / `START TRANSACTION`). The backend reports it on every execution
+   *  that observed the connection; the tab mirrors it into the `Tx` badge and
+   *  the commit/rollback actions. Not persisted. */
+  autoCommitOpenTransaction?: boolean;
+  /** Auto-commit tab: show the notice that the backend rolled back an explicit
+   *  transaction this tab left open, so the cleanup is never silent. */
+  autoCommitTxnRolledBack?: boolean;
 }
 
 export interface SavedSqlFolder {

@@ -214,6 +214,7 @@ export default withEnglishFallback({
     commit: "Təsdiqlə",
     rollback: "Geri qaytar",
     txnAutoRolledBack: "5 dəqiqə fəaliyyətsizlikdən sonra tranzaksiya avtomatik geri qaytarıldı",
+    autoCommitTxnRolledBack: 'Bu nişanın açıq qoyduğu tranzaksiya avtomatik geri qaytarıldı; icralar arasında saxlamaq üçün ayarlarda "Avtomatik commit rejimində açıq tranzaksiyaları saxla" seçimini aktivləşdirin',
     previewSql: "SQL önbaxışı",
     previewQuery: "Sorğu önbaxışı",
     hidePreviewSql: "SQL önbaxışını gizlət",
@@ -7450,6 +7451,9 @@ export default withEnglishFallback({
       'Yeni SQL redaktoru açıldıqda standart olaraq istifadə olunan tranzaksiya rejimi. "Əl ilə tranzaksiya" seçildikdə yeni redaktorlar əl ilə tranzaksiya rejimində açılır və dəyişiklikləri əl ilə təsdiqləmək və ya geri qaytarmaq tələb olunur; "Avtomatik təsdiqləmə" seçildikdə hər əmr avtomatik təsdiqlənir. Yalnız tranzaksiyaları dəstəkləyən verilənlər bazalarına tətbiq olunur.',
     defaultTransactionModeAuto: "Avtomatik təsdiqləmə",
     defaultTransactionModeManual: "Əl ilə tranzaksiya",
+    keepExplicitTransactionInAutoCommit: "Avtomatik commit rejimində açıq tranzaksiyaları saxla",
+    keepExplicitTransactionInAutoCommitDescription:
+      "Avtomatik commit nişanında BEGIN / START TRANSACTION icra etdikdən sonra tranzaksiya siz COMMIT və ya ROLLBACK icra edənə qədər açıq qalır. Söndürüldükdə hər icra açıq qalan tranzaksiyanı geri qaytarır ki, qalıq tranzaksiya nişanın oxuma snapshot-ını sabitləməsin.",
     executeAllOnBlankLine: "Boş sətirlərdən bütün SQL-i icra et",
     executeAllOnBlankLineDescription: "Cari əmr rejimində kursorun olduğu yerdə əmr olmadıqda bütün SQL-i icra et. Standart olaraq deaktivdir.",
     showExecutionTargetPicker: "İcra hədəfi seçicisini göstər",

@@ -558,6 +558,7 @@ const showThemeCustomizer = ref(false);
 const showDataGridTypeColorScheme = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editDefaultTransactionMode = ref(settingsStore.editorSettings.defaultTransactionMode);
+const editKeepExplicitTransactionInAutoCommit = ref(settingsStore.editorSettings.keepExplicitTransactionInAutoCommit);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 function translateWithExecuteShortcut(key: string): string {
   return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
@@ -926,6 +927,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     defaultTransactionMode: editDefaultTransactionMode.value,
+    keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
@@ -1567,6 +1569,7 @@ function syncEditorSettingsDraftFromStore() {
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
   editDefaultTransactionMode.value = settingsStore.editorSettings.defaultTransactionMode;
+  editKeepExplicitTransactionInAutoCommit.value = settingsStore.editorSettings.keepExplicitTransactionInAutoCommit;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
@@ -1811,6 +1814,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   clickTableNavigationTarget: editClickTableNavigationTarget,
   completionTriggerMode: editCompletionTriggerMode,
   defaultTransactionMode: editDefaultTransactionMode,
+  keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit,
   tableColumnTemplateFields: editTableColumnTemplateRows,
 };
 
@@ -2148,6 +2152,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
+    editKeepExplicitTransactionInAutoCommit.value = DEFAULT_EDITOR_SETTINGS.keepExplicitTransactionInAutoCommit;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -2297,6 +2302,7 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
+  editKeepExplicitTransactionInAutoCommit.value = DEFAULT_EDITOR_SETTINGS.keepExplicitTransactionInAutoCommit;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -6042,6 +6048,16 @@ onUnmounted(() => {
                       <SelectItem value="manual">{{ t("settings.defaultTransactionModeManual") }}</SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-keep-explicit-transaction>
+                  <div class="min-w-0 space-y-1">
+                    <Label for="editor-keep-explicit-transaction">{{ t("settings.keepExplicitTransactionInAutoCommit") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.keepExplicitTransactionInAutoCommitDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-keep-explicit-transaction" v-model="editKeepExplicitTransactionInAutoCommit" class="mt-0.5 shrink-0" />
                 </div>
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': editExecuteMode !== 'current' }">

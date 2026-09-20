@@ -744,6 +744,35 @@ fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
         && (upper.len() == keyword.len() || !upper.as_bytes()[keyword.len()].is_ascii_alphanumeric())
 }
 
+/// Whether one MySQL statement is an explicit transaction opener that a
+/// tab-scoped auto-commit session may keep alive across executions: a bare
+/// `BEGIN` / `BEGIN WORK` / `START TRANSACTION [modifiers]`.
+///
+/// `COMMIT` / `ROLLBACK` close a transaction instead of opening one, and
+/// compound statements (`BEGIN ... END`, only valid inside stored programs)
+/// never open a transaction at the top level, so neither is matched. Anything
+/// ambiguous — extra statements in the same text, other `BEGIN` continuations —
+/// is reported as "not an opener" so the caller falls back to the historical
+/// cleanup instead of keeping a transaction open by accident.
+pub fn mysql_statement_opens_explicit_transaction(sql: &str) -> bool {
+    let cleaned = strip_sql_comments(sql);
+    let mut parts = cleaned.split(';');
+    let statement = parts.next().unwrap_or_default().trim();
+    if statement.is_empty() || parts.any(|part| !part.trim().is_empty()) {
+        return false;
+    }
+    let upper = statement.to_ascii_uppercase();
+    let mut tokens = upper.split_whitespace();
+    match tokens.next() {
+        Some("BEGIN") => matches!(tokens.next(), None | Some("WORK")),
+        // Modifiers (`READ ONLY`, `READ WRITE`, `WITH CONSISTENT SNAPSHOT`) are
+        // optional and are verified by the server; a malformed one fails the
+        // statement, so no transaction is left open for this execution.
+        Some("START") => tokens.next() == Some("TRANSACTION"),
+        _ => false,
+    }
+}
+
 /// Check whether a SQL statement is allowed under read-only mode.
 /// Returns Err with a descriptive message if the statement is a write operation.
 pub fn check_read_only(sql: &str, connection_name: &str, database_type: DatabaseType) -> Result<(), String> {
@@ -2218,5 +2247,46 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn mysql_explicit_transaction_openers_are_recognized() {
+        for sql in [
+            "BEGIN",
+            "begin",
+            "BEGIN;",
+            "  BEGIN  ",
+            "BEGIN WORK",
+            "BEGIN WORK;",
+            "-- open a transaction\nBEGIN",
+            "/* keep */ START TRANSACTION",
+            "START TRANSACTION",
+            "start transaction;",
+            "START TRANSACTION READ ONLY",
+            "START TRANSACTION READ WRITE",
+            "START TRANSACTION WITH CONSISTENT SNAPSHOT",
+        ] {
+            assert!(mysql_statement_opens_explicit_transaction(sql), "expected opener: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_non_openers_are_not_treated_as_explicit_transactions() {
+        for sql in [
+            "",
+            "   ",
+            ";",
+            "SELECT 1",
+            "COMMIT",
+            "ROLLBACK",
+            "BEGIN;\nUPDATE t SET a = 1;",
+            "BEGIN\nDECLARE x INT;\nEND",
+            "BEGIN END",
+            "START REPLICA",
+            "SET autocommit = 0",
+            "SELECT 'BEGIN' FROM t",
+        ] {
+            assert!(!mysql_statement_opens_explicit_transaction(sql), "expected non-opener: {sql}");
+        }
     }
 }

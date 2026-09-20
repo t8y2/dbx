@@ -161,6 +161,33 @@ pub async fn rollback_open_transaction(conn: &mut mysql_async::Conn) -> Result<(
     conn.query_drop("ROLLBACK").await.map_err(|error| error.to_string())
 }
 
+/// Session state reported by the final status packet of the last statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MySqlSessionStatus {
+    /// `SERVER_STATUS_IN_TRANS`: a multi-statement transaction is open.
+    pub in_transaction: bool,
+    /// `SERVER_STATUS_AUTOCOMMIT`: the session still commits every statement.
+    /// `false` means auto-commit was disabled for the session (or for this
+    /// batch), so the next statement opens a transaction that only an explicit
+    /// `COMMIT`/`ROLLBACK` ends.
+    pub autocommit: bool,
+}
+
+/// Reads the status flags of the last final OK/EOF packet.
+///
+/// `None` means the server reported no usable status: mysql_async clears its
+/// cached packet when a statement ends with an ERR packet, so callers must not
+/// read "no transaction is open" out of a missing packet.
+pub fn session_status_from_last_ok(conn: &mysql_async::Conn) -> Option<MySqlSessionStatus> {
+    conn.last_ok_packet().map(|packet| {
+        let flags = packet.status_flags();
+        MySqlSessionStatus {
+            in_transaction: flags.contains(StatusFlags::SERVER_STATUS_IN_TRANS),
+            autocommit: flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT),
+        }
+    })
+}
+
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
 const MYSQL_SQL_PACKET_MARGIN_MAX_BYTES: usize = 64 * 1024;
 
@@ -219,8 +246,8 @@ fn transaction_error_from_mysql_error(error: mysql_async::Error) -> MySqlTransac
 }
 
 fn transaction_status_from_last_ok(conn: &mysql_async::Conn) -> Result<bool, MySqlTransactionError> {
-    conn.last_ok_packet()
-        .map(|packet| packet.status_flags().contains(StatusFlags::SERVER_STATUS_IN_TRANS))
+    session_status_from_last_ok(conn)
+        .map(|status| status.in_transaction)
         .ok_or_else(|| MySqlTransactionError::Transport("MySQL did not return a final status packet".to_string()))
 }
 
@@ -228,8 +255,17 @@ fn transaction_status_from_last_ok(conn: &mysql_async::Conn) -> Result<bool, MyS
 /// intentionally clears the cached OK packet for ERR, so COM_PING is required
 /// to obtain fresh status from the same physical connection.
 pub async fn ping_transaction_status_on_conn(conn: &mut mysql_async::Conn) -> Result<bool, MySqlTransactionError> {
+    ping_session_status_on_conn(conn).await.map(|status| status.in_transaction)
+}
+
+/// Read the full session status after a recoverable server ERR packet. See
+/// [`ping_transaction_status_on_conn`].
+pub async fn ping_session_status_on_conn(
+    conn: &mut mysql_async::Conn,
+) -> Result<MySqlSessionStatus, MySqlTransactionError> {
     conn.ping().await.map_err(transaction_error_from_mysql_error)?;
-    transaction_status_from_last_ok(conn)
+    session_status_from_last_ok(conn)
+        .ok_or_else(|| MySqlTransactionError::Transport("MySQL did not return a final status packet".to_string()))
 }
 
 impl MySqlQueryResult {

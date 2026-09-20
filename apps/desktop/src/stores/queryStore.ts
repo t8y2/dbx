@@ -4872,6 +4872,23 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.txnPossiblyDirty !== undefined) tab.txnPossiblyDirty = false;
   }
 
+  /** Auto-commit tabs mirror the backend's report of an open explicit
+   *  transaction. The flag is dropped whenever the tab stops pointing at the
+   *  connection that reported it (target switch, tab close), so a stale badge
+   *  can never outlive the session it describes. */
+  function clearAutoCommitOpenTransaction(tab: { autoCommitOpenTransaction?: boolean }) {
+    if (tab.autoCommitOpenTransaction !== undefined) tab.autoCommitOpenTransaction = false;
+  }
+
+  /** Mirrors the MySQL auto-commit settlement the backend reported for this
+   *  execution onto the tab. Absent markers (non-MySQL connections, executions
+   *  that never touched a tab connection) leave the previous state untouched. */
+  function applyAutoCommitTransactionReport(tab: QueryTab, results: QueryResult[]) {
+    const openTransaction = results.find((result) => result.auto_commit_open_transaction !== undefined)?.auto_commit_open_transaction;
+    if (openTransaction !== undefined) tab.autoCommitOpenTransaction = openTransaction;
+    if (results.some((result) => result.auto_commit_explicit_transaction_rolled_back === true)) tab.autoCommitTxnRolledBack = true;
+  }
+
   /** Centralized manual-session cleanup. Clears every field tied to a manual
    *  transaction session exactly when that session is conclusively ended or
    *  discarded. Callers must not assign these fields individually. */
@@ -4894,11 +4911,19 @@ export const useQueryStore = defineStore("query", () => {
     }
     clearTxnPossiblyDirty(tab);
     tab.txnAutoRolledBack = false;
+    clearAutoCommitOpenTransaction(tab);
   }
 
   async function commitTransaction(id: string) {
     const tab = tabs.value.find((t) => t.id === id);
-    if (!tab?.txnSessionId) return;
+    if (!tab) return;
+    if (!tab.txnSessionId) {
+      // Auto-commit tab (`Tx:A`) that keeps explicit user transactions: the
+      // transaction lives on the tab's own connection, so COMMIT is an ordinary
+      // statement on that connection.
+      if (tab.autoCommitOpenTransaction) await executeCurrentSql("COMMIT", { tabId: tab.id });
+      return;
+    }
     try {
       await api.commitManualTransaction(tab.txnSessionId);
     } finally {
@@ -4908,7 +4933,11 @@ export const useQueryStore = defineStore("query", () => {
 
   async function rollbackTransaction(id: string) {
     const tab = tabs.value.find((t) => t.id === id);
-    if (!tab?.txnSessionId) return;
+    if (!tab) return;
+    if (!tab.txnSessionId) {
+      if (tab.autoCommitOpenTransaction) await executeCurrentSql("ROLLBACK", { tabId: tab.id });
+      return;
+    }
     const sessionId = tab.txnSessionId;
     // Remove the old session before the backend responds: a target switch may
     // start a new transaction while this rollback is still in flight.
@@ -7334,6 +7363,8 @@ export const useQueryStore = defineStore("query", () => {
           timeoutSecs: queryTimeoutSecs,
           catalog: executionCatalog,
           continueOnError: continueOnBatchError,
+          // MySQL-family connections only use this; other drivers ignore it.
+          ...(settingsStore.editorSettings.keepExplicitTransactionInAutoCommit ? { preserveExplicitTransaction: true } : {}),
         };
         queryExecutionLog("info", "execute-multi:invoke", {
           traceId,
@@ -7518,6 +7549,7 @@ export const useQueryStore = defineStore("query", () => {
           console.warn("[DBX] Failed to resolve SAP HANA CURRENT_SCHEMA", error);
         }
       }
+      if (tab.autoCommit !== false) applyAutoCommitTransactionReport(tab, results);
       const current = findExecutionTab(id);
       if (current?.executionId === executionId && manualTransactionTargetEpoch(current) === executionTargetEpoch) {
         if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;

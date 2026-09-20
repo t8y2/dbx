@@ -384,6 +384,13 @@ pub struct AppState {
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    /// Pool keys whose tab-scoped MySQL connection holds a transaction the user
+    /// opened explicitly and DBX deliberately kept open
+    /// (`preserve_explicit_transaction`). Keeping it here — not on the driver
+    /// connection — makes the state die with the pool: a reconnect, a rebuilt
+    /// pool, or a closed tab can never inherit a transaction that no longer
+    /// exists.
+    mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
     /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
     /// 绝不落盘）。键为 `(owner_scope, connection_id)`：桌面端 owner 为空串，
@@ -1523,6 +1530,7 @@ impl AppState {
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
+            mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
@@ -4616,14 +4624,30 @@ impl AppState {
         self.stop_keepalive_task(&pool_key).await;
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
+        self.mysql_preserved_transactions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
         Ok(removed.map(|pool| (pool_key, pool)))
+    }
+
+    /// Whether `pool_key` keeps a transaction the user opened explicitly open
+    /// on purpose (MySQL auto-commit tabs with `preserve_explicit_transaction`).
+    pub(crate) async fn has_preserved_explicit_transaction(&self, pool_key: &str) -> bool {
+        self.mysql_preserved_transactions.read().await.contains(pool_key)
+    }
+
+    pub(crate) async fn mark_preserved_explicit_transaction(&self, pool_key: &str) {
+        self.mysql_preserved_transactions.write().await.insert(pool_key.to_string());
+    }
+
+    pub(crate) async fn clear_preserved_explicit_transaction(&self, pool_key: &str) {
+        self.mysql_preserved_transactions.write().await.remove(pool_key);
     }
 
     pub async fn remove_pool_by_key(&self, pool_key: &str) -> bool {
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
         self.postgres_cancel_contexts.write().await.remove(pool_key);
+        self.mysql_preserved_transactions.write().await.remove(pool_key);
         let removed = self.connections.write().await.remove(pool_key);
         if let Some(pool) = removed {
             self.pool_routing_control().close_pool_with_timeout(pool_key.to_string(), pool).await;

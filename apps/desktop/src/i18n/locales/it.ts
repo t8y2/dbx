@@ -370,6 +370,7 @@ export default withEnglishFallback({
     commit: "Commit",
     rollback: "Rollback",
     txnAutoRolledBack: "Transazione annullata automaticamente dopo 5 minuti di inattività",
+    autoCommitTxnRolledBack: 'La transazione esplicita lasciata aperta da questa scheda è stata annullata automaticamente; attiva "Mantieni le transazioni esplicite in autocommit" per conservarla tra le esecuzioni',
     previewSql: "Anteprima SQL",
     previewQuery: "Anteprima query",
     hidePreviewSql: "Nascondi anteprima SQL",
@@ -7303,6 +7304,9 @@ export default withEnglishFallback({
       'La modalità di transazione utilizzata per impostazione predefinita quando si apre un nuovo editor SQL. Con "Transazione manuale", i nuovi editori iniziano in modalità di transazione manuale, richiedendo commit o rollback manuale; con "Commit automatico", ogni istruzione viene committata automaticamente. Si applica solo ai database che supportano le transazioni.',
     defaultTransactionModeAuto: "Commit automatico",
     defaultTransactionModeManual: "Transazione manuale",
+    keepExplicitTransactionInAutoCommit: "Mantieni le transazioni esplicite in autocommit",
+    keepExplicitTransactionInAutoCommitDescription:
+      "Dopo aver eseguito BEGIN / START TRANSACTION in una scheda autocommit, la transazione resta aperta finché non esegui COMMIT o ROLLBACK. Se disattivato, ogni esecuzione annulla la transazione esplicita lasciata aperta, evitando che una transazione residua fissi lo snapshot di lettura della scheda.",
     executeAllOnBlankLine: "Esegui tutto l'SQL dalle righe vuote",
     executeAllOnBlankLineDescription: "In modalità istruzione corrente, esegue tutto l'SQL quando non è presente un'istruzione al cursore. Disattivato per impostazione predefinita.",
     showExecutionTargetPicker: "Mostra selettore destinazione",

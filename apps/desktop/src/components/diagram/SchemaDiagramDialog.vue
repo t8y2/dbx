@@ -35,7 +35,7 @@ import { saveDiagramBinaryExport, saveDiagramTextExport } from "@/lib/export/sav
 import { inferRelationships, filterByStorage } from "@/lib/diagram/match-engine";
 import { loadMatchConfirms, saveMatchConfirms, loadMatchIgnores, saveMatchIgnores, isAutoMatchEnabled } from "@/lib/diagram/match-storage";
 import { toVueFlowNodes, toVueFlowEdges, toDiagramEdges, toVueFlowLayerNodes, toAbsolutePosition, isTableCanvasVisible } from "@/lib/diagram/vue-flow-adapter";
-import { CARD_WIDTH, CARD_HEADER_HEIGHT, COLUMN_ROW_HEIGHT, CARD_BOTTOM_PADDING, GAP_X, GAP_Y, MARGIN, LAYER_CONTENT_PADDING, LAYER_HEADER_HEIGHT, DIAGRAM_HOVERED_EDGE_KEY, DIAGRAM_EDGE_OBSTACLES_KEY } from "@/lib/diagram/diagram-constants";
+import { CARD_WIDTH, CARD_HEADER_HEIGHT, COLUMN_ROW_HEIGHT, CARD_BOTTOM_PADDING, GAP_X, GAP_Y, MARGIN, LAYER_CONTENT_PADDING, LAYER_HEADER_HEIGHT, DIAGRAM_HOVERED_EDGE_KEY, DIAGRAM_EDGE_OBSTACLES_KEY, diagramTableCardHeight } from "@/lib/diagram/diagram-constants";
 import { sizeLayerToFit, findLayerAtPoint, placeNewLayer } from "@/lib/diagram/size-layer";
 import { computeLtrAutoLayout } from "@/lib/diagram/ltr-auto-layout";
 import { computeLayoutWithLayers } from "@/lib/diagram/elk-layout";
@@ -530,7 +530,9 @@ const customRelationshipCount = computed(() => customRelationships.value.length)
 const matchRelationshipCount = computed(() => matchResult.value.relationships.length);
 
 function tableHeight(table: DiagramTable): number {
-  return CARD_HEADER_HEIGHT + table.columns.length * COLUMN_ROW_HEIGHT + CARD_BOTTOM_PADDING;
+  // Includes the rendered table/column comment lines so canvas bounds, layers,
+  // edge routing and auto layout match the card height.
+  return diagramTableCardHeight(table);
 }
 
 const canvasSize = computed(() => {
@@ -1345,7 +1347,7 @@ async function setSelectedSchemas(values: string[]) {
   if (diagramReady.value) await loadDiagram();
 }
 
-async function loadTableDiagramData(tableName: string, querySchema: string): Promise<DiagramTable> {
+async function loadTableDiagramData(tableName: string, querySchema: string, tableComment?: string | null): Promise<DiagramTable> {
   try {
     const [columns, foreignKeys, indexes] = await Promise.all([
       api.getColumns(connectionId.value, database.value, querySchema, tableName),
@@ -1355,6 +1357,7 @@ async function loadTableDiagramData(tableName: string, querySchema: string): Pro
     return {
       name: tableName,
       schema: querySchema,
+      comment: tableComment ?? null,
       columns,
       foreignKeys,
       indexes: indexes.map((index) => ({
@@ -1374,7 +1377,7 @@ async function loadTableDiagramData(tableName: string, querySchema: string): Pro
   } catch (e) {
     failedTableCount.value += 1;
     console.warn(`[diagram] failed to load table metadata: ${querySchema}.${tableName}`, e);
-    return { name: tableName, schema: querySchema, columns: [], foreignKeys: [], indexes: [] };
+    return { name: tableName, schema: querySchema, comment: tableComment ?? null, columns: [], foreignKeys: [], indexes: [] };
   }
 }
 
@@ -1395,7 +1398,8 @@ async function loadDiagram() {
       targetSchemas.map(async (sc) => {
         try {
           const list = await api.listTables(connectionId.value, database.value, sc);
-          return list.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").map((table) => ({ name: table.name, schema: sc }));
+          // Keep the table comment so the card can render the table description.
+          return list.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").map((table) => ({ name: table.name, schema: sc, comment: table.comment ?? null }));
         } catch (e) {
           console.warn(`[diagram] failed to list tables for schema ${sc}`, e);
           return [];
@@ -1411,7 +1415,7 @@ async function loadDiagram() {
     const loadedTables: DiagramTable[] = [];
     for (let index = 0; index < baseTables.length; index += METADATA_BATCH_SIZE) {
       const batch = baseTables.slice(index, index + METADATA_BATCH_SIZE);
-      const batchTables = await Promise.all(batch.map((item) => loadTableDiagramData(item.name, item.schema)));
+      const batchTables = await Promise.all(batch.map((item) => loadTableDiagramData(item.name, item.schema, item.comment)));
       loadedTables.push(...batchTables);
       loadedTableCount.value = loadedTables.length;
     }

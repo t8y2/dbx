@@ -668,6 +668,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   // Flush any trailing statement that lacks a terminating semicolon.
   flush();
 
+  if (databaseType === "sqlserver") return mergeSqlServerControlFlowBatches(sql, statements, databaseType, parameterOptions);
   return statements;
 }
 
@@ -776,7 +777,7 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
   // SQL Server control-flow batches use line-oriented BEGIN/EXEC tokens inside one IF/ELSE statement.
-  if (isSqlServerIfElseControlFlowBatch(sql, statement, databaseType, parameterOptions)) return [statement];
+  if (isSqlServerControlFlowBatch(sql, statement, databaseType, parameterOptions)) return [statement];
 
   const lineStarts = topLevelSoftStatementLineStarts(sql, statement, databaseType, parameterOptions);
   if (lineStarts.length <= 1) return [statement];
@@ -882,11 +883,114 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   return ranges.length > 0 ? ranges : [statement];
 }
 
-function isSqlServerIfElseControlFlowBatch(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
-  if (databaseType !== "sqlserver" || !startsWithSqlWords(sql, statement.from, ["IF"], databaseType, parameterOptions)) return false;
+// `BEGIN` opens a control-flow block only when it does not start a transaction or a
+// conversation (`BEGIN TRAN`, `BEGIN DISTRIBUTED TRANSACTION`, `BEGIN DIALOG
+// CONVERSATION`); those have no matching `END`.
+const SQLSERVER_NON_BLOCK_BEGIN_KEYWORDS = new Set(["TRANSACTION", "TRAN", "DISTRIBUTED", "DIALOG", "CONVERSATION"]);
+// `END CONVERSATION`/`END DIALOG` close a conversation instead of a BEGIN/CASE block.
+const SQLSERVER_NON_BLOCK_END_KEYWORDS = new Set(["CONVERSATION", "DIALOG"]);
 
-  const words = topLevelWordsBefore(sql, statement.from, statement.to, 64, databaseType, parameterOptions);
-  return words.includes("ELSE") && words.includes("BEGIN") && words.includes("END");
+interface SqlServerControlFlowScan {
+  /** BEGIN/CASE blocks left open at the end of the scanned fragment. */
+  openBlocks: number;
+  /** A top-level `BEGIN` that really opens a block was seen. */
+  sawBlockBegin: boolean;
+  /** A top-level `ELSE` belonging to the enclosing `IF` (not to a `CASE`) was seen. */
+  hasControlFlowElse: boolean;
+}
+
+/**
+ * Collect the control-flow facts of a T-SQL fragment: how many BEGIN/CASE blocks
+ * it leaves open and whether it contains an `IF`-level `ELSE`. Tokens inside
+ * parentheses, string literals and comments are ignored, and `CASE ... END`
+ * nesting keeps a `CASE`'s own `ELSE` from looking like an `IF` branch.
+ */
+function scanSqlServerControlFlow(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlServerControlFlowScan {
+  const words = topLevelWordsInRange(sql, from, to, databaseType, parameterOptions);
+  let openBlocks = 0;
+  let sawBlockBegin = false;
+  let hasControlFlowElse = false;
+
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    const next = words[index + 1];
+    if (word === "BEGIN") {
+      if (next !== undefined && SQLSERVER_NON_BLOCK_BEGIN_KEYWORDS.has(next)) continue;
+      sawBlockBegin = true;
+      openBlocks += 1;
+      continue;
+    }
+    if (word === "CASE") {
+      openBlocks += 1;
+      continue;
+    }
+    if (word === "END") {
+      if (next !== undefined && SQLSERVER_NON_BLOCK_END_KEYWORDS.has(next)) continue;
+      if (openBlocks > 0) openBlocks -= 1;
+      continue;
+    }
+    if (word === "ELSE" && openBlocks === 0) {
+      hasControlFlowElse = true;
+    }
+  }
+
+  return { openBlocks, sawBlockBegin, hasControlFlowElse };
+}
+
+/**
+ * True when `statement` is a whole T-SQL control-flow batch: an `IF`/`WHILE`
+ * whose body is a `BEGIN ... END` block or whose branches are plain statements
+ * with an `ELSE`. Such a batch contains no independent statements, so it must
+ * stay one execution range instead of being split at the line-oriented
+ * `BEGIN`/`EXEC`/`END` tokens.
+ */
+function isSqlServerControlFlowBatch(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  if (databaseType !== "sqlserver") return false;
+  const firstWord = nextSqlWordToken(sql, statement.from, databaseType, parameterOptions)?.word;
+  if (firstWord !== "IF" && firstWord !== "WHILE") return false;
+
+  const scan = scanSqlServerControlFlow(sql, statement.from, statement.to, databaseType, parameterOptions);
+  return scan.hasControlFlowElse || (scan.sawBlockBegin && scan.openBlocks === 0);
+}
+
+/**
+ * T-SQL does not end a `BEGIN ... END` block at a semicolon, so splitting on
+ * every top-level `;` cuts `IF ... BEGIN ... ; ... END` batches into fragments
+ * whose `BEGIN`/`EXEC`/`END` lines then look like independent statements
+ * (#9336). Re-join the fragments of such a batch so it stays one range.
+ */
+function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[], databaseType: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+  const merged: RawStatement[] = [];
+  let index = 0;
+
+  while (index < statements.length) {
+    const first = statements[index];
+    const firstWord = nextSqlWordToken(sql, first.from, databaseType, parameterOptions)?.word;
+    if (firstWord !== "IF" && firstWord !== "WHILE") {
+      merged.push(first);
+      index += 1;
+      continue;
+    }
+
+    let last = index;
+    let openBlocks = scanSqlServerControlFlow(sql, first.from, first.to, databaseType, parameterOptions).openBlocks;
+    while (openBlocks > 0 && last + 1 < statements.length) {
+      last += 1;
+      openBlocks += scanSqlServerControlFlow(sql, statements[last].from, statements[last].to, databaseType, parameterOptions).openBlocks;
+    }
+
+    if (last === index) {
+      merged.push(first);
+      index += 1;
+      continue;
+    }
+
+    const to = statements[last].to;
+    merged.push({ hitFrom: first.hitFrom, from: first.from, to, sql: sql.slice(first.from, to) });
+    index = last + 1;
+  }
+
+  return merged;
 }
 
 function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): Array<{ hitFrom: number; from: number; keyword: string }> {
@@ -1129,6 +1233,12 @@ function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean
 }
 
 function topLevelWordsBefore(sql: string, from: number, to: number, limit: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): string[] {
+  const words = topLevelWordsInRange(sql, from, to, databaseType, parameterOptions);
+  return words.length > limit ? words.slice(words.length - limit) : words;
+}
+
+/** Top-level (paren-depth 0) keyword sequence of `sql[from, to)`, in order. */
+function topLevelWordsInRange(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): string[] {
   const words: string[] = [];
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
@@ -1274,7 +1384,6 @@ function topLevelWordsBefore(sql: string, from: number, to: number, limit: numbe
       const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
       if (match) {
         words.push(match[0].toUpperCase());
-        if (words.length > limit) words.shift();
         i += match[0].length;
         continue;
       }

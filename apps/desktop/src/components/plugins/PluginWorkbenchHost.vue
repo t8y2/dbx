@@ -93,14 +93,16 @@ async function tauriFileApi() {
   return import("@/lib/backend/tauri");
 }
 
-async function openTauriPluginFile(path: string, write: boolean): Promise<PluginFileHandleMeta> {
+async function openTauriPluginFile(pluginId: string, path: string, write: boolean): Promise<PluginFileHandleMeta> {
   const { openPluginLocalFile } = await tauriFileApi();
-  const handle = await openPluginLocalFile(path, write);
-  if (!write) openTauriHandles.add(handle.handleId);
+  const handle = await openPluginLocalFile(pluginId, path, write);
+  // Track read AND write handles: unmount must reclaim both (leaked fds also
+  // burn the shared 64-handle registry quota).
+  openTauriHandles.add(handle.handleId);
   return { handleId: `${tauriHandlePrefix}${handle.handleId}`, name: handle.name, size: handle.size, contentType: handle.contentType };
 }
 
-async function pickPluginFiles(options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]> {
+async function pickPluginFiles(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]> {
   if (isTauriRuntime()) {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ multiple: options.multiple === true });
@@ -108,7 +110,7 @@ async function pickPluginFiles(options: PluginPickFilesOptions): Promise<PluginF
     const files: PluginFileHandleMeta[] = [];
     for (const path of paths) {
       try {
-        files.push(await openTauriPluginFile(path, false));
+        files.push(await openTauriPluginFile(pluginId, path, false));
       } catch (error) {
         console.warn("[DBX][plugin-workbench:pick]", error);
       }
@@ -121,6 +123,12 @@ async function pickPluginFiles(options: PluginPickFilesOptions): Promise<PluginF
     input.type = "file";
     input.multiple = options.multiple === true;
     input.style.display = "none";
+    // The picker fires no change event on cancel; without this the pick
+    // promise hangs forever and the plugin's upload waits on nothing.
+    input.addEventListener("cancel", () => {
+      input.remove();
+      resolve(null);
+    });
     input.addEventListener("change", () => {
       input.remove();
       resolve(input.files);
@@ -137,11 +145,11 @@ async function pickPluginFiles(options: PluginPickFilesOptions): Promise<PluginF
   return files;
 }
 
-async function readPluginFileChunkById(handleId: string, offset: number, length?: number): Promise<PluginFileReadChunk> {
+async function readPluginFileChunkById(pluginId: string, handleId: string, offset: number, length?: number): Promise<PluginFileReadChunk> {
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { readPluginLocalFileChunk } = await tauriFileApi();
-    return readPluginLocalFileChunk(parsed.numericId, offset, length);
+    return readPluginLocalFileChunk(pluginId, parsed.numericId, offset, length);
   }
   const file = webPickedFiles.get(handleId);
   if (!file) throw new Error("Unknown file handle");
@@ -150,7 +158,7 @@ async function readPluginFileChunkById(handleId: string, offset: number, length?
   return { dataBase64: encodeBytesBase64(bytes), length: bytes.byteLength, eof: offset + bytes.byteLength >= file.size };
 }
 
-async function beginPluginFileSave(request: { name?: string; contentType?: string; size?: number }): Promise<{ handleId: string; chunkBytes: number } | null> {
+async function beginPluginFileSave(pluginId: string, request: { name?: string; contentType?: string; size?: number }): Promise<{ handleId: string; chunkBytes: number } | null> {
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const fileName = request.name || "download.bin";
@@ -161,7 +169,7 @@ async function beginPluginFileSave(request: { name?: string; contentType?: strin
     });
     if (!path) return null;
     const { openPluginLocalFile } = await tauriFileApi();
-    const handle = await openPluginLocalFile(path, true);
+    const handle = await openPluginLocalFile(pluginId, path, true);
     return { handleId: `${tauriHandlePrefix}${handle.handleId}`, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
   }
   const handleId = `${webHandlePrefix}${++webFileSequence}`;
@@ -169,11 +177,11 @@ async function beginPluginFileSave(request: { name?: string; contentType?: strin
   return { handleId, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
 }
 
-async function writePluginFileChunkById(handleId: string, offset: number, bytes: Uint8Array): Promise<PluginFileWriteResult> {
+async function writePluginFileChunkById(pluginId: string, handleId: string, offset: number, bytes: Uint8Array): Promise<PluginFileWriteResult> {
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { writePluginLocalFileChunk } = await tauriFileApi();
-    return writePluginLocalFileChunk(parsed.numericId, offset, encodeBytesBase64(bytes));
+    return writePluginLocalFileChunk(pluginId, parsed.numericId, offset, encodeBytesBase64(bytes));
   }
   const buffer = webSaveBuffers.get(handleId);
   if (!buffer) throw new Error("Unknown file handle");
@@ -181,12 +189,12 @@ async function writePluginFileChunkById(handleId: string, offset: number, bytes:
   return { written: bytes.byteLength, nextOffset: offset + bytes.byteLength };
 }
 
-async function finishPluginFileSave(handleId: string): Promise<void> {
+async function finishPluginFileSave(pluginId: string, handleId: string): Promise<void> {
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
     openTauriHandles.delete(parsed.numericId);
-    await closePluginLocalFile(parsed.numericId);
+    await closePluginLocalFile(pluginId, parsed.numericId);
     return;
   }
   const buffer = webSaveBuffers.get(handleId);
@@ -208,12 +216,12 @@ async function finishPluginFileSave(handleId: string): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-async function closePluginFileHandleById(handleId: string): Promise<void> {
+async function closePluginFileHandleById(pluginId: string, handleId: string): Promise<void> {
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
     openTauriHandles.delete(parsed.numericId);
-    await closePluginLocalFile(parsed.numericId);
+    await closePluginLocalFile(pluginId, parsed.numericId);
     return;
   }
   webPickedFiles.delete(handleId);
@@ -223,7 +231,7 @@ async function closePluginFileHandleById(handleId: string): Promise<void> {
 function disposeLocalFileHandles(): void {
   for (const handleId of openTauriHandles)
     tauriFileApi()
-      .then(({ closePluginLocalFile }) => closePluginLocalFile(handleId))
+      .then(({ closePluginLocalFile }) => closePluginLocalFile(props.plugin.manifest.id, handleId))
       .catch(() => undefined);
   openTauriHandles.clear();
   webPickedFiles.clear();
@@ -284,7 +292,7 @@ function onHostFileDrop(event: Event): void {
     const files: PluginFileHandleMeta[] = [];
     for (const path of paths) {
       try {
-        files.push(await openTauriPluginFile(path, false));
+        files.push(await openTauriPluginFile(props.plugin.manifest.id, path, false));
       } catch (error) {
         console.error("[DBX][plugin-workbench:drop]", error);
       }
@@ -339,12 +347,12 @@ function createBridge() {
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       copyText: (_pluginId, text) => copyToClipboard(text),
-      pickFiles: (_pluginId, options) => pickPluginFiles(options),
-      readFileChunk: (_pluginId, handleId, offset, length) => readPluginFileChunkById(handleId, offset, length),
-      beginFileSave: (_pluginId, request) => beginPluginFileSave(request),
-      writeFileChunk: (_pluginId, handleId, offset, bytes) => writePluginFileChunkById(handleId, offset, bytes),
-      finishFileSave: (_pluginId, handleId) => finishPluginFileSave(handleId),
-      closeFileHandle: (_pluginId, handleId) => closePluginFileHandleById(handleId),
+      pickFiles: (pluginId, options) => pickPluginFiles(pluginId, options),
+      readFileChunk: (pluginId, handleId, offset, length) => readPluginFileChunkById(pluginId, handleId, offset, length),
+      beginFileSave: (pluginId, request) => beginPluginFileSave(pluginId, request),
+      writeFileChunk: (pluginId, handleId, offset, bytes) => writePluginFileChunkById(pluginId, handleId, offset, bytes),
+      finishFileSave: (pluginId, handleId) => finishPluginFileSave(pluginId, handleId),
+      closeFileHandle: (pluginId, handleId) => closePluginFileHandleById(pluginId, handleId),
     },
     appLocale.value,
     currentBridgeTheme(),
@@ -547,7 +555,7 @@ onBeforeUnmount(() => {
       <span>{{ error }}</span>
     </div>
     <template v-else>
-      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write; clipboard-read" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
       <!-- Cover until the frame has actually painted: the iframe stays mounted
            underneath so its load event can fire (v-else on the overlay would
            deadlock), it just isn't visible yet. Fully opaque so the covered

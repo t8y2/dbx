@@ -2438,20 +2438,20 @@ export interface PluginLocalFileWriteResult {
   nextOffset: number;
 }
 
-export async function openPluginLocalFile(path: string, write: boolean): Promise<PluginLocalFileHandle> {
-  return invoke("plugin_file_open", { path, write });
+export async function openPluginLocalFile(pluginId: string, path: string, write: boolean): Promise<PluginLocalFileHandle> {
+  return invoke("plugin_file_open", { pluginId, path, write });
 }
 
-export async function readPluginLocalFileChunk(handleId: number, offset: number, length?: number): Promise<PluginLocalFileChunk> {
-  return invoke("plugin_file_read", { handleId, offset, length });
+export async function readPluginLocalFileChunk(pluginId: string, handleId: number, offset: number, length?: number): Promise<PluginLocalFileChunk> {
+  return invoke("plugin_file_read", { pluginId, handleId, offset, length });
 }
 
-export async function writePluginLocalFileChunk(handleId: number, offset: number, dataBase64: string): Promise<PluginLocalFileWriteResult> {
-  return invoke("plugin_file_write", { handleId, offset, dataBase64 });
+export async function writePluginLocalFileChunk(pluginId: string, handleId: number, offset: number, dataBase64: string): Promise<PluginLocalFileWriteResult> {
+  return invoke("plugin_file_write", { pluginId, handleId, offset, dataBase64 });
 }
 
-export async function closePluginLocalFile(handleId: number): Promise<void> {
-  return invoke("plugin_file_close", { handleId });
+export async function closePluginLocalFile(pluginId: string, handleId: number): Promise<void> {
+  return invoke("plugin_file_close", { pluginId, handleId });
 }
 
 export async function listPluginFilesystemEntries(pluginId: string, providerId: string, options: { connectionId?: string; uri?: string; cursor?: string; limit?: number } = {}): Promise<PluginFilesystemListResult> {

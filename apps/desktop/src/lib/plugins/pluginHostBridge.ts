@@ -417,7 +417,9 @@ export class PluginHostBridge {
         contentType: optionalTrimmedString(input.contentType),
         size: input.size === undefined || typeof input.size !== "number" || !Number.isFinite(input.size) ? undefined : Math.max(0, Math.floor(input.size)),
       });
-      return target ?? { handleId: "", chunkBytes: 0, cancelled: true };
+      // Cancelled saves resolve null, exactly as the documented contract and
+      // every plugin's env.d.ts types it.
+      return target;
     }
     if (method === "host.writeFileChunk") {
       const input = requireRecord(params, "host.writeFileChunk params");
@@ -740,7 +742,10 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         beginSave: (options) => request('host.beginFileSave', options || {}),
         write: (handleId, offset, data) => {
           if (typeof data === 'string') return request('host.writeFileChunk', { handleId, offset, dataBase64: data });
-          const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.buffer : new Uint8Array(data).buffer);
+          // A Uint8Array can be a view into a larger buffer — transferring
+          // .buffer blindly would send bytes outside the view. Copy the
+          // visible range into a standalone buffer first.
+          const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
           return request('host.writeFileChunk', { handleId, offset }, { transfer: bytes });
         },
         finish: (handleId) => request('host.finishFileSave', { handleId }),

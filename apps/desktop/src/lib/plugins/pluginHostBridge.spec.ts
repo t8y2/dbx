@@ -1011,6 +1011,17 @@ describe("plugin SDK source", () => {
     for (const message of messages) expect((message as { error?: string }).error).toBeUndefined();
   });
 
+  it("resolves a cancelled beginFileSave to null", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), beginFileSave: vi.fn().mockResolvedValue(null) });
+
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "1", method: "host.beginFileSave", params: { name: "out.bin" } } } as MessageEvent);
+
+    await vi.waitFor(() => expect(messages.filter((message) => (message as { type?: string }).type === "response")).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ type: "response", id: "1", result: null });
+  });
+
   it("pushes drag state and opened drop handles to the plugin", () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

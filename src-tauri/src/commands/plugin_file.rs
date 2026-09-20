@@ -6,17 +6,21 @@
 //! the user picked the file in a native dialog or dropped it onto the plugin's
 //! workbench area — both are explicit user consent, and every open goes through
 //! the workbench-host TS layer, which is the only caller of these commands.
+//!
+//! Every handle is owned by the plugin that opened it: all operations carry the
+//! caller's plugin id and are rejected unless it matches, and ids come from
+//! uuid v4 so a malicious plugin cannot enumerate another plugin's handles.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 use tauri::State;
+use uuid::Uuid;
 
 /// Mirrors the bridge binary cap: one read/write chunk never exceeds it.
 pub const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -31,12 +35,12 @@ struct OpenFile {
     file: File,
     write: bool,
     size: u64,
+    owner: String,
 }
 
 #[derive(Default)]
 pub struct PluginFileState {
     handles: Mutex<HashMap<u64, OpenFile>>,
-    next_id: AtomicU64,
 }
 
 impl PluginFileState {
@@ -104,10 +108,32 @@ fn with_handles<T>(
     body(&mut handles)
 }
 
+fn owned_handle<'a>(
+    handles: &'a mut HashMap<u64, OpenFile>,
+    plugin_id: &str,
+    handle_id: u64,
+) -> Result<&'a mut OpenFile, String> {
+    let entry = handles.get_mut(&handle_id).ok_or_else(|| "unknown plugin file handle".to_string())?;
+    if entry.owner != plugin_id {
+        // Deliberately indistinguishable from a missing handle: a plugin must
+        // not learn that another plugin's handle ids exist.
+        return Err("unknown plugin file handle".to_string());
+    }
+    Ok(entry)
+}
+
 /// Open a local file for the plugin bridge. `write` handles truncate existing
 /// content (the path comes from the native save dialog, where the user already
 /// confirmed overwriting); they may not exist yet.
-pub fn open_plugin_file(state: &PluginFileState, path: &str, write: bool) -> Result<PluginFileHandle, String> {
+pub fn open_plugin_file(
+    state: &PluginFileState,
+    plugin_id: &str,
+    path: &str,
+    write: bool,
+) -> Result<PluginFileHandle, String> {
+    if plugin_id.trim().is_empty() {
+        return Err("plugin id is required".to_string());
+    }
     let path = Path::new(path);
     let metadata = std::fs::metadata(path);
     if let Ok(metadata) = &metadata {
@@ -135,14 +161,18 @@ pub fn open_plugin_file(state: &PluginFileState, path: &str, write: bool) -> Res
         if handles.len() >= MAX_OPEN_HANDLES {
             return Err(format!("too many open plugin file handles (max {MAX_OPEN_HANDLES})"));
         }
-        let handle_id = state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        handles.insert(handle_id, OpenFile { file, write, size });
+        // Unguessable id: a plugin that can only reach its own bridge must not
+        // be able to walk the registry by trying sequential ids.
+        let bytes = Uuid::new_v4().into_bytes();
+        let handle_id = u64::from_be_bytes(bytes[0..8].try_into().expect("uuid prefix"));
+        handles.insert(handle_id, OpenFile { file, write, size, owner: plugin_id.to_string() });
         Ok(PluginFileHandle { handle_id, name, size, content_type: guess_content_type(path), write })
     })
 }
 
 pub fn read_plugin_file_chunk(
     state: &PluginFileState,
+    plugin_id: &str,
     handle_id: u64,
     offset: u64,
     length: Option<u32>,
@@ -152,7 +182,7 @@ pub fn read_plugin_file_chunk(
         return Err("read length must be positive".to_string());
     }
     with_handles(state, |handles| {
-        let entry = handles.get_mut(&handle_id).ok_or_else(|| "unknown plugin file handle".to_string())?;
+        let entry = owned_handle(handles, plugin_id, handle_id)?;
         if entry.write {
             return Err("handle is write-only".to_string());
         }
@@ -171,6 +201,7 @@ pub fn read_plugin_file_chunk(
 
 pub fn write_plugin_file_chunk(
     state: &PluginFileState,
+    plugin_id: &str,
     handle_id: u64,
     offset: u64,
     data_base64: &str,
@@ -180,7 +211,7 @@ pub fn write_plugin_file_chunk(
     }
     let bytes = BASE64.decode(data_base64.as_bytes()).map_err(|error| format!("invalid base64 payload: {error}"))?;
     with_handles(state, |handles| {
-        let entry = handles.get_mut(&handle_id).ok_or_else(|| "unknown plugin file handle".to_string())?;
+        let entry = owned_handle(handles, plugin_id, handle_id)?;
         if !entry.write {
             return Err("handle is read-only".to_string());
         }
@@ -193,53 +224,61 @@ pub fn write_plugin_file_chunk(
 /// Close a handle. Write handles are flushed to disk before dropping; the
 /// bytes were already handed to the OS through `write_all`, so failure here
 /// means the OS could not flush — surfaced to the plugin as an error.
-pub fn close_plugin_file(state: &PluginFileState, handle_id: u64) -> Result<(), String> {
+pub fn close_plugin_file(state: &PluginFileState, plugin_id: &str, handle_id: u64) -> Result<(), String> {
     with_handles(state, |handles| {
-        let entry = handles.remove(&handle_id).ok_or_else(|| "unknown plugin file handle".to_string())?;
-        if entry.write {
-            entry.file.sync_all().map_err(|error| format!("flush failed: {error}"))?;
+        {
+            let entry = owned_handle(handles, plugin_id, handle_id)?;
+            if entry.write {
+                entry.file.sync_all().map_err(|error| format!("flush failed: {error}"))?;
+            }
         }
-        Ok(())
+        handles.remove(&handle_id).map(|_| ()).ok_or_else(|| "unknown plugin file handle".to_string())
     })
 }
 
 #[tauri::command]
 pub fn plugin_file_open(
     state: State<'_, PluginFileState>,
+    plugin_id: String,
     path: String,
     write: Option<bool>,
 ) -> Result<PluginFileHandle, String> {
-    open_plugin_file(&state, &path, write == Some(true))
+    open_plugin_file(&state, &plugin_id, &path, write == Some(true))
 }
 
 #[tauri::command]
 pub fn plugin_file_read(
     state: State<'_, PluginFileState>,
+    plugin_id: String,
     handle_id: u64,
     offset: u64,
     length: Option<u32>,
 ) -> Result<PluginFileReadChunk, String> {
-    read_plugin_file_chunk(&state, handle_id, offset, length)
+    read_plugin_file_chunk(&state, &plugin_id, handle_id, offset, length)
 }
 
 #[tauri::command]
 pub fn plugin_file_write(
     state: State<'_, PluginFileState>,
+    plugin_id: String,
     handle_id: u64,
     offset: u64,
     data_base64: String,
 ) -> Result<PluginFileWriteResult, String> {
-    write_plugin_file_chunk(&state, handle_id, offset, &data_base64)
+    write_plugin_file_chunk(&state, &plugin_id, handle_id, offset, &data_base64)
 }
 
 #[tauri::command]
-pub fn plugin_file_close(state: State<'_, PluginFileState>, handle_id: u64) -> Result<(), String> {
-    close_plugin_file(&state, handle_id)
+pub fn plugin_file_close(state: State<'_, PluginFileState>, plugin_id: String, handle_id: u64) -> Result<(), String> {
+    close_plugin_file(&state, &plugin_id, handle_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OWNER: &str = "io.dbx.sample";
+    const OTHER: &str = "io.dbx.other";
 
     fn temp_file(name: &str, contents: &[u8]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("dbx-plugin-file-{}-{name}", std::process::id()));
@@ -251,21 +290,40 @@ mod tests {
     fn open_read_and_close_roundtrip() {
         let path = temp_file("roundtrip.bin", b"hello plugin bridge");
         let state = PluginFileState::new();
-        let handle = open_plugin_file(&state, path.to_string_lossy().as_ref(), false).expect("open");
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), false).expect("open");
         assert_eq!(handle.size, 19);
         assert_eq!(handle.name, path.file_name().and_then(|value| value.to_str()).unwrap());
         assert!(!handle.write);
         assert_eq!(handle.content_type, "application/octet-stream");
 
-        let chunk = read_plugin_file_chunk(&state, handle.handle_id, 6, Some(6)).expect("read");
+        let chunk = read_plugin_file_chunk(&state, OWNER, handle.handle_id, 6, Some(6)).expect("read");
         assert_eq!(BASE64.decode(chunk.data_base64).unwrap(), b"plugin");
         assert!(!chunk.eof);
-        let tail = read_plugin_file_chunk(&state, handle.handle_id, 13, Some(64)).expect("read tail");
+        let tail = read_plugin_file_chunk(&state, OWNER, handle.handle_id, 13, Some(64)).expect("read tail");
         assert_eq!(BASE64.decode(tail.data_base64).unwrap(), b"bridge");
         assert!(tail.eof);
 
-        close_plugin_file(&state, handle.handle_id).expect("close");
-        assert!(read_plugin_file_chunk(&state, handle.handle_id, 0, None).is_err());
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
+        assert!(read_plugin_file_chunk(&state, OWNER, handle.handle_id, 0, None).is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn handles_reject_other_plugins() {
+        let path = temp_file("ownership.bin", b"secret");
+        let state = PluginFileState::new();
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), false).expect("open");
+
+        let foreign_read = read_plugin_file_chunk(&state, OTHER, handle.handle_id, 0, None).unwrap_err();
+        assert_eq!(foreign_read, "unknown plugin file handle");
+        let foreign_write =
+            write_plugin_file_chunk(&state, OTHER, handle.handle_id, 0, &BASE64.encode(b"x")).unwrap_err();
+        assert_eq!(foreign_write, "unknown plugin file handle");
+        let foreign_close = close_plugin_file(&state, OTHER, handle.handle_id).unwrap_err();
+        assert_eq!(foreign_close, "unknown plugin file handle");
+        assert!(read_plugin_file_chunk(&state, OWNER, handle.handle_id, 0, None).is_ok());
+
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
         let _ = std::fs::remove_file(path);
     }
 
@@ -273,15 +331,19 @@ mod tests {
     fn write_handle_truncates_and_persists() {
         let path = temp_file("write.bin", b"stale contents");
         let state = PluginFileState::new();
-        let handle = open_plugin_file(&state, path.to_string_lossy().as_ref(), true).expect("open write");
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), true).expect("open write");
         assert!(handle.write);
         assert_eq!(handle.size, 0);
-        assert!(read_plugin_file_chunk(&state, handle.handle_id, 0, None).is_err(), "write handles reject reads");
+        assert!(
+            read_plugin_file_chunk(&state, OWNER, handle.handle_id, 0, None).is_err(),
+            "write handles reject reads"
+        );
 
-        let written = write_plugin_file_chunk(&state, handle.handle_id, 0, &BASE64.encode(b"fresh")).expect("write");
+        let written =
+            write_plugin_file_chunk(&state, OWNER, handle.handle_id, 0, &BASE64.encode(b"fresh")).expect("write");
         assert_eq!(written.written, 5);
         assert_eq!(written.next_offset, 5);
-        close_plugin_file(&state, handle.handle_id).expect("close");
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
 
         assert_eq!(std::fs::read(&path).unwrap(), b"fresh");
         let _ = std::fs::remove_file(path);
@@ -292,32 +354,34 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-plugin-file-{}-new.bin", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let state = PluginFileState::new();
-        let handle = open_plugin_file(&state, path.to_string_lossy().as_ref(), true).expect("open write");
-        write_plugin_file_chunk(&state, handle.handle_id, 0, &BASE64.encode(b"data")).expect("write");
-        close_plugin_file(&state, handle.handle_id).expect("close");
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), true).expect("open write");
+        write_plugin_file_chunk(&state, OWNER, handle.handle_id, 0, &BASE64.encode(b"data")).expect("write");
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
         assert_eq!(std::fs::read(&path).unwrap(), b"data");
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn rejects_directory_and_unknown_handles() {
+    fn rejects_directory_unknown_handles_and_missing_plugin_id() {
         let state = PluginFileState::new();
-        let error = open_plugin_file(&state, std::env::temp_dir().to_string_lossy().as_ref(), false).unwrap_err();
+        let error =
+            open_plugin_file(&state, OWNER, std::env::temp_dir().to_string_lossy().as_ref(), false).unwrap_err();
         assert!(error.contains("directory"));
-        assert!(read_plugin_file_chunk(&state, 999_999, 0, None).is_err());
-        assert!(close_plugin_file(&state, 999_999).is_err());
+        assert!(open_plugin_file(&state, "  ", std::env::temp_dir().to_string_lossy().as_ref(), false).is_err());
+        assert!(read_plugin_file_chunk(&state, OWNER, 999_999, 0, None).is_err());
+        assert!(close_plugin_file(&state, OWNER, 999_999).is_err());
     }
 
     #[test]
     fn read_rejects_offset_beyond_size() {
         let path = temp_file("bounds.bin", b"abc");
         let state = PluginFileState::new();
-        let handle = open_plugin_file(&state, path.to_string_lossy().as_ref(), false).expect("open");
-        assert!(read_plugin_file_chunk(&state, handle.handle_id, 4, None).is_err());
-        let at_end = read_plugin_file_chunk(&state, handle.handle_id, 3, None).expect("read at eof");
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), false).expect("open");
+        assert!(read_plugin_file_chunk(&state, OWNER, handle.handle_id, 4, None).is_err());
+        let at_end = read_plugin_file_chunk(&state, OWNER, handle.handle_id, 3, None).expect("read at eof");
         assert!(at_end.eof);
         assert_eq!(at_end.length, 0);
-        close_plugin_file(&state, handle.handle_id).expect("close");
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
         let _ = std::fs::remove_file(path);
     }
 
@@ -325,16 +389,16 @@ mod tests {
     fn content_type_is_guessed_from_extension() {
         let mut path = temp_file("ctype.svg", b"<svg/>");
         let state = PluginFileState::new();
-        let handle = open_plugin_file(&state, path.to_string_lossy().as_ref(), false).expect("open");
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), false).expect("open");
         assert_eq!(handle.content_type, "image/svg+xml");
-        close_plugin_file(&state, handle.handle_id).expect("close");
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
         let _ = std::fs::remove_file(&path);
 
         path.set_extension("weird");
         std::fs::write(&path, b"x").unwrap();
-        let handle = open_plugin_file(&state, path.to_string_lossy().as_ref(), false).expect("open");
+        let handle = open_plugin_file(&state, OWNER, path.to_string_lossy().as_ref(), false).expect("open");
         assert_eq!(handle.content_type, "application/octet-stream");
-        close_plugin_file(&state, handle.handle_id).expect("close");
+        close_plugin_file(&state, OWNER, handle.handle_id).expect("close");
         let _ = std::fs::remove_file(path);
     }
 }

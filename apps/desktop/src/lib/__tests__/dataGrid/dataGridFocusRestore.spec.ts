@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveGridFocusRestoreTarget } from "@/lib/dataGrid/dataGridFocusRestore";
+import { resolveGridFocusRestoreTarget, shouldRestoreDataGridFocusAfterEditCommit } from "@/lib/dataGrid/dataGridFocusRestore";
 
 function element(overrides: { connected?: boolean; children?: HTMLElement[]; closest?: Record<string, HTMLElement | null>; ownerDocument?: { body: HTMLElement; documentElement: HTMLElement }; activeGrid?: boolean } = {}) {
   const children = overrides.children ?? [];
@@ -64,5 +64,50 @@ describe("resolveGridFocusRestoreTarget", () => {
     const activeGrid = element({ activeGrid: true });
     const activeGridInput = element({ closest: { "[data-grid-root]": activeGrid } });
     expect(resolveGridFocusRestoreTarget(root, searchInput, activeGridInput)).toBeNull();
+  });
+});
+
+describe("shouldRestoreDataGridFocusAfterEditCommit", () => {
+  it("restores focus when the grid root is not mounted yet", () => {
+    expect(shouldRestoreDataGridFocusAfterEditCommit(null, null)).toBe(true);
+    expect(shouldRestoreDataGridFocusAfterEditCommit(undefined, null)).toBe(true);
+  });
+
+  it("keeps focus in the grid after a keyboard commit", () => {
+    const input = element();
+    const root = element({ children: [input] });
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, input)).toBe(true);
+  });
+
+  it("restores focus when the blur landed on body or the document element", () => {
+    const body = element();
+    const documentElement = element();
+    const root = element({ ownerDocument: { body, documentElement } });
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, body)).toBe(true);
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, documentElement)).toBe(true);
+  });
+
+  it("restores focus from a stale removed element", () => {
+    const root = element();
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, element({ connected: false }))).toBe(true);
+  });
+
+  it("restores focus when the tab strip took it", () => {
+    const root = element();
+    const tabButton = element({ closest: { ".app-tab-bar, [role='tab'], [role='tablist']": element() } });
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, tabButton)).toBe(true);
+  });
+
+  it("does not steal focus back from the SQL editor after an outside click", () => {
+    const root = element();
+    const sqlEditor = element();
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, sqlEditor)).toBe(false);
+  });
+
+  it("does not steal focus back from another active grid", () => {
+    const root = element();
+    const grid = element({ activeGrid: true });
+    const otherGridInput = element({ closest: { "[data-grid-root]": grid } });
+    expect(shouldRestoreDataGridFocusAfterEditCommit(root, otherGridInput)).toBe(false);
   });
 });

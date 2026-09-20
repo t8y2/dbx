@@ -3845,9 +3845,13 @@ const webdavError = ref(false);
 const syncMethodTab = ref<"webdav" | "snippet">("webdav");
 
 const snippetProvider = ref<SnippetProvider>((localStorage.getItem("dbx-snippet-provider") as SnippetProvider) || "github");
+const snippetInstanceUrl = ref(localStorage.getItem("dbx-gitlab-instance-url") || "https://gitlab.com");
+const activeSnippetInstanceUrl = ref(snippetInstanceUrl.value);
+const snippetInstanceError = ref("");
+const snippetPreferenceKey = () => `dbx-snippet-remember-token-${snippetProvider.value}${snippetProvider.value === "gitlab" ? `-${activeSnippetInstanceUrl.value}` : ""}`;
 const snippetId = ref("");
 const snippetToken = ref("");
-const snippetRememberToken = ref(localStorage.getItem(`dbx-snippet-remember-token-${snippetProvider.value}`) === "true");
+const snippetRememberToken = ref(localStorage.getItem(snippetPreferenceKey()) === "true");
 const snippetHasSavedToken = ref(false);
 const snippetPassphrase = ref("");
 const snippetSecretsPassphrase = ref("");
@@ -3861,7 +3865,7 @@ const pendingLegacyCleanupId = ref("");
 const snippetSyncSettingsLoading = ref(true);
 
 const webdavReady = computed(() => !!webdavEndpoint.value.trim() && !webdavBusy.value && (!webdavSyncSecrets.value || !!webdavSecretsPassphrase.value.trim() || webdavHasSavedSecretsPassphrase.value));
-const snippetReady = computed(() => !snippetSyncSettingsLoading.value && !snippetBusy.value && (!!snippetToken.value.trim() || snippetHasSavedToken.value));
+const snippetReady = computed(() => !snippetSyncSettingsLoading.value && !snippetBusy.value && (snippetProvider.value !== "gitlab" || (!snippetInstanceError.value && snippetInstanceUrl.value === activeSnippetInstanceUrl.value)) && (!!snippetToken.value.trim() || snippetHasSavedToken.value));
 const snippetUploadReady = computed(() => snippetReady.value && !!snippetPassphrase.value.trim() && (!snippetIncludeSecrets.value || !!snippetSecretsPassphrase.value.trim()));
 // Legacy plaintext snippets have no outer encryption password. Let the
 // backend require one only after it detects an encrypted envelope so those
@@ -3871,6 +3875,7 @@ const snippetDownloadReady = computed(() => snippetReady.value && (!snippetResto
 function currentSnippetConfig(replaceLegacySnippet = false): SnippetSyncConfig {
   return {
     provider: snippetProvider.value,
+    instanceUrl: snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined,
     token: snippetToken.value.trim() || undefined,
     snippetId: snippetId.value.trim() || undefined,
     replaceLegacySnippet: replaceLegacySnippet || undefined,
@@ -3882,43 +3887,70 @@ function currentSnippetAccountConfig(): SnippetSyncConfig {
 }
 
 async function refreshSnippetTokenStatus() {
+  const account = `${snippetProvider.value}:${activeSnippetInstanceUrl.value}`;
   try {
     const status = await snippetTokenStatus(currentSnippetAccountConfig());
+    if (account !== `${snippetProvider.value}:${activeSnippetInstanceUrl.value}`) return;
     snippetHasSavedToken.value = status.hasSavedToken;
     if (status.hasSavedToken) snippetRememberToken.value = true;
   } catch {
-    snippetHasSavedToken.value = false;
+    if (account === `${snippetProvider.value}:${activeSnippetInstanceUrl.value}`) snippetHasSavedToken.value = false;
   }
 }
 
-async function refreshSnippetSyncSettings(provider = snippetProvider.value) {
+async function refreshSnippetSyncSettings(provider = snippetProvider.value, instanceUrl = activeSnippetInstanceUrl.value) {
+  const isCurrent = () => provider === snippetProvider.value && instanceUrl === activeSnippetInstanceUrl.value;
   try {
-    const settings = await snippetSyncSettings(provider);
-    if (provider !== snippetProvider.value) return;
+    const settings = await snippetSyncSettings(provider, provider === "gitlab" ? instanceUrl : undefined);
+    if (!isCurrent()) return;
     pendingLegacyCleanupId.value = settings.legacyCleanupRequiredId || "";
     if (settings.snippetId) {
       snippetId.value = settings.snippetId;
       return;
     }
-    const legacyId = localStorage.getItem(`dbx-snippet-id-${provider}`)?.trim();
+    const legacyId = provider === "gitlab" ? undefined : localStorage.getItem(`dbx-snippet-id-${provider}`)?.trim();
     if (legacyId) {
       await saveSnippetSyncId(provider, legacyId);
       localStorage.removeItem(`dbx-snippet-id-${provider}`);
     }
-    if (provider !== snippetProvider.value) return;
+    if (!isCurrent()) return;
     snippetId.value = legacyId || "";
   } catch {
-    if (provider === snippetProvider.value) {
+    if (isCurrent()) {
       snippetId.value = "";
       pendingLegacyCleanupId.value = "";
     }
   } finally {
-    if (provider === snippetProvider.value) snippetSyncSettingsLoading.value = false;
+    if (isCurrent()) snippetSyncSettingsLoading.value = false;
   }
 }
 
 async function persistSnippetSyncId() {
-  await saveSnippetSyncId(snippetProvider.value, snippetId.value.trim() || undefined);
+  await saveSnippetSyncId(snippetProvider.value, snippetId.value.trim() || undefined, snippetProvider.value === "gitlab" ? activeSnippetInstanceUrl.value : undefined);
+}
+
+function commitSnippetInstance() {
+  try {
+    const url = new URL(snippetInstanceUrl.value.trim());
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
+    snippetInstanceUrl.value = url.href.replace(/\/$/, "");
+    snippetInstanceError.value = "";
+  } catch {
+    snippetInstanceError.value = t("settings.syncGitLabInstanceInvalid");
+    return;
+  }
+  if (snippetInstanceUrl.value === activeSnippetInstanceUrl.value) return;
+  activeSnippetInstanceUrl.value = snippetInstanceUrl.value;
+  localStorage.setItem("dbx-gitlab-instance-url", activeSnippetInstanceUrl.value);
+  snippetRememberToken.value = localStorage.getItem(snippetPreferenceKey()) === "true";
+  snippetToken.value = "";
+  snippetHasSavedToken.value = false;
+  snippetId.value = "";
+  legacySnippetId.value = "";
+  pendingLegacyCleanupId.value = "";
+  snippetSyncSettingsLoading.value = true;
+  void refreshSnippetTokenStatus();
+  void refreshSnippetSyncSettings();
 }
 
 async function applySnippetTokenPreference() {
@@ -3940,7 +3972,7 @@ async function runSnippetAction(kind: "test" | "upload" | "download" | "migrate"
   snippetError.value = false;
   try {
     localStorage.setItem("dbx-snippet-provider", snippetProvider.value);
-    localStorage.setItem(`dbx-snippet-remember-token-${snippetProvider.value}`, String(snippetRememberToken.value));
+    localStorage.setItem(snippetPreferenceKey(), String(snippetRememberToken.value));
     if (persistCurrentSnippetId) await persistSnippetSyncId();
     await applySnippetTokenPreference();
     snippetMessage.value = await action();
@@ -4325,8 +4357,9 @@ watch([webdavAutoUploadEnabled, webdavAutoUploadIntervalMinutes], () => {
 watch(snippetProvider, (provider) => {
   localStorage.setItem("dbx-snippet-provider", provider);
   snippetId.value = "";
-  snippetRememberToken.value = localStorage.getItem(`dbx-snippet-remember-token-${provider}`) === "true";
+  snippetRememberToken.value = localStorage.getItem(snippetPreferenceKey()) === "true";
   snippetToken.value = "";
+  snippetHasSavedToken.value = false;
   legacySnippetId.value = "";
   pendingLegacyCleanupId.value = "";
   snippetSyncSettingsLoading.value = true;
@@ -8456,7 +8489,7 @@ LIMIT 100;</pre
               <Tabs v-model="syncMethodTab" class="w-full">
                 <TabsList v-if="!isWeb" class="grid w-full grid-cols-2">
                   <TabsTrigger value="webdav">WebDAV</TabsTrigger>
-                  <TabsTrigger value="snippet">GitHub / Gitee</TabsTrigger>
+                  <TabsTrigger value="snippet">{{ t("settings.syncSnippetTitle") }}</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="webdav" data-settings-search-id="sync-webdav" :class="['mt-5 space-y-5', settingsSearchTargetClass('sync-webdav')]">
@@ -8583,8 +8616,15 @@ LIMIT 100;</pre
                         <SelectContent>
                           <SelectItem value="github">GitHub Gist</SelectItem>
                           <SelectItem value="gitee">{{ t("settings.syncSnippetProviderGitee") }}</SelectItem>
+                          <SelectItem value="gitlab">GitLab Snippets</SelectItem>
                         </SelectContent>
                       </Select>
+                    </div>
+                    <div v-if="snippetProvider === 'gitlab'" class="space-y-2 md:col-span-2">
+                      <Label for="gitlab-instance-url">{{ t("settings.syncGitLabInstance") }}</Label>
+                      <Input id="gitlab-instance-url" v-model="snippetInstanceUrl" type="url" autocomplete="url" :disabled="!!snippetBusy" placeholder="https://gitlab.example.com" @blur="commitSnippetInstance" @keydown.enter="commitSnippetInstance" />
+                      <p v-if="snippetInstanceError" class="text-xs text-destructive">{{ snippetInstanceError }}</p>
+                      <p v-if="activeSnippetInstanceUrl.startsWith('http://')" class="text-xs text-destructive">{{ t("settings.syncGitLabHttpWarning") }}</p>
                     </div>
                     <div class="space-y-2">
                       <Label for="snippet-sync-id">{{ t("settings.syncSnippetId") }}</Label>

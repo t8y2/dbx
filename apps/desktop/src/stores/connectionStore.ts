@@ -147,7 +147,6 @@ import {
   mergeTableTreePageChildren,
   objectGroupRefreshParentId,
   objectTypesForGroupNode,
-  sortDatabaseObjectsByName,
   tablePartitionGroups,
   withoutTableTreeLoadMoreNodes,
   type TableTreeLoadMoreParent,
@@ -155,7 +154,7 @@ import {
 } from "@/lib/table/tableTree";
 import { hasTreeNodeDatabaseContext, normalizeCataloglessDatabaseNodes, treeNodeSchemaCachePrefix } from "@/lib/sidebar/treeNodeContext";
 import { decodeSchemaTreeCache, decodeTableSearchIndexManifest, encodeSchemaTreeCache, encodeTableSearchIndexManifest, type TableSearchIndexManifestEntry } from "@/lib/metadata/schemaTreeCache";
-import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
+import { sortSidebarTreeChildrenByNameKeepingTableVGroups, sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
@@ -2435,11 +2434,7 @@ export const useConnectionStore = defineStore("connection", () => {
       existing.set(key, child);
     }
     const config = parent.connectionId ? getConfig(parent.connectionId) : undefined;
-    return sortSidebarTreeChildrenForParent(
-      parent,
-      sortDatabaseObjectsByName(merged, (node) => node.label),
-      config?.db_type,
-    );
+    return sortSidebarTreeChildrenByNameKeepingTableVGroups(parent, merged, config?.db_type);
   }
 
   function findTreeNodes(nodes: TreeNode[], predicate: (node: TreeNode) => boolean): TreeNode[] {

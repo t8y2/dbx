@@ -11,7 +11,8 @@ import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataT
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
+import { physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
@@ -314,6 +315,7 @@ export function useSidebarDataOpenRuntime() {
       if (!config) throw new Error("Connection config not found");
 
       const limit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+      const defaultSortMode = settingsStore.editorSettings.tableOpenSortMode ?? "none";
       const shouldRefreshTableMeta = !cachedTableMeta;
       // Dameng metadata calls must remain serialized behind the table query.
       const deferTableMetaRefresh = effectiveDbType === "dameng";
@@ -334,7 +336,9 @@ export function useSidebarDataOpenRuntime() {
       }
 
       const metadataRefresh = shouldRefreshTableMeta && !deferTableMetaRefresh ? refreshTableMetaInBackground(tabId) : undefined;
-      if (!cachedTableMeta && (effectiveDbType === "mysql" || effectiveDbType === "postgres")) {
+      if (!cachedTableMeta && (effectiveDbType === "mysql" || effectiveDbType === "postgres" || defaultSortMode !== "none")) {
+        // No query is in flight yet, so deferred drivers can safely load metadata serially.
+        if (deferTableMetaRefresh) await refreshTableMetaInBackground(tabId);
         await metadataRefresh;
       }
 
@@ -347,6 +351,8 @@ export function useSidebarDataOpenRuntime() {
       const loadedTableMeta = cachedTableMeta ?? queryStore.tabs.find((item) => item.id === tabId)?.tableMeta;
       const columns = loadedTableMeta?.columns ?? [];
       const primaryKeys = loadedTableMeta?.primaryKeys ?? [];
+      const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, loadedTableMeta?.physicalPrimaryKeys ?? physicalTablePrimaryKeys(columns), connectionStore.connectionIdentifierQuote?.(node.connectionId));
+      const defaultOrderBy = defaultSort.orderBy;
       const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
@@ -364,6 +370,7 @@ export function useSidebarDataOpenRuntime() {
         limit,
         includeRowId,
         injectDefaultTimeSeriesWhere: true,
+        orderBy: defaultOrderBy,
       });
       // SQL 构建是异步后端调用：期间更晚的导航（openData/openTableTarget）
       // 接管会替换 executionId，旧流程不得再覆盖 SQL/启动查询
@@ -380,6 +387,8 @@ export function useSidebarDataOpenRuntime() {
       });
       logPhase("sql-built", { tabId, columnCount: columns.length, primaryKeyCount: primaryKeys.length });
       queryStore.updateSql(tabId, sql);
+      const openedTab = queryStore.tabs.find((item) => item.id === tabId);
+      if (openedTab && defaultOrderBy) openedTab.orderByInput = defaultOrderBy;
       logPhase("sql-updated", { tabId });
 
       openDataLog("info", "execute:start", { traceId, tabId, elapsed: elapsed() });
@@ -389,6 +398,10 @@ export function useSidebarDataOpenRuntime() {
         pagination: { limit, offset: 0 },
       });
       openDataLog("info", "execute:done", { traceId, tabId, elapsed: elapsed() });
+      const sortedTab = queryStore.tabs.find((item) => item.id === tabId);
+      if ((request?.isCurrent() ?? true) && sortedTab && sortedTab === openedTab && sortedTab.sql === sql) {
+        applyTableDefaultSortResult(sortedTab, defaultSort, queryStore.sortTabResultLocally);
+      }
       logPhase("execute-tab-sql", { tabId });
       if (shouldRefreshTableMeta && deferTableMetaRefresh && canApplyTableMetadata(tabId)) {
         void refreshTableMetaInBackground(tabId);

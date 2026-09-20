@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDocumentFilterCondition, documentFieldPathTreeFromDocuments, documentFilterModeOptions, documentFilterValueTypeOptions } from "@/lib/app/documentStoreProvider";
+import { buildDocumentFilterCondition, documentFieldPathTreeFromDocuments, documentFilterModeOptions, documentFilterModeOptionsFor, documentFilterValueTypeOptions } from "@/lib/app/documentStoreProvider";
 
 describe("document store structured filters", () => {
   it("offers and builds inclusive comparison filters", () => {
@@ -77,5 +77,65 @@ describe("document store structured filters", () => {
     const tree = documentFieldPathTreeFromDocuments([{ _id: "001", name: "Alice" }]);
 
     expect(tree[0]).toMatchObject({ path: "_id", sampleValue: "001" });
+  });
+
+  it("offers the PostgreSQL-style operators for MongoDB only", () => {
+    const mongoModes = documentFilterModeOptionsFor("mongodb").map((option) => option.value);
+    expect(mongoModes).toEqual(expect.arrayContaining(["begins-with", "ends-with", "in", "not-in", "between", "not-between"]));
+    for (const kind of ["elasticsearch", "dynamodb", "meilisearch"] as const) {
+      const modes = documentFilterModeOptionsFor(kind).map((option) => option.value);
+      for (const mode of ["begins-with", "ends-with", "in", "not-in", "between", "not-between"] as const) {
+        expect(modes).not.toContain(mode);
+      }
+    }
+    expect(buildDocumentFilterCondition({ id: "starts", fieldName: "name", mode: "begins-with", rawValue: "张", conjunction: "AND" }, { kind: "elasticsearch", sampleValue: "张三" })).toBeNull();
+  });
+
+  it("builds anchored prefix and suffix filters", () => {
+    expect(buildDocumentFilterCondition({ id: "starts", fieldName: "name", mode: "begins-with", rawValue: "张", conjunction: "AND" }, { kind: "mongodb", sampleValue: "张三" })).toEqual({
+      name: { $regex: "^张", $options: "i" },
+    });
+    expect(buildDocumentFilterCondition({ id: "ends", fieldName: "name", mode: "ends-with", rawValue: "三", conjunction: "AND" }, { kind: "mongodb", sampleValue: "张三" })).toEqual({
+      name: { $regex: "三$", $options: "i" },
+    });
+    expect(buildDocumentFilterCondition({ id: "starts", fieldName: "name", mode: "begins-with", rawValue: "a.b", conjunction: "AND" }, { kind: "mongodb", sampleValue: "alice" })).toEqual({
+      name: { $regex: "^a\\.b", $options: "i" },
+    });
+  });
+
+  it("matches numeric MongoDB fields for prefix and suffix filters", () => {
+    expect(buildDocumentFilterCondition({ id: "starts", fieldName: "age", mode: "begins-with", rawValue: "2", conjunction: "AND" }, { kind: "mongodb", sampleValue: 28 })).toEqual({
+      $expr: {
+        $regexMatch: {
+          input: { $convert: { input: "$age", to: "string", onError: "", onNull: "" } },
+          regex: "^2",
+          options: "i",
+        },
+      },
+    });
+  });
+
+  it("builds in and not-in filters from comma or newline separated values", () => {
+    expect(buildDocumentFilterCondition({ id: "in", fieldName: "name", mode: "in", rawValue: "张三, 李四\n王五", conjunction: "AND" }, { kind: "mongodb", sampleValue: "张三" })).toEqual({
+      name: { $in: ["张三", "李四", "王五"] },
+    });
+    expect(buildDocumentFilterCondition({ id: "not-in", fieldName: "age", mode: "not-in", rawValue: "18, 30", valueType: "number", conjunction: "AND" }, { kind: "mongodb" })).toEqual({
+      age: { $nin: [18, 30] },
+    });
+    expect(buildDocumentFilterCondition({ id: "in", fieldName: "name", mode: "in", rawValue: "'a,b'", conjunction: "AND" }, { kind: "mongodb", sampleValue: "a" })).toEqual({
+      name: { $in: ["a,b"] },
+    });
+    expect(buildDocumentFilterCondition({ id: "in", fieldName: "name", mode: "in", rawValue: "  , \n ", conjunction: "AND" }, { kind: "mongodb" })).toBeNull();
+  });
+
+  it("builds between and not-between filters", () => {
+    expect(buildDocumentFilterCondition({ id: "between", fieldName: "age", mode: "between", rawValue: "18", rawEndValue: "30", valueType: "number", conjunction: "AND" }, { kind: "mongodb" })).toEqual({
+      age: { $gte: 18, $lte: 30 },
+    });
+    expect(buildDocumentFilterCondition({ id: "not-between", fieldName: "age", mode: "not-between", rawValue: "18", rawEndValue: "30", valueType: "number", conjunction: "AND" }, { kind: "mongodb" })).toEqual({
+      $or: [{ age: { $lt: 18 } }, { age: { $gt: 30 } }],
+    });
+    expect(buildDocumentFilterCondition({ id: "between", fieldName: "age", mode: "between", rawValue: "18", rawEndValue: "", conjunction: "AND" }, { kind: "mongodb" })).toBeNull();
+    expect(buildDocumentFilterCondition({ id: "between", fieldName: "age", mode: "between", rawValue: "18", rawEndValue: "30", conjunction: "AND" }, { kind: "mysql" as never })).toBeNull();
   });
 });

@@ -5,8 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import UpdateDialog from "@/components/layout/UpdateDialog.vue";
 
+const runtimeState = vi.hoisted(() => ({ tauri: true }));
+
 vi.mock("@/lib/backend/tauriRuntime", () => ({
-  isTauriRuntime: () => true,
+  isTauriRuntime: () => runtimeState.tauri,
 }));
 
 const mountedApps: App[] = [];
@@ -29,7 +31,7 @@ async function flushDialog() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-async function mountDialog(activeTaskCount: number, initialState: Partial<DialogState> = {}, installDownloaded = vi.fn(async () => {})) {
+async function mountDialog(activeTaskCount: number, initialState: Partial<DialogState> = {}, installDownloaded = vi.fn(async () => {}), extraProps: Record<string, unknown> = {}) {
   const state = reactive<DialogState>({
     open: true,
     portableMode: false,
@@ -91,6 +93,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
             updateReady: state.updateReady,
             isIgnoringUpdate: state.isIgnoringUpdate,
             activeTaskCount,
+            ...extraProps,
             "onDownload-in-background": downloadInBackground,
             "onCancel-download": cancelDownload,
             "onInstall-downloaded": handleInstallDownloaded,
@@ -134,8 +137,23 @@ async function clickOutside() {
 }
 
 afterEach(() => {
+  runtimeState.tauri = true;
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
+});
+
+describe("UpdateDialog web runtime", () => {
+  it("keeps web updates as Docker instructions without desktop install controls", async () => {
+    runtimeState.tauri = false;
+
+    await mountDialog(0);
+
+    expect(document.body.textContent).toContain("Docker users should run");
+    expect(document.body.textContent).toContain("docker compose pull && docker compose up -d");
+    expect(buttonWithText("Open Release")).toBeDefined();
+    expect(downloadButton()).toBeUndefined();
+    expect(installDownloadedButton()).toBeUndefined();
+  });
 });
 
 describe("UpdateDialog active task guard", () => {
@@ -252,7 +270,6 @@ describe("UpdateDialog close protection", () => {
   it("allows closing while a downloaded update is idle", async () => {
     const { state } = await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
 
-    expect(buttonWithText("Cancel")).toBeDefined();
     expect(document.body.querySelector('[data-slot="dialog-close"]')).not.toBeNull();
     await pressEscape();
 
@@ -262,7 +279,6 @@ describe("UpdateDialog close protection", () => {
   it("prevents closing while installation is in progress", async () => {
     const { state } = await mountDialog(0, { updateDownloaded: true, isInstallingUpdate: true });
 
-    expect(buttonWithText("Cancel")).toBeUndefined();
     expect(document.body.querySelector('[data-slot="dialog-close"]')).toBeNull();
     await pressEscape();
 
@@ -286,7 +302,7 @@ describe("UpdateDialog close protection", () => {
 
     rejectInstall(new Error("install failed"));
     await flushDialog();
-    expect(buttonWithText("Cancel")).toBeDefined();
+    expect(document.body.querySelector('[data-slot="dialog-close"]')).not.toBeNull();
     await pressEscape();
 
     expect(state.open).toBe(false);
@@ -320,7 +336,6 @@ describe("UpdateDialog close protection", () => {
     expect(state.updateDownloaded).toBe(false);
     expect(state.updateReady).toBe(true);
     expect(buttonWithText("Restart")).toBeDefined();
-    expect(buttonWithText("Cancel")).toBeDefined();
     await pressEscape();
     expect(state.open).toBe(false);
     expect(installDownloaded).toHaveBeenCalledOnce();
@@ -361,5 +376,77 @@ describe("UpdateDialog release notes safety", () => {
     });
     expect(document.body.querySelector("script, img")).toBeNull();
     expect(Array.from(document.body.querySelectorAll("a")).every((anchor) => anchor.href.startsWith("https://"))).toBe(true);
+  });
+});
+
+describe("UpdateDialog aggregate update center", () => {
+  it("keeps the client restart gated while update all is still updating components", async () => {
+    await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 }, undefined, { isUpdatingAll: true });
+
+    expect(installDownloadedButton()?.disabled).toBe(true);
+    expect(buttonWithText("Ignore this version")).toBeUndefined();
+  });
+
+  it("disables component actions while an automatic update is active", async () => {
+    await mountDialog(0, {}, undefined, {
+      componentUpdatesUpdating: true,
+      driverUpdates: [{ db_type: "mysql", label: "MySQL", version: "9.0.0", installed_version: "8.0.0", update_available: true }],
+    });
+
+    expect(buttonWithText("Update all")?.disabled).toBe(true);
+
+    const driversTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="drivers"]');
+    driversTab?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+    driversTab?.click();
+    await flushDialog();
+
+    expect(buttonWithText("Update Now")?.disabled).toBe(true);
+  });
+
+  it("organizes component updates into tabs and installs the selected category", async () => {
+    const installComponentUpdates = vi.fn();
+    const updateAll = vi.fn();
+    await mountDialog(0, {}, undefined, {
+      driverUpdates: [{ db_type: "mysql", label: "MySQL", version: "9.0.0", installed_version: "8.0.0", update_available: true }],
+      jdbcUpdate: { installed: true, version: "0.1.0", latest_version: "0.2.0", update_available: true, compatible: true, path: "/tmp/jdbc" },
+      mcpUpdate: { installed: true, npm_available: true, current_version: "1.0.0", latest_version: "1.1.0", update_available: true },
+      pluginUpdates: [
+        {
+          key: "official:example",
+          status: "update",
+          artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash" },
+          repository: { id: "official" },
+          plugin: { id: "example", latestVersion: "1.1.0" },
+          name: "Example plugin",
+        },
+      ],
+      "onInstall-component-updates": installComponentUpdates,
+      "onUpdate-all": updateAll,
+    });
+
+    expect(document.body.querySelector('[data-update-tab="app"]')).not.toBeNull();
+    expect(document.body.querySelector('[data-update-tab="drivers"]')?.textContent).toContain("Database drivers");
+    expect(document.body.querySelector('[data-update-tab="jdbc"]')?.textContent).toContain("JDBC");
+    expect(document.body.querySelector('[data-update-tab="mcp"]')?.textContent).toContain("MCP");
+    expect(document.body.querySelector('[data-update-tab="plugins"]')?.textContent).toContain("Plugins");
+    expect(document.body.querySelector<HTMLElement>("[data-update-scroll-region]")?.classList.contains("overflow-auto")).toBe(true);
+    expect(document.body.querySelector<HTMLElement>("[data-update-footer]")?.className).toContain("mx-0");
+    expect(document.body.querySelector<HTMLElement>("[data-update-footer]")?.className).toContain("px-[22px]");
+    expect(document.body.querySelector<HTMLElement>("[data-update-footer]")?.className).toContain("pb-2.5");
+    expect(document.body.querySelector<HTMLElement>("[data-update-footer]")?.className).toContain("pt-2.5");
+    expect(buttonWithText("Cancel")).toBeUndefined();
+
+    buttonWithText("Update all")?.click();
+    await flushDialog();
+    expect(updateAll).toHaveBeenCalledOnce();
+
+    const driversTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="drivers"]');
+    driversTab?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+    driversTab?.click();
+    await flushDialog();
+    buttonWithText("Update Now")?.click();
+    await flushDialog();
+
+    expect(installComponentUpdates).toHaveBeenCalledWith("drivers");
   });
 });

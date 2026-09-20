@@ -104,6 +104,8 @@ const themes = () => ({
         "--color-primary-foreground": "#18181b",
         "--color-destructive": "#f3625f",
         "--color-destructive-foreground": "#18181b",
+        "--font-sans": '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        "--font-mono": "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
         "--radius-md": "6px",
         "--radius-lg": "8px",
       }
@@ -121,6 +123,8 @@ const themes = () => ({
         "--color-primary-foreground": "#ffffff",
         "--color-destructive": "#e7000b",
         "--color-destructive-foreground": "#ffffff",
+        "--font-sans": '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        "--font-mono": "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
         "--radius-md": "6px",
         "--radius-lg": "8px",
       },

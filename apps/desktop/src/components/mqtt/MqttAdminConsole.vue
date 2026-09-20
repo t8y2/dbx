@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useI18n } from "vue-i18n";
 import { mqttGetBrokerInfo, mqttListTopics, mqttListSavedTopicConfigs, mqttGetMessages, mqttSubscribe, mqttUnsubscribe, mqttSaveTopicConfig, mqttDeleteTopicConfig, mqttClearMessages } from "@/lib/backend/api";
 import type { MqttBrokerInfo, MqttSavedTopic, MqttTopicNode, MqttMessage, MqttQoS } from "@/types/mqtt";
@@ -45,6 +45,7 @@ const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initial
 const loading = ref(true);
 const error = ref<string | null>(null);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
+const messageListRef = ref<HTMLElement | null>(null);
 const messagesPaused = ref(restoredUiState.messagesPaused ?? false);
 const displayEncoding = ref<PayloadEncoding>(restoredUiState.displayEncoding ?? "plaintext");
 const topicSearch = ref(restoredUiState.topicSearch ?? "");
@@ -126,6 +127,9 @@ async function refreshData() {
     savedTopics.value = configs.map((config) => ({ ...config, enabled: config.enabled !== false, noLocal: config.noLocal === true }));
     messages.value = msgs;
     error.value = null;
+    void nextTick(() => {
+      if (messageListRef.value) messageListRef.value.scrollTop = 0;
+    });
   } catch (e) {
     error.value = String(e);
   } finally {
@@ -412,7 +416,7 @@ onUnmounted(stopPolling);
               </Button>
             </div>
           </div>
-          <div class="flex min-h-0 flex-1 flex-col overflow-auto">
+          <div ref="messageListRef" data-testid="mqtt-message-list" class="flex min-h-0 flex-1 flex-col overflow-auto">
             <div v-if="messages.length === 0" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMessages") }}</div>
             <div v-else-if="filteredMessages.length === 0" data-testid="mqtt-no-matching-messages" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMatchingMessages") }}</div>
             <div

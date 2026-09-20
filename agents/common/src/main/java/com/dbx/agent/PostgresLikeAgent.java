@@ -79,7 +79,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
     /**
      * Wrap {@link AbstractJdbcAgent#resultValue} so PostGIS-style {@code geometry}
      * and {@code geography} columns are decoded into WKT (matching the native
-     * tokio_postgres path in {@code crates/dbx-core/src/db/postgres.rs}).
+     * tokio_postgres path in {@code crates/dbx-drivers/src/db/postgres.rs}).
      */
     private JdbcExecutor.ColumnAwareResultValueReader geometryAwareResolver() {
         return (rs, index, sqlType, columnTypeName) -> {

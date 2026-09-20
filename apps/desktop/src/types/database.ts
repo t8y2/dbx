@@ -403,6 +403,8 @@ export interface PluginConnectionProviderContribution {
   filesystem_provider?: string;
   capabilities?: PluginConnectionCapability[];
   actions?: PluginConnectionActionContribution[];
+  /** Multi-endpoint providers (Kafka advertised.listeners) receive a SOCKS5 runtime.proxy route over transport layers. */
+  proxy_route?: boolean;
 }
 
 export interface PluginWorkbenchContribution {
@@ -1339,6 +1341,7 @@ export type TreeNodeType =
   | "group-table-partitions"
   | "group-table-subpartitions"
   | "group-tables"
+  | "table-vgroup"
   | "group-dolt-system-tables"
   | "group-views"
   | "group-materialized-views"
@@ -1413,6 +1416,16 @@ export interface SidebarLayout {
   order: SidebarOrderEntry[];
 }
 
+export type TableVGroupOrderEntry = { type: "group"; id: string; children?: TableVGroupOrderEntry[] } | { type: "table"; name: string };
+
+export interface TableVGroupLayout {
+  version?: number;
+  groups: ConnectionGroup[];
+  order: TableVGroupOrderEntry[];
+  /** Toggled by the container context menu to hide groups without deleting them. */
+  enabled?: boolean;
+}
+
 export interface TreeNode {
   id: string;
   label: string;
@@ -1468,6 +1481,8 @@ export interface TreeNode {
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
+  /** Set on synthetic table virtual-group container nodes. */
+  vgroupId?: string;
   meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ConstraintInfo | PartitionInfo | SubpartitionInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta | CustomTypeTreeMemberMeta;
   loadMore?: {
     parentId: string;
@@ -1660,6 +1675,12 @@ export interface QueryTab {
     anchor: number;
     head: number;
   };
+  /** Ephemeral request to move the cursor/scrolling to a specific line/column (e.g. global content search jump). */
+  editorRevealRequest?: {
+    id: number;
+    line: number;
+    column?: number;
+  };
   executionId?: string;
   /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
   executingResultRunId?: string | null;
@@ -1789,6 +1810,8 @@ export interface QueryTab {
     database?: string;
     columns: ColumnInfo[];
     primaryKeys: string[];
+    /** Physical primary keys used for table-open default sorting; excludes unique and synthetic row identifiers. */
+    physicalPrimaryKeys?: string[];
   };
   tableMetaUpdatedAt?: number;
   /** 该 tab 的 tableMeta 是哪个连接元数据代次下写入的：disconnect / 关闭数据库 /

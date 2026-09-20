@@ -163,7 +163,7 @@ describe("QueryEditor batch column selection", () => {
   });
 
   it("marks the insertion action so the completion menu can keep it sticky", () => {
-    expect(source).toContain("dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey }");
+    expect(source).toContain("dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey, ...(item.batchColumnSelectionToggleAll ? { toggleAll: true as const } : {}) }");
     expect(source).toContain('optionClass: (completion) => ((completion as QueryCompletionOption).dbxBatchColumnSelectionAction ? "cm-batch-column-selection-action" : "")');
   });
 
@@ -175,8 +175,8 @@ describe("QueryEditor batch column selection", () => {
     expect(source.slice(dragUpdateStart, dragUpdateEnd)).toContain("updateBatchColumnSelectionActionLabel(state.view, state.sessionKey);");
     expect(source).toContain("const batchColumnSelectionTooltipParents = new WeakMap<EditorViewType, HTMLElement>();");
     expect(source).toContain("batchColumnSelectionTooltipParents.set(view.value, tooltipParent);");
-    expect(source).toContain("const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, string>();");
-    expect(source).toContain("batchColumnSelectionActionMarkers.get(marker) !== sessionKey");
+    expect(source).toContain("const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, { sessionKey: string; toggleAll: boolean }>();");
+    expect(source).toContain("!markerState || markerState.sessionKey !== sessionKey");
     expect(source).toContain("renderBatchColumnSelectionActionMarker");
   });
 

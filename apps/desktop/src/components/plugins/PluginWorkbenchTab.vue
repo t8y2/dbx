@@ -30,6 +30,12 @@ const error = ref("");
 const deferred = ref(false);
 let loadGeneration = 0;
 const resolvedConnectionId = computed(() => props.connectionId || (typeof props.context?.connectionId === "string" ? props.context.connectionId : undefined));
+// The host's re-push-on-reinit and the plugin itself both key off
+// context.connectionId; filesystem tabs carry it only as a tab-level prop.
+const hostContext = computed(() => {
+  if (!resolvedConnectionId.value || props.context?.connectionId) return props.context;
+  return { ...props.context, connectionId: resolvedConnectionId.value };
+});
 const entry = computed(() => createFrontendPluginRegistry(plugins.value, appLocale.value).findWorkbench(props.pluginId, props.contributionId));
 
 async function load() {
@@ -54,7 +60,18 @@ async function refresh() {
   loading.value = true;
   error.value = "";
   try {
-    if (resolvedConnectionId.value) await connectionStore.ensureConnected(resolvedConnectionId.value);
+    const connectionId = resolvedConnectionId.value;
+    if (connectionId) {
+      if (connectionStore.connectedIds.has(connectionId)) {
+        // The connection is open but the plugin sidecar's registry may have
+        // been wiped (iframe reload, tab restore): ensureConnected's health
+        // fast-path only probes the sidecar process and would not heal that.
+        // Force a re-push instead; it no-ops when a push just happened.
+        await connectionStore.repushPluginConnection(connectionId);
+      } else {
+        await connectionStore.ensureConnected(connectionId);
+      }
+    }
     await load();
   } catch (cause) {
     loading.value = false;
@@ -73,9 +90,14 @@ function start() {
   void load();
 }
 
-function openWorkbench(pluginId: string, contributionId: string, context?: PluginWorkbenchContext) {
+function openWorkbench(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }) {
   const target = createFrontendPluginRegistry(plugins.value, appLocale.value).findWorkbench(pluginId, contributionId);
-  queryStore.openPluginWorkbench(pluginId, contributionId, { title: target?.contribution.label || contributionId, context });
+  // Session tabs are per-connection: title them after the connection (like the
+  // sidebar-opened tab) so parallel sessions read "server", "server (2)", …
+  // — the numbering itself is applied in queryStore.openPluginWorkbench.
+  const contextConnectionId = typeof context?.connectionId === "string" ? context.connectionId : "";
+  const connectionName = contextConnectionId ? connectionStore.getConfig(contextConnectionId)?.name : undefined;
+  queryStore.openPluginWorkbench(pluginId, contributionId, { title: connectionName || target?.contribution.label || contributionId, context, forceNew: options?.forceNew === true });
 }
 
 function openFilesystem(pluginId: string, providerId: string, context?: PluginWorkbenchContext) {
@@ -105,6 +127,6 @@ defineExpose({ refresh });
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <span>{{ error || t("pluginPlatform.workbenchUnavailableFallback") }}</span>
     </div>
-    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="context" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @close-tab="emit('closeTab')" />
+    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="hostContext" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @close-tab="emit('closeTab')" />
   </div>
 </template>

@@ -1,7 +1,7 @@
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 export type DataGridReplacementMatch = { rowId: number; col: number; value: string };
-export type DataGridCellReplacement = DataGridReplacementMatch & { previousValue: string };
+export type DataGridCellReplacement = DataGridReplacementMatch & { previousValue: string; sourceValue?: string };
 export type DataGridReplaceScope = "loaded" | "column" | "selection";
 
 type ReplacementMatchOptions = {
@@ -12,6 +12,15 @@ type ReplacementMatchOptions = {
   includesCell?: (rowId: number, col: number) => boolean;
   canReplaceCell?: (rowId: number, col: number) => boolean;
   isTruncated?: (rowId: number, col: number) => boolean;
+};
+
+type PrepareCellReplacementsOptions = {
+  matches: readonly DataGridReplacementMatch[];
+  search: string;
+  replacement: string;
+  caseSensitive: boolean;
+  needsResolution: (rowId: number, col: number) => boolean;
+  resolveValues: (rowIds: number[], columnIndexes: number[]) => Promise<Map<number, Map<number, CellValue>>>;
 };
 
 export function dataGridReplacementPattern(search: string, caseSensitive: boolean): RegExp {
@@ -39,4 +48,34 @@ export function findDataGridReplacementMatches(options: ReplacementMatchOptions)
     });
   }
   return matches;
+}
+
+export async function prepareDataGridCellReplacements(options: PrepareCellReplacementsOptions): Promise<DataGridCellReplacement[]> {
+  if (!options.search || options.matches.length === 0) return [];
+  const resolutionMatches = options.matches.filter((match) => options.needsResolution(match.rowId, match.col));
+  const resolutionKeys = new Set(resolutionMatches.map((match) => `${match.rowId}:${match.col}`));
+  const resolvedValues = resolutionMatches.length ? await options.resolveValues([...new Set(resolutionMatches.map((match) => match.rowId))], [...new Set(resolutionMatches.map((match) => match.col))]) : new Map<number, Map<number, CellValue>>();
+  const pattern = dataGridReplacementPattern(options.search, options.caseSensitive);
+  const replacements: DataGridCellReplacement[] = [];
+
+  for (const match of options.matches) {
+    const needsResolution = resolutionKeys.has(`${match.rowId}:${match.col}`);
+    const resolvedRow = resolvedValues.get(match.rowId);
+    if (needsResolution && !resolvedRow?.has(match.col)) continue;
+    const previousValue = needsResolution ? resolvedRow?.get(match.col) : match.value;
+    if (typeof previousValue !== "string") continue;
+    pattern.lastIndex = 0;
+    if (!pattern.test(previousValue)) continue;
+    const value = replaceDataGridText(previousValue, options.search, options.replacement, options.caseSensitive);
+    if (value === previousValue) continue;
+    replacements.push({
+      rowId: match.rowId,
+      col: match.col,
+      previousValue,
+      value,
+      ...(needsResolution ? { sourceValue: match.value } : {}),
+    });
+  }
+
+  return replacements;
 }

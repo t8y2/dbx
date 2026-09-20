@@ -339,10 +339,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function normalizeCompleteLocalResult(result: QueryResult): { columns: string[]; columnTypes: string[]; columnComments: Array<string | undefined>; rows: CellValue[][]; mongoCopyDocuments?: unknown[] } {
+    const editorSettings = useSettingsStore().editorSettings;
+    if (databaseType.value === "mongodb") {
+      const projected = projectResultColumns(result, columns.value);
+      const rows = editorSettings.exportRowLimitEnabled ? projected.rows.slice(0, editorSettings.exportRowLimit) : projected.rows;
+      return {
+        columns: projected.columns,
+        columnTypes: projected.columnTypes,
+        columnComments: commentsForExportColumns(projected.columns),
+        rows,
+        mongoCopyDocuments: result.mongo_copy_documents?.slice(0, rows.length),
+      };
+    }
+
     const hiddenColumnIndexes = new Set(result.hidden_column_indexes ?? []);
     const exportedColumnIndexes = result.columns.map((_, index) => index).filter((index) => !hiddenColumnIndexes.has(index));
     const hasHiddenColumns = exportedColumnIndexes.length !== result.columns.length;
-    const editorSettings = useSettingsStore().editorSettings;
     const rows = editorSettings.exportRowLimitEnabled ? result.rows.slice(0, editorSettings.exportRowLimit) : result.rows;
 
     // Internal key columns are query-only metadata. Keep every user column,
@@ -364,6 +376,33 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const source = document as Record<string, unknown>;
       return columnsToExport.map((column) => (Object.prototype.hasOwnProperty.call(source, column) ? (source[column] as CellValue) : null));
     });
+  }
+
+  function projectResultColumns(
+    result: QueryResult,
+    targetColumns: readonly string[],
+  ): {
+    columns: string[];
+    columnTypes: string[];
+    rows: CellValue[][];
+    spatialColumns?: QueryResult["spatial_columns"];
+    spatialValues?: QueryResult["spatial_values"];
+  } {
+    const sourceIndexes = targetColumns.map((column) => result.columns.indexOf(column));
+    const targetIndexBySource = new Map<number, number>();
+    sourceIndexes.forEach((sourceIndex, targetIndex) => {
+      if (sourceIndex >= 0) targetIndexBySource.set(sourceIndex, targetIndex);
+    });
+    return {
+      columns: [...targetColumns],
+      columnTypes: sourceIndexes.map((sourceIndex) => (sourceIndex >= 0 ? (result.column_types?.[sourceIndex] ?? "") : "")),
+      rows: result.rows.map((row) => sourceIndexes.map((sourceIndex) => (sourceIndex >= 0 ? (row[sourceIndex] ?? null) : null))),
+      spatialColumns: result.spatial_columns?.flatMap((column) => {
+        const targetIndex = targetIndexBySource.get(column.column_index);
+        return targetIndex === undefined ? [] : [{ ...column, column_index: targetIndex }];
+      }),
+      spatialValues: result.spatial_values?.map((row) => sourceIndexes.map((sourceIndex) => (sourceIndex >= 0 ? (row[sourceIndex] ?? null) : null))),
+    };
   }
 
   function mongoLocalRowsForJson(items: RowItem[]): CellValue[][] {
@@ -396,27 +435,34 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (useFullExport && rowIds === undefined && fullExportResult && !hasCompleteLocalResult?.value) {
       const result = await fullExportResult(onProgress);
       if (result) {
-        const columnComments = buildXlsxHeaderOverrides(result.columns, commentsForExportColumns(result.columns), headerMode);
+        const projected = databaseType.value === "mongodb" ? projectResultColumns(result, columns.value) : undefined;
+        const exportedColumns = projected?.columns ?? result.columns;
+        const exportedColumnTypes = projected?.columnTypes ?? result.column_types ?? [];
+        const exportedRows = projected?.rows ?? result.rows;
+        const exportedSpatialColumns = projected?.spatialColumns ?? result.spatial_columns;
+        const exportedSpatialValues = projected?.spatialValues ?? result.spatial_values;
+        const columnComments = buildXlsxHeaderOverrides(exportedColumns, commentsForExportColumns(exportedColumns), headerMode);
         return {
           ...applyGlobalDateTimeExportFormat(
             // fullExportResult returns source rows, not the collection grid's
             // marker-encoded rows. Applying externalCellValue here would
             // mistake a real BSON string in the reserved namespace for a grid
             // marker and corrupt the exported value.
-            { columns: result.columns, columnTypes: result.column_types ?? [], rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(result.columns, result.rows, result.mongo_copy_documents) : result.rows },
+            { columns: exportedColumns, columnTypes: exportedColumnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(exportedColumns, exportedRows, result.mongo_copy_documents) : exportedRows },
             formatDateTime && !preserveMongoExtendedJson,
           ),
           columnComments,
-          spatialColumns: result.spatial_columns,
-          spatialValues: result.spatial_values,
+          spatialColumns: exportedSpatialColumns,
+          spatialValues: exportedSpatialValues,
         };
       }
     }
-    // The full result is already in memory — export the raw QueryResult (all
-    // rows, all columns, committed values) so "export all data" matches the
-    // original re-run-SQL semantics. displayItems only covers visible columns
-    // and reflects client-side filters/search and unsaved edits, which would
-    // silently change what the export contains.
+    // The full result is already in memory — export all rows with the source
+    // result's committed values. MongoDB applies the current visible-column
+    // projection above; other result types retain their existing all-column
+    // semantics. displayItems only covers visible columns and reflects
+    // client-side filters/search and unsaved edits, which would silently
+    // change what the export contains.
     if (useFullExport && rowIds === undefined && hasCompleteLocalResult?.value && completeLocalResult?.value) {
       const normalized = normalizeCompleteLocalResult(completeLocalResult.value);
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);

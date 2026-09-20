@@ -249,6 +249,30 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
     );
 }
 
+/// The client-facing field is `max_rows`. Only this rmcp-level test proves the
+/// published name survives tool-call serialization and that clamping happens at
+/// the native boundary; the in-process tests assert the internal `limit`
+/// argument directly and cannot catch a name mismatch.
+#[tokio::test]
+async fn execute_query_forwards_client_max_rows() {
+    let cases = [
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1" }), 100_u64),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 500 }), 500),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 100000 }), 1000),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 0 }), 1),
+    ];
+    for (request, expected) in cases {
+        let backend = Arc::new(CapturingBackend {
+            policy: McpGlobalPolicy::default(),
+            connections: vec![test_connection("scoped", "shared-db")],
+            calls: Mutex::new(Vec::new()),
+        });
+        let captured = captured_query_arguments(backend, request.clone()).await;
+        assert_eq!(captured.len(), 1, "expected one captured execute_query call");
+        assert_eq!(captured[0]["limit"], json!(expected), "max_rows in {request} must map to limit");
+    }
+}
+
 fn test_connection(id: &str, name: &str) -> ConnectionConfig {
     serde_json::from_value(json!({
         "id": id,

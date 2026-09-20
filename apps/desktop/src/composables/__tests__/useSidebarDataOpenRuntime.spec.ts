@@ -5,6 +5,8 @@ import type { QueryTab, TreeNode } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   databaseType: "oceanbase" as string,
+  tableOpenSortMode: "none" as "none" | "database" | "local",
+  sortTabResultLocally: vi.fn(),
   callOrder: [] as string[],
   tabs: [] as QueryTab[],
   activeTabId: null as string | null,
@@ -90,12 +92,13 @@ vi.mock("@/stores/queryStore", () => ({
       if (tab) tab.sql = sql;
     },
     executeTabSql: mocks.executeTabSql,
+    sortTabResultLocally: mocks.sortTabResultLocally,
     setErrorResult: mocks.setErrorResult,
   }),
 }));
 
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { dataTabReuseMode: mocks.dataTabReuseMode, openDataTabsNextToActive: mocks.openDataTabsNextToActive, pageSize: 100 } }),
+  useSettingsStore: () => ({ editorSettings: { tableOpenSortMode: mocks.tableOpenSortMode, tableDatabaseSortDirection: "desc", tableLocalSortDirection: "asc", dataTabReuseMode: mocks.dataTabReuseMode, openDataTabsNextToActive: mocks.openDataTabsNextToActive, pageSize: 100 } }),
 }));
 
 vi.mock("@/lib/database/jdbcDialect", () => ({
@@ -117,8 +120,12 @@ vi.mock("@/lib/common/utils", () => ({ uuid: () => "open-data-id" }));
 vi.mock("@/lib/backend/debugLog", () => ({ appendDebugLog: vi.fn(), isDebugLoggingEnabled: () => false }));
 // dataTabOpenPolicy 使用真实实现，覆盖设置开关对应的复用范围
 vi.mock("@/lib/sidebar/treeNodeContext", () => ({ hasTreeNodeDatabaseContext: () => true }));
-vi.mock("@/lib/table/tableSelectSql", () => ({ buildTableSelectSql: mocks.buildTableSelectSql }));
+vi.mock("@/lib/table/tableSelectSql", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/table/tableSelectSql")>()), buildTableSelectSql: mocks.buildTableSelectSql }));
 vi.mock("@/lib/table/tableEditing", () => ({
+  physicalTablePrimaryKeys: (columns: Array<{ name: string; is_primary_key: boolean }>, indexes: Array<{ columns: string[]; is_primary: boolean }> = []) => {
+    const columnPrimaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
+    return columnPrimaryKeys.length > 0 ? columnPrimaryKeys : (indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? []);
+  },
   usesSyntheticRowIdKey: () => false,
   shouldIncludeSyntheticRowId: () => false,
 }));
@@ -147,6 +154,7 @@ describe("useSidebarDataOpenRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.databaseType = "oceanbase";
+    mocks.tableOpenSortMode = "none";
     mocks.callOrder.length = 0;
     mocks.tabs.length = 0;
     mocks.activeTabId = null;
@@ -176,6 +184,48 @@ describe("useSidebarDataOpenRuntime", () => {
         ageMs: 0,
       };
     });
+  });
+
+  it.each(["database", "local"] as const)("applies the %s default using its independent direction", async (mode) => {
+    mocks.tableOpenSortMode = mode;
+    mocks.executeTabSql.mockImplementation(async () => {
+      const tab = mocks.tabs[0]!;
+      tab.isExecuting = false;
+      tab.executionId = undefined;
+      tab.result = { columns: ["id"], rows: [[2], [1]], affected_rows: 0, execution_time_ms: 0 } as any;
+    });
+    await useSidebarDataOpenRuntime().openData(tableNode);
+    if (mode === "database") {
+      expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"id" DESC' }));
+      expect(mocks.tabs[0]).toMatchObject({ resultSortColumn: "id", resultSortDirection: "desc", resultSortMode: "database" });
+    } else {
+      expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: undefined }));
+      expect(mocks.sortTabResultLocally).toHaveBeenCalledWith("tab-1", "id", 0, "asc");
+    }
+  });
+
+  it("applies database sorting from a physical primary index when columns omit the key flag", async () => {
+    mocks.databaseType = "oracle";
+    mocks.tableOpenSortMode = "database";
+    mocks.loadTableMetadata.mockResolvedValue({
+      metadata: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        database: "app",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        indexes: [{ name: "users_pk", columns: ["id"], is_unique: true, is_primary: true }],
+        primaryKeys: ["id"],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    });
+
+    await useSidebarDataOpenRuntime().openData(tableNode);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"id" DESC' }));
+    expect(mocks.tabs[0]?.tableMeta?.physicalPrimaryKeys).toEqual(["id"]);
   });
 
   it("creates a new sidebar tab for the same table in always-new mode", async () => {

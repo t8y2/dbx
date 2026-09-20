@@ -101,7 +101,7 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
 | `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
-| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning 100 rows by default (up to 1000 with the `max_rows` parameter) |
 | `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
@@ -110,6 +110,10 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
+
+`dbx_execute_query` row controls:
+
+- `max_rows`: 1–1000, defaults to 100. Out-of-range values are clamped, not rejected. It applies to SQL connections only — MongoDB shell commands always return at most 100 rows, and multi-statement scripts routed to the batch executor return at most 100 rows per statement.
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
 

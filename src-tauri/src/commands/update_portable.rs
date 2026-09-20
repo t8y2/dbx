@@ -170,6 +170,19 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Windows PowerShell lives in a versioned directory that Rust's executable
+/// search order never visits (it only probes the `System32` root), so a machine
+/// whose `PATH` lost that entry fails with "program not found" even though
+/// PowerShell is installed. Resolve the absolute path first and keep the bare
+/// name as a fallback for non-standard installs.
+#[cfg(target_os = "windows")]
+fn resolve_powershell_program() -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("SystemRoot").filter(|value| !value.is_empty())?;
+    let candidate =
+        std::path::Path::new(&root).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe");
+    candidate.is_file().then_some(candidate)
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn launch_portable_update_helper(archive: &[u8], version: &Version) -> Result<(), String> {
     use std::fs::{self, OpenOptions};
@@ -223,7 +236,9 @@ pub(super) fn launch_portable_update_helper(archive: &[u8], version: &Version) -
         fs::write(&script_path, PORTABLE_UPDATE_SCRIPT)
             .map_err(|error| format!("Failed to create portable update helper: {error}"))?;
 
-        Command::new("powershell.exe")
+        let resolved_powershell = resolve_powershell_program();
+        let program = resolved_powershell.clone().unwrap_or_else(|| std::path::PathBuf::from("powershell.exe"));
+        Command::new(&program)
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script_path)
             .arg("-ParentProcessId")
@@ -238,7 +253,12 @@ pub(super) fn launch_portable_update_helper(archive: &[u8], version: &Version) -
             .arg(&staging_dir)
             .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
             .spawn()
-            .map_err(|error| format!("Failed to start portable update helper: {error}"))?;
+            .map_err(|error| match resolved_powershell.as_deref() {
+                Some(resolved) => format!("Failed to start portable update helper ({}): {error}", resolved.display()),
+                None => format!(
+                    "Failed to start portable update helper: {error}. Portable updates replace DBX.exe with Windows PowerShell, which was not found at %SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe or on PATH; install it or download the portable ZIP from the release page to update manually."
+                ),
+            })?;
         Ok(())
     })();
 

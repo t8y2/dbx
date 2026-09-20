@@ -16,7 +16,7 @@ import { BACKSLASH_ESCAPE_STRING_DIALECTS } from "@/lib/sql/sqlStatementRanges";
 import { requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identifierSearch";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
-import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { quoteTableIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
 import { rejectsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
@@ -1352,6 +1352,7 @@ export interface SqlCompletionItem {
   boost: number;
   exactMatch?: boolean;
   dedupeKey?: string;
+  replaceSelectWildcard?: true;
   /** Enables the query editor's checkbox-based batch insertion for this column. */
   batchSelectionMode?: "select" | "insert";
   /** Qualifier to prepend to every batch-selected column after the first one. */
@@ -1371,7 +1372,7 @@ type SqlCompletionApplyDialect = "mysql" | "postgres" | "sqlserver" | "oracle" |
 // folding and quoting rules.
 const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
 const POSTGRES_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kingbase", "highgo", "uxdb", "vastbase", "kwdb", "opengauss"]);
-const ORACLE_COMPAT_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
+export const ORACLE_COMPAT_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
 const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["dameng", "db2"]);
 
 function sqlCompletionApplyDialect(databaseType: DatabaseType | undefined, fallback: "mysql" | "postgres" | "sqlserver" | undefined): SqlCompletionApplyDialect | undefined {
@@ -1428,6 +1429,7 @@ export interface SqlCompletionContext {
   comparisonLeftColumn?: string;
   onStar: boolean;
   selectListColumnContext: boolean;
+  selectListWildcardAfterCursor?: boolean;
   preferredKeywords: string[];
   updateTarget?: { table: string; schema?: string };
   deleteTarget?: { table: string; schema?: string };
@@ -1448,22 +1450,47 @@ const SQL_COMPLETION_CLOSING_QUOTES: Readonly<Record<string, SqlCompletionClosin
   "[": "]",
 };
 
-export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "replacementRange">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
+const SELECT_WILDCARD_FOLLOWING_CLAUSES = new Set(["except", "fetch", "for", "from", "group", "having", "intersect", "into", "limit", "offset", "order", "qualify", "union", "where", "window"]);
+const SELECT_PROJECTION_MODIFIERS = new Set(["all", "distinct", "distinctrow"]);
+
+function isStandaloneSelectWildcard(sql: string, cursor: number, selectListColumnContext: boolean, statementKind: SqlStatementKind, dialectId?: string): boolean {
+  if (!selectListColumnContext || statementKind !== "select" || sql[cursor] !== "*") return false;
+
+  const tokens = tokenizeSqlSemantic(sql, dialectId).filter((token) => token.kind !== "comment");
+  const starIndex = tokens.findIndex((token) => token.span.start === cursor && token.text === "*");
+  if (starIndex < 0) return false;
+
+  const star = tokens[starIndex]!;
+  let previousIndex = starIndex - 1;
+  while (previousIndex >= 0 && tokens[previousIndex]!.depth === star.depth && tokens[previousIndex]!.kind === "word" && SELECT_PROJECTION_MODIFIERS.has(tokens[previousIndex]!.normalized)) previousIndex--;
+  const previous = tokens[previousIndex];
+  const startsProjection = previous?.depth === star.depth && (previous.normalized === "select" || previous.text === ",");
+  if (!startsProjection) return false;
+
+  const next = tokens.slice(starIndex + 1).find((token) => token.depth <= star.depth);
+  if (!next) return true;
+  if (next.depth !== star.depth) return false;
+  return next.text === "," || next.text === ";" || (next.kind === "word" && SELECT_WILDCARD_FOLLOWING_CLAUSES.has(next.normalized));
+}
+
+export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "replacementRange" | "selectListWildcardAfterCursor">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
   const range = context.replacementRange;
   const from = range && range.start >= 0 && range.start <= cursor && range.end === cursor ? range.start : cursor - context.prefix.length;
   const closingQuote = from < cursor ? SQL_COMPLETION_CLOSING_QUOTES[sql[from] ?? ""] : undefined;
-  if (!closingQuote) return { from, items };
   const replaceClosingQuote = sql[cursor] === closingQuote ? closingQuote : undefined;
+  const replaceSelectWildcard = from === cursor && context.selectListWildcardAfterCursor === true;
+  if (!closingQuote && !replaceSelectWildcard) return { from, items };
   return {
     from,
     items: items.map((item) => {
       let prepared = item;
       const apply = item.apply ?? item.label;
-      if (item.type === "column" && !(apply.startsWith(sql[from] ?? "") && apply.endsWith(closingQuote)) && (context.qualifier || !apply.includes("."))) {
+      if (closingQuote && item.type === "column" && !(apply.startsWith(sql[from] ?? "") && apply.endsWith(closingQuote)) && (context.qualifier || !apply.includes("."))) {
         const escaped = apply.replaceAll(closingQuote, closingQuote + closingQuote);
         prepared = { ...prepared, apply: `${sql[from]}${escaped}${closingQuote}` };
       }
-      return replaceClosingQuote && !prepared.replaceClosingQuote ? { ...prepared, replaceClosingQuote } : prepared;
+      if (replaceClosingQuote && !prepared.replaceClosingQuote) prepared = { ...prepared, replaceClosingQuote };
+      return replaceSelectWildcard && !prepared.replaceSelectWildcard ? { ...prepared, replaceSelectWildcard: true } : prepared;
     }),
   };
 }
@@ -2435,6 +2462,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const suggestRoutines = inCallRoutineContext || oracleTableFunctionContext || inPotentialPackageMemberContext || (!exclusiveTableSuggestions && !exclusiveColumnSuggestions && !insertInfo && !updateInfo?.inSetClause && prefix.length >= 2);
 
   const statementKind = detectStatementKind(beforeCursor || fullStatement);
+  const selectListWildcardAfterCursor = isStandaloneSelectWildcard(rawStatement, cursor - statementSpan.start, selectListColumnContext, statementKind, resolveSqlDialectId(options));
   const dataTypeContext = isCreateTableColumnTypeContext(beforeToken, options.databaseType);
   const preferredValueKeywords = sqlServerDatepartCompletionValues(beforeCursor, options.databaseType);
   const preferredKeywords = qualifier ? [] : preferredKeywordsForCompletion(beforeCursor, beforeToken, selectListColumnContext, exclusiveTableSuggestions, updateInfo, deleteInfo, options.databaseType);
@@ -2480,6 +2508,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
     comparisonLeftColumn: detectComparisonLeftColumn(beforeCursor),
     onStar: detectOnStar(beforeCursor),
     selectListColumnContext,
+    selectListWildcardAfterCursor,
     preferredKeywords,
     updateTarget: updateInfo?.target,
     deleteTarget: deleteInfo?.target,
@@ -3708,7 +3737,9 @@ function unquoteIdentifier(value: string): string {
 
 export function quoteSqlIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect): string {
   if (dialect === "oracle") {
-    if (/^[A-Za-z][A-Za-z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
+    // Oracle folds bare identifiers to uppercase, so only all-uppercase names
+    // stay resolvable unquoted; mixed-case names keep their quotes.
+    if (/^[A-Z][A-Z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
     return `"${identifier.replaceAll('"', '""')}"`;
   }
   if (dialect === "upper") {
@@ -3748,7 +3779,7 @@ function quoteCompletionApplyName(applyName: string, dialect?: SqlCompletionAppl
 }
 
 function quoteCompletionRoutineIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect): string {
-  if (dialect === "oracle" && /^[A-Za-z][A-Za-z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
+  if (dialect === "oracle" && /^[A-Z][A-Z0-9_$#]*$/.test(identifier) && !POSTGRES_IDENTIFIER_KEYWORDS.has(identifier.toLowerCase())) return identifier;
   return quoteCompletionApplyIdentifier(identifier, dialect);
 }
 
@@ -3760,6 +3791,7 @@ function quoteCompletionRoutineName(applyName: string, dialect?: SqlCompletionAp
 }
 
 function quoteSelectStarColumnIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType): string {
+  if (databaseType === "oracle" || (databaseType === undefined && dialect === "oracle")) return quoteTableIdentifierIfNeeded("oracle", identifier);
   if (!requiresPostgresIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
   if (databaseType) return quoteTableIdentifier(databaseType, identifier);
   if (dialect === "mysql") return `\`${identifier.replaceAll("`", "``")}\``;

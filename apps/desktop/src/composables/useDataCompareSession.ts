@@ -3,11 +3,18 @@ import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import { openDataCompareSession } from "@/composables/useDialogSources";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase, type DataCompareCellValue, type DataCompareFromTablesPreparation, type DataCompareResult, type DataCompareSyncPlan, type DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
+import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase, normalizeKeyColumns, type DataCompareCellValue, type DataCompareFromTablesPreparation, type DataCompareResult, type DataCompareSyncPlan, type DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 
 export type CompareColumn = ColumnInfo;
 
+/**
+ * One source-table -> target-table compare task.
+ *
+ * Match columns are not part of the task itself: they are stored per source
+ * table in `DataCompareSessionConfig.keyColumnsByTable` so that every task of a
+ * batch compare can carry its own selection instead of sharing one global list.
+ */
 export interface DataCompareTableTask {
   sourceTable: string;
   targetTable: string;
@@ -75,7 +82,15 @@ export interface DataCompareSessionConfig {
   targetSchemas: string[];
   targetTables: string[];
   targetTable: string;
-  keyColumns: string[];
+  /**
+   * Explicit match columns per source table (keyed by the source table name).
+   *
+   * An absent entry means "no override": the primary key of that source table is
+   * inferred automatically. A present entry is an explicit user choice, so an
+   * empty array means the user cleared the selection and must pick columns
+   * again — it must not silently fall back to the primary key.
+   */
+  keyColumnsByTable: Record<string, string[]>;
   label: string;
 }
 
@@ -130,16 +145,36 @@ function cloneConfig(config: DataCompareSessionConfig): DataCompareSessionConfig
     targetDatabases: [...config.targetDatabases],
     targetSchemas: [...config.targetSchemas],
     targetTables: [...config.targetTables],
-    keyColumns: [...config.keyColumns],
+    keyColumnsByTable: normalizeKeyColumnOverrides(config.keyColumnsByTable),
   };
+}
+
+/**
+ * Normalizes a per-table match-column map so a cloned session never shares
+ * arrays with the caller: every entry is trimmed and de-duplicated while an
+ * explicit empty selection stays an empty array (it must not become "auto").
+ */
+export function normalizeKeyColumnOverrides(overrides: Record<string, string[] | undefined> | null | undefined): Record<string, string[]> {
+  const normalized: Record<string, string[]> = {};
+  for (const [table, columns] of Object.entries(overrides ?? {})) {
+    if (!table) continue;
+    normalized[table] = normalizeKeyColumns(columns ?? []);
+  }
+  return normalized;
 }
 
 function sessionError(error: unknown): string {
   return error instanceof Error ? error.message : (error as { message?: string } | null)?.message || String(error);
 }
 
+function fallbackCompareErrorMessage(kind: DataCompareSessionErrorKind, columns?: string): string {
+  if (kind === "missingKeyColumns") return `Missing key columns: ${columns ?? ""}`;
+  if (kind === "noCommonColumns") return "No common columns";
+  return "No key columns available";
+}
+
 function compareErrorMessage(dependencies: DataCompareSessionDependencies, kind: DataCompareSessionErrorKind, columns?: string): string {
-  return dependencies.formatError?.(kind, columns) ?? (kind === "missingKeyColumns" ? `Missing key columns: ${columns ?? ""}` : kind === "noCommonColumns" ? "No common columns" : "No key columns available");
+  return dependencies.formatError?.(kind, columns) ?? fallbackCompareErrorMessage(kind, columns);
 }
 
 function toSelectableDiff(diff: DataCompareResult): SelectableDataCompareResult {
@@ -284,6 +319,18 @@ function buildErrorResult(task: DataCompareTableTask, keyColumns: string[], data
   };
 }
 
+/**
+ * Resolves the configured match columns of one compare task.
+ *
+ * Returns the explicit per-source-table override when the user configured one
+ * (an empty array counts as "explicitly nothing selected") and `undefined`
+ * otherwise, which means the caller must infer the primary key for that table.
+ */
+function configuredTaskKeyColumns(input: DataCompareSessionConfig, task: DataCompareTableTask): string[] | undefined {
+  const override = input.keyColumnsByTable[task.sourceTable];
+  return override === undefined ? undefined : normalizeKeyColumns(override);
+}
+
 async function runDataCompareSession(session: DataCompareSession, tasks: DataCompareTableTask[], dependencies: DataCompareSessionDependencies): Promise<void> {
   const input = session.config;
   const sourceColumnCache = new Map<string, CompareColumn[]>();
@@ -297,10 +344,11 @@ async function runDataCompareSession(session: DataCompareSession, tasks: DataCom
 
     for (const [index, task] of tasks.entries()) {
       publishProgress(session, { current: index + 1, total: tasks.length, table: task.sourceTable });
-      let keyColumns = input.keyColumns;
+      const configuredKeys = configuredTaskKeyColumns(input, task);
+      let keyColumns = configuredKeys ?? [];
       try {
         if (input.targetTables.includes(task.targetTable)) {
-          const resolvedKeys = input.keyColumns.length > 0 ? input.keyColumns : await inferKeyColumnsForTable(input, task.sourceTable, sourceColumnCache);
+          const resolvedKeys = configuredKeys ?? (await inferKeyColumnsForTable(input, task.sourceTable, sourceColumnCache));
           if (resolvedKeys.length === 0) throw new Error(compareErrorMessage(dependencies, "noKeyColumns"));
 
           const sourceColumns = await loadColumnsWithCache(sourceColumnCache, input.sourceConnectionId, input.sourceDatabase, input.sourceSchema, task.sourceTable);
@@ -335,7 +383,7 @@ async function runDataCompareSession(session: DataCompareSession, tasks: DataCom
           results.push(buildTableResult(task, preparation, canonicalKeyColumns, columns, columnInfo, databaseType));
         } else {
           const sourceColumns = await loadColumnsWithCache(sourceColumnCache, input.sourceConnectionId, input.sourceDatabase, input.sourceSchema, task.sourceTable);
-          const resolvedKeys = input.keyColumns.length > 0 ? input.keyColumns : [];
+          const resolvedKeys = configuredTaskKeyColumns(input, task) ?? [];
           const sourceColumnNames = sourceColumns.map((column) => column.name);
           keyColumns = resolvedKeys.map((key) => matchColumnNameIgnoreCase(key, sourceColumnNames) ?? key);
           const preparation = await api.prepareDataCompareMissingTarget({

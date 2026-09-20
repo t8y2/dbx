@@ -1,4 +1,4 @@
-// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs.
+// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/ai/agent_loop.rs.
 // The backend clamp remains the source of truth for persisted values.
 export const MAX_AGENT_TURNS_DEFAULT = 30;
 export const MAX_AGENT_TURNS_MIN = 5;

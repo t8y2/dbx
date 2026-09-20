@@ -4,10 +4,7 @@ import { beforeEach, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
 import type { DataGridTableMeta } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
-import {
-  DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
-  type DataGridExtractorOptions,
-} from "../../apps/desktop/src/lib/dataGrid/dataGridCopyExtractor.ts";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridExtractorOptions } from "../../apps/desktop/src/lib/dataGrid/dataGridCopyExtractor.ts";
 import type { DatabaseType, QueryResult } from "../../apps/desktop/src/types/database.ts";
 
 const apiMock = vi.hoisted(() => ({
@@ -409,7 +406,7 @@ test("full query result CSV export streams through the backend without loading a
 });
 
 test("MongoDB full query result CSV export uses the full-result fallback", async () => {
-  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb" });
+  const { composable, fullExportResult, queryResultExportRequest } = buildExportHarness({ databaseType: "mongodb", columns: ["_id", "name"] });
   fullExportResult.mockResolvedValueOnce({
     columns: ["_id", "name"],
     rows: [["1", "Ada"]],
@@ -719,7 +716,7 @@ test("local SQL export asks the backend to drop primary key columns", async () =
     truncated: false,
     has_more: false,
   };
-  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO \"users\" (\"name\") VALUES ('Ada');");
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce('INSERT INTO "users" ("name") VALUES (\'Ada\');');
 
   try {
     const { composable } = buildExportHarness({

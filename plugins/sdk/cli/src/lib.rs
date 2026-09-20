@@ -1122,10 +1122,45 @@ fn build_rust_backend(
     }
     command.env("CARGO_TARGET_DIR", target_directory);
     run_command(&mut command, "Rust backend build")?;
-    let built = target_directory.join("release").join(executable_name(&backend.binary));
+    let built = rust_backend_binary_path(target_directory, &backend.binary, cargo_build_target().as_deref())?;
     fs::copy(&built, staged_executable)
         .map_err(|error| format!("Failed to copy Rust backend {}: {error}", built.display()))?;
     Ok(())
+}
+
+/// Read the cross-build target cargo was told to use, if any. `cargo build
+/// --release` writes into `<target-dir>/<triple>/release` when this is set (for
+/// example a musl triple for fully static Linux sidecars) instead of
+/// `<target-dir>/release`.
+fn cargo_build_target() -> Option<String> {
+    let value = std::env::var("CARGO_BUILD_TARGET").ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.contains(['/', '\\']) || trimmed.contains("..") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Locate the release binary cargo produced for the plugin backend. Cargo
+/// changes the output layout when a build target is configured, so the
+/// triple-qualified path is checked first and the plain host layout is kept as
+/// a fallback for older cargo behaviour and for prebuilt directories.
+fn rust_backend_binary_path(
+    target_directory: &Path,
+    binary: &str,
+    build_target: Option<&str>,
+) -> Result<PathBuf, String> {
+    let executable = executable_name(binary);
+    let mut candidates = Vec::new();
+    if let Some(triple) = build_target {
+        candidates.push(target_directory.join(triple).join("release").join(&executable));
+    }
+    candidates.push(target_directory.join("release").join(executable));
+    if let Some(found) = candidates.iter().find(|candidate| candidate.is_file()) {
+        return Ok(found.clone());
+    }
+    let searched = candidates.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ");
+    Err(format!("Failed to locate the Rust backend binary after build; looked in {searched}"))
 }
 
 fn build_go_backend(
@@ -1593,10 +1628,44 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        color_enabled_with, create_project, generate_signing_key_file, package_manifest, package_project,
-        resolve_create_options, run_cli, styled, title_from_slug, validate_manifest_assets, validate_semver,
-        BackendConfig, CreateInputs, CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT, CLI_VERSION,
+        color_enabled_with, create_project, executable_name, generate_signing_key_file, package_manifest,
+        package_project, resolve_create_options, run_cli, rust_backend_binary_path, styled, title_from_slug,
+        validate_manifest_assets, validate_semver, BackendConfig, CreateInputs, CreateOptions, PackageOptions,
+        ProjectTemplate, ANSI_ACCENT, CLI_VERSION,
     };
+
+    #[test]
+    fn rust_backend_binary_path_prefers_cross_build_target_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let triple_directory = root.path().join("x86_64-unknown-linux-musl").join("release");
+        std::fs::create_dir_all(&triple_directory).unwrap();
+        let binary = triple_directory.join(executable_name("dbx-market-watch"));
+        std::fs::write(&binary, b"binary").unwrap();
+
+        let found =
+            rust_backend_binary_path(root.path(), "dbx-market-watch", Some("x86_64-unknown-linux-musl")).unwrap();
+        assert_eq!(found, binary);
+    }
+
+    #[test]
+    fn rust_backend_binary_path_falls_back_to_host_release_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let release_directory = root.path().join("release");
+        std::fs::create_dir_all(&release_directory).unwrap();
+        let binary = release_directory.join(executable_name("dbx-demo"));
+        std::fs::write(&binary, b"binary").unwrap();
+
+        assert_eq!(rust_backend_binary_path(root.path(), "dbx-demo", Some("aarch64-apple-darwin")).unwrap(), binary);
+        assert_eq!(rust_backend_binary_path(root.path(), "dbx-demo", None).unwrap(), binary);
+    }
+
+    #[test]
+    fn rust_backend_binary_path_reports_every_searched_location() {
+        let root = tempfile::tempdir().unwrap();
+        let error = rust_backend_binary_path(root.path(), "dbx-demo", Some("x86_64-unknown-linux-musl")).unwrap_err();
+        assert!(error.contains("x86_64-unknown-linux-musl"), "{error}");
+        assert!(error.contains("release"), "{error}");
+    }
 
     #[test]
     fn rejects_development_data_in_package_inputs() {

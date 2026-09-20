@@ -703,24 +703,33 @@ async fn offline_zip_import_preserves_existing_jre_when_archive_is_corrupt() {
     let original_java = std::fs::read(&java_path).unwrap();
 
     write_offline_driver_zip_with_jre_bytes(&corrupt_zip, "h2", "0.3.0", "21.0.13", b"not-a-tar-gz".to_vec());
-    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap_err();
+    let result = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap();
 
-    assert!(err.contains("Failed to extract JRE archive"));
+    assert!(result.jre_installed.is_empty());
+    // The unusable JRE must not stop the drivers that do work.
+    assert_eq!(result.drivers_installed, vec!["h2"]);
+    assert_eq!(result.failures.len(), 1);
+    assert!(result.failures[0].is_jre);
+    assert_eq!(result.failures[0].key, DEFAULT_JRE_KEY);
+    assert!(
+        result.failures[0].error.contains("Failed to extract JRE archive"),
+        "unexpected error: {}",
+        result.failures[0].error
+    );
     assert_eq!(std::fs::read(java_path).unwrap(), original_java);
     assert_eq!(manager.load_state().jre_versions.get(DEFAULT_JRE_KEY).map(String::as_str), Some("21.0.12"));
 }
 
 #[tokio::test]
-async fn offline_zip_import_preserves_existing_jre_when_driver_is_corrupt() {
-    let manager = test_manager("offline-corrupt-driver-preserves-jre");
-    let root = test_path("offline-corrupt-driver-preserves-jre-zip");
+async fn offline_zip_import_installs_jre_and_reports_corrupt_driver() {
+    let manager = test_manager("offline-corrupt-driver-reports-failure");
+    let root = test_path("offline-corrupt-driver-reports-failure-zip");
     let valid_zip = root.join("valid.zip");
     let corrupt_zip = root.join("corrupt.zip");
     std::fs::create_dir_all(&root).unwrap();
     write_offline_driver_zip_with_jre(&valid_zip, "h2", "0.2.0", "21.0.12");
     import_agents_from_zip(&manager, &valid_zip, |_| {}).await.unwrap();
-    let java_path = manager.jre_java_path(DEFAULT_JRE_KEY);
-    let original_java = std::fs::read(&java_path).unwrap();
+    let original_jar = std::fs::read(manager.driver_jar_path("h2")).unwrap();
 
     write_offline_driver_zip_with_jre_and_jar_bytes(
         &corrupt_zip,
@@ -730,23 +739,33 @@ async fn offline_zip_import_preserves_existing_jre_when_driver_is_corrupt() {
         test_jre_archive_bytes(),
         b"jar".to_vec(),
     );
-    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap_err();
+    let result = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap();
 
-    assert!(err.contains("invalid or corrupt"));
-    assert_eq!(std::fs::read(java_path).unwrap(), original_java);
-    assert_eq!(manager.load_state().jre_versions.get(DEFAULT_JRE_KEY).map(String::as_str), Some("21.0.12"));
+    assert_eq!(result.jre_installed, vec![DEFAULT_JRE_KEY]);
+    assert!(result.drivers_installed.is_empty());
+    assert_eq!(result.failures.len(), 1);
+    assert!(!result.failures[0].is_jre);
+    assert_eq!(result.failures[0].key, "h2");
+    assert!(result.failures[0].error.contains("invalid or corrupt"), "unexpected error: {}", result.failures[0].error);
+    // A corrupt driver artifact must not replace the working installation.
+    assert_eq!(std::fs::read(manager.driver_jar_path("h2")).unwrap(), original_jar);
+    assert_eq!(manager.load_state().installed_drivers["h2"].version, "0.2.0");
+    assert_eq!(manager.load_state().jre_versions.get(DEFAULT_JRE_KEY).map(String::as_str), Some("21.0.13"));
 }
 
 #[tokio::test]
-async fn offline_zip_import_rejects_corrupt_jar() {
+async fn offline_zip_import_reports_corrupt_jar_without_installing_it() {
     let manager = test_manager("offline-corrupt-driver");
     let zip_path = test_path("offline-corrupt-driver-zip").join("agents.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
     write_offline_driver_zip_with_jar(&zip_path, "h2", "0.2.0", b"jar".to_vec());
 
-    let err = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap_err();
+    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
 
-    assert!(err.contains("invalid or corrupt"));
+    assert!(result.drivers_installed.is_empty());
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].key, "h2");
+    assert!(result.failures[0].error.contains("invalid or corrupt"), "unexpected error: {}", result.failures[0].error);
     assert!(!manager.driver_jar_path("h2").exists());
     assert!(!manager.load_state().installed_drivers.contains_key("h2"));
 }
@@ -763,11 +782,32 @@ async fn offline_zip_import_preserves_existing_driver_when_jar_is_corrupt() {
     let original = std::fs::read(manager.driver_jar_path("h2")).unwrap();
 
     write_offline_driver_zip_with_jar(&corrupt_zip, "h2", "0.3.0", b"jar".to_vec());
-    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap_err();
+    let result = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap();
 
-    assert!(err.contains("invalid or corrupt"));
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].key, "h2");
+    assert!(result.failures[0].error.contains("invalid or corrupt"), "unexpected error: {}", result.failures[0].error);
     assert_eq!(std::fs::read(manager.driver_jar_path("h2")).unwrap(), original);
     assert_eq!(manager.load_state().installed_drivers["h2"].version, "0.2.0");
+}
+
+#[tokio::test]
+async fn offline_zip_import_installs_the_remaining_drivers_when_one_item_is_broken() {
+    let manager = test_manager("offline-partial-driver-package");
+    let zip_path = test_path("offline-partial-driver-package-zip").join("agents.zip");
+    std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
+    let valid_jar = test_agent_jar_bytes();
+    write_offline_java_driver_zip(&zip_path, &[("h2", "0.2.0", &valid_jar), ("duckdb", "0.1.0", b"not-a-jar")]);
+
+    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
+
+    assert_eq!(result.drivers_installed, vec!["h2"]);
+    assert_eq!(manager.load_state().installed_drivers["h2"].version, "0.2.0");
+    assert_eq!(result.failures.len(), 1);
+    assert!(!result.failures[0].is_jre);
+    assert_eq!(result.failures[0].key, "duckdb");
+    assert!(result.failures[0].error.contains("invalid or corrupt"), "unexpected error: {}", result.failures[0].error);
+    assert!(!manager.is_driver_installed("duckdb"));
 }
 
 #[tokio::test]
@@ -884,9 +924,11 @@ async fn offline_zip_import_preserves_existing_native_driver_when_binary_is_inva
         AgentManager::current_platform(),
         b"not-a-native-agent".to_vec(),
     );
-    let err = import_agents_from_zip(&manager, &invalid_zip, |_| {}).await.unwrap_err();
+    let result = import_agents_from_zip(&manager, &invalid_zip, |_| {}).await.unwrap();
 
-    assert!(err.contains("not a"));
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].key, "kingbase");
+    assert!(result.failures[0].error.contains("not a"), "unexpected error: {}", result.failures[0].error);
     assert_eq!(std::fs::read(manager.driver_native_path("kingbase")).unwrap(), original);
     assert_eq!(manager.load_state().installed_drivers["kingbase"].version, "0.1.34");
 }
@@ -1289,25 +1331,41 @@ fn test_jre_archive_zstd_bytes() -> Vec<u8> {
 }
 
 fn write_offline_driver_zip_with_jar(path: &std::path::Path, db_type: &str, version: &str, jar: Vec<u8>) {
+    write_offline_java_driver_zip(path, &[(db_type, version, &jar)]);
+}
+
+/// Build a package from `(db_type, version, jar bytes)` tuples so a single
+/// package can mix working and broken drivers.
+fn write_offline_java_driver_zip(path: &std::path::Path, drivers: &[(&str, &str, &[u8])]) {
     let file = std::fs::File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    let registry = serde_json::json!({
-        "drivers": {
-            db_type: {
-                "version": version,
-                "label": db_type,
-                "min_app_version": "0.1.0",
-                "jre": DEFAULT_JRE_KEY,
-                "jar": { "url": format!("https://example.com/dbx-agent-{db_type}-{version}.jar"), "size": jar.len() }
-            }
-        }
-    });
+    let registry_drivers = drivers
+        .iter()
+        .map(|(db_type, version, jar)| {
+            (
+                (*db_type).to_string(),
+                serde_json::json!({
+                    "version": version,
+                    "label": db_type,
+                    "min_app_version": "0.1.0",
+                    "jre": DEFAULT_JRE_KEY,
+                    "jar": {
+                        "url": format!("https://example.com/dbx-agent-{db_type}-{version}.jar"),
+                        "size": jar.len()
+                    }
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    let registry = serde_json::json!({ "drivers": registry_drivers });
 
     zip.start_file("agent-registry.json", options).unwrap();
     std::io::Write::write_all(&mut zip, registry.to_string().as_bytes()).unwrap();
-    zip.start_file(format!("drivers/dbx-agent-{db_type}-{version}.jar"), options).unwrap();
-    std::io::Write::write_all(&mut zip, &jar).unwrap();
+    for (db_type, version, jar) in drivers {
+        zip.start_file(format!("drivers/dbx-agent-{db_type}-{version}.jar"), options).unwrap();
+        std::io::Write::write_all(&mut zip, jar).unwrap();
+    }
     zip.finish().unwrap();
 }
 

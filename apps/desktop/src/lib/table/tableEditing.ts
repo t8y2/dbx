@@ -29,6 +29,13 @@ export function editablePrimaryKeys(databaseType: DatabaseType | undefined, colu
   return primaryKeys;
 }
 
+/** Physical primary keys only; unlike editable row identifiers, never fall back to unique indexes or synthetic keys. */
+export function physicalTablePrimaryKeys(columns: readonly Pick<ColumnInfo, "name" | "is_primary_key">[], indexes: readonly Pick<IndexInfo, "columns" | "is_primary">[] = []): string[] {
+  const columnPrimaryKeys = columns.filter((column) => column.is_primary_key).map((column) => column.name);
+  if (columnPrimaryKeys.length > 0) return columnPrimaryKeys;
+  return indexes.find((index) => index.is_primary && index.columns.length > 0)?.columns ?? [];
+}
+
 export function editableRowIdentifierColumns(databaseType: DatabaseType | undefined, columns: ColumnInfo[], indexes?: IndexInfo[], tableType?: string): string[] {
   const primaryKeys = editablePrimaryKeys(databaseType, columns, tableType);
   const oracleRowIdFallback = getDatabaseCapability(databaseType).syntheticKey === "oracle-rowid" && primaryKeys.length === 1 && primaryKeys[0]?.toUpperCase() === DBX_ROWID_COLUMN;

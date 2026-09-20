@@ -176,6 +176,30 @@ pub async fn save_editor_settings(state: State<'_, Arc<AppState>>, settings: ser
     state.storage.save_editor_settings(&settings).await
 }
 
+const GLOBAL_SEARCH_SETTINGS_FILE: &str = "global-search-settings.json";
+
+#[tauri::command]
+pub async fn load_global_search_settings(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir;
+    let path = data_dir.join(GLOBAL_SEARCH_SETTINGS_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+}
+
+#[tauri::command]
+pub async fn save_global_search_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    let default_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = crate::data_dir::resolve_data_dir_with_mode(default_data_dir).data_dir;
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create {}: {e}", data_dir.display()))?;
+    let path = data_dir.join(GLOBAL_SEARCH_SETTINGS_FILE);
+    let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
 #[tauri::command]
 pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions))).await

@@ -199,6 +199,8 @@ The result is `{ "action": "submit", "value": "123456" }`, `{ "action": "cancel"
 
 The fixed lifecycle methods are `connection/test`, `connection/connect`, and `connection/disconnect`; custom form actions use `connection/action`. Parameters include `provider`, `connection`, and `runtime`, plus `action: { id }` for actions. Keep sessions keyed by `connection.id` and connect to `runtime.host`/`runtime.port`, which include DBX tunnel/proxy resolution. Hydrated secrets are provided only to backend lifecycle requests; the frontend uses `connectionId` to access an established session.
 
+Multi-endpoint protocols (Kafka `advertised.listeners`, cluster discovery) declare `proxy_route` on the contribution. With transport layers configured, DBX then delivers a SOCKS5 route in the payload instead of a static forward, keeping `runtime.host`/`runtime.port` at the logical endpoint while the plugin dials every advertised endpoint through `runtime.proxy` (`{ "type": "socks5", "host": "...", "port": 1080, "username": "...", "password": "..." }`; an SSH final hop exposes its dynamic SOCKS5 endpoint, a SOCKS5 proxy layer is used directly, and proxy credentials ride the same encrypted channel as connection secrets and must never be logged). Without the flag, transport layers keep the static-tunnel behavior, which requires a single remote endpoint from the standard `host`/`port` fields; DBX rejects plugin connections that would tunnel to an empty endpoint instead of timing out silently.
+
 Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`, `outline`, `secondary`, `destructive`, or `ghost`; `timeout_ms` is 1–120000. `requires_valid_form` requires a complete form and `close_on_success` closes the dialog on success. Return `{ "success": true, "message": "...", "fieldValues": { "port": 443 } }` to update declared fields; `success: false` is a failure.
 
 ### Other Contributions
@@ -313,6 +315,24 @@ button {
 ```
 
 Listen with `window.addEventListener("dbx-plugin-env", handler)` for locale/theme changes. Initialize from `dbxPlugin.locale`/`theme`, then refresh your state on events. DBX includes lightweight `dbx-btn` and `dbx-input` styles, but the development host does not emulate the complete component kit; custom token-based styles work more consistently in both.
+
+#### What the theme payload carries
+
+The env message's `theme` is `{ appearance, tokens, editor? }`. `appearance` is `"light" | "dark"`; `tokens` are the resolved root design variables swept by prefix (`--color-*`, `--radius-*`, `--font-*`); `editor` is a structured snapshot of the SQL editor settings that have no CSS-token carrier. Delivered settings:
+
+| DBX setting | Delivered as |
+| --- | --- |
+| Light/dark/system mode | `theme.appearance` |
+| Palette + custom color sets | `--color-*` tokens |
+| Corner style | `--radius-*` tokens |
+| UI font family | `--font-sans` token |
+| Editor (mono) font family | `--font-mono` token + `theme.editor.fontFamily` |
+| Editor font size | `theme.editor.fontSize` |
+| SQL editor syntax theme | `theme.editor.theme` |
+| UI scale (host window zoom) | not delivered — plugins own their own zoom |
+| Data-grid font / type colors, editor background image | not delivered — DB-domain (`--dbx-*` tokens are excluded from the sweep) |
+
+Treat `terminal.fontSize`-style concerns as plugin-owned: the host never dictates your font size; consume `theme.editor.fontSize` as a default only if it suits your UI. All payload changes push live on the env channel — font-family edits via the theme revision, size/theme via the explicit editor watcher — so no refresh is needed.
 
 Build the UI as packaged static assets, not references to a Vite server or CDN scripts. The host converts the entry and assets into sandbox-loadable content. For CSP errors, verify build outputs and confinement under `ui.root`, and reproduce with the matching CLI version. Use plugin-owned dialogs for delete/rename rather than relying on native `alert`/`confirm`/`prompt` inside the sandbox.
 

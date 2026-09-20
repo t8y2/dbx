@@ -8,13 +8,14 @@ import type { ConnectionConfig, ObjectInfo } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   listObjects: vi.fn(),
+  listSchemas: vi.fn(),
   ensureConnected: vi.fn(),
   editorInstances: 0,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   listObjects: (...args: unknown[]) => mocks.listObjects(...args),
-  listSchemas: vi.fn().mockResolvedValue([]),
+  listSchemas: (...args: unknown[]) => mocks.listSchemas(...args),
   listObjectStatistics: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@/stores/connectionStore", () => ({
@@ -81,6 +82,7 @@ const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.listObjects.mockResolvedValue([]);
+  mocks.listSchemas.mockResolvedValue([]);
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.editorInstances = 0;
   invalidateObjectBrowserRowsCache({});
@@ -96,14 +98,15 @@ afterEach(() => {
 
 async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser>["$props"]> = {}) {
   const props = reactive({ connection, database: "app", initialEventCreateRequestId: 1 as number | undefined, ...overrides });
+  const browser = ref<InstanceType<typeof ObjectBrowser> | null>(null);
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, props) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { ...props, ref: browser }) });
   mountedApps.push({ app, host });
   app.mount(host);
   await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledOnce());
   await nextTick();
-  return { host, props };
+  return { browser, host, props };
 }
 
 describe("ObjectBrowser event editor rendering", () => {
@@ -182,5 +185,17 @@ describe("ObjectBrowser event editor rendering", () => {
 
     expect(host.textContent).toContain("objects unavailable");
     expect(host.querySelector("[data-event-editor]")).toBeNull();
+  });
+});
+
+describe("ObjectBrowser refresh scope", () => {
+  it("matches the schema selected automatically by loadSchemas", async () => {
+    mocks.listSchemas.mockResolvedValue(["APP", "OTHER"]);
+    const damengConnection = { ...connection, id: "dameng", name: "Dameng", db_type: "dameng" } as ConnectionConfig;
+    const { browser } = await mountBrowser({ connection: damengConnection, initialEventCreateRequestId: undefined });
+
+    expect(browser.value?.matchesRefreshScope({ schema: "APP" })).toBe(true);
+    expect(browser.value?.matchesRefreshScope({ schema: "OTHER" })).toBe(false);
+    expect(browser.value?.matchesRefreshScope({ schema: "APP", catalog: "OTHER" })).toBe(false);
   });
 });

@@ -20,6 +20,7 @@ dbx-core = { path = "../dbx-core", default-features = false }
 dirs = "6"
 log = "0.4"
 axum = "0.8"
+chrono = "0.4"
 rmcp = { version = "2.2.0", features = ["client", "transport-io", "transport-streamable-http-server"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

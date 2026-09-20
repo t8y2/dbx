@@ -299,7 +299,7 @@ describe("DataGrid context menu target lifecycle", () => {
     await settle();
 
     expect(contextMenuLabels()).toContain("Copy Selected Column Names (2)");
-    expect(contextMenuLabels()).toContain("Freeze Selected Columns");
+    expect(contextMenuLabels()).toContain("Freeze Selected Columns (2)");
   });
 
   it("offers snapshots for full-column selections from the column header", async () => {

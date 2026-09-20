@@ -1436,6 +1436,19 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Metadata/completion command chains nest very large async futures (a single
+    // frame can be 60-150 KiB), which can exhaust tokio's default 2 MiB worker
+    // stack and abort the process with STATUS_STACK_OVERFLOW. Give the runtime a
+    // roomier worker stack so those chains have headroom.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()
+        .expect("Failed to build tokio runtime");
+    let runtime_handle = runtime.handle().clone();
+    let _runtime = Box::leak(Box::new(runtime));
+    tauri::async_runtime::set(runtime_handle);
+
     startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
     append_startup_probe("runtime prerequisites configured");
@@ -1800,6 +1813,8 @@ pub fn run() {
             commands::mcp_http_server::rotate_mcp_http_server_token,
             commands::app_settings::load_editor_settings,
             commands::app_settings::save_editor_settings,
+            commands::app_settings::load_global_search_settings,
+            commands::app_settings::save_global_search_settings,
             commands::app_settings::load_open_tabs_state,
             commands::app_settings::save_open_tabs_state,
             commands::app_settings::save_detached_tab_handoff,
@@ -1855,6 +1870,9 @@ pub fn run() {
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
             commands::connection::load_sidebar_layout,
+            commands::connection::save_table_vgroups,
+            commands::connection::load_table_vgroups,
+            commands::connection::delete_table_vgroups_for_connection,
             commands::plugins::list_plugins,
             commands::plugins::list_plugin_trusted_keys,
             commands::plugins::save_plugin_trusted_key,
@@ -2046,6 +2064,7 @@ pub fn run() {
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
+            commands::global_search::global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,

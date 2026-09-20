@@ -307,6 +307,7 @@ pub async fn import_agents_from_zip(
         return Ok(Json(serde_json::json!({
             "count": result.drivers_installed.len() as u32,
             "jreCount": result.jre_installed.len(),
+            "failures": result.failures,
         })));
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.6.16",
+  "version": "0.6.17",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -34,6 +34,7 @@
     "check": "node scripts/run-check.mjs",
     "db:env": "node scripts/database-env.mjs",
     "test:db-env": "node --test scripts/database-env.test.mjs",
+    "test:architecture": "node --test scripts/core-architecture.test.mjs",
     "test:ai-html-canary": "node scripts/ai-html-runtime-canary.mjs",
     "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
     "bench:mongodb-count": "node scripts/bench/mongodb-count.mjs",
@@ -58,6 +59,7 @@
     "@codemirror/lang-xml": "^6.1.0",
     "@codemirror/lang-yaml": "^6.1.3",
     "@codemirror/language": "^6.12.3",
+    "@codemirror/lint": "^6.9.5",
     "@codemirror/legacy-modes": "^6.5.3",
     "@codemirror/search": "^6.7.0",
     "@codemirror/state": "^6.6.0",

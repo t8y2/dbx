@@ -465,3 +465,12 @@ fn highgo_declares_data_transfer_support() {
     assert!(highgo.capabilities.table_import);
     assert!(highgo.capabilities.data_transfer);
 }
+
+#[test]
+fn xugu_declares_table_import_support() {
+    let manifest = driver_manifest();
+    let xugu =
+        manifest.drivers.iter().find(|driver| driver.db_type == DatabaseType::Xugu).expect("Xugu manifest entry");
+
+    assert!(xugu.capabilities.table_import);
+}

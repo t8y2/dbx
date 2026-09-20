@@ -3,6 +3,13 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, normalizeDataGridCopyPreference, normalizeDataGridExtractorOptions, resolveDataGridCopyPreference, validateDataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 
 describe("data-grid extractor options", () => {
+  it("keeps database qualification for legacy options and persists explicit opt-out", () => {
+    expect(normalizeDataGridExtractorOptions({ sql: {} }).sql.includeDatabaseName).toBe(true);
+    const configured = normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: false } });
+    expect(normalizeDataGridExtractorOptions(JSON.parse(JSON.stringify(configured))).sql.includeDatabaseName).toBe(false);
+    expect(normalizeDataGridExtractorOptions({ sql: { includeDatabaseName: "false" } }).sql.includeDatabaseName).toBe(true);
+  });
+
   it("defaults DSV NULL output to an empty spreadsheet field", () => {
     expect(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.dsv.nullText).toBe("");
     expect(normalizeDataGridExtractorOptions({}).dsv.nullText).toBe("");

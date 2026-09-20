@@ -151,7 +151,7 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  *
  * Time-series engines get the same rolling-window scoping the sidebar
  * quick-open uses (see `default_time_series_predicate` in
- * `crates/dbx-core/src/sql_dialect/table_select.rs`). Without a `time`
+ * `crates/dbx-sql/src/sql_dialect/table_select.rs`). Without a `time`
  * predicate InfluxDB scans every shard (v1/v2) or every Parquet file
  * (v3), which turns "let me draft a query against this table" into a
  * full-history scan the moment the user hits Run. VictoriaMetrics

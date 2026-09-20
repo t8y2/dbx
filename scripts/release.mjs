@@ -42,7 +42,7 @@ const PACKAGE_RELEASE_PATHS = [
   "packages/mcp-win32-x64/",
   "crates/dbx-mcp/",
   "crates/dbx-cli/",
-  "crates/dbx-core/src/mongo_shell.rs",
+  "crates/dbx-drivers/src/mongo_shell.rs",
   "Cargo.toml",
   "Cargo.lock",
   ".github/workflows/mcp-release.yml",

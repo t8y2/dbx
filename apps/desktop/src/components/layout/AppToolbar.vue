@@ -622,9 +622,21 @@ const toolbarStyle = computed(() => {
       <template v-if="toolbarItems.checkUpdates">
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button v-show="isRightItemVisible('checkUpdates')" data-toolbar-update-trigger variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" @click="emit('check-updates')">
-              <ToolbarUpdateIcon />
-              <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
+            <Button
+              v-show="isRightItemVisible('checkUpdates')"
+              data-toolbar-update-trigger
+              :data-toolbar-update-action="hasUpdateAvailable ? '' : undefined"
+              :variant="hasUpdateAvailable ? 'default' : 'ghost'"
+              :size="hasUpdateAvailable ? 'sm' : 'icon'"
+              class="toolbar-action-button shrink-0"
+              :class="hasUpdateAvailable ? 'h-7 gap-1.5 px-2 text-xs' : 'relative h-8 w-8'"
+              @click="emit('check-updates')"
+            >
+              <template v-if="hasUpdateAvailable">
+                <CloudDownload class="h-3.5 w-3.5" />
+                <span>{{ t("updates.updateAction") }}</span>
+              </template>
+              <ToolbarUpdateIcon v-else :available="false" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{{ updateTooltip }}</TooltipContent>

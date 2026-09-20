@@ -11,7 +11,7 @@ import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -131,7 +131,8 @@ async function loadDdl(force = false) {
     );
     const formatDialect = props.formatDialect ?? props.dialect;
     const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
-    rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, formatDialect);
+    const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+    rawDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
   } catch (e: any) {
     ddlError.value = e?.message || String(e);
   } finally {

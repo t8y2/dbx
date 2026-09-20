@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   renderWkt: vi.fn(),
   panelCancel: vi.fn(),
   panelOpenSearch: vi.fn(),
+  copyToClipboard: vi.fn(),
+  toast: vi.fn(),
 }));
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -53,7 +55,15 @@ vi.mock("@/components/ui/button", async () => ({ Button: (await import("./vueHos
 vi.mock("@/components/ui/input", async () => ({ Input: (await import("./vueHostHarness")).createPassthroughStub("Input", "input") }));
 vi.mock("@/components/ui/dialog", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
-  return { Dialog: createPassthroughStub("Dialog"), DialogContent: createPassthroughStub("DialogContent"), DialogFooter: createPassthroughStub("DialogFooter"), DialogHeader: createPassthroughStub("DialogHeader"), DialogTitle: createPassthroughStub("DialogTitle") };
+  return {
+    Dialog: createPassthroughStub("Dialog"),
+    DialogContent: createPassthroughStub("DialogContent"),
+    DialogDescription: createPassthroughStub("DialogDescription"),
+    DialogFooter: createPassthroughStub("DialogFooter"),
+    DialogHeader: createPassthroughStub("DialogHeader"),
+    DialogTitle: createPassthroughStub("DialogTitle"),
+    DialogTrigger: createPassthroughStub("DialogTrigger"),
+  };
 });
 vi.mock("@/components/ui/dropdown-menu", async () => {
   const { createPassthroughStub } = await import("./vueHostHarness");
@@ -82,6 +92,8 @@ vi.mock("@/composables/useCellDetailEditor", () => ({ useCellDetailEditor: () =>
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: {} } }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { cellDetailJsonFormatted: true, theme: "default", fontSize: 13, fontFamily: "monospace" }, updateEditorSettings: mocks.updateSettings }) }));
 vi.mock("@/lib/dataGrid/geometryPreview", () => ({ isHexGeometry: () => false, renderWktOnCanvas: mocks.renderWkt }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/composables/useDataGridCellDetail", async () => {
   const { ref } = await import("vue");
   return {
@@ -106,6 +118,8 @@ import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
 const dataGridCellDetailEditSource = readFileSync("apps/desktop/src/composables/useDataGridCellDetailEdit.ts", "utf8");
 const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
+const cellDetailDialogSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailDialog.vue", "utf8");
+const binaryTextPreviewSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailTextPreview.vue", "utf8");
 const cellDetailHeaderSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailHeader.vue", "utf8");
 const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
 
@@ -1538,6 +1552,164 @@ describe("cell detail surfaces", () => {
     });
 
     expect(hostText(panel.root)).toContain("0x89504e470d0a1a0a");
+  });
+
+  // issue #9505：GaussDB（ZenithDriver）的 BLOB 已经以 `0x<hex>` 到达前端，缺的是详情里显式、只读的文本查看入口。
+  it("offers an explicit read-only binary text preview in the dialog and the panel", () => {
+    const blobDetail = detail({
+      type: "BLOB",
+      value: "0x5b5b68656164657273203d207b7d",
+      rawValue: "0x5b5b68656164657273203d207b7d",
+      rawValuePreview: "0x5b5b68656164657273203d207b7d",
+      displayValue: "BLOB [14 bytes]",
+      displayValuePreview: "BLOB [14 bytes]",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: blobDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText: vi.fn(),
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      databaseType: "gaussdb",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: blobDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "gaussdb",
+    });
+
+    for (const mounted of [dialog, panel]) {
+      // canonical 值仍是 0x 十六进制，解码文本只出现在只读预览里。
+      expect(hostText(mounted.root)).toContain("0x5b5b68656164657273203d207b7d");
+      expect(hostText(mounted.root)).toContain("grid.binaryTextPreview");
+      // binary 列不再渲染 timestamp/radix 这类对 hex 无意义的文本转换。
+      expect(findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(0);
+      expect(findOne(mounted.root, (node) => node.type === "textarea").value).toBe("[[headers = {}");
+    }
+  });
+
+  it("re-decodes the binary text preview with GBK only after the user picks it", async () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "BLOB", value: "0xd6d0cec4", rawValue: "0xd6d0cec4", rawValuePreview: "0xd6d0cec4", displayValue: "BLOB [4 bytes]", displayValuePreview: "BLOB [4 bytes]", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "gaussdb",
+    });
+
+    // 默认 UTF-8：GBK 字节严格解码失败时给出失败提示，而不是替换字符。
+    expect(hostText(panel.root)).toContain("grid.binaryTextPreviewErrors.undecodable");
+    dispatch(
+      findOne(panel.root, (node) => node.type === "button" && hostText(node).trim() === "grid.binaryTextPreviewEncodings.gbk"),
+      "click",
+    );
+    await nextTick();
+
+    expect(hostText(panel.root)).not.toContain("grid.binaryTextPreviewErrors.undecodable");
+    expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("中文");
+  });
+
+  it("keeps the value transform entry for non-binary detail cells", () => {
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "VARCHAR(32)", value: "hello", rawValue: "hello", rawValuePreview: "hello", displayValue: "hello", displayValuePreview: "hello", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => false,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "mysql",
+    });
+
+    expect(findAll(panel.root, (node) => node.props["data-stub"] === "DataGridValueTransform")).toHaveLength(1);
+    expect(hostText(panel.root)).not.toContain("grid.binaryTextPreviewTitle");
+    expect(findAll(panel.root, (node) => node.type === "textarea")).toHaveLength(0);
+  });
+
+  it("keeps the binary text preview out of the copy-back and edit paths", async () => {
+    const copyValue = vi.fn();
+    const startEdit = vi.fn();
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: detail({ type: "BLOB", value: "0x48656c6c6f", rawValue: "0x48656c6c6f", rawValuePreview: "0x48656c6c6f", displayValue: "BLOB [5 bytes]", displayValuePreview: "BLOB [5 bytes]", formattedJson: "" }),
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => false,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "gaussdb",
+      onCopyValue: copyValue,
+      onStartEdit: startEdit,
+    });
+
+    dispatch(
+      findOne(panel.root, (node) => node.type === "button" && hostText(node).trim() === "grid.binaryTextPreviewCopy"),
+      "click",
+    );
+    await nextTick();
+
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith("Hello");
+    expect(mocks.toast).toHaveBeenCalledWith("grid.cellValueCopied", 2000);
+    // 预览只读：不触发栅格复制/编辑，details 预览仍展示未修改的 canonical hex。
+    expect(copyValue).not.toHaveBeenCalled();
+    expect(startEdit).not.toHaveBeenCalled();
+    expect(hostText(panel.root)).toContain("0x48656c6c6f");
+    expect(findOne(panel.root, (node) => node.type === "textarea").value).toBe("Hello");
+  });
+
+  it("keeps the binary text preview component strictly read-only and shared by both surfaces", () => {
+    expect(binaryTextPreviewSource).toContain("binaryCellTextPreview(props.value");
+    // 不发出任何编辑/提交事件，也不给 detail.value / rawValue 赋值。
+    expect(binaryTextPreviewSource).not.toContain("defineEmits");
+    expect(binaryTextPreviewSource).not.toMatch(/(?:props|detail)\.(?:value|rawValue)\s*=/);
+    expect(cellDetailDialogSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="open && isBinaryCellColumnType\(detail\.type\)"/);
+    // Panel 与下载菜单同一道闸门：编辑中不对草稿做只读文本预览。
+    expect(cellDetailPanelSource).toMatch(/<DataGridCellDetailTextPreview\s+v-if="!editing && isBinaryCellColumnType\(detail\.type\)"/);
   });
 
   it("copies the presented value, emits edit, closes, and replaces the JSON result", async () => {

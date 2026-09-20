@@ -44,8 +44,9 @@ const DATABASE_QUALIFIED_TABLE_TYPES = new Set<DatabaseType>(["mysql", "clickhou
 // name" on schema-aware engines — except for databases that can only address
 // objects through their full qualified name (`catalog.schema.table` /
 // `database.schema.table`), where dropping it would break the query.
-export function dropsSchemaQualifier(databaseType: DatabaseType | undefined, includeDatabaseName?: boolean): boolean {
-  return includeDatabaseName === false && databaseType !== undefined && !DATABASE_SCHEMA_QUALIFIED_TYPES.has(databaseType);
+export function dropsSchemaQualifier(databaseType: DatabaseType | undefined, includeDatabaseName?: boolean, catalog?: string): boolean {
+  if (includeDatabaseName !== false || databaseType === undefined || DATABASE_SCHEMA_QUALIFIED_TYPES.has(databaseType)) return false;
+  return !catalog || catalog === "internal" || (databaseType !== "doris" && databaseType !== "starrocks");
 }
 
 /**
@@ -55,12 +56,7 @@ export function dropsSchemaQualifier(databaseType: DatabaseType | undefined, inc
  * SELECT templates do (#9326).
  */
 export function tableMetaWithoutOptionalDatabaseQualifier<T extends { schema?: string; database?: string; catalog?: string }>(tableMeta: T | undefined, databaseType: DatabaseType | undefined, includeDatabaseName?: boolean): T | undefined {
-  if (!tableMeta || !dropsSchemaQualifier(databaseType, includeDatabaseName)) return tableMeta;
-  // Doris/StarRocks external-catalog tables are only addressable through the
-  // 3-part `catalog.database.table` form; stripping the middle segment would
-  // retarget the generated SQL, so keep the qualifiers (same rule as
-  // `qualifiedTableName`).
-  if (tableMeta.catalog && tableMeta.catalog !== "internal" && (databaseType === "doris" || databaseType === "starrocks")) return tableMeta;
+  if (!tableMeta || !dropsSchemaQualifier(databaseType, includeDatabaseName, tableMeta.catalog)) return tableMeta;
   if (tableMeta.schema === undefined && tableMeta.database === undefined) return tableMeta;
   return { ...tableMeta, schema: undefined, database: undefined };
 }

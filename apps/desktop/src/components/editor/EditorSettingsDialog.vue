@@ -113,6 +113,7 @@ import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatemen
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
+import type { DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import DataGridTypeColorSchemeDialog from "@/components/grid/DataGridTypeColorSchemeDialog.vue";
 import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, cloneDataGridTypeColorSchemes, type DataGridTypeColorScheme } from "@/lib/dataGrid/dataGridTypeColorScheme";
@@ -178,6 +179,7 @@ import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { COLUMN_NAME_COPY_SEPARATOR_LABELS, COLUMN_NAME_COPY_SEPARATOR_OPTIONS, isColumnNameCopySeparator, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
+import { REDIS_DATABASE_DISPLAY_LIMIT_MIN, REDIS_DATABASE_DISPLAY_LIMIT_MAX, REDIS_DATABASE_DISPLAY_LIMIT_OPTIONS } from "@/lib/redis/redisDatabaseAlias";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
@@ -251,6 +253,7 @@ import {
 import { applyEditorSettingsDraftToRefs, type EditorSettingsDraftRefMap } from "@/lib/settings/applyEditorSettingsDraft";
 import { serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId } from "@/lib/settings/settingsTransfer";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
@@ -289,6 +292,7 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
+const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const tunnelProfileStore = useTunnelProfileStore();
@@ -382,13 +386,59 @@ const props = defineProps<{
   aiConfigRequestId?: number;
   appVersion?: string;
   checkingUpdates?: boolean;
+  updatingAllUpdates?: boolean;
+  appUpdateAvailable?: boolean;
+  appUpdateVersion?: string;
+  driverUpdateCount?: number;
+  jdbcUpdateAvailable?: boolean;
+  mcpUpdateAvailable?: boolean;
+  pluginUpdateCount?: number;
 }>();
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
   "check-updates": [];
+  "update-all": [];
+  "open-driver-store": [target?: DriverStoreTab];
+  "open-plugin-center": [];
+  "open-mcp-settings": [];
+  "open-update-center": [];
   "ai-config-deep-link-handled": [];
 }>();
+
+const hasAnyUpdate = computed(() => Boolean(props.appUpdateAvailable || (props.driverUpdateCount || 0) > 0 || props.jdbcUpdateAvailable || props.mcpUpdateAvailable || (props.pluginUpdateCount || 0) > 0));
+const updateCheckItemKeys = ["app", "drivers", "jdbc", "mcp", "plugins"] as const;
+type UpdateCheckItem = (typeof updateCheckItemKeys)[number];
+const updateCheckLoading = ref<Record<UpdateCheckItem, boolean>>({ app: false, drivers: false, jdbc: false, mcp: false, plugins: false });
+let updateCheckRevealTimers: ReturnType<typeof setTimeout>[] = [];
+let updateCheckWasActive = false;
+
+watch(
+  () => props.checkingUpdates,
+  (checking) => {
+    for (const timer of updateCheckRevealTimers) clearTimeout(timer);
+    updateCheckRevealTimers = [];
+    if (checking) {
+      updateCheckWasActive = true;
+      for (const key of updateCheckItemKeys) updateCheckLoading.value[key] = true;
+      return;
+    }
+    if (!updateCheckWasActive) return;
+    updateCheckWasActive = false;
+    updateCheckItemKeys.forEach((key, index) => {
+      updateCheckRevealTimers.push(
+        setTimeout(() => {
+          updateCheckLoading.value[key] = false;
+        }, index * 120),
+      );
+    });
+  },
+  { immediate: true },
+);
+
+onUnmounted(() => {
+  for (const timer of updateCheckRevealTimers) clearTimeout(timer);
+});
 
 const isSettingsPage = computed(() => props.variant === "page");
 const settingsVisible = computed(() => isSettingsPage.value || props.open === true);
@@ -520,6 +570,8 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editInsertSpaceAfterCompletion = ref(settingsStore.editorSettings.insertSpaceAfterCompletion);
+const editSqlServerSpaceConfirmsCompletion = ref(settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion);
+const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnection.value || settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value);
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
@@ -579,6 +631,9 @@ const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dat
 const editDataGridCrosshairHighlight = ref(settingsStore.editorSettings.dataGridCrosshairHighlight);
 const editPageSize = ref(settingsStore.editorSettings.pageSize);
 const editTableOpenPageSize = ref(settingsStore.editorSettings.tableOpenPageSize);
+const editTableOpenSortMode = ref(settingsStore.editorSettings.tableOpenSortMode);
+const editTableDatabaseSortDirection = ref(settingsStore.editorSettings.tableDatabaseSortDirection);
+const editTableLocalSortDirection = ref(settingsStore.editorSettings.tableLocalSortDirection);
 const editQueryResultMaxRowsEnabled = ref(settingsStore.editorSettings.queryResultMaxRowsEnabled);
 const editQueryResultMaxRows = ref(settingsStore.editorSettings.queryResultMaxRows);
 const editExternalSqlEditorMaxMb = ref(settingsStore.editorSettings.externalSqlEditorMaxMb);
@@ -684,12 +739,16 @@ const tableHoverLookupModeDescription = computed(() => {
   return t(key);
 });
 const editClickTableNavigationTarget = ref<ClickTableNavigationTarget>(settingsStore.editorSettings.clickTableNavigationTarget);
-const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
-const editAutoDownloadUpdates = ref(settingsStore.editorSettings.autoDownloadUpdates);
+const editAutoUpdateApp = ref(settingsStore.editorSettings.autoUpdateApp);
+const editAutoUpdateDrivers = ref(settingsStore.editorSettings.autoUpdateDrivers);
+const editAutoUpdateJdbc = ref(settingsStore.editorSettings.autoUpdateJdbc);
+const editAutoUpdateMcp = ref(settingsStore.editorSettings.autoUpdateMcp);
+const editAutoUpdatePlugins = ref(settingsStore.editorSettings.autoUpdatePlugins);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
 const editSidebarCopyTableNameSeparator = ref<ColumnNameCopySeparator>(settingsStore.editorSettings.sidebarCopyTableNameSeparator);
 const editSidebarCopyTableNameIncludeSchema = ref(settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema);
 const editRedisKeyTemplates = ref(normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n"));
+const editRedisDatabaseDisplayLimit = ref(settingsStore.editorSettings.redisDatabaseDisplayLimit);
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
@@ -849,6 +908,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     autoAliasTables: editAutoAliasTables.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
+    sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion.value,
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
     completionTriggerMode: editCompletionTriggerMode.value,
@@ -887,6 +947,9 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridShowWhitespace: editDataGridShowWhitespace.value,
     pageSize: editPageSize.value,
     tableOpenPageSize: editTableOpenPageSize.value,
+    tableOpenSortMode: editTableOpenSortMode.value,
+    tableDatabaseSortDirection: editTableDatabaseSortDirection.value,
+    tableLocalSortDirection: editTableLocalSortDirection.value,
     queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled.value,
     queryResultMaxRows: editQueryResultMaxRows.value,
     externalSqlEditorMaxMb: editExternalSqlEditorMaxMb.value,
@@ -912,8 +975,13 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     formatSqlOnSqlFileSave: editFormatSqlOnSqlFileSave.value,
     showTableDdlHoverPreview: editShowTableDdlHoverPreview.value,
     tableHoverLookupMode: editTableHoverLookupMode.value,
-    updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
-    autoDownloadUpdates: editAutoDownloadUpdates.value,
+    updateNotificationsEnabled: editAutoUpdateApp.value,
+    autoDownloadUpdates: editAutoUpdateApp.value,
+    autoUpdateApp: editAutoUpdateApp.value,
+    autoUpdateDrivers: editAutoUpdateDrivers.value,
+    autoUpdateJdbc: editAutoUpdateJdbc.value,
+    autoUpdateMcp: editAutoUpdateMcp.value,
+    autoUpdatePlugins: editAutoUpdatePlugins.value,
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarShowTooltips: editSidebarShowTooltips.value,
@@ -923,6 +991,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarCopyTableNameSeparator: editSidebarCopyTableNameSeparator.value,
     sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema.value,
     redisKeyTemplates: normalizeRedisKeyTemplates(editRedisKeyTemplates.value),
+    redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit.value,
     exportBatchSize: editExportBatchSize.value,
     csvQuoteMode: editCsvQuoteMode.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
@@ -1477,6 +1546,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
+  editSqlServerSpaceConfirmsCompletion.value = settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion;
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = settingsStore.editorSettings.selectFirstCompletionOnOpen;
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
@@ -1516,6 +1586,9 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridShowWhitespace.value = settingsStore.editorSettings.dataGridShowWhitespace;
   editPageSize.value = settingsStore.editorSettings.pageSize;
   editTableOpenPageSize.value = settingsStore.editorSettings.tableOpenPageSize;
+  editTableOpenSortMode.value = settingsStore.editorSettings.tableOpenSortMode;
+  editTableDatabaseSortDirection.value = settingsStore.editorSettings.tableDatabaseSortDirection;
+  editTableLocalSortDirection.value = settingsStore.editorSettings.tableLocalSortDirection;
   editQueryResultMaxRowsEnabled.value = settingsStore.editorSettings.queryResultMaxRowsEnabled;
   editQueryResultMaxRows.value = settingsStore.editorSettings.queryResultMaxRows;
   editExternalSqlEditorMaxMb.value = settingsStore.editorSettings.externalSqlEditorMaxMb;
@@ -1543,12 +1616,16 @@ function syncEditorSettingsDraftFromStore() {
   editShowTableDdlHoverPreview.value = settingsStore.editorSettings.showTableDdlHoverPreview;
   editTableHoverLookupMode.value = settingsStore.editorSettings.tableHoverLookupMode;
   editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
-  editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
-  editAutoDownloadUpdates.value = settingsStore.editorSettings.autoDownloadUpdates;
+  editAutoUpdateApp.value = settingsStore.editorSettings.autoUpdateApp;
+  editAutoUpdateDrivers.value = settingsStore.editorSettings.autoUpdateDrivers;
+  editAutoUpdateJdbc.value = settingsStore.editorSettings.autoUpdateJdbc;
+  editAutoUpdateMcp.value = settingsStore.editorSettings.autoUpdateMcp;
+  editAutoUpdatePlugins.value = settingsStore.editorSettings.autoUpdatePlugins;
   editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
   editSidebarCopyTableNameSeparator.value = settingsStore.editorSettings.sidebarCopyTableNameSeparator;
   editSidebarCopyTableNameIncludeSchema.value = settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema;
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n");
+  editRedisDatabaseDisplayLimit.value = settingsStore.editorSettings.redisDatabaseDisplayLimit;
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
@@ -1600,6 +1677,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showInsertValueHints: editShowInsertValueHints,
   autoAliasTables: editAutoAliasTables,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
+  sqlServerSpaceConfirmsCompletion: editSqlServerSpaceConfirmsCompletion,
   sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically,
   selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen,
   wordWrap: editWordWrap,
@@ -1634,6 +1712,9 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridCrosshairHighlight: editDataGridCrosshairHighlight,
   pageSize: editPageSize,
   tableOpenPageSize: editTableOpenPageSize,
+  tableOpenSortMode: editTableOpenSortMode,
+  tableDatabaseSortDirection: editTableDatabaseSortDirection,
+  tableLocalSortDirection: editTableLocalSortDirection,
   queryResultMaxRowsEnabled: editQueryResultMaxRowsEnabled,
   queryResultMaxRows: editQueryResultMaxRows,
   externalSqlEditorMaxMb: editExternalSqlEditorMaxMb,
@@ -1660,8 +1741,13 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   formatSqlOnSqlFileSave: editFormatSqlOnSqlFileSave,
   showTableDdlHoverPreview: editShowTableDdlHoverPreview,
   tableHoverLookupMode: editTableHoverLookupMode,
-  updateNotificationsEnabled: editUpdateNotificationsEnabled,
-  autoDownloadUpdates: editAutoDownloadUpdates,
+  updateNotificationsEnabled: editAutoUpdateApp,
+  autoDownloadUpdates: editAutoUpdateApp,
+  autoUpdateApp: editAutoUpdateApp,
+  autoUpdateDrivers: editAutoUpdateDrivers,
+  autoUpdateJdbc: editAutoUpdateJdbc,
+  autoUpdateMcp: editAutoUpdateMcp,
+  autoUpdatePlugins: editAutoUpdatePlugins,
   sidebarObjectInfoMode: editSidebarObjectInfoMode,
   sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll,
   sidebarShowTooltips: editSidebarShowTooltips,
@@ -1671,6 +1757,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarCopyTableNameSeparator: editSidebarCopyTableNameSeparator,
   sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema,
   redisKeyTemplates: editRedisKeyTemplates,
+  redisDatabaseDisplayLimit: editRedisDatabaseDisplayLimit,
   exportBatchSize: editExportBatchSize,
   csvQuoteMode: editCsvQuoteMode,
   exportRowLimitEnabled: editExportRowLimitEnabled,
@@ -1939,6 +2026,10 @@ async function persistSettings() {
     settingsStore.updateEditorSettings(editorSettingsPatch);
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+    // updateEditorSettings clamps out-of-range values; reflect the clamped
+    // result back into the input so an out-of-range draft doesn't keep
+    // reporting unsaved changes after a successful apply.
+    editRedisDatabaseDisplayLimit.value = settingsStore.editorSettings.redisDatabaseDisplayLimit;
   }
   if (pendingBackgroundImageCleanup) {
     const cleanupPath = pendingBackgroundImageCleanup;
@@ -2030,6 +2121,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
+    editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
     editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
@@ -2118,6 +2210,9 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
     editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+    editTableOpenSortMode.value = DEFAULT_EDITOR_SETTINGS.tableOpenSortMode;
+    editTableDatabaseSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableDatabaseSortDirection;
+    editTableLocalSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableLocalSortDirection;
     editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
     editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
@@ -2127,6 +2222,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDuckDbWorkerMaxProcesses.value = DEFAULT_DESKTOP_SETTINGS.duckdb_worker_max_processes;
     editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
     editRedisKeyTemplates.value = normalizeRedisKeyTemplates(DEFAULT_EDITOR_SETTINGS.redisKeyTemplates).join("\n");
+    editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
@@ -2139,10 +2235,13 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   } else if (tab === "snippets") {
     editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
-  } else if (tab === "about") {
+  } else if (tab === "updates") {
+    editAutoUpdateApp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateApp;
+    editAutoUpdateDrivers.value = DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
+    editAutoUpdateJdbc.value = DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
+    editAutoUpdateMcp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
+    editAutoUpdatePlugins.value = DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
     editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
-    editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
-    editAutoDownloadUpdates.value = DEFAULT_EDITOR_SETTINGS.autoDownloadUpdates;
   }
 }
 
@@ -2168,6 +2267,7 @@ function resetAllDefaults() {
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
+  editSqlServerSpaceConfirmsCompletion.value = DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
@@ -2212,6 +2312,9 @@ function resetAllDefaults() {
   editDataGridShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace;
   editPageSize.value = DEFAULT_EDITOR_SETTINGS.pageSize;
   editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
+  editTableOpenSortMode.value = DEFAULT_EDITOR_SETTINGS.tableOpenSortMode;
+  editTableDatabaseSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableDatabaseSortDirection;
+  editTableLocalSortDirection.value = DEFAULT_EDITOR_SETTINGS.tableLocalSortDirection;
   editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
   editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
   editExternalSqlEditorMaxMb.value = DEFAULT_EDITOR_SETTINGS.externalSqlEditorMaxMb;
@@ -2238,8 +2341,11 @@ function resetAllDefaults() {
   editFormatSqlOnSqlFileSave.value = DEFAULT_EDITOR_SETTINGS.formatSqlOnSqlFileSave;
   editShowTableDdlHoverPreview.value = DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview;
   editTableHoverLookupMode.value = DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode;
-  editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
-  editAutoDownloadUpdates.value = DEFAULT_EDITOR_SETTINGS.autoDownloadUpdates;
+  editAutoUpdateApp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateApp;
+  editAutoUpdateDrivers.value = DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
+  editAutoUpdateJdbc.value = DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
+  editAutoUpdateMcp.value = DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
+  editAutoUpdatePlugins.value = DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
@@ -2249,6 +2355,7 @@ function resetAllDefaults() {
   editSidebarCopyTableNameSeparator.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameSeparator;
   editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(DEFAULT_EDITOR_SETTINGS.redisKeyTemplates).join("\n");
+  editRedisDatabaseDisplayLimit.value = DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit;
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
@@ -2660,10 +2767,11 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "sync", label: t("settings.syncTab") },
   { value: "ai", label: t("settings.aiTab") },
   { value: "mcp" as const, label: t("settings.mcpTab") },
+  { value: "updates" as const, label: t("settings.updatesTab") },
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets", "updates"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
@@ -2693,6 +2801,8 @@ const settingsSearchEntries = computed(() =>
     [...SETTINGS_SEARCH_DEFINITIONS, ...createShortcutSettingsSearchDefinitions(SHORTCUT_DEFINITIONS)],
     {
       isWeb,
+      hasSqlServerConnection: hasSqlServerConnection.value,
+      sqlServerSpaceConfirmsCompletionEnabled: settingsStore.editorSettings.sqlServerSpaceConfirmsCompletion || editSqlServerSpaceConfirmsCompletion.value,
       visibleCategories: new Set(settingsCategoryNav.value.map((category) => category.value)),
     },
     translateWithExecuteShortcut,
@@ -4413,7 +4523,7 @@ function globalInstructionsTooLong(): boolean {
 }
 
 // Agent turn limit for DBX's API-backed agent loop. CLI providers enforce their own limits.
-// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/agent_loop.rs —
+// Mirrors DEFAULT/MIN/MAX_MAX_AGENT_TURNS in crates/dbx-core/src/ai/agent_loop.rs —
 // keep in sync; the backend clamp on save/load is the actual source of truth.
 const editMaxAgentTurns = ref<number | undefined>(undefined);
 const maxAgentTurnsSaving = ref(false);
@@ -5945,6 +6055,16 @@ onUnmounted(() => {
                   <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
                 </div>
 
+                <div v-if="showSqlServerSpaceConfirmsCompletion" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-sqlserver-space-confirms-completion">{{ t("settings.sqlServerSpaceConfirmsCompletion") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sqlServerSpaceConfirmsCompletionDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-sqlserver-space-confirms-completion" v-model="editSqlServerSpaceConfirmsCompletion" class="mt-0.5" />
+                </div>
+
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-sort-completion-columns-alphabetically">{{ t("settings.sortCompletionColumnsAlphabetically") }}</Label>
@@ -7335,6 +7455,35 @@ onUnmounted(() => {
                     @update:model-value="updatePageSizeDraft"
                   />
                 </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="tableOpenSortMode">{{ t("settings.tableOpenSortMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.tableOpenSortDescription") }}</p>
+                  </div>
+                  <select id="tableOpenSortMode" v-model="editTableOpenSortMode" class="h-8 rounded-md border bg-background px-2 text-xs">
+                    <option value="none">{{ t("settings.tableSortUnchanged") }}</option>
+                    <option value="database">{{ t("settings.tableSortDatabase") }}</option>
+                    <option value="local">{{ t("settings.tableSortLocal") }}</option>
+                  </select>
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="tableDatabaseSortDirection">{{ t("settings.tableDatabaseSortDirection") }}</Label>
+                  </div>
+                  <select id="tableDatabaseSortDirection" v-model="editTableDatabaseSortDirection" class="h-8 rounded-md border bg-background px-2 text-xs">
+                    <option value="asc">{{ t("settings.tableSortAscending") }}</option>
+                    <option value="desc">{{ t("settings.tableSortDescending") }}</option>
+                  </select>
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="tableLocalSortDirection">{{ t("settings.tableLocalSortDirection") }}</Label>
+                  </div>
+                  <select id="tableLocalSortDirection" v-model="editTableLocalSortDirection" class="h-8 rounded-md border bg-background px-2 text-xs">
+                    <option value="asc">{{ t("settings.tableSortAscending") }}</option>
+                    <option value="desc">{{ t("settings.tableSortDescending") }}</option>
+                  </select>
+                </div>
                 <div data-settings-search-id="default-auto-keep-results" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('default-auto-keep-results')]">
                   <div class="min-w-0 space-y-1">
                     <Label for="default-auto-keep-results">{{ t("settings.defaultAutoKeepResults") }}</Label>
@@ -7668,6 +7817,25 @@ onUnmounted(() => {
                   <p class="text-xs text-muted-foreground">
                     {{ t("settings.redisKeyTemplatesDescription") }}
                   </p>
+                </div>
+                <div class="space-y-2">
+                  <Label for="redis-database-display-limit-input">{{ t("settings.redisDatabaseDisplayLimit") }}</Label>
+                  <div class="flex items-center gap-3">
+                    <Input
+                      id="redis-database-display-limit-input"
+                      type="number"
+                      list="redis-database-display-limits"
+                      :min="REDIS_DATABASE_DISPLAY_LIMIT_MIN"
+                      :max="REDIS_DATABASE_DISPLAY_LIMIT_MAX"
+                      step="10"
+                      v-model.number="editRedisDatabaseDisplayLimit"
+                      class="settings-export-number-input h-9 w-28 [&::-webkit-inner-spin-button]:appearance-none"
+                    />
+                    <datalist id="redis-database-display-limits">
+                      <option v-for="size in REDIS_DATABASE_DISPLAY_LIMIT_OPTIONS" :key="size" :value="size" />
+                    </datalist>
+                    <span class="text-xs text-muted-foreground">{{ t("settings.redisDatabaseDisplayLimitDescription") }}</span>
+                  </div>
                 </div>
               </div>
 
@@ -9783,6 +9951,111 @@ LIMIT 100;</pre
               </Tabs>
             </section>
 
+            <section v-else-if="activeSettingsTab === 'updates'" data-settings-search-id="updates" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('updates')]">
+              <div class="space-y-3 rounded-lg border bg-muted/20 p-4">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.updateStatusTitle") }}</Label>
+                    <p class="text-sm text-muted-foreground">{{ t("settings.updateStatusDescription") }}</p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Button type="button" variant="outline" size="sm" class="h-8 min-w-20" :disabled="props.checkingUpdates || props.updatingAllUpdates" :aria-label="t('settings.checkUpdates')" @click="emit('check-updates')">
+                      <Loader2 v-if="props.checkingUpdates" class="h-3.5 w-3.5 animate-spin" />
+                      <span v-else>{{ t("settings.checkUpdates") }}</span>
+                    </Button>
+                    <Button v-if="hasAnyUpdate" type="button" size="sm" class="h-8" :disabled="props.checkingUpdates || props.updatingAllUpdates" @click="emit('update-all')">
+                      <Loader2 v-if="props.updatingAllUpdates" class="h-3.5 w-3.5 animate-spin" />
+                      <RefreshCw v-else class="h-3.5 w-3.5" />
+                      {{ t("settings.updateAll") }}
+                    </Button>
+                  </div>
+                </div>
+                <div class="grid gap-2 sm:grid-cols-2">
+                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                    <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-update-center')">
+                      <div class="font-medium">{{ t("settings.updateClient") }}</div>
+                      <div class="flex items-center gap-1.5" :class="updateCheckLoading.app ? 'text-muted-foreground' : props.appUpdateAvailable ? 'text-primary' : 'text-muted-foreground'">
+                        <Loader2 v-if="updateCheckLoading.app" class="h-3 w-3 animate-spin" />
+                        <span>{{ updateCheckLoading.app ? t("updates.checking") : props.appUpdateAvailable ? props.appUpdateVersion || t("settings.updateAvailable") : t("settings.upToDate") }}</span>
+                      </div>
+                    </button>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Label for="auto-update-app" class="text-xs font-normal text-muted-foreground">{{ t("settings.autoUpdate") }}</Label>
+                      <Switch id="auto-update-app" v-model="editAutoUpdateApp" :aria-label="t('settings.autoUpdateApp')" />
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                    <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-driver-store', 'agent')">
+                      <div class="font-medium">{{ t("settings.updateDrivers") }}</div>
+                      <div class="flex items-center gap-1.5" :class="updateCheckLoading.drivers ? 'text-muted-foreground' : (props.driverUpdateCount || 0) > 0 ? 'text-primary' : 'text-muted-foreground'">
+                        <Loader2 v-if="updateCheckLoading.drivers" class="h-3 w-3 animate-spin" />
+                        <span>{{ updateCheckLoading.drivers ? t("updates.checking") : (props.driverUpdateCount || 0) > 0 ? t("settings.updateCount", { count: props.driverUpdateCount }) : t("settings.upToDate") }}</span>
+                      </div>
+                    </button>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Label for="auto-update-drivers" class="text-xs font-normal text-muted-foreground">{{ t("settings.autoUpdate") }}</Label>
+                      <Switch id="auto-update-drivers" v-model="editAutoUpdateDrivers" :aria-label="t('settings.autoUpdateDrivers')" />
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                    <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-driver-store', 'jdbc')">
+                      <div class="font-medium">{{ t("settings.updateJdbc") }}</div>
+                      <div class="flex items-center gap-1.5" :class="updateCheckLoading.jdbc ? 'text-muted-foreground' : props.jdbcUpdateAvailable ? 'text-primary' : 'text-muted-foreground'">
+                        <Loader2 v-if="updateCheckLoading.jdbc" class="h-3 w-3 animate-spin" />
+                        <span>{{ updateCheckLoading.jdbc ? t("updates.checking") : props.jdbcUpdateAvailable ? t("settings.updateAvailable") : t("settings.upToDate") }}</span>
+                      </div>
+                    </button>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Label for="auto-update-jdbc" class="text-xs font-normal text-muted-foreground">{{ t("settings.autoUpdate") }}</Label>
+                      <Switch id="auto-update-jdbc" v-model="editAutoUpdateJdbc" :aria-label="t('settings.autoUpdateJdbc')" />
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                    <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-mcp-settings')">
+                      <div class="font-medium">{{ t("settings.updateMcp") }}</div>
+                      <div class="flex items-center gap-1.5" :class="updateCheckLoading.mcp ? 'text-muted-foreground' : props.mcpUpdateAvailable ? 'text-primary' : 'text-muted-foreground'">
+                        <Loader2 v-if="updateCheckLoading.mcp" class="h-3 w-3 animate-spin" />
+                        <span>{{ updateCheckLoading.mcp ? t("updates.checking") : props.mcpUpdateAvailable ? t("settings.updateAvailable") : t("settings.upToDate") }}</span>
+                      </div>
+                    </button>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Label for="auto-update-mcp" class="text-xs font-normal text-muted-foreground">{{ t("settings.autoUpdate") }}</Label>
+                      <Switch id="auto-update-mcp" v-model="editAutoUpdateMcp" :aria-label="t('settings.autoUpdateMcp')" />
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5 text-sm">
+                    <button type="button" class="min-w-0 space-y-0.5 rounded-sm text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" @click="emit('open-plugin-center')">
+                      <div class="font-medium">{{ t("settings.updatePlugins") }}</div>
+                      <div class="flex items-center gap-1.5" :class="updateCheckLoading.plugins ? 'text-muted-foreground' : (props.pluginUpdateCount || 0) > 0 ? 'text-primary' : 'text-muted-foreground'">
+                        <Loader2 v-if="updateCheckLoading.plugins" class="h-3 w-3 animate-spin" />
+                        <span>{{ updateCheckLoading.plugins ? t("updates.checking") : (props.pluginUpdateCount || 0) > 0 ? t("settings.updateCount", { count: props.pluginUpdateCount }) : t("settings.upToDate") }}</span>
+                      </div>
+                    </button>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Label for="auto-update-plugins" class="text-xs font-normal text-muted-foreground">{{ t("settings.autoUpdate") }}</Label>
+                      <Switch id="auto-update-plugins" v-model="editAutoUpdatePlugins" :aria-label="t('settings.autoUpdatePlugins')" />
+                    </div>
+                  </div>
+                </div>
+                <p class="border-t pt-3 text-xs text-muted-foreground">{{ t("settings.updateRestartHint") }}</p>
+              </div>
+
+              <div class="flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div class="min-w-0 space-y-1">
+                  <Label>{{ t("settings.updateDownloadSource") }}</Label>
+                  <p class="text-sm text-muted-foreground">{{ t("settings.updateDownloadSourceDescription") }}</p>
+                </div>
+                <Select :model-value="editUpdateDownloadSource" @update:model-value="onUpdateDownloadSourceChange">
+                  <SelectTrigger class="h-9 w-full sm:w-[180px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="official">{{ t("settings.updateDownloadSourceOfficial") }}</SelectItem>
+                    <SelectItem value="cnb">{{ t("settings.updateDownloadSourceCnb") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
+            </section>
+
             <section v-else-if="activeSettingsTab === 'security' && isWeb" data-settings-search-id="security" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('security')]">
               <div class="space-y-3">
                 <Label class="text-base">{{ t("auth.changePassword") }}</Label>
@@ -9881,46 +10154,6 @@ LIMIT 100;</pre
                   </Button>
                 </div>
               </div>
-
-              <div class="settings-item flex flex-col gap-4 rounded-lg border p-4">
-                <div class="flex items-center justify-between gap-4">
-                  <div class="min-w-0 space-y-1">
-                    <Label for="update-notifications-enabled">{{ t("settings.updateNotificationsEnabled") }}</Label>
-                    <p class="text-sm text-muted-foreground">
-                      {{ t("settings.updateNotificationsEnabledDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="update-notifications-enabled" v-model="editUpdateNotificationsEnabled" />
-                </div>
-                <div class="flex items-center justify-between gap-4">
-                  <div class="min-w-0 space-y-1">
-                    <Label for="auto-download-updates">{{ t("settings.autoDownloadUpdates") }}</Label>
-                    <p class="text-sm text-muted-foreground">
-                      {{ t("settings.autoDownloadUpdatesDescription") }}
-                    </p>
-                  </div>
-                  <Switch id="auto-download-updates" v-model="editAutoDownloadUpdates" />
-                </div>
-                <div class="flex flex-col gap-3 border-t border-border/60 pt-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div class="min-w-0 space-y-1">
-                    <Label>{{ t("settings.updateDownloadSource") }}</Label>
-                    <p class="text-sm text-muted-foreground">
-                      {{ t("settings.updateDownloadSourceDescription") }}
-                    </p>
-                  </div>
-                  <Select :model-value="editUpdateDownloadSource" @update:model-value="onUpdateDownloadSourceChange">
-                    <SelectTrigger class="h-9 w-full sm:w-[180px]">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="official">{{ t("settings.updateDownloadSourceOfficial") }}</SelectItem>
-                      <SelectItem value="cnb">{{ t("settings.updateDownloadSourceCnb") }}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
 
               <div class="grid gap-3 sm:grid-cols-3">
                 <button type="button" class="rounded-lg border p-4 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" @click="openExternalUrl('https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322')">

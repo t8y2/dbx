@@ -6,6 +6,7 @@ import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import type {
   ColumnInfo,
   CompletionAssistantCandidate,
+  CompletionAssistantMatchMode,
   CompletionAssistantObjectKind,
   CompletionAssistantRequest,
   ConnectionConfig,
@@ -65,6 +66,30 @@ import {
   type DropPosition,
   type ReorderEntriesOptions,
 } from "@/lib/sidebar/sidebarLayout";
+import {
+  applyTableVGroupsToChildren,
+  collectTableTreeNames,
+  createTableVGroup as createTableVGroupOp,
+  deleteTableVGroups as deleteTableVGroupsOp,
+  emptyTableVGroupLayout,
+  findTableVGroupContainerNode,
+  hasTableTreeLoadMore,
+  hasTableVGroupEntries,
+  moveTableToVGroup as moveTableToVGroupOp,
+  normalizeTableVGroupLayout as normalizeTableVGroupLayoutOp,
+  pruneTableVGroupMembers as pruneTableVGroupMembersOp,
+  reorderTableVGroupEntry as reorderTableVGroupEntryOp,
+  renameTableVGroup as renameTableVGroupOp,
+  resolveTableVGroupScopeFromNode,
+  setTableVGroupsEnabled as setTableVGroupsEnabledOp,
+  stripTableVGroupsFromChildren,
+  tableVGroupPathForTable as tableVGroupPathForTableOp,
+  tableVGroupScopeKey,
+  toggleTableVGroupCollapsed as toggleTableVGroupCollapsedOp,
+  type TableVGroupDropPosition,
+  type TableVGroupLayout,
+  type TableVGroupScope,
+} from "@/lib/table/tableVGroup";
 import {
   buildConnectionConfigBundle,
   filterSidebarLayoutByConnectionIds,
@@ -145,7 +170,7 @@ import { completionSchemasFromTree, completionTablesFromTree } from "@/lib/metad
 import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { etcdPermissionsAllowKey } from "@/lib/etcd/keyPermissions";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
-import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
+import { limitRedisDatabaseList, normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints, isMysqlMissingPasswordFailure, isSqliteMissingEncryptionPasswordFailure } from "@/lib/connection/connectionErrorHints";
@@ -600,6 +625,9 @@ export const useConnectionStore = defineStore("connection", () => {
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
+  const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
+  const dirtyTableVGroupScopeKeys = new Set<string>();
+  let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
   const connectionGroupOptions = computed(() => connectionGroupDestinationRows(sidebarLayout.value));
   const selectedConnectionGroupId = computed(() => {
@@ -1788,6 +1816,9 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       children = children.map((child) => {
         const old = oldMap.get(child.id);
+        // Virtual group containers are rebuilt from the layout on every projection;
+        // stale copies must never override the freshly computed arrangement.
+        if (child.type === "table-vgroup") return child;
         if (old?.isLoading) {
           const isExpanded = old.isExpanded;
           const isLoading = old.isLoading;
@@ -1822,6 +1853,7 @@ export const useConnectionStore = defineStore("connection", () => {
       persistPinnedTreeNodeIds();
     }
     syncPinnedTreeState(children);
+    children = applyTableVGroupsToChildren(children, tableVGroupLayoutForNode(parent), parent);
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
     syncConfirmedEmptyTreeNodeId(parent);
@@ -2737,7 +2769,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function savePersistedTreeChildren(cacheKey: string, children: TreeNode[]) {
-    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(children)))).catch(() => undefined);
+    // 分组是显示层投影，绝不写入元数据缓存——否则重启后会随缓存复现。
+    const cacheChildren = stripTableVGroupsFromChildren(children);
+    await api.saveSchemaCache(cacheKey, encodeSchemaTreeCache(stripTreeNodeExpansionState(stripDatabaseSavedSqlTreeNodes(cacheChildren)))).catch(() => undefined);
   }
 
   function sidebarTableSearchTreeCacheKey(parent: TreeNode): string | null {
@@ -3560,9 +3594,26 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const id of removedIds) nextLayout = removeConnectionFromSidebarLayout(nextLayout, id);
     await persistConnectionDeletion(nextConnections, nextLayout);
     applyConnectionRemoval(removedIds, nextConnections, nextLayout);
+    purgeTableVGroupsForConnections(removedIds);
     await cleanupRemovedOneTimeConnections(oneTimeIds);
   }
 
+  /** 删除连接后同步清理其名下的表分组布局（本地内存 + dbx.db 行）。 */
+  function purgeTableVGroupsForConnections(removedIds: ReadonlySet<string>) {
+    const nextLayouts = { ...tableVGroupLayouts.value };
+    let removed = false;
+    for (const id of removedIds) {
+      const prefix = `${id}\u0000`;
+      for (const key of Object.keys(nextLayouts)) {
+        if (key.startsWith(prefix)) {
+          delete nextLayouts[key];
+          removed = true;
+        }
+      }
+    }
+    if (removed) tableVGroupLayouts.value = nextLayouts;
+    for (const id of removedIds) void api.deleteTableVGroupsForConnection(id).catch(() => {});
+  }
   function applyConnectionRemoval(removedIds: ReadonlySet<string>, nextConnections: ConnectionConfig[], nextLayout: SidebarLayout) {
     connections.value = nextConnections;
     syncTimeoutInheritanceBackup();
@@ -4334,8 +4385,8 @@ export const useConnectionStore = defineStore("connection", () => {
     invalidateConnectionMetadataLifetime(connectionId, database);
   }
 
-  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean } = {}) {
-    if (connectedIds.value.has(connectionId)) {
+  async function ensureConnected(connectionId: string, options: { activate?: boolean; verifyHealth?: boolean; forceReconnect?: boolean } = {}) {
+    if (!options.forceReconnect && connectedIds.value.has(connectionId)) {
       // Pure navigation can safely trust the existing connected state. Its
       // destination will perform the real API request, while blocking here on
       // a health probe makes an otherwise local tab switch take up to 5s.
@@ -4448,6 +4499,49 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       finishLocalConnectionAttempt(connectionId, localAttempt);
     }
+  }
+
+  /**
+   * Re-push an already-open plugin connection's config (credentials included)
+   * to its sidecar through the same connection/connect path used when opening
+   * from the sidebar. A plugin iframe reload can leave the sidecar's in-memory
+   * connection registry empty while the host still considers the connection
+   * open, and ensureConnected()'s health fast-path would not heal that. Silent
+   * no-op when the connection is not open, is not plugin-backed, or its
+   * credentials are no longer available (save_password=false without a live
+   * session credential): the plugin then keeps its existing "reopen from the
+   * sidebar" guidance instead of triggering an interactive prompt from a
+   * background re-init.
+   */
+  async function repushPluginConnection(connectionId: string): Promise<void> {
+    const config = getConfig(connectionId);
+    if (!config || config.db_type !== "plugin" || !connectedIds.value.has(connectionId)) return;
+    // A successful connect/health probe within the TTL means the sidebar open
+    // (or a fresh restore connect) pushed the config moments ago and the
+    // sidecar registry cannot plausibly be empty yet — skipping here keeps the
+    // first open from paying a redundant disconnect+connect cycle on the
+    // plugin's first `ready`. The 2s in-memory TTL dies with the frontend, so
+    // every realistic reload path still re-pushes.
+    if (hasRecentConnectionHealthCheck(connectionId)) return;
+    if (connectionNeedsPasswordPrompt(config) && (await pluginConnectionPasswordPromptNeeded(config)) && !(await hasSessionCredential(connectionId))) return;
+    await ensureConnected(connectionId, { activate: false, forceReconnect: true });
+  }
+
+  /**
+   * Explicit, user-triggered reconnect of a plugin connection (the plugin's own
+   * "reconnect" button). Unlike repushPluginConnection — the silent background
+   * heal — this runs the full connect flow and MAY show the interactive
+   * password prompt, which is appropriate for a deliberate user action. Editing
+   * a connection drops it from connectedIds without notifying plugins, so the
+   * sidecar's config goes stale; this is the plugin's way to request a fresh
+   * connection/connect with the updated config.
+   */
+  async function reopenPluginConnection(connectionId: string, pluginId: string): Promise<void> {
+    const config = getConfig(connectionId);
+    if (!config) throw new Error("Connection config not found");
+    if (config.db_type !== "plugin") throw new Error("Connection is not plugin-backed");
+    if (config.plugin_id !== pluginId) throw new Error("Connection is owned by another plugin");
+    await ensureConnected(connectionId, { activate: false, forceReconnect: true });
   }
 
   function setBeforeConnectHandler(handler: BeforeConnectHandler | null) {
@@ -4841,7 +4935,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadRedisDatabases(connectionId: string) {
+  async function loadRedisDatabases(connectionId: string, options?: { showAll?: boolean }) {
     const node = findConnectionNode(connectionId);
     return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const dbs = await withMetadataLoadTimeout(connectionId, api.redisListDatabases(connectionId), "Redis databases");
@@ -4857,26 +4951,25 @@ export const useConnectionStore = defineStore("connection", () => {
         connectionId,
         dbs.map((db) => String(db.db)),
       );
-      setChildren(
-        targetNode,
-        withSavedSqlRoot(
+      const databaseNodes: TreeNode[] = dbs
+        .filter((db) => visibleNameSet.has(String(db.db)))
+        .map((db) => ({
+          id: `${connectionId}:db${db.db}`,
+          label: redisDatabaseLabel(db.db, config?.redis_database_aliases, db.keys),
+          type: "redis-db" as const,
           connectionId,
-          dbs
-            .filter((db) => visibleNameSet.has(String(db.db)))
-            .map((db) => ({
-              id: `${connectionId}:db${db.db}`,
-              label: redisDatabaseLabel(db.db, config?.redis_database_aliases, db.keys),
-              type: "redis-db" as const,
-              connectionId,
-              database: String(db.db),
-              loadedKeyCount: 0,
-              totalKeyCount: db.keys,
-              isExpanded: false,
-              children: [],
-            })),
-          targetNode,
-        ),
-      );
+          database: String(db.db),
+          loadedKeyCount: 0,
+          totalKeyCount: db.keys,
+          isExpanded: false,
+          children: [],
+        }));
+      // #1236: a `databases` count in the low hundreds is rare but not unheard
+      // of, and dumping every one of them into the sidebar at once is the
+      // reported pain point. Cap the initial render and let a "load more" node
+      // reveal the rest on demand, unless the user explicitly asked to see all.
+      const { visible, hasMore } = options?.showAll ? { visible: databaseNodes, hasMore: false } : limitRedisDatabaseList(databaseNodes, useSettingsStore().editorSettings.redisDatabaseDisplayLimit);
+      setChildren(targetNode, withSavedSqlRoot(connectionId, hasMore ? [...visible, buildLoadMoreNode(targetNode, visible.length, databaseNodes.length - visible.length)] : visible, targetNode));
       targetNode.isExpanded = true;
     });
   }
@@ -5929,6 +6022,8 @@ export const useConnectionStore = defineStore("connection", () => {
           setChildren(targetNode, children);
           if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
+            // grouped 显示下这里加载的是分组占位节点；xugu 协议命名空间的空列表也不代表表被删。
+            pruneTableVGroupStaleMembers(targetNode, children, simpleObjectDisplay && !isPublicSynonymScope && !isSchedulerJobScope);
           }
           const currentTargetNode = treeNodeLoadTarget(load);
           if (!currentTargetNode) return;
@@ -6085,6 +6180,7 @@ export const useConnectionStore = defineStore("connection", () => {
           options?.onChildrenApplied?.(targetNode);
           if (!searchFilter && !isSidebarTableSearch && !tableNameFilter) {
             await savePersistedTreeChildren(cacheKey, children);
+            pruneTableVGroupStaleMembers(targetNode, children, targetNode.type === "group-tables");
           }
           const currentTargetNode = treeNodeLoadTarget(load);
           if (currentTargetNode) currentTargetNode.isExpanded = true;
@@ -6127,6 +6223,18 @@ export const useConnectionStore = defineStore("connection", () => {
     if (node.type !== "load-more" || !node.loadMore) return;
     const loadMore = node.loadMore;
     const parent = findNode(treeNodes.value, node.loadMore.parentId);
+    if (parent?.type === "connection" && parent.connectionId && getConfig(parent.connectionId)?.db_type === "redis") {
+      // The full database list is already fetched in one cheap call, so "load
+      // more" here just re-renders it without the display-limit truncation
+      // instead of paging through another backend round trip.
+      node.isLoading = true;
+      try {
+        await loadRedisDatabases(parent.connectionId, { showAll: true });
+      } finally {
+        node.isLoading = false;
+      }
+      return;
+    }
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return;
     const parentConnectionId = parent.connectionId;
     const configForScope = getConfig(parentConnectionId);
@@ -6182,6 +6290,8 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!options?.searchFilter) {
               await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", ownerAwareMetadataCacheVersion(config, "objects-simple-v8")), nextChildren);
             }
+            // 该分支只服务 simple 库/模式表列表；搜索分页结果不是全量，不能作为成员依据。
+            if (!page.hasMore && !options?.searchFilter) pruneTableVGroupStaleMembers(targetParent, nextChildren, true);
             const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
             if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
             return;
@@ -6248,6 +6358,9 @@ export const useConnectionStore = defineStore("connection", () => {
           setChildren(targetParent, nextChildren);
           if (!options?.searchFilter) {
             await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+            // 只认 group-tables：group-views 等分组与表共用 scope_key，其列表不是全量表；
+            // 分页中间态（含 load-more）由 prune 内部再挡一次。
+            pruneTableVGroupStaleMembers(targetParent, nextChildren, parent.type === "group-tables");
           }
           const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
           if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
@@ -7571,7 +7684,29 @@ export const useConnectionStore = defineStore("connection", () => {
       }));
   }
 
-  async function listCompletionAssistantTables(connectionId: string, database: string, filter: string, limit?: number, schema?: string, globalSearch = false, currentSchema?: string, requestRevision = completionCacheRevision(connectionId, database)): Promise<SqlCompletionTable[]> {
+  /**
+   * The completion assistant matches names by prefix only, while the warm local
+   * index also matches substrings. Without widening, the very first fuzzy lookup
+   * of a connection (empty local index) returns far fewer candidates than the
+   * same lookup once the index is warm. Widening to a substring search keeps the
+   * two paths consistent whenever the prefix search left room in the result list.
+   */
+  function shouldWidenCompletionMatch(filter: string, resultCount: number, limit?: number): boolean {
+    if (filter.trim().length < 3) return false;
+    return limit === undefined || resultCount < limit;
+  }
+
+  async function listCompletionAssistantTables(
+    connectionId: string,
+    database: string,
+    filter: string,
+    limit?: number,
+    schema?: string,
+    globalSearch = false,
+    currentSchema?: string,
+    requestRevision = completionCacheRevision(connectionId, database),
+    matchMode: CompletionAssistantMatchMode = "prefix",
+  ): Promise<SqlCompletionTable[]> {
     const oracleAssistant = getConfig(connectionId)?.db_type === "oracle";
     const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
@@ -7585,7 +7720,7 @@ export const useConnectionStore = defineStore("connection", () => {
         max_results: limit ?? 200,
         global_search: globalSearch,
         parent_schema: globalSearch ? null : (schema ?? null),
-        match_mode: "prefix",
+        match_mode: matchMode,
       },
       requestRevision,
     );
@@ -7605,6 +7740,7 @@ export const useConnectionStore = defineStore("connection", () => {
     currentSchema: string | undefined,
     objectKinds: CompletionAssistantObjectKind[],
     caseSensitive: boolean,
+    matchMode: CompletionAssistantMatchMode = "prefix",
   ): Promise<SqlCompletionObject[]> {
     const databaseType = getConfig(connectionId)?.db_type;
     const oracleAssistant = databaseType === "oracle";
@@ -7622,7 +7758,7 @@ export const useConnectionStore = defineStore("connection", () => {
       global_search: globalSearch,
       parent_schema: globalSearch || sequenceOnly ? null : (schema ?? null),
       parent_name: parentName ?? null,
-      match_mode: "prefix",
+      match_mode: matchMode,
     });
     const objects = completionAssistantObjects(response.candidates, preferredSchema, oracleAssistant).map((object) => ({
       ...object,
@@ -8122,6 +8258,14 @@ export const useConnectionStore = defineStore("connection", () => {
             try {
               results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision);
               assistantCompleted = true;
+              if (shouldWidenCompletionMatch(trimmedFilter, results.length, limit)) {
+                try {
+                  const widenedTables = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision, "contains");
+                  results = dedupeCompletionTables([...results, ...widenedTables]);
+                } catch {
+                  // Keep the prefix matches when the widened lookup is unavailable.
+                }
+              }
             } catch {
               if (schema) {
                 const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
@@ -8255,7 +8399,16 @@ export const useConnectionStore = defineStore("connection", () => {
           await ensureConnected(connectionId);
           if (filteredRoutineAssistant) {
             try {
-              completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive));
+              let assistantObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive);
+              if (shouldWidenCompletionMatch(filter, assistantObjects.length, limit)) {
+                try {
+                  const widenedObjects = await listCompletionAssistantObjects(connectionId, database, filter, limit, schema, parentName, globalSearch, currentSchema, objectKinds, caseSensitive, "contains");
+                  assistantObjects = [...assistantObjects, ...widenedObjects];
+                } catch {
+                  // Keep the prefix matches when the widened lookup is unavailable.
+                }
+              }
+              completionObjectsCache.value[cacheKey] = dedupeCompletionObjects(assistantObjects);
             } catch {
               if (objectKinds.length === 1 && objectKinds[0] === "sequence") {
                 completionObjectsCache.value[cacheKey] = [];
@@ -8670,6 +8823,72 @@ export const useConnectionStore = defineStore("connection", () => {
     }, 300);
   }
 
+  /** 表分组的 scope 一律从「解析到的容器」派生：simple 显示模式下表行带 schema
+   * 而容器不带，直接用行字段算 key 会把读写劈成两份。入参可以是树行，也可以是
+   * 只带身份字段的纯 scope 值（action 参数），后者按字段匹配容器。 */
+  function resolveTableVGroupScope(node: TreeNode | TableVGroupScope): { scope: TableVGroupScope; scopeKey: string } | null {
+    const scope = resolveTableVGroupScopeFromNode(treeNodes.value, node);
+    const scopeKey = tableVGroupScopeKey(scope);
+    return scopeKey ? { scope, scopeKey } : null;
+  }
+
+  function tableVGroupLayoutForNode(node: TreeNode): TableVGroupLayout | undefined {
+    const resolved = resolveTableVGroupScope(node);
+    return resolved ? tableVGroupLayouts.value[resolved.scopeKey] : undefined;
+  }
+
+  function scheduleTableVGroupPersistFlush() {
+    if (tableVGroupPersistTimer) clearTimeout(tableVGroupPersistTimer);
+    tableVGroupPersistTimer = setTimeout(() => {
+      tableVGroupPersistTimer = null;
+      for (const key of dirtyTableVGroupScopeKeys) {
+        const layout = tableVGroupLayouts.value[key];
+        if (layout) api.saveTableVGroups(key, layout).catch(() => {});
+      }
+      dirtyTableVGroupScopeKeys.clear();
+    }, 300);
+  }
+
+  /** 分组节点是显示层投影：按已解析的作用域重建容器子节点，容器里不留投影副本。 */
+  function reprojectTableVGroupScope(scope: TableVGroupScope, scopeKey: string, tableName?: string) {
+    const container = findTableVGroupContainerNode(treeNodes.value, scope, tableName);
+    if (!container?.children) return;
+    container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children), tableVGroupLayouts.value[scopeKey], scope);
+  }
+
+  /** 表分组成员回收：只有「本 scope 的完整表列表」才能判定成员存亡。
+   *  同一 scope_key 下并存多种列表：grouped 的各对象分组（视图/函数…只含非表行）、
+   *  simple 的库/模式表列表、以及分页中间态。非表列表或分页结果作为依据会把有效
+   *  成员误删并持久化，故列表语义由调用点声明（`completeTableList`），本函数只复核分页态。 */
+  function pruneTableVGroupStaleMembers(parent: TreeNode, children: TreeNode[], completeTableList: boolean) {
+    if (!completeTableList) return;
+    const resolved = resolveTableVGroupScope(parent);
+    const layout = resolved ? tableVGroupLayouts.value[resolved.scopeKey] : undefined;
+    if (!resolved || !hasTableVGroupEntries(layout)) return;
+    if (hasTableTreeLoadMore(children)) return;
+    const keepNames = collectTableTreeNames(stripTableVGroupsFromChildren(children));
+    const next = pruneTableVGroupMembersOp(layout, keepNames);
+    if (next === layout) return;
+    updateTableVGroupLayout(resolved.scope, resolved.scopeKey, next);
+  }
+
+  /** 写入某作用域的布局：即时重投影 + 合并 300ms 后落盘。作用域须已解析出 scopeKey。 */
+  function updateTableVGroupLayout(scope: TableVGroupScope, scopeKey: string, nextLayout: TableVGroupLayout, tableName?: string) {
+    tableVGroupLayouts.value = { ...tableVGroupLayouts.value, [scopeKey]: nextLayout };
+    dirtyTableVGroupScopeKeys.add(scopeKey);
+    scheduleTableVGroupPersistFlush();
+    reprojectTableVGroupScope(scope, scopeKey, tableName);
+  }
+
+  /** 分组变更的统一入口：读当前布局 → 变换 → 写回。作用域不可解析或尚无布局时跳过。 */
+  function updateTableVGroupLayoutFor(scope: TableVGroupScope, transform: (layout: TableVGroupLayout) => TableVGroupLayout, tableName?: string) {
+    const resolved = resolveTableVGroupScope(scope);
+    if (!resolved) return;
+    const current = tableVGroupLayouts.value[resolved.scopeKey];
+    if (!current) return;
+    updateTableVGroupLayout(resolved.scope, resolved.scopeKey, transform(current), tableName);
+  }
+
   function rebuildTreeNodes() {
     const existingNodesMap = new Map<string, TreeNode>();
     const collectExisting = (nodes: TreeNode[]) => {
@@ -8733,6 +8952,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await persistConnectionDeletion(nextConnections, nextLayout);
     if (removedConnectionIds.size) {
       applyConnectionRemoval(removedConnectionIds, nextConnections, nextLayout);
+      purgeTableVGroupsForConnections(removedConnectionIds);
     } else {
       sidebarLayout.value = nextLayout;
       rebuildTreeNodes();
@@ -9194,7 +9414,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await settingsStore.initEditorSettings();
     if (!initFromDiskPromise) {
       initFromDiskPromise = (async () => {
-        const [pinnedOrder, saved] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init()]);
+        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         await migrateTimeoutInheritance(saved);
         const loadedConnections = saved.map(normalizeConnection);
@@ -9208,6 +9428,8 @@ export const useConnectionStore = defineStore("connection", () => {
           await persistConnections();
         }
         syncTimeoutInheritanceBackup();
+        // 旧版本写下的行可能缺字段（如 version），一律归一化后再进内存，避免脏数据被原样写回。
+        tableVGroupLayouts.value = Object.fromEntries(Object.entries(loadedTableVGroups ?? {}).map(([scopeKey, layout]) => [scopeKey, normalizeTableVGroupLayoutOp(layout)]));
         const savedLayout = await api.loadSidebarLayout();
         const currentLayout = sidebarLayout.value.groups.length || sidebarLayout.value.order.length ? sidebarLayout.value : null;
         sidebarLayout.value = reconcileLayout(
@@ -9323,6 +9545,8 @@ export const useConnectionStore = defineStore("connection", () => {
     startCreatingConnectionInGroup,
     stopCreatingConnectionInGroup,
     connect,
+    repushPluginConnection,
+    reopenPluginConnection,
     cancelConnecting,
     disconnect,
     hasDisconnectInFlight,
@@ -9486,6 +9710,41 @@ export const useConnectionStore = defineStore("connection", () => {
     reorderSidebarEntries(draggedIds: string[], targetId: string, position: DropPosition, options?: ReorderEntriesOptions) {
       const layout = reorderEntriesOp(sidebarLayout.value, draggedIds, targetId, position, options);
       if (layout !== sidebarLayout.value) updateLayoutAndRebuild(layout);
+    },
+    tableVGroupLayouts,
+    resolveTableVGroupScope,
+    tableVGroupLayoutFor(scope: TableVGroupScope) {
+      const resolved = resolveTableVGroupScope(scope);
+      return resolved ? tableVGroupLayouts.value[resolved.scopeKey] : undefined;
+    },
+    createTableVGroup(scope: TableVGroupScope, name: string, parentGroupId?: string | null) {
+      const resolved = resolveTableVGroupScope(scope);
+      if (!resolved) return null;
+      const result = createTableVGroupOp(tableVGroupLayouts.value[resolved.scopeKey] ?? emptyTableVGroupLayout(), name, parentGroupId);
+      updateTableVGroupLayout(resolved.scope, resolved.scopeKey, result.layout);
+      return result.groupId;
+    },
+    renameTableVGroup(scope: TableVGroupScope, groupId: string, name: string) {
+      updateTableVGroupLayoutFor(scope, (layout) => renameTableVGroupOp(layout, groupId, name));
+    },
+    deleteTableVGroups(scope: TableVGroupScope, groupIds: Iterable<string>) {
+      updateTableVGroupLayoutFor(scope, (layout) => deleteTableVGroupsOp(layout, groupIds));
+    },
+    moveTableToVGroup(scope: TableVGroupScope, tableName: string, groupId: string | null) {
+      updateTableVGroupLayoutFor(scope, (layout) => moveTableToVGroupOp(layout, tableName, groupId), tableName);
+    },
+    reorderTableVGroupEntry(scope: TableVGroupScope, draggedEntryId: string, targetEntryId: string, position: TableVGroupDropPosition) {
+      updateTableVGroupLayoutFor(scope, (layout) => reorderTableVGroupEntryOp(layout, draggedEntryId, targetEntryId, position));
+    },
+    toggleTableVGroupCollapsed(scope: TableVGroupScope, groupId: string) {
+      updateTableVGroupLayoutFor(scope, (layout) => toggleTableVGroupCollapsedOp(layout, groupId));
+    },
+    setTableVGroupsEnabled(scope: TableVGroupScope, enabled: boolean) {
+      updateTableVGroupLayoutFor(scope, (layout) => setTableVGroupsEnabledOp(layout, enabled));
+    },
+    tableVGroupPathForTable(scope: TableVGroupScope, tableName: string) {
+      const resolved = resolveTableVGroupScope(scope);
+      return tableVGroupPathForTableOp(resolved ? tableVGroupLayouts.value[resolved.scopeKey] : undefined, tableName);
     },
   };
 });

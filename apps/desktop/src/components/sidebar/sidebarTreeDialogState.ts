@@ -5,6 +5,7 @@ import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createData
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
 import type { MongoCreateIndexForm, MongoIndexRow } from "@/lib/sidebar/mongoCollectionMutation";
+import type { TableVGroupScope } from "@/lib/table/tableVGroup";
 
 export type DuplicateStructureSource = TreeNode & { connectionId: string; database: string };
 type ConnectionDeleteTarget = TreeNode & { connectionId: string };
@@ -20,6 +21,15 @@ export const sidebarFormTarget = shallowRef<TreeNode | null>(null);
 export const connectionDeleteTargetSnapshot = ref<ConnectionDeleteTarget[]>([]);
 export const connectionGroupDeleteTargetSnapshot = ref<ConnectionGroupDeleteTarget[]>([]);
 export const deleteConnectionsWithGroup = ref(false);
+export const showTableVGroupDialog = ref(false);
+export const tableVGroupName = ref("");
+/** Scope snapshot + creation payload for the table vgroup naming dialog. */
+export const tableVGroupDialogScope = shallowRef<TableVGroupScope | null>(null);
+export const tableVGroupDialogParentGroupId = ref<string | null>(null);
+export const tableVGroupDialogTableNames = ref<string[]>([]);
+export const showTableVGroupDeleteConfirm = ref(false);
+/** Scope + group snapshot for the table vgroup delete confirmation. */
+export const tableVGroupDeleteTarget = shallowRef<{ scope: TableVGroupScope; groupId: string; name: string } | null>(null);
 export const showDeleteConfirm = ref(false);
 export const showDropTableConfirm = ref(false);
 export const showDropTableChildObjectConfirm = ref(false);
@@ -235,6 +245,8 @@ const openFlags = [
   showCompileErrorDialog,
   showDeleteGroupConfirm,
   showMoveToNewGroupDialog,
+  showTableVGroupDialog,
+  showTableVGroupDeleteConfirm,
 ];
 
 export function resetSidebarTreeDialogState() {
@@ -266,4 +278,7 @@ export function resetSidebarTreeDialogState() {
   connectionDeleteTargetSnapshot.value = [];
   connectionGroupDeleteTargetSnapshot.value = [];
   deleteConnectionsWithGroup.value = false;
+  tableVGroupDialogScope.value = null;
+  tableVGroupDialogParentGroupId.value = null;
+  tableVGroupDialogTableNames.value = [];
 }

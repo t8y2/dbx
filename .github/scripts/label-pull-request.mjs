@@ -30,6 +30,8 @@ export const STATIC_LABEL_SPECS = {
   "tests-only": { color: "bfd4f2", description: "Changes only tests, fixtures, or snapshots" },
 };
 
+const CORE_CRATE_PATH = /^crates\/dbx-(?:core|drivers|sql|formats|types|platform|ai-provider|plugin-runtime)\//;
+
 const TYPE_LABELS = new Set(["bug", "enhancement", "documentation", "maintenance"]);
 const LABEL_PALETTE = [
   "0e8a16",
@@ -133,7 +135,7 @@ export function inferAreaLabels(changedFiles) {
     || file.startsWith("src-tauri/"))) {
     labels.add("area/desktop");
   }
-  if (has((file) => file.startsWith("crates/dbx-core/") || file.startsWith("packages/node-core/"))) {
+  if (has((file) => CORE_CRATE_PATH.test(file) || file.startsWith("packages/node-core/"))) {
     labels.add("area/core");
   }
   if (has((file) => file.startsWith("crates/dbx-web/") || file.startsWith("examples/web-api/"))) {
@@ -220,7 +222,7 @@ export function inferDatabaseTypes(changedFiles, knownDatabaseTypes) {
 
     if (file.startsWith("plugins/jdbc/")) add("jdbc");
 
-    if (file.startsWith("apps/desktop/src/") || file.startsWith("crates/dbx-core/src/")) {
+    if (file.startsWith("apps/desktop/src/") || CORE_CRATE_PATH.test(file)) {
       for (const [pattern, databaseType] of DATABASE_PATH_TOKENS) {
         if (pattern.test(file)) add(databaseType);
       }

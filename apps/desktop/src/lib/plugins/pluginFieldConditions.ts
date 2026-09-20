@@ -2,7 +2,7 @@ import type { PluginFieldCondition, PluginFormField, PluginFormFieldValue } from
 
 /**
  * Canonical string form of a form value, matching the Rust host
- * (`condition_value_text` in `crates/dbx-core/src/plugins/manifest.rs`).
+ * (`condition_value_text` in `crates/dbx-plugin-runtime/src/plugins/manifest.rs`).
  * `false` renders as `"false"` and `22.0` as `"22"`.
  */
 export function pluginConditionValueText(value: PluginFormFieldValue): string {

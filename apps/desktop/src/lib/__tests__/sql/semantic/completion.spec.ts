@@ -475,13 +475,13 @@ FROM (
   });
 
   it.each([
-    ["Oracle", "oracle", "mysql", '"ID", o."created at", o."SELECT", o.safe_name'],
-    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
-    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name'],
-    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name"],
-    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name"],
+    ["Oracle", "oracle", "mysql", 'ID, o."created at", o."SELECT", o."safe_name", o."OrderId", o."order_id"'],
+    ["MySQL", "mysql", "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name, o.`OrderId`, o.order_id"],
+    ["PostgreSQL", "postgres", "postgres", '"ID", o."created at", o."SELECT", o.safe_name, o."OrderId", o.order_id'],
+    ["SQL Server", "sqlserver", "sqlserver", "[ID], o.[created at], o.[SELECT], o.safe_name, o.[OrderId], o.order_id"],
+    ["dialect fallback", undefined, "mysql", "`ID`, o.`created at`, o.`SELECT`, o.safe_name, o.`OrderId`, o.order_id"],
   ] as const)("uses %s identifier quoting in qualified star completion items", (_label, databaseType, dialect, expected) => {
-    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name"].map((name) => ({ name, table: "orders" }))]]);
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["orders", ["ID", "created at", "SELECT", "safe_name", "OrderId", "order_id"].map((name) => ({ name, table: "orders" }))]]);
 
     const starItems = semanticCompletion("SELECT o.*| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
     const selectAllItems = semanticCompletion("SELECT o.| FROM orders o", { columnsByTable }, { databaseType, dialect }).items;
@@ -492,13 +492,13 @@ FROM (
 
   it("uses Oracle quoting for an unqualified multi-table star completion item", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
-      ["ORDERS", ["ID", "created at"].map((name) => ({ name, table: "ORDERS" }))],
-      ["AUDIT", ["ID", "SELECT"].map((name) => ({ name, table: "AUDIT" }))],
+      ["ORDERS", ["ID", "created at", "OrderId"].map((name) => ({ name, table: "ORDERS" }))],
+      ["AUDIT", ["ID", "SELECT", "order_id"].map((name) => ({ name, table: "AUDIT" }))],
     ]);
 
     const { items } = semanticCompletion("SELECT *| FROM ORDERS o JOIN AUDIT a ON a.ID = o.ID", { columnsByTable }, { databaseType: "oracle", dialect: "mysql" });
 
-    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o."ID", o."created at", a."ID", a."SELECT"');
+    expect(items.find((item) => item.label === "* \u2192 columns")?.apply).toBe('o.ID, o."created at", o."OrderId", a.ID, a."SELECT", a."order_id"');
   });
 
   it("generates collision-free table aliases from semantic row sources", () => {

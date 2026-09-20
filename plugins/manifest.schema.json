@@ -284,6 +284,7 @@
           "uniqueItems": true,
           "items": { "enum": ["test", "connect", "disconnect"] }
         },
+        "proxy_route": { "type": "boolean", "default": false },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/connectionAction" } }
       }
     },

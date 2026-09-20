@@ -33,8 +33,10 @@ import {
   mongoUseToQueryResult,
   mongoVersionToQueryResult,
   mongoBulkWriteToQueryResult,
+  mongoScalarToQueryResult,
   mongoWriteToQueryResult,
   splitMongoCommandRanges,
+  splitSiblingDbPrefix,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
@@ -801,6 +803,8 @@ function expandStarProjectionColumnsForSource(analysis: EditableQueryInfo, sourc
 let saveTabsQueue = Promise.resolve();
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
+/** Monotonic id for content-search jump requests; lets repeated clicks on the same result re-trigger the editor reveal. */
+let contentRevealSeq = 0;
 
 function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
   if (isDetachedWindow()) return Promise.resolve();
@@ -2937,10 +2941,11 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], catalog?: string, schema?: string) {
+  function openExternalSqlFile(connectionId: string, database: string, path: string, sql: string, version?: QueryTab["externalSqlFileVersion"], catalog?: string, schema?: string, reveal?: { line: number; column?: number }) {
     const normalizedPath = normalizeExternalSqlPath(path);
     const existing = tabs.value.find((tab) => tab.mode === "query" && tab.externalSqlPath && normalizeExternalSqlPath(tab.externalSqlPath) === normalizedPath);
     if (existing) {
+      if (reveal) existing.editorRevealRequest = { id: ++contentRevealSeq, line: reveal.line, column: reveal.column };
       switchTab(existing.id);
       return existing.id;
     }
@@ -2964,6 +2969,7 @@ export const useQueryStore = defineStore("query", () => {
       originalSql: sql,
       externalSqlPath: path,
       externalSqlFileVersion: version,
+      editorRevealRequest: reveal ? { id: ++contentRevealSeq, line: reveal.line, column: reveal.column } : undefined,
       isExecuting: false,
       isCancelling: false,
       isExplaining: false,
@@ -3463,9 +3469,23 @@ export const useQueryStore = defineStore("query", () => {
     tab.nacosTargetKeyword = undefined;
   }
 
+  /**
+   * Effective connection binding of a plugin tab: bridge-created tabs carry
+   * the connection only inside context (tab-level connectionId is ""), so
+   * read both. New tabs normalize the context value up to the tab level at
+   * creation, but restored/legacy tabs still need the fallback.
+   */
+  function pluginTabConnectionId(tab: QueryTab): string {
+    if (tab.connectionId) return tab.connectionId;
+    const contextConnectionId = tab.pluginWorkbench?.context?.connectionId;
+    return typeof contextConnectionId === "string" ? contextConnectionId : "";
+  }
+
   function openPluginWorkbench(pluginId: string, contributionId: string, options: { title?: string; connectionId?: string; database?: string; context?: Record<string, unknown>; forceNew?: boolean } = {}) {
+    const contextConnectionId = typeof options.context?.connectionId === "string" ? options.context.connectionId : "";
+    const connectionId = options.connectionId || contextConnectionId;
     if (!options.forceNew) {
-      const existing = tabs.value.find((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && tab.pluginWorkbench?.contributionId === contributionId && tab.connectionId === (options.connectionId || ""));
+      const existing = tabs.value.find((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && tab.pluginWorkbench?.contributionId === contributionId && pluginTabConnectionId(tab) === connectionId);
       if (existing) {
         // Reopening surfaces the existing tab as-is. Replacing the context
         // here (openPluginConnection mints a fresh workbenchId per click)
@@ -3482,11 +3502,23 @@ export const useQueryStore = defineStore("query", () => {
       }
     }
 
+    // Termius-style session numbering: the first same-plugin + same-connection
+    // tab keeps the bare connection name; each additional one gets " (n)"
+    // where n advances beyond the highest live suffix (second tab → (1)).
+    // Numbers are assigned at creation and never backfilled after a close —
+    // stable titles beat dense numbering, while live titles stay unique.
+    const siblingTabs = tabs.value.filter((tab) => tab.mode === "plugin-workbench" && tab.pluginWorkbench?.pluginId === pluginId && pluginTabConnectionId(tab) === connectionId);
+    const nextSessionNumber =
+      siblingTabs.reduce((highest, tab) => {
+        const suffix = / \((\d+)\)$/.exec(tab.title);
+        return suffix ? Math.max(highest, Number(suffix[1])) : highest;
+      }, 0) + 1;
+    const baseTitle = options.title || contributionId;
     const id = uuid();
     const tab: QueryTab = {
       id,
-      title: options.title || contributionId,
-      connectionId: options.connectionId || "",
+      title: siblingTabs.length >= 1 ? `${baseTitle} (${nextSessionNumber})` : baseTitle,
+      connectionId,
       database: options.database || "",
       sql: "",
       isExecuting: false,
@@ -6493,6 +6525,13 @@ export const useQueryStore = defineStore("query", () => {
 
         for (const parsedCommand of mongoCommands) {
           let mongoCommand = parsedCommand.command;
+          // db.getSiblingDB("x").<command>: target that database for this command only.
+          const sessionDatabase = currentDatabase;
+          const targetsSiblingDatabase = mongoCommand.kind === "inDatabase";
+          if (mongoCommand.kind === "inDatabase") {
+            currentDatabase = mongoCommand.database;
+            mongoCommand = mongoCommand.command;
+          }
           const sourceStatement = parsedCommand.text;
           const sourceRange = options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset + parsedCommand.from, to: options.sourceOffset + parsedCommand.to };
           const commandStartedAt = performance.now();
@@ -6507,10 +6546,21 @@ export const useQueryStore = defineStore("query", () => {
             // The frontend parser remains responsible for editor ranges, while
             // dbx-core is authoritative for command semantics at execution time.
             mongoCommand = await api.mongoParseShellCommand(sourceStatement);
+            // The authoritative parse keeps the `db.getSiblingDB("x").` wrapper;
+            // re-apply the same one-command database override before dispatch.
+            if (mongoCommand.kind === "inDatabase") {
+              currentDatabase = mongoCommand.database;
+              mongoCommand = mongoCommand.command;
+            }
             switch (mongoCommand.kind) {
               case "find": {
                 queryExecutionLog("info", "mongo-find:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
-                const pagePlan = planMongoFindPagination(sourceStatement, mongoCommand, options?.pagination?.offset ?? 0, normalizeResultPageSize(options?.pagination?.limit ?? settingsStore.editorSettings.pageSize));
+                // Pagination planning parses `db.<collection>.find(...)` directly;
+                // strip a `db.getSiblingDB("x")` wrapper so the plan reflects the
+                // wrapped command's own skip/limit chain.
+                const siblingPrefix = splitSiblingDbPrefix(sourceStatement);
+                const paginationSource = siblingPrefix ? `db${siblingPrefix.rest}` : sourceStatement;
+                const pagePlan = planMongoFindPagination(paginationSource, mongoCommand, options?.pagination?.offset ?? 0, normalizeResultPageSize(options?.pagination?.limit ?? settingsStore.editorSettings.pageSize));
                 if (!pagePlan) throw new Error(describeMongoCommandParseFailure(sourceStatement));
                 // A stale request can point past an explicit .limit() bound. Keep
                 // the backend call bounded so limit(0) cannot become unbounded.
@@ -6745,6 +6795,7 @@ export const useQueryStore = defineStore("query", () => {
               case "createUser":
               case "dropIndex":
               case "dropIndexes":
+              case "renameCollection":
               case "dropCollection": {
                 if (options?.mongoSafety) {
                   const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
@@ -6782,6 +6833,9 @@ export const useQueryStore = defineStore("query", () => {
                   } finally {
                     await refreshLoadedMongoIndexesAfterMutation(executionConnectionId, currentDatabase, mongoCommand.collection, traceId);
                   }
+                } else if (mongoCommand.kind === "renameCollection") {
+                  await api.mongoRenameCollection(executionConnectionId, currentDatabase, mongoCommand.collection, mongoCommand.newName);
+                  allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoScalarToQueryResult("renamed", `${mongoCommand.collection} -> ${mongoCommand.newName}`, performance.now() - commandStartedAt))));
                 } else if (mongoCommand.kind === "dropCollection") {
                   await api.mongoDropCollection(executionConnectionId, currentDatabase, mongoCommand.collection);
                   allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoWriteToQueryResult(1, performance.now() - commandStartedAt))));
@@ -6815,6 +6869,9 @@ export const useQueryStore = defineStore("query", () => {
             // for the rest of the batch, matching the grouped-result UX.
             allResults.push(annotateMongoResult(toErrorResult(error)));
             mongoEditTarget = undefined;
+          } finally {
+            // A sibling-database command does not change the session database the way `use` does.
+            if (targetsSiblingDatabase) currentDatabase = sessionDatabase;
           }
         }
 
@@ -8403,10 +8460,16 @@ export const useQueryStore = defineStore("query", () => {
 
     if (effectiveDbType === "mongodb") {
       let mongoCommand;
+      let exportDatabase = location.database;
       try {
         mongoCommand = await api.mongoParseShellCommand(sql);
       } catch {
         throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
+      }
+      if (mongoCommand.kind === "inDatabase") {
+        // `db.getSiblingDB("x").c.find()` exports against the wrapped database.
+        exportDatabase = mongoCommand.database;
+        mongoCommand = mongoCommand.command;
       }
       if (mongoCommand.kind !== "find") throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
 
@@ -8417,14 +8480,18 @@ export const useQueryStore = defineStore("query", () => {
       let totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
       const exportStartedAt = performance.now();
       const exportExecutionId = uuid();
+      // Pagination planning parses `db.<collection>.find(...)` directly; strip a
+      // `db.getSiblingDB("x")` wrapper the same way the execution loop does.
+      const exportSiblingPrefix = splitSiblingDbPrefix(sql);
+      const exportPaginationSource = exportSiblingPrefix ? `db${exportSiblingPrefix.rest}` : sql;
 
       while (documents.length < exportRowLimit) {
         const remaining = exportRowLimit - documents.length;
-        const plan = planMongoFindPagination(sql, mongoCommand, pageOffset, Math.min(pageLimit, remaining));
+        const plan = planMongoFindPagination(exportPaginationSource, mongoCommand, pageOffset, Math.min(pageLimit, remaining));
         if (!plan) throw new Error(QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR);
         if (plan.requestLimit === 0) break;
 
-        const result = await api.mongoFindDocuments(location.connectionId, location.database, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, mongoCommand.collation, exportExecutionId);
+        const result = await api.mongoFindDocuments(location.connectionId, exportDatabase, mongoCommand.collection, plan.requestSkip, plan.requestLimit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, mongoCommand.collation, exportExecutionId);
         const pageDocuments = result.documents.slice(0, plan.requestLimit);
         documents.push(...pageDocuments);
 

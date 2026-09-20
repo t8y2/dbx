@@ -359,7 +359,7 @@ test("scheduled backup history exposes rename and overall percentage controls", 
 
 test("scheduled backups prepare table scope before opening a consistent snapshot", () => {
   const scheduler = readFileSync("apps/desktop/src/composables/useScheduledDatabaseBackups.ts", "utf8");
-  const exportCore = readFileSync("crates/dbx-core/src/database_export.rs", "utf8");
+  const exportCore = readFileSync("crates/dbx-core/src/data/database_export.rs", "utf8");
   const schemaIndex = scheduler.indexOf("await api.listSchemas(config.connectionId, database)");
   const snapshotIndex = scheduler.indexOf("await api.beginDatabaseBackupSnapshot(config.connectionId, database, runId)");
   const exportIndex = scheduler.indexOf("await runDatabaseExportUntilTerminal(");

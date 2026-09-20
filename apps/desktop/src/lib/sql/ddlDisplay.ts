@@ -1,6 +1,9 @@
 import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
-import { tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
+import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
+import type { DatabaseType } from "@/types/database";
 
 const SIMPLE_SQLSERVER_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -71,6 +74,170 @@ export function formatGeneratedDdlIdentifierQuotes(sql: string, dialect: SqlForm
   for (let index = replacements.length - 1; index >= 0; index -= 1) {
     const replacement = replacements[index]!;
     result = `${result.slice(0, replacement.start)}${replacement.value}${result.slice(replacement.end)}`;
+  }
+  return result;
+}
+
+interface DdlSpan {
+  start: number;
+  end: number;
+}
+
+/** Object keywords that can follow `CREATE` once its modifiers are consumed. */
+const DDL_CREATE_OBJECT_WORDS = new Set(["table", "view", "index"]);
+
+/**
+ * Modifiers that may appear between `CREATE` and the object keyword. Anything
+ * outside this set (`function`, `procedure`, `sequence`, ...) is treated as an
+ * object kind we do not rewrite, which keeps unrelated DDL untouched.
+ */
+const DDL_CREATE_MODIFIER_WORDS = new Set(["global", "local", "materialized", "or", "replace", "temporary", "temp", "unlogged", "unique", "clustered", "nonclustered", "columnstore", "fulltext", "spatial", "external"]);
+
+const DDL_ALTER_OBJECT_WORDS = new Set(["table", "view", "index"]);
+const DDL_DROP_OBJECT_WORDS = new Set(["table", "view", "index"]);
+const DDL_COMMENT_OBJECT_WORDS = new Set(["table", "view", "index", "materialized"]);
+
+/** Skips an optional keyword sequence, returning the original index when it does not match. */
+function skipDdlWords(tokens: readonly SqlSemanticToken[], index: number, end: number, words: readonly string[]): number {
+  let cursor = index;
+  for (const word of words) {
+    const token = tokens[cursor];
+    if (cursor >= end || !token || token.kind !== "word" || token.normalized !== word) return index;
+    cursor += 1;
+  }
+  return cursor;
+}
+
+/** Token indexes of every identifier part of the qualified name starting at `start`. */
+function readDdlQualifiedName(tokens: readonly SqlSemanticToken[], start: number, end: number): number[] | undefined {
+  if (start >= end || !tokenIsIdentifier(tokens[start])) return undefined;
+  const parts = [start];
+  let cursor = start + 1;
+  while (cursor + 1 < end && tokens[cursor]!.text === "." && tokenIsIdentifier(tokens[cursor + 1])) {
+    parts.push(cursor + 1);
+    cursor += 2;
+  }
+  return parts;
+}
+
+function findDdlKeyword(tokens: readonly SqlSemanticToken[], start: number, end: number, word: string): number {
+  for (let cursor = start; cursor < end; cursor += 1) {
+    const token = tokens[cursor]!;
+    if (token.depth === 0 && token.kind === "word" && token.normalized === word) return cursor;
+  }
+  return -1;
+}
+
+/**
+ * Records the span covering the qualifier chain of a qualified name, keeping
+ * only the trailing `keep` parts (`SYSTEM.TEST` with `keep: 1` removes `SYSTEM.`).
+ */
+function collectDdlQualifierRemoval(tokens: readonly SqlSemanticToken[], parts: readonly number[], keep: number, out: DdlSpan[]): void {
+  const firstKept = parts.length - keep;
+  if (firstKept <= 0) return;
+  out.push({ start: tokens[parts[0]!]!.span.start, end: tokens[parts[firstKept]!]!.span.start });
+}
+
+function collectDdlStatementQualifierRemovals(tokens: readonly SqlSemanticToken[], from: number, to: number, out: DdlSpan[]): void {
+  let index = from;
+  while (index < to && tokens[index]!.kind === "comment") index += 1;
+  const head = tokens[index];
+  if (!head || head.kind !== "word") return;
+
+  if (head.normalized === "create") {
+    let cursor = index + 1;
+    while (cursor < to) {
+      const token = tokens[cursor]!;
+      if (token.kind !== "word") return;
+      if (DDL_CREATE_OBJECT_WORDS.has(token.normalized)) break;
+      if (!DDL_CREATE_MODIFIER_WORDS.has(token.normalized)) return;
+      cursor += 1;
+    }
+    const objectWord = tokens[cursor];
+    if (!objectWord) return;
+    cursor = skipDdlWords(tokens, cursor + 1, to, ["if", "not", "exists"]);
+    const nameParts = readDdlQualifiedName(tokens, cursor, to);
+    if (!nameParts) return;
+    collectDdlQualifierRemoval(tokens, nameParts, 1, out);
+    if (objectWord.normalized === "index") {
+      const onIndex = findDdlKeyword(tokens, nameParts[nameParts.length - 1]! + 1, to, "on");
+      if (onIndex < 0) return;
+      const tableParts = readDdlQualifiedName(tokens, onIndex + 1, to);
+      if (tableParts) collectDdlQualifierRemoval(tokens, tableParts, 1, out);
+    }
+    return;
+  }
+
+  if (head.normalized === "alter") {
+    const objectWord = tokens[index + 1];
+    if (!objectWord || objectWord.kind !== "word" || !DDL_ALTER_OBJECT_WORDS.has(objectWord.normalized)) return;
+    const nameParts = readDdlQualifiedName(tokens, skipDdlWords(tokens, index + 2, to, ["if", "exists"]), to);
+    if (nameParts) collectDdlQualifierRemoval(tokens, nameParts, 1, out);
+    return;
+  }
+
+  if (head.normalized === "drop") {
+    const objectWord = tokens[index + 1];
+    if (!objectWord || objectWord.kind !== "word" || !DDL_DROP_OBJECT_WORDS.has(objectWord.normalized)) return;
+    let cursor = skipDdlWords(tokens, index + 2, to, ["if", "exists"]);
+    for (;;) {
+      const nameParts = readDdlQualifiedName(tokens, cursor, to);
+      if (!nameParts) return;
+      collectDdlQualifierRemoval(tokens, nameParts, 1, out);
+      cursor = nameParts[nameParts.length - 1]! + 1;
+      if (tokens[cursor]?.text !== ",") return;
+      cursor += 1;
+    }
+  }
+
+  if (head.normalized === "truncate") {
+    let cursor = index + 1;
+    if (tokens[cursor]?.kind === "word" && ["table", "only"].includes(tokens[cursor]!.normalized)) cursor += 1;
+    const nameParts = readDdlQualifiedName(tokens, cursor, to);
+    if (nameParts) collectDdlQualifierRemoval(tokens, nameParts, 1, out);
+    return;
+  }
+
+  if (head.normalized === "comment") {
+    if (tokens[index + 1]?.normalized !== "on") return;
+    const objectWord = tokens[index + 2];
+    if (!objectWord || objectWord.kind !== "word") return;
+    const isColumn = objectWord.normalized === "column";
+    if (!isColumn && !DDL_COMMENT_OBJECT_WORDS.has(objectWord.normalized)) return;
+    const nameParts = readDdlQualifiedName(tokens, index + 3, to);
+    // `COMMENT ON COLUMN t.c` keeps `t.c`, so only the schema qualifier goes.
+    if (nameParts) collectDdlQualifierRemoval(tokens, nameParts, isColumn ? 2 : 1, out);
+  }
+}
+
+/**
+ * Drops the schema/database qualifier from the target object of DDL statements
+ * (`CREATE/ALTER/DROP TABLE`, `CREATE INDEX ... ON`, `COMMENT ON ...`,
+ * `TRUNCATE TABLE`) so table DDL honors the "Include database name in generated
+ * SQL" preference the same way generated SELECT and copy-as-INSERT SQL do
+ * (#9421). Databases whose objects cannot be addressed without their qualifier
+ * keep it, mirroring `dropsSchemaQualifier`.
+ */
+export function omitDdlDatabaseQualifier(sql: string, dialect: SqlFormatDialect, databaseType: DatabaseType | undefined, includeDatabaseName: boolean, catalog?: string): string {
+  if (!dropsSchemaQualifier(databaseType, includeDatabaseName, catalog)) return sql;
+  const tokens = tokenizeSqlSemantic(sql, dialect === "sqlserver" ? "sqlserver" : dialect);
+  if (tokens.some((token) => token.closed === false)) return sql;
+
+  const removals: DdlSpan[] = [];
+  let statementStart = 0;
+  for (let index = 0; index <= tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token && !(token.kind === "punctuation" && token.text === ";" && token.depth === 0)) continue;
+    collectDdlStatementQualifierRemovals(tokens, statementStart, index, removals);
+    statementStart = index + 1;
+  }
+  if (removals.length === 0) return sql;
+
+  removals.sort((left, right) => left.start - right.start);
+  let result = sql;
+  for (let index = removals.length - 1; index >= 0; index -= 1) {
+    const removal = removals[index]!;
+    result = `${result.slice(0, removal.start)}${result.slice(removal.end)}`;
   }
   return result;
 }

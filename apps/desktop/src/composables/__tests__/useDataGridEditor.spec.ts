@@ -213,6 +213,24 @@ describe("useDataGridEditor searched replacements", () => {
     expect(mocks.executeBatch).not.toHaveBeenCalled();
   });
 
+  it("stages a resolved large-value replacement while the source row still contains its preview", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["prefix hit…"]]);
+    editor.newRows.value = [];
+
+    expect(
+      editor.stageCellReplacements([
+        {
+          rowId: 0,
+          col: 0,
+          sourceValue: "prefix hit…",
+          previousValue: "prefix hit suffix",
+          value: "prefix done suffix",
+        },
+      ]),
+    ).toBe(1);
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe("prefix done suffix");
+  });
+
   it("rejects readonly, stale, deleted, non-string and out-of-range targets", () => {
     const editor = createEditor(
       ["first", undefined, "last"],

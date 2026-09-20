@@ -209,6 +209,9 @@ function save() {
             <label v-if="draftExtractor === 'sql-inserts'" class="flex items-center gap-2 text-sm"
               ><input type="checkbox" :checked="draftOptions.sql.excludePrimaryKeysFromInsert" @change="updateSql('excludePrimaryKeysFromInsert', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorExcludePrimaryKeys") }}</label
             >
+            <label v-if="draftExtractor === 'sql-inserts'" class="flex items-center gap-2 text-sm"
+              ><input type="checkbox" :checked="draftOptions.sql.includeDatabaseName" @change="updateSql('includeDatabaseName', ($event.target as HTMLInputElement).checked)" />{{ t("grid.copyExtractorIncludeDatabaseName") }}</label
+            >
             <div v-if="draftExtractor === 'sql-inserts'" class="space-y-1.5">
               <Label>{{ t("grid.copyExtractorInsertMode") }}</Label>
               <Select :model-value="draftOptions.sql.insertMode" @update:model-value="updateSql('insertMode', $event as DataGridExtractorOptions['sql']['insertMode'])">

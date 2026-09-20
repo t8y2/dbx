@@ -1,6 +1,6 @@
 import type { ColumnInfo, DatabaseType, IndexInfo, QueryTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { editableRowIdentifierColumns } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys } from "@/lib/table/tableEditing";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadCacheStatus, type MetadataLoadTraceLogger } from "./metadataLoadCoordinator";
 import { metadataScopeKey, metadataScopeParts, type MetadataScopeInput } from "./metadataLoadScope";
 import { metadataCacheInvalidationMatcher, MetadataResultCache, type MetadataCacheInvalidation } from "./metadataResultCache";
@@ -275,6 +275,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: 
     database: metadata.database,
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
+    physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes),
   };
 }
 

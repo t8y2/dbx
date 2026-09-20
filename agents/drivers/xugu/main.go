@@ -2769,7 +2769,28 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		item.NumericPrecision, item.NumericScale, item.CharacterMaximumLength = decodeXuguScale(item.DataType, scale)
 		result = append(result, item)
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = s.closeRows(rows)
+		return nil, err
+	}
+	if err := s.closeRows(rows); err != nil {
+		return nil, err
+	}
+
+	// Xugu exposes IDENTITY/AUTO_INCREMENT columns through the serial
+	// metadata catalogs rather than through DEF_VAL. Enrich the common column
+	// contract with the value already understood by the desktop data generator.
+	// This lookup is deliberately optional: an account may read ALL_COLUMNS
+	// while lacking access to ALL_SEQUENCES, and that must not make ordinary
+	// column metadata unavailable.
+	if identities, identityErr := s.tableIdentities(schema, table); identityErr == nil {
+		for index := range result {
+			if xuguIdentityMatchesColumn(result[index].Name, identities) {
+				result[index].Extra = stringPtr("auto_increment")
+			}
+		}
+	}
+	return emptyIfNil(result), nil
 }
 
 func (s *server) queryColumnRows(schema, table string) (*sql.Rows, bool, error) {
@@ -4544,6 +4565,22 @@ func (s *server) tableIdentities(schema, table string) (map[string]xuguIdentityI
 		result[item.Column] = item
 	}
 	return result, rows.Err()
+}
+
+// xuguIdentityMatchesColumn keeps identity enrichment safe for catalog views
+// that may normalize unquoted names differently from ALL_COLUMNS. Exact
+// matches win; a case-insensitive match is accepted only when unambiguous.
+func xuguIdentityMatchesColumn(columnName string, identities map[string]xuguIdentityInfo) bool {
+	if _, ok := identities[columnName]; ok {
+		return true
+	}
+	matches := 0
+	for identityColumn := range identities {
+		if strings.EqualFold(identityColumn, columnName) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 func (s *server) tableConstraints(schema, table string) ([]xuguConstraintInfo, error) {

@@ -348,7 +348,7 @@ class Gbase8sAgentTest {
     void getColumnsUsesGbase8sSystemCatalog() {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
-        TestSupport.setPrivateConnection(agent, preparedConnection(
+        Connection connection = preparedConnection(
             sql,
             resultSet(
                 new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
@@ -365,7 +365,11 @@ class Gbase8sAgentTest {
                     {"price", 5, 3, 3074, "Unit price"}
                 }
             )
-        ));
+        );
+        TestSupport.setPrivateConnection(agent, connection);
+        agent.afterConnect(new ConnectParams(
+            "", 0, "", "", "", "NOTSQLMODE=mysql;SQLMODE=ansi", "", false
+        ), connection);
 
         List<ColumnInfo> columns = agent.getColumns("root", "products");
 
@@ -373,6 +377,7 @@ class Gbase8sAgentTest {
         Assertions.assertTrue(sql.get(0).contains("FROM sysconstraints"), sql.get(0));
         Assertions.assertTrue(sql.get(0).contains("t.owner = ?"), sql.get(0));
         Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("e.default AS column_default"), sql.get(1));
         Assertions.assertTrue(sql.get(2).contains("FROM syscolumns"), sql.get(2));
         Assertions.assertTrue(sql.get(2).contains("t.owner = ?"), sql.get(2));
         Assertions.assertEquals(3, columns.size());
@@ -391,10 +396,10 @@ class Gbase8sAgentTest {
     }
 
     @Test
-    void getColumnsLoadsDefaultsFromDefaultExpressionCatalog() throws Exception {
+    void getColumnsLoadsDefaultsFromDefaultExpressionCatalogInMysqlCompatMode() throws Exception {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
-        TestSupport.setPrivateConnection(agent, preparedConnection(
+        Connection connection = preparedConnection(
             sql,
             resultSet(
                 new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
@@ -412,18 +417,59 @@ class Gbase8sAgentTest {
                     {"created_at", 10, 3, 8, null}
                 }
             )
-        ));
+        );
+        TestSupport.setPrivateConnection(agent, connection);
+        agent.afterConnect(new ConnectParams(
+            "",
+            0,
+            "",
+            "",
+            "",
+            "GBASEDBTSERVER=gbase01;SQLMODE=mysql;CLIENT_LOCALE=zh_CN.57372;DB_LOCALE=zh_CN.57372;ifx_lock_mode_wait=60;",
+            "",
+            false
+        ), connection);
 
         List<ColumnInfo> columns = agent.getColumns("root", "system_user");
 
         Assertions.assertEquals(3, sql.size());
         Assertions.assertTrue(sql.get(1).contains("JOIN sysdefaultsexpr"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("e.type = 'T'"), sql.get(1));
-        Assertions.assertTrue(sql.get(1).contains("e.default AS column_default"), sql.get(1));
+        Assertions.assertTrue(sql.get(1).contains("e.`default` AS column_default"), sql.get(1));
         Assertions.assertTrue(sql.get(1).contains("t.owner = ?"), sql.get(1));
         Assertions.assertNull(columns.get(0).getColumn_default());
         Assertions.assertEquals("'0'", columns.get(1).getColumn_default());
         Assertions.assertEquals("current_timestamp", columns.get(2).getColumn_default());
+    }
+
+    @Test
+    void getColumnsUsesMysqlModeFromCustomConnectionStringBeforeUrlParams() {
+        String sql = defaultExpressionSql(
+            "SQLMODE=ansi",
+            "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=mysql"
+        );
+
+        Assertions.assertTrue(sql.contains("e.`default` AS column_default"), sql);
+    }
+
+    @Test
+    void getColumnsUsesAnsiModeFromCustomConnectionStringBeforeUrlParams() {
+        String sql = defaultExpressionSql(
+            "SQLMODE=mysql",
+            "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s;SQLMODE=ansi"
+        );
+
+        Assertions.assertTrue(sql.contains("e.default AS column_default"), sql);
+    }
+
+    @Test
+    void getColumnsIgnoresUrlParamsWhenCustomConnectionStringOmitsSqlMode() {
+        String sql = defaultExpressionSql(
+            "SQLMODE=mysql",
+            "jdbc:gbasedbt-sqli://localhost:9088/appdb:GBASEDBTSERVER=gbase8s"
+        );
+
+        Assertions.assertTrue(sql.contains("e.default AS column_default"), sql);
     }
 
     @Test
@@ -609,6 +655,28 @@ class Gbase8sAgentTest {
             }
             return defaultValue(method.getReturnType());
         });
+    }
+
+    private static String defaultExpressionSql(String urlParams, String connectionString) {
+        List<String> sql = new ArrayList<>();
+        Gbase8sAgent agent = new Gbase8sAgent();
+        Connection connection = preparedConnection(
+            sql,
+            resultSet(
+                new String[]{"part1", "part2", "part3", "part4", "part5", "part6", "part7", "part8", "part9", "part10", "part11", "part12", "part13", "part14", "part15", "part16"},
+                new Object[][]{}
+            ),
+            resultSet(new String[]{"colname", "column_default"}, new Object[][]{}),
+            resultSet(new String[]{"colname", "coltype", "colno", "collength", "comments"}, new Object[][]{})
+        );
+        TestSupport.setPrivateConnection(agent, connection);
+        agent.afterConnect(new ConnectParams(
+            "localhost", 9088, "appdb", "", "", urlParams, connectionString, false
+        ), connection);
+
+        agent.getColumns("root", "system_user");
+
+        return sql.get(1);
     }
 
     private static Connection defaultQueryFailureConnection(List<String> sql, ResultSet... resultSets) {

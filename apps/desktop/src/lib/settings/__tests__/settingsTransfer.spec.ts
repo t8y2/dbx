@@ -234,6 +234,22 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.snippets).toEqual(settings.snippets);
   });
 
+  it("round-trips table default sorting settings", () => {
+    const settings = {
+      ...DEFAULT_EDITOR_SETTINGS,
+      tableOpenSortMode: "database",
+      tableDatabaseSortDirection: "desc",
+      tableLocalSortDirection: "asc",
+    } as EditorSettings;
+    const result = parseSettingsTransferFile(serializeSettingsTransfer(settings));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.tableOpenSortMode).toBe("database");
+    expect(result.value.editorSettings.tableDatabaseSortDirection).toBe("desc");
+    expect(result.value.editorSettings.tableLocalSortDirection).toBe("asc");
+    expect(transferCategoryForKey("tableOpenSortMode")).toBe("data");
+  });
+
   it("rejects custom theme items that lack id or name", () => {
     const validTheme = { ...DEFAULT_EDITOR_SETTINGS.customThemes[0] };
     const idless = parseSettingsTransferFile(fileWith({ customThemes: [{ ...validTheme, id: "" }] }));

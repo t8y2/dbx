@@ -1071,12 +1071,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     beginBatch();
     try {
       for (const change of changes) {
-        const { rowId, col, previousValue, value } = change;
+        const { rowId, col, previousValue, sourceValue = previousValue, value } = change;
         if (!Number.isInteger(rowId) || rowId < 0 || !Number.isInteger(col) || col < 0 || col >= result.value.columns.length || !canEditColumn(col) || deletedRows.value.has(rowId)) continue;
         const row = result.value.rows[rowId];
         if (!row) continue;
         const data = rowDataWithChanges(row, rowId);
-        if (typeof data[col] !== "string" || data[col] !== previousValue || value === previousValue) continue;
+        if (typeof data[col] !== "string" || data[col] !== sourceValue || value === previousValue) continue;
         const item: RowItem = { id: rowId, sourceIndex: rowId, data, isNew: false, isDeleted: false, isDirtyCol: [], status: "clean" };
         applyCellValueToItem(item, rowId, col, value, { preserveEmptyString: true });
         const currentValue = rowDataWithChanges(row, rowId)[col];

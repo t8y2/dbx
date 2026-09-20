@@ -68,7 +68,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
   // Doris: backend listing path still uses the generic SHOW TABLES path (see
-  // `list_tables_once` for `PoolKind::Mysql` in crates/dbx-core/src/schema.rs)
+  // `list_tables_once` for `PoolKind::Mysql` in crates/dbx-core/src/schema/mod.rs)
   // and lacks a MV classifier. Keep Doris on TABLE_VIEW_OBJECTS until a
   // Doris-specific MV listing/classification lands, otherwise the UI advertises
   // MV support that the backend cannot route.

@@ -92,13 +92,16 @@ test("handshake rejects wrong identity and missing executables terminate promptl
 });
 
 test("handshake adopts a manifest.json rewritten on disk when the in-memory copy is stale", async (t) => {
+  let sidecar;
   const project = await mkdtemp(join(tmpdir(), "dbx-sidecar-manifest-"));
-  t.after(() => rm(project, { recursive: true, force: true }));
+  t.after(async () => {
+    await sidecar?.stop();
+    await rm(project, { recursive: true, force: true });
+  });
   // Simulates a version bump made while the dev host was already running:
   // the sidecar binary reports 1.0.0, the in-memory manifest is behind.
   await writeFile(join(project, "manifest.json"), JSON.stringify({ id: "example.echo", version: "1.0.0" }));
-  const sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
-  t.after(() => sidecar.stop());
+  sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
   const info = await sidecar.start();
   assert.equal(sidecar.state, "ready");
   assert.equal(sidecar.manifest.version, "1.0.0");
@@ -106,10 +109,14 @@ test("handshake adopts a manifest.json rewritten on disk when the in-memory copy
 });
 
 test("handshake still rejects when the on-disk manifest also disagrees with the sidecar", async (t) => {
+  let sidecar;
   const project = await mkdtemp(join(tmpdir(), "dbx-sidecar-manifest-"));
-  t.after(() => rm(project, { recursive: true, force: true }));
+  t.after(async () => {
+    await sidecar?.stop();
+    await rm(project, { recursive: true, force: true });
+  });
   await writeFile(join(project, "manifest.json"), JSON.stringify({ id: "example.echo", version: "0.9.0" }));
-  const sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
+  sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
   await assert.rejects(sidecar.start(), /identity/);
 });
 

@@ -376,13 +376,13 @@ onMounted(() => {
             ><span class="font-medium">{{ t("meilisearch.description") }}</span
             ><Input v-model="form.description" :placeholder="t('meilisearch.descriptionPlaceholder')" /><span class="text-[11px] leading-4 text-muted-foreground">{{ t("meilisearch.descriptionHelp") }}</span></label
           >
-          <div class="grid gap-1">
+          <div class="grid min-w-0 gap-1">
             <span class="font-medium">{{ t("meilisearch.indexes") }}</span
             ><MeilisearchMultiSelect v-model="form.indexes" :options="indexOptions" :disabled="Boolean(editing)" :loading="indexesLoading" :error="indexLoadError" :placeholder="t('meilisearch.indexesPlaceholder')" /><span class="text-[11px] leading-4 text-muted-foreground">{{
               t("meilisearch.indexesHelp")
             }}</span>
           </div>
-          <div class="grid gap-1">
+          <div class="grid min-w-0 gap-1">
             <span class="font-medium">{{ t("meilisearch.actions") }}</span
             ><MeilisearchMultiSelect v-model="form.actions" :options="[...KEY_ACTION_OPTIONS]" :disabled="Boolean(editing)" :placeholder="t('meilisearch.actionsPlaceholder')" /><span class="text-[11px] leading-4 text-muted-foreground">{{ t("meilisearch.actionsHelp") }}</span>
           </div>

@@ -21,6 +21,7 @@ pub mod etcd_cmd;
 pub mod external_db;
 pub mod external_sql;
 pub mod fs_open;
+pub mod global_search;
 pub mod hbase_cmd;
 pub mod history;
 pub mod keychain;

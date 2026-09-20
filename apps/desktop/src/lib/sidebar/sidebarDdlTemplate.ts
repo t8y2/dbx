@@ -1,4 +1,7 @@
 import { joinExportedDdls } from "@/lib/export/ddlExport";
+import { omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import type { DatabaseType } from "@/types/database";
 
 interface SidebarDdlExecutionTarget {
   connectionId: string;
@@ -16,4 +19,9 @@ export async function buildSidebarDdlTemplateSql<T>(targets: readonly T[], loadD
     parts.push(await formatDdl(await loadDdl(target), target));
   }
   return parts.length === 1 ? parts[0]! : joinExportedDdls(parts);
+}
+
+export function formatSidebarDdlTemplateForDisplay(sql: string, dialect: SqlFormatDialect, databaseType: DatabaseType | undefined, includeDatabaseName: boolean, quoteIdentifiers: boolean, catalog?: string): string {
+  const unqualified = omitDdlDatabaseQualifier(sql, dialect, databaseType, includeDatabaseName, catalog);
+  return quoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, dialect);
 }

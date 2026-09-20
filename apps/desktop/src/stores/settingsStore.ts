@@ -19,6 +19,7 @@ import type { SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTar
 import type { ConnectionListSortMode } from "@/lib/sidebar/connectionListSort";
 import { type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
+import { REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT, REDIS_DATABASE_DISPLAY_LIMIT_MIN, REDIS_DATABASE_DISPLAY_LIMIT_MAX } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTableNameCopy";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
@@ -770,6 +771,7 @@ export interface EditorSettings {
   showInsertValueHints: boolean;
   autoAliasTables: boolean;
   insertSpaceAfterCompletion: boolean;
+  sqlServerSpaceConfirmsCompletion: boolean;
   sortCompletionColumnsAlphabetically: boolean;
   selectFirstCompletionOnOpen: boolean;
   wordWrap: boolean;
@@ -793,6 +795,9 @@ export interface EditorSettings {
   appLayout: "separated" | "classic";
   pageSize: number;
   tableOpenPageSize: number;
+  tableOpenSortMode: "none" | "database" | "local";
+  tableDatabaseSortDirection: "asc" | "desc";
+  tableLocalSortDirection: "asc" | "desc";
   queryResultMaxRowsEnabled: boolean;
   queryResultMaxRows: number;
   externalSqlEditorMaxMb: number;
@@ -863,8 +868,15 @@ export interface EditorSettings {
   generateSqlIncludeDatabaseName: boolean;
   generateSqlQuoteIdentifiers: boolean;
   formatSqlOnSqlFileSave: boolean;
+  /** Legacy alias retained for settings-file compatibility. Mirrors autoUpdateApp. */
   updateNotificationsEnabled: boolean;
+  /** Legacy setting retained for compatibility. Mirrors autoUpdateApp after the centralized update controls are enabled. */
   autoDownloadUpdates: boolean;
+  autoUpdateApp: boolean;
+  autoUpdateDrivers: boolean;
+  autoUpdateJdbc: boolean;
+  autoUpdateMcp: boolean;
+  autoUpdatePlugins: boolean;
   sidebarHiddenTablePrefixes: string[];
   sidebarCopyTableNameSeparator: ColumnNameCopySeparator;
   sidebarCopyTableNameIncludeSchema: boolean;
@@ -886,6 +898,8 @@ export interface EditorSettings {
   csvQuoteMode: CsvQuoteMode;
   /** Global Redis key-search templates; overridden by non-empty connection templates. */
   redisKeyTemplates: string[];
+  /** Sidebar database-list cap for Redis connections; the rest are revealed via "load more". */
+  redisDatabaseDisplayLimit: number;
   exportRowLimitEnabled: boolean;
   exportRowLimit: number;
   queryExportKeysetOptimizationEnabled: boolean;
@@ -1015,6 +1029,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   autoAliasTables: true,
   insertSpaceAfterCompletion: true,
+  sqlServerSpaceConfirmsCompletion: false,
   sortCompletionColumnsAlphabetically: true,
   selectFirstCompletionOnOpen: true,
   wordWrap: false,
@@ -1038,6 +1053,9 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   appLayout: "classic",
   pageSize: 100,
   tableOpenPageSize: 100,
+  tableOpenSortMode: "none",
+  tableDatabaseSortDirection: "asc",
+  tableLocalSortDirection: "asc",
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: DEFAULT_QUERY_RESULT_MAX_ROWS,
   externalSqlEditorMaxMb: 64,
@@ -1108,7 +1126,12 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   generateSqlQuoteIdentifiers: true,
   formatSqlOnSqlFileSave: false,
   updateNotificationsEnabled: true,
-  autoDownloadUpdates: false,
+  autoDownloadUpdates: true,
+  autoUpdateApp: true,
+  autoUpdateDrivers: true,
+  autoUpdateJdbc: true,
+  autoUpdateMcp: true,
+  autoUpdatePlugins: true,
   sidebarHiddenTablePrefixes: [],
   sidebarCopyTableNameSeparator: "comma",
   sidebarCopyTableNameIncludeSchema: false,
@@ -1129,6 +1152,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   exportBatchSize: 2000,
   csvQuoteMode: DEFAULT_CSV_QUOTE_MODE,
   redisKeyTemplates: [],
+  redisDatabaseDisplayLimit: REDIS_DATABASE_DISPLAY_LIMIT_DEFAULT,
   exportRowLimitEnabled: false,
   exportRowLimit: 100000,
   queryExportKeysetOptimizationEnabled: true,
@@ -1439,6 +1463,17 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const normalizedExtractorOptions = normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions);
   const isLegacyExtractorOptions = typeof savedExtractorMigrationVersion !== "number" || savedExtractorMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
   const dataGridExtractorOptions = isLegacyExtractorOptions && normalizedExtractorOptions.dsv.nullText === "NULL" ? { ...normalizedExtractorOptions, dsv: { ...normalizedExtractorOptions.dsv, nullText: "" } } : normalizedExtractorOptions;
+  // Preserve the explicit intent behind the legacy update controls. Disabling
+  // update reminders was a full opt-out; disabling automatic downloads only
+  // opted out of downloading the DBX package itself.
+  const legacyUpdateOptOut = settings.updateNotificationsEnabled === false;
+  const legacyAutoDownload = typeof settings.autoDownloadUpdates === "boolean" ? settings.autoDownloadUpdates : undefined;
+  const autoUpdateApp = typeof settings.autoUpdateApp === "boolean" ? settings.autoUpdateApp : legacyUpdateOptOut ? false : (legacyAutoDownload ?? DEFAULT_EDITOR_SETTINGS.autoUpdateApp);
+  const autoDownloadUpdates = autoUpdateApp;
+  const autoUpdateDrivers = typeof settings.autoUpdateDrivers === "boolean" ? settings.autoUpdateDrivers : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
+  const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
+  const autoUpdateMcp = typeof settings.autoUpdateMcp === "boolean" ? settings.autoUpdateMcp : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateMcp;
+  const autoUpdatePlugins = typeof settings.autoUpdatePlugins === "boolean" ? settings.autoUpdatePlugins : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdatePlugins;
   return {
     fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
@@ -1499,6 +1534,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
+    sqlServerSpaceConfirmsCompletion: typeof settings.sqlServerSpaceConfirmsCompletion === "boolean" ? settings.sqlServerSpaceConfirmsCompletion : DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion,
     sortCompletionColumnsAlphabetically: typeof settings.sortCompletionColumnsAlphabetically === "boolean" ? settings.sortCompletionColumnsAlphabetically : DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically,
     selectFirstCompletionOnOpen: typeof settings.selectFirstCompletionOnOpen === "boolean" ? settings.selectFirstCompletionOnOpen : DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen,
     wordWrap: settings.wordWrap ?? DEFAULT_EDITOR_SETTINGS.wordWrap,
@@ -1522,6 +1558,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
     tableOpenPageSize: normalizeResultPageSize(settings.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize),
+    tableOpenSortMode: settings.tableOpenSortMode === "database" || settings.tableOpenSortMode === "local" ? settings.tableOpenSortMode : "none",
+    tableDatabaseSortDirection: settings.tableDatabaseSortDirection === "desc" ? "desc" : "asc",
+    tableLocalSortDirection: settings.tableLocalSortDirection === "desc" ? "desc" : "asc",
     queryResultMaxRowsEnabled: settings.queryResultMaxRowsEnabled !== false,
     queryResultMaxRows: normalizeQueryResultMaxRows(settings.queryResultMaxRows),
     externalSqlEditorMaxMb: normalizeExternalSqlEditorMaxMb(settings.externalSqlEditorMaxMb),
@@ -1621,8 +1660,13 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
     generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
     formatSqlOnSqlFileSave: settings.formatSqlOnSqlFileSave === true,
-    updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
-    autoDownloadUpdates: settings.autoDownloadUpdates === true,
+    updateNotificationsEnabled: autoUpdateApp,
+    autoDownloadUpdates,
+    autoUpdateApp,
+    autoUpdateDrivers,
+    autoUpdateJdbc,
+    autoUpdateMcp,
+    autoUpdatePlugins,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     sidebarCopyTableNameSeparator: normalizeSidebarCopyTableNameSeparator(settings.sidebarCopyTableNameSeparator),
     sidebarCopyTableNameIncludeSchema: settings.sidebarCopyTableNameIncludeSchema === true,
@@ -1660,6 +1704,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
     csvQuoteMode: normalizeCsvQuoteMode(settings.csvQuoteMode),
     redisKeyTemplates: normalizeRedisKeyTemplates(settings.redisKeyTemplates),
+    redisDatabaseDisplayLimit:
+      typeof settings.redisDatabaseDisplayLimit === "number" && settings.redisDatabaseDisplayLimit >= REDIS_DATABASE_DISPLAY_LIMIT_MIN && settings.redisDatabaseDisplayLimit <= REDIS_DATABASE_DISPLAY_LIMIT_MAX
+        ? Math.round(settings.redisDatabaseDisplayLimit)
+        : DEFAULT_EDITOR_SETTINGS.redisDatabaseDisplayLimit,
     exportRowLimitEnabled: typeof settings.exportRowLimitEnabled === "boolean" ? settings.exportRowLimitEnabled : DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled,
     exportRowLimit: typeof settings.exportRowLimit === "number" && settings.exportRowLimit >= 100 && settings.exportRowLimit <= 2147483647 ? Math.round(settings.exportRowLimit) : DEFAULT_EDITOR_SETTINGS.exportRowLimit,
     queryExportKeysetOptimizationEnabled: typeof settings.queryExportKeysetOptimizationEnabled === "boolean" ? settings.queryExportKeysetOptimizationEnabled : DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled,
@@ -2263,6 +2311,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
+    if (partial.sqlServerSpaceConfirmsCompletion !== undefined) editorSettings.value.sqlServerSpaceConfirmsCompletion = partial.sqlServerSpaceConfirmsCompletion === true;
     if (partial.sortCompletionColumnsAlphabetically !== undefined) editorSettings.value.sortCompletionColumnsAlphabetically = partial.sortCompletionColumnsAlphabetically === true;
     if (partial.selectFirstCompletionOnOpen !== undefined) editorSettings.value.selectFirstCompletionOnOpen = partial.selectFirstCompletionOnOpen === true;
     if (partial.wordWrap !== undefined) editorSettings.value.wordWrap = partial.wordWrap;
@@ -2289,6 +2338,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
     if (partial.tableOpenPageSize !== undefined) editorSettings.value.tableOpenPageSize = normalizeResultPageSize(partial.tableOpenPageSize, DEFAULT_EDITOR_SETTINGS.tableOpenPageSize);
+    if (partial.tableOpenSortMode !== undefined) editorSettings.value.tableOpenSortMode = partial.tableOpenSortMode === "database" || partial.tableOpenSortMode === "local" ? partial.tableOpenSortMode : "none";
+    if (partial.tableDatabaseSortDirection !== undefined) editorSettings.value.tableDatabaseSortDirection = partial.tableDatabaseSortDirection === "desc" ? "desc" : "asc";
+    if (partial.tableLocalSortDirection !== undefined) editorSettings.value.tableLocalSortDirection = partial.tableLocalSortDirection === "desc" ? "desc" : "asc";
     if (partial.queryResultMaxRowsEnabled !== undefined) editorSettings.value.queryResultMaxRowsEnabled = Boolean(partial.queryResultMaxRowsEnabled);
     if (partial.queryResultMaxRows !== undefined) editorSettings.value.queryResultMaxRows = normalizeQueryResultMaxRows(partial.queryResultMaxRows, editorSettings.value.queryResultMaxRows);
     if (partial.externalSqlEditorMaxMb !== undefined) editorSettings.value.externalSqlEditorMaxMb = normalizeExternalSqlEditorMaxMb(partial.externalSqlEditorMaxMb);
@@ -2364,8 +2416,25 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
     if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;
     if (partial.formatSqlOnSqlFileSave !== undefined) editorSettings.value.formatSqlOnSqlFileSave = partial.formatSqlOnSqlFileSave === true;
-    if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
-    if (partial.autoDownloadUpdates !== undefined) editorSettings.value.autoDownloadUpdates = partial.autoDownloadUpdates === true;
+    if (partial.updateNotificationsEnabled !== undefined) {
+      editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
+      editorSettings.value.autoUpdateApp = partial.updateNotificationsEnabled;
+      editorSettings.value.autoDownloadUpdates = partial.updateNotificationsEnabled;
+    }
+    if (partial.autoUpdateApp !== undefined) {
+      editorSettings.value.autoUpdateApp = partial.autoUpdateApp;
+      editorSettings.value.updateNotificationsEnabled = partial.autoUpdateApp;
+      editorSettings.value.autoDownloadUpdates = partial.autoUpdateApp;
+    }
+    if (partial.autoDownloadUpdates !== undefined) {
+      editorSettings.value.autoDownloadUpdates = partial.autoDownloadUpdates === true;
+      editorSettings.value.autoUpdateApp = partial.autoDownloadUpdates === true;
+      editorSettings.value.updateNotificationsEnabled = partial.autoDownloadUpdates === true;
+    }
+    if (partial.autoUpdateDrivers !== undefined) editorSettings.value.autoUpdateDrivers = partial.autoUpdateDrivers;
+    if (partial.autoUpdateJdbc !== undefined) editorSettings.value.autoUpdateJdbc = partial.autoUpdateJdbc;
+    if (partial.autoUpdateMcp !== undefined) editorSettings.value.autoUpdateMcp = partial.autoUpdateMcp;
+    if (partial.autoUpdatePlugins !== undefined) editorSettings.value.autoUpdatePlugins = partial.autoUpdatePlugins;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);
     if (partial.sidebarCopyTableNameSeparator !== undefined) editorSettings.value.sidebarCopyTableNameSeparator = normalizeSidebarCopyTableNameSeparator(partial.sidebarCopyTableNameSeparator);
     if (partial.sidebarCopyTableNameIncludeSchema !== undefined) editorSettings.value.sidebarCopyTableNameIncludeSchema = partial.sidebarCopyTableNameIncludeSchema === true;
@@ -2386,6 +2455,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
     if (partial.csvQuoteMode !== undefined) editorSettings.value.csvQuoteMode = normalizeCsvQuoteMode(partial.csvQuoteMode);
     if (partial.redisKeyTemplates !== undefined) editorSettings.value.redisKeyTemplates = normalizeRedisKeyTemplates(partial.redisKeyTemplates);
+    if (partial.redisDatabaseDisplayLimit !== undefined) editorSettings.value.redisDatabaseDisplayLimit = Math.min(REDIS_DATABASE_DISPLAY_LIMIT_MAX, Math.max(REDIS_DATABASE_DISPLAY_LIMIT_MIN, Math.round(partial.redisDatabaseDisplayLimit)));
     if (partial.exportRowLimitEnabled !== undefined) editorSettings.value.exportRowLimitEnabled = partial.exportRowLimitEnabled;
     if (partial.exportRowLimit !== undefined) editorSettings.value.exportRowLimit = Math.min(2147483647, Math.max(100, Math.round(partial.exportRowLimit)));
     if (partial.queryExportKeysetOptimizationEnabled !== undefined) editorSettings.value.queryExportKeysetOptimizationEnabled = partial.queryExportKeysetOptimizationEnabled;

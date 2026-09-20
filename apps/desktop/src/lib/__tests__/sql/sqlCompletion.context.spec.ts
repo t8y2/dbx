@@ -6,12 +6,49 @@ import {
   buildSqlCompletionItemsFromContext,
   getPostgresSequenceLiteralCompletionContext,
   getSqlCompletionContext,
+  prepareSqlCompletionReplacement,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
 } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
+
+describe("SQL completion replacement", () => {
+  const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
+
+  it("marks a standalone SELECT wildcard for replacement", () => {
+    const sql = "SELECT * FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).toMatchObject({ replaceSelectWildcard: true });
+  });
+
+  it("does not mark the multiplication operator before an untyped right operand", () => {
+    const sql = "SELECT *qty FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).not.toHaveProperty("replaceSelectWildcard");
+  });
+
+  it("does not mark an expression operator after another projection operand", () => {
+    const sql = "SELECT amount + * FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).not.toHaveProperty("replaceSelectWildcard");
+  });
+
+  it("marks a standalone wildcard after a SELECT modifier", () => {
+    const sql = "SELECT DISTINCT * FROM users";
+    const cursor = sql.indexOf("*");
+    const context = getSqlCompletionContext(sql, cursor);
+
+    expect(prepareSqlCompletionReplacement(sql, cursor, context, [columnItem]).items[0]).toMatchObject({ replaceSelectWildcard: true });
+  });
+});
 
 describe("sqlCompletion keyword snippets", () => {
   it("auto-opens and suggests SELECT when typing sel", () => {
@@ -334,7 +371,76 @@ describe("SELECT star expansion", () => {
         qualifierSql,
         databaseType,
       ),
-    ).toBe(`id, ${qualifierSql}.${quotedColumn}`);
+    ).toBe(`${databaseType === "oracle" ? '"id"' : "id"}, ${qualifierSql}.${quotedColumn}`);
+  });
+
+  it("does not quote all-uppercase Oracle columns when expanding alias.* (regression #9163)", () => {
+    const sql = "SELECT t.* FROM device_table AS t";
+    const cursor = sql.indexOf("*") + 1;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, { databaseType: "oracle", dialect: "mysql" }), getSqlCompletionContext(sql, cursor, { databaseType: "oracle", dialect: "mysql" }));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "device_table",
+            [
+              { name: "AGENT_NAME", table: "device_table" },
+              { name: "PROTOCOL", table: "device_table" },
+              { name: "created at", table: "device_table" },
+            ],
+          ],
+        ]),
+        "mysql",
+        "t",
+        "oracle",
+      ),
+    ).toBe('AGENT_NAME, t.PROTOCOL, t."created at"');
+  });
+
+  it("does not quote all-uppercase Oracle columns for an unqualified star when only databaseType is set", () => {
+    const sql = "SELECT * FROM device_table";
+    const cursor = "SELECT *".length;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, { databaseType: "oracle" }), getSqlCompletionContext(sql, cursor, { databaseType: "oracle" }));
+
+    expect(
+      buildSelectStarExpansion(
+        context,
+        new Map([
+          [
+            "device_table",
+            [
+              { name: "AGENT_NAME", table: "device_table" },
+              { name: "SPARE1", table: "device_table" },
+            ],
+          ],
+        ]),
+        undefined,
+        undefined,
+        "oracle",
+      ),
+    ).toBe("AGENT_NAME, SPARE1");
+  });
+
+  it.each([
+    ["oracle", "mysql"],
+    ["oracle", undefined],
+    [undefined, "oracle"],
+  ] as const)("preserves required Oracle column quotes with databaseType %s and dialect %s", (databaseType, dialect) => {
+    const columnsByTable = new Map([["orders", ["OrderId", "order_id", "AGENT_NAME", "SELECT", "created at", "ACCOUNT$SYS"].map((name) => ({ name, table: "orders" }))]]);
+    const contextOptions = { databaseType, dialect: "mysql" as const };
+
+    for (const [sql, expected] of [
+      ["SELECT o.* FROM orders o", '"OrderId", o."order_id", o.AGENT_NAME, o."SELECT", o."created at", o.ACCOUNT$SYS'],
+      ["SELECT * FROM orders", '"OrderId", "order_id", AGENT_NAME, "SELECT", "created at", ACCOUNT$SYS'],
+    ]) {
+      const cursor = sql.indexOf("*") + 1;
+      const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, contextOptions), getSqlCompletionContext(sql, cursor, contextOptions));
+
+      expect(buildSelectStarExpansion(context, columnsByTable, dialect, context.qualifier, databaseType)).toBe(expected);
+      expect(buildSelectStarExpansion(context, new Map(), dialect, context.qualifier, databaseType)).toBeNull();
+    }
   });
 
   it("expands an unqualified star from result columns when the table has an alias", () => {
@@ -605,7 +711,8 @@ describe("sqlCompletion table aliases", () => {
     });
 
     const table = items.find((item) => item.label === "order_items" && item.type === "table");
-    expect(table?.apply).toBe("order_items oi");
+    // The lowercase table name must stay quoted (#9526); the generated alias is a new identifier and stays bare.
+    expect(table?.apply).toBe('"order_items" oi');
   });
 
   it("never adds generated aliases to Cassandra table completions", () => {

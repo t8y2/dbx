@@ -152,7 +152,7 @@ Ask the MCP client to:
 | `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
 | `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
-| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning 100 rows by default (up to 1000 with the `max_rows` parameter) |
 | `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
@@ -163,6 +163,8 @@ Ask the MCP client to:
 | `dbx_execute_and_show` | Execute a query and display the result in the DBX desktop application |
 
 When connection scoping is enabled, mutating connection tools and desktop UI tools are hidden.
+
+`dbx_execute_query` accepts an optional `max_rows` parameter (1–1000, default 100; out-of-range values are clamped, not rejected). It applies to SQL connections only: MongoDB shell commands always return at most 100 rows, and multi-statement scripts routed to the batch executor return at most 100 rows per statement.
 
 `dbx_peek_messages` reads a Kafka topic in local or Web mode when `mq-admin` is enabled. Pass `connection_id` or `connection_name`, `topic`, optional `count` (1–100, default 20), `start_position` (`latest` by default, `earliest`, or `offset`), and optional non-negative `partition`. A non-negative `offset` is required only in offset mode; without a partition it applies to all partitions. The JSON response preserves base64 payloads and metadata, reports broker partial reads via `incomplete`, and reports whole-message omissions under a 256 KiB output budget via `outputTruncated`. It respects connection/tool scopes and permits read-only and production reads without committing consumer offsets. It does not support other MQ types or continuous subscriptions.
 
@@ -529,7 +531,7 @@ MCP 配置：
 | `dbx_list_tables` | 列出表、视图、集合或消息队列 Topic |
 | `dbx_describe_table` | 获取字段和表结构 |
 | `dbx_get_schema_context` | 获取适合 AI 使用的紧凑 Schema 上下文 |
-| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB Shell 命令，最多返回 100 行 |
+| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB Shell 命令，默认返回 100 行，可用 `max_rows` 参数提高到最多 1000 行 |
 | `dbx_execute_batch` | 一次执行包含多条语句的 SQL 脚本，按语句返回结果（多语句脚本搭配 `use_transaction` 时返回单个合并结果） |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
@@ -538,6 +540,8 @@ MCP 配置：
 | `dbx_send_message` | 向支持的消息队列 Topic 发送消息 |
 | `dbx_open_table` | 在 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 桌面端展示结果 |
+
+`dbx_execute_query` 支持可选参数 `max_rows`（取值 1–1000，默认 100；越界值会被夹取到范围内，而不是报错）。该参数仅对 SQL 连接生效：MongoDB shell 命令始终最多返回 100 行，路由到批量执行器的多语句脚本每条语句最多返回 100 行。
 
 启用 `mq-admin` 后，`dbx_peek_messages` 可在本地和 Web 模式下读取 Kafka Topic。参数为 `connection_id` 或 `connection_name`、`topic`、可选 `count`（1–100，默认 20）、`start_position`（默认 `latest`，也支持 `earliest`、`offset`）及可选的非负 `partition`。仅 offset 模式必须且允许指定非负 `offset`，未指定分区时该位点应用于所有分区。JSON 结果保留 base64 消息体和元数据，通过 `incomplete` 标记底层不完整读取，通过 `outputTruncated` 标记因 256 KiB 输出预算而省略整条消息。工具遵守连接和工具范围，允许只读与生产连接读取，不提交消费位点，不支持其他 MQ 类型或持续订阅。
 

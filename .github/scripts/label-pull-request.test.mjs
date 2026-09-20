@@ -104,13 +104,32 @@ test("recognizes conventional titles with a full-width colon", () => {
   assert.deepEqual(result.labels, ["area/core", "bug"]);
 });
 
+test("recognizes extracted core crates and their database sources", () => {
+  const result = evaluatePullRequestLabels({
+    title: "fix(sql): preserve PostgreSQL query contracts",
+    changedFiles: [
+      "crates/dbx-drivers/src/db/postgres.rs",
+      "crates/dbx-sql/src/sql.rs",
+      "crates/dbx-types/src/types.rs",
+      "crates/dbx-platform/src/process.rs",
+      "crates/dbx-ai-provider/src/ai.rs",
+      "crates/dbx-formats/src/csv_export.rs",
+      "crates/dbx-plugin-runtime/src/plugins.rs",
+    ],
+    knownDatabaseTypes,
+  });
+
+  assert.deepEqual(result.labels, ["area/core", "bug", "db/postgres"]);
+  assert.deepEqual(result.databaseTypes, ["postgres"]);
+});
+
 test("collapses broad area and database changes", () => {
   const result = evaluatePullRequestLabels({
     title: "feat: add cross-runtime geometry support",
     changedFiles: [
       "agents/drivers/mysql/build.gradle",
       "apps/desktop/src/components/grid/GeometryViewer.vue",
-      "crates/dbx-core/src/db/postgres.rs",
+      "crates/dbx-drivers/src/db/postgres.rs",
       "crates/dbx-mcp/src/main.rs",
       "crates/dbx-web/src/main.rs",
       "docs/content/docs/geometry.mdx",

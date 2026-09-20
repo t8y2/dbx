@@ -13,15 +13,22 @@ directory; OAuth login required).
   domain. Artifact bytes, headers, and Range semantics are untouched.
 - `dbxio.com/api/plugins/install` — `POST` fire-and-forget beacon the desktop
   app can send after a successful marketplace install
-  (`{"id": "<plugin id>", "version": "<version>"}`, 204 on accept). Decorative
-  statistics only: no auth, no PII.
+  (`{"id": "<plugin id>", "version": "<version>", "kind": "install"|"update",
+  "clientId": "<random uuid>"}`, 204 on accept; `kind` and `clientId` are
+  optional and absent on legacy app versions). Decorative statistics only: no
+  auth, no PII — `clientId` is a purely random per-installation id the app
+  generates locally, not a hardware or user fingerprint.
 
 ## Storage — Workers Analytics Engine
 
 One datapoint per event (binding `PLUGIN_STATS`):
 
-- `blobs = [kind, pluginId, version]` where kind is `dl` (artifact GET) or
-  `inst` (install beacon); `doubles = [1]`; `indexes = [pluginId]`.
+- `blobs = [kind, pluginId, version, identity]` where kind is `dl` (artifact
+  GET), `inst` (fresh install; legacy beacons without `kind` also land here so
+  the historical mixed-event base stays continuous) or `updt` (version update);
+  `identity` is the beacon `clientId` when present (stable per-machine unique),
+  otherwise a day-scoped IP HMAC (all `dl` events use the latter).
+  `doubles = [1]`; `indexes = [pluginId]`.
 
 Chosen over KV counters: KV read-modify-write costs 1 write per request, and
 the free tier's 1k writes/day is below what a 30k-user base generates on a hot
@@ -35,7 +42,11 @@ trailing window into the `plugin_stats_archive` KV namespace — the permanent
 layer future UI reads:
 
 - `total:{kind}:{pluginId}:{version}` — all-time cumulative events
-- `summary` — one JSON blob `{dl: {pluginId: n}, inst: {...}}` for single-read display
+- `summary` — one JSON blob `{dl: {pluginId: n}, inst: {...}, updt: {...}}` for
+  single-read display; `inst` carries the pre-2026-09-19 mixed install+update
+  base (the switch to classified kinds), so treat it as the display number
+- `uniqd:{kind}:{pluginId}:{day}` — per-day distinct identities (machines for
+  classified inst/updt events, distinct downloaders for dl)
 - `meta:last-success` — window marker; only advanced after all writes land, so a
   failed run retries the same window on the next cron
 

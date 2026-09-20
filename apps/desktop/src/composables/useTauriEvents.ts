@@ -11,6 +11,7 @@ export function useTauriEvents(deps: {
   openAiConfigDeepLink: (url: string) => Promise<void>;
   openPluginInstallDeepLink: (url: string) => Promise<void>;
   closeActiveSurface: () => void;
+  refreshPluginWorkbenches: (pluginId: string) => void;
 }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
@@ -167,6 +168,13 @@ export function useTauriEvents(deps: {
 
         listen("dbx-close-active-tab", () => {
           deps.closeActiveSurface();
+        }).then((unlisten) => unlistenHandles.push(unlisten));
+
+        // A plugin was installed/rolled back from its already-replaced runtime:
+        // open workbench tabs still render the previous UI bundle until they
+        // reload, so hand them the new identity to pick up.
+        listen<{ pluginId: string; version: string }>("plugin-runtime-replaced", (event) => {
+          if (event.payload?.pluginId) deps.refreshPluginWorkbenches(event.payload.pluginId);
         }).then((unlisten) => unlistenHandles.push(unlisten));
       })
       .catch(() => {});

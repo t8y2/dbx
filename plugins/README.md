@@ -224,6 +224,8 @@ Password fields default to `secret` when `binding` is omitted. DBX validates req
 
 Absent optional fields stay absent: when DBX hands the manifest to its own UI it omits `description`, `placeholder`, `default`, and `binding` for fields that do not declare them, and `"default": null` means "no default" exactly like omitting the key. Treat a missing value as unset — never as an empty string, and never as the literal text `null`, which is not a storable plugin value.
 
+Well-known field keys: a `config`-bound field keyed `connect_timeout_secs` declares the plugin's own connect/handshake timeout and is the single source of truth for it. On save, DBX mirrors its resolved value (the declared `default`, or the value a user entered in the connection form) into the typed `ConnectionConfig.connect_timeout_secs` — the dialog's generic global/per-connection timeout radios do not apply to providers declaring this field. The host's `connection/test` and `connection/connect` RPC deadline follows the same resolved value (stored `external_config` first, then the declared `default`), so the deadline never fires before the plugin's own timeout; providers that do not declare the field keep the generic typed-timeout behavior. Declare it when your transport needs more than the generic built-in 10s default (e.g. SSH handshakes on slow links).
+
 #### Local file fields
 
 A `text`, `password`, or `textarea` field may declare `picker` when the user should choose a local file (private keys, keystores, credential files):
@@ -285,6 +287,37 @@ Lifecycle methods receive:
 ```
 
 `runtime.host` and `runtime.port` are the final endpoint after DBX transport layers. A protocol plugin must connect to this endpoint instead of rebuilding DBX tunnels itself.
+
+##### Transport proxy route for multi-endpoint targets
+
+A static tunnel forwards exactly one remote endpoint. Protocols whose server advertises additional endpoints a client must dial (Kafka `advertised.listeners`, cluster discovery, etc.) cannot be served that way: the bootstrap endpoint connects, but every advertised broker is unreachable. Such providers declare `proxy_route` on the connection-provider contribution:
+
+```json
+{
+  "type": "connection-provider",
+  "id": "vendor.kafka.connection",
+  "database_type": "kafka",
+  "proxy_route": true
+}
+```
+
+When transport layers are configured, DBX then delivers a SOCKS5 route instead of a static forward:
+
+```json
+{
+  "provider": { "...": "..." },
+  "connection": { "...": "..." },
+  "runtime": {
+    "host": "",
+    "port": 0,
+    "proxy": { "type": "socks5", "host": "127.0.0.1", "port": 49153, "username": "", "password": "" }
+  }
+}
+```
+
+- With SSH as the final transport layer the route is the hop's dynamic SOCKS5 endpoint (`ssh -D`); with a SOCKS5 proxy layer the route is that proxy, tunneled through any preceding layers. `username`/`password` are omitted when empty.
+- `runtime.host`/`runtime.port` stay at the connection's logical endpoint, which the plugin should keep using as its seed/metadata source while dialing every endpoint through the SOCKS5 route. Credentials ride the same encrypted lifecycle channel as connection secrets and must never be logged by the plugin.
+- Without the flag, transport layers keep the static-tunnel behavior, which requires the connection to resolve a single remote endpoint (providers should declare `host`/`port` bindings, as the SSH and LDAP plugins do); DBX rejects plugin connections that would tunnel to an empty endpoint instead of timing out silently.
 
 #### Connection dialog actions
 

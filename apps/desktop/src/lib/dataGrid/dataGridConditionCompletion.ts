@@ -1,6 +1,6 @@
 import type { DataGridConditionColumnOption } from "@/composables/useDataGridConditionEditor";
 import { codeMirrorSqlDialect } from "@/lib/database/jdbcDialect";
-import { quoteSqlIdentifier } from "@/lib/sql/sqlCompletion";
+import { ORACLE_COMPAT_IDENTIFIER_DATABASES, quoteSqlIdentifier } from "@/lib/sql/sqlCompletion";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 
@@ -49,7 +49,10 @@ function addIoTDBConnectionParams(target: Map<string, string>, raw: string | und
 }
 
 export function dataGridConditionColumnOptions(columns: readonly DataGridConditionColumnOption[], databaseType?: DatabaseType): DataGridConditionColumnOption[] {
-  const dialect = codeMirrorSqlDialect(databaseType);
+  // Oracle-family identifier quoting needs the completion apply dialect; the
+  // CodeMirror syntax dialect has no Oracle entry and falls back to MySQL,
+  // which never quotes, so case-sensitive columns would insert unresolvable.
+  const dialect = databaseType !== undefined && ORACLE_COMPAT_IDENTIFIER_DATABASES.has(databaseType) ? "oracle" : codeMirrorSqlDialect(databaseType);
   return columns.map((column) => {
     const name = typeof column === "string" ? column : column.name;
     const insertText = quoteSqlIdentifier(name, dialect);

@@ -2977,12 +2977,12 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchItems')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
           </div>
           <span class="flex-1" />
-          <Input v-model="newValue" class="h-6 w-40 text-xs" placeholder="value" @keydown.enter="listPush" />
-          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="listPush"><Plus class="w-3 h-3 mr-1" />Push</Button>
+          <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="listPush" />
+          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="listPush"><Plus class="w-3 h-3 mr-1" />{{ t("redis.pushAction") }}</Button>
         </div>
         <div class="grid grid-cols-[60px_1fr_84px] border-b bg-muted/50 shrink-0">
           <div class="px-3 py-1 text-xs font-medium text-muted-foreground border-r">#</div>
-          <div class="px-3 py-1 text-xs font-medium text-muted-foreground">Value</div>
+          <div class="px-3 py-1 text-xs font-medium text-muted-foreground">{{ t("redis.columnValue") }}</div>
           <div />
         </div>
         <RecycleScroller class="flex-1 overflow-y-auto" :items="listRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
@@ -3025,11 +3025,11 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchMembers')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
           </div>
           <span class="flex-1" />
-          <Input v-model="newValue" class="h-6 w-40 text-xs" placeholder="member" @keydown.enter="setAdd" />
-          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="setAdd"><Plus class="w-3 h-3 mr-1" />Add</Button>
+          <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.memberPlaceholder')" @keydown.enter="setAdd" />
+          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="setAdd"><Plus class="w-3 h-3 mr-1" />{{ t("redis.addAction") }}</Button>
         </div>
         <div class="grid grid-cols-[1fr_84px] border-b bg-muted/50 shrink-0">
-          <div class="px-3 py-1 text-xs font-medium text-muted-foreground">Member</div>
+          <div class="px-3 py-1 text-xs font-medium text-muted-foreground">{{ t("redis.member") }}</div>
           <div />
         </div>
         <RecycleScroller class="flex-1 overflow-y-auto" :items="setRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
@@ -3076,14 +3076,14 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchFields')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
           </div>
           <span class="flex-1" />
-          <Input v-model="newField" class="h-6 w-24 text-xs" placeholder="field" />
-          <Input v-model="newValue" class="h-6 w-32 text-xs" placeholder="value" @keydown.enter="hashSet" />
-          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="hashSet"><Plus class="w-3 h-3 mr-1" />Set</Button>
+          <Input v-model="newField" class="h-6 w-24 text-xs" :placeholder="t('redis.fieldPlaceholder')" />
+          <Input v-model="newValue" class="h-6 w-32 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="hashSet" />
+          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="hashSet"><Plus class="w-3 h-3 mr-1" />{{ t("redis.setAction") }}</Button>
         </div>
         <div class="grid border-b bg-muted/50 shrink-0" :style="hashGridStyle">
           <div class="relative border-r text-xs font-medium text-muted-foreground select-none" role="columnheader" :aria-sort="hashSortBy === 'field' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'">
             <button type="button" class="flex h-full w-full cursor-pointer items-center gap-1 px-3 py-1 text-left hover:bg-accent/50" @click="toggleHashSort('field')">
-              Field
+              {{ t("redis.field") }}
               <ArrowUp v-if="hashSortBy === 'field' && hashSortDir === 'asc'" class="h-3 w-3 shrink-0" />
               <ArrowDown v-else-if="hashSortBy === 'field' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
               <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
@@ -3091,7 +3091,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.stop.prevent="startResizeHashColumns" />
           </div>
           <div class="px-3 py-1 text-xs font-medium text-muted-foreground cursor-pointer hover:bg-accent/50 flex items-center gap-1 select-none" role="columnheader" :aria-sort="hashSortBy === 'value' ? (hashSortDir === 'asc' ? 'ascending' : 'descending') : 'none'" @click="toggleHashSort('value')">
-            Value
+            {{ t("redis.columnValue") }}
             <ArrowUp v-if="hashSortBy === 'value' && hashSortDir === 'asc'" class="h-3 w-3 shrink-0" />
             <ArrowDown v-else-if="hashSortBy === 'value' && hashSortDir === 'desc'" class="h-3 w-3 shrink-0" />
             <ArrowUpDown v-else class="h-3 w-3 shrink-0 text-muted-foreground/40" />
@@ -3169,21 +3169,21 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchMembers')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
           </div>
           <span class="flex-1" />
-          <Input v-model="newScore" class="h-6 w-20 text-xs" placeholder="score" />
-          <Input v-model="newValue" class="h-6 w-32 text-xs" placeholder="member" @keydown.enter="zsetAdd" />
-          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="zsetAdd"><Plus class="w-3 h-3 mr-1" />Add</Button>
+          <Input v-model="newScore" class="h-6 w-20 text-xs" :placeholder="t('redis.scorePlaceholder')" />
+          <Input v-model="newValue" class="h-6 w-32 text-xs" :placeholder="t('redis.memberPlaceholder')" @keydown.enter="zsetAdd" />
+          <Button variant="ghost" size="sm" class="h-6 text-xs" @click="zsetAdd"><Plus class="w-3 h-3 mr-1" />{{ t("redis.addAction") }}</Button>
         </div>
         <div class="grid border-b bg-muted/50 shrink-0" :style="zsetGridStyle">
           <div class="px-3 py-1 text-center text-xs font-medium text-muted-foreground border-r" role="columnheader">#</div>
           <div class="relative border-r text-xs font-medium text-muted-foreground select-none" role="columnheader" :aria-sort="zsetSortDir === 'asc' ? 'ascending' : 'descending'">
             <button type="button" class="flex h-full w-full cursor-pointer items-center gap-1 px-3 py-1 text-left hover:bg-accent/50" @click="toggleZsetSort">
-              Score
+              {{ t("redis.createScore") }}
               <ArrowUp v-if="zsetSortDir === 'asc'" class="h-3 w-3 shrink-0" />
               <ArrowDown v-else class="h-3 w-3 shrink-0" />
             </button>
             <div class="absolute -right-1 top-0 h-full w-2 cursor-col-resize touch-none" @pointerdown.stop.prevent="startResizeZsetColumns" />
           </div>
-          <div class="px-3 py-1 text-xs font-medium text-muted-foreground min-w-0">Member</div>
+          <div class="px-3 py-1 text-xs font-medium text-muted-foreground min-w-0">{{ t("redis.member") }}</div>
           <div />
         </div>
         <RecycleScroller class="flex-1 overflow-y-auto" :items="zsetRows" :item-size="REDIS_COLLECTION_ROW_HEIGHT" :buffer="600" :skip-hover="true" key-field="id">
@@ -3191,11 +3191,11 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div data-redis-value-row class="dbx-editor-font-family grid border-b text-sm hover:bg-accent/50 group" :class="{ 'bg-accent/60': isEditingZsetRow(row.value) }" :style="{ ...zsetGridStyle, height: `${REDIS_COLLECTION_ROW_HEIGHT}px` }">
               <div class="px-3 py-1.5 text-center text-xs text-muted-foreground border-r tabular-nums">{{ row.index + 1 }}</div>
               <div class="flex min-w-0 items-center border-r px-3 py-1.5 text-xs text-muted-foreground">
-                <Input v-if="isEditingZsetRow(row.value)" v-model="zsetInlineScore" aria-label="Score" class="h-6 min-w-0 text-xs tabular-nums" :disabled="savingZsetMember" inputmode="decimal" @keydown.enter.prevent="saveZsetInlineEdit(row.value)" />
+                <Input v-if="isEditingZsetRow(row.value)" v-model="zsetInlineScore" :aria-label="t('redis.createScore')" class="h-6 min-w-0 text-xs tabular-nums" :disabled="savingZsetMember" inputmode="decimal" @keydown.enter.prevent="saveZsetInlineEdit(row.value)" />
                 <span v-else class="min-w-0 truncate" :title="String(row.value.score)">{{ row.value.score }}</span>
               </div>
               <div class="flex min-w-0 items-center px-3 py-1.5">
-                <Input v-if="isEditingZsetRow(row.value)" v-model="zsetInlineMember" aria-label="Member" class="dbx-editor-font-family h-6 min-w-0 text-sm" :disabled="savingZsetMember" @keydown.enter.prevent="saveZsetInlineEdit(row.value)" />
+                <Input v-if="isEditingZsetRow(row.value)" v-model="zsetInlineMember" :aria-label="t('redis.member')" class="dbx-editor-font-family h-6 min-w-0 text-sm" :disabled="savingZsetMember" @keydown.enter.prevent="saveZsetInlineEdit(row.value)" />
                 <span v-else class="min-w-0 truncate" :title="formatValue(row.value.member)">{{ formatValue(row.value.member) }}</span>
               </div>
               <div class="flex items-center justify-center gap-1">

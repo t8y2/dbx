@@ -27,6 +27,7 @@ const categoryLabels = {
   sync: "Sync",
   ai: "AI",
   mcp: "MCP",
+  updates: "Updates",
   security: "Security",
   about: "About",
 } satisfies Record<SettingsCategory, string>;
@@ -69,6 +70,32 @@ describe("settings search", () => {
     );
 
     expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
+  });
+
+  it("indexes SQL Server space confirmation when SQL Server exists or an exported setting is enabled", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-sqlserver-space-completion");
+    expect(definition).toEqual(
+      expect.objectContaining({
+        id: "editor-sqlserver-space-completion",
+        category: "editor",
+        titleKey: "settings.sqlServerSpaceConfirmsCompletion",
+        descriptionKey: "settings.sqlServerSpaceConfirmsCompletionDescription",
+        targetId: "editor",
+        visible: expect.any(Function),
+      }),
+    );
+
+    const context = { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) };
+    const withoutSqlServer = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { ...context, hasSqlServerConnection: false, sqlServerSpaceConfirmsCompletionEnabled: false }, translate, categoryLabels);
+    const importedWithoutSqlServer = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { ...context, hasSqlServerConnection: false, sqlServerSpaceConfirmsCompletionEnabled: true }, translate, categoryLabels);
+    const withSqlServer = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { ...context, hasSqlServerConnection: true, sqlServerSpaceConfirmsCompletionEnabled: false }, translate, categoryLabels);
+
+    expect(withoutSqlServer.map((entry) => entry.id)).not.toContain("editor-sqlserver-space-completion");
+    expect(importedWithoutSqlServer.map((entry) => entry.id)).toContain("editor-sqlserver-space-completion");
+    expect(withSqlServer.map((entry) => entry.id)).toContain("editor-sqlserver-space-completion");
+    expect(settingsDialogSource).toContain('const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));');
+    expect(settingsDialogSource).toContain("const showSqlServerSpaceConfirmsCompletion = computed(");
+    expect(settingsDialogSource).toContain('<div v-if="showSqlServerSpaceConfirmsCompletion" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">');
   });
 
   it("does not index connection or query timeout under editor settings", () => {

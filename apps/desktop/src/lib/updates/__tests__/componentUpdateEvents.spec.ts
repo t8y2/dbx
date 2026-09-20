@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it, vi } from "vitest";
-import { COMPONENT_PLUGINS_UPDATED_EVENT, notifyComponentPluginsUpdated } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_PLUGINS_UPDATED_EVENT, COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 
 describe("component update events", () => {
   it("notifies plugin surfaces after component-level plugin updates", () => {
@@ -12,5 +12,15 @@ describe("component update events", () => {
 
     expect(listener).toHaveBeenCalledOnce();
     window.removeEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, listener);
+  });
+
+  it("notifies the app when a management surface changes component state", () => {
+    const listener = vi.fn();
+    window.addEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
+
+    notifyComponentUpdatesChanged();
+
+    expect(listener).toHaveBeenCalledOnce();
+    window.removeEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
   });
 });

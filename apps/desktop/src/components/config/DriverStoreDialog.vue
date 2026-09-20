@@ -40,6 +40,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { runAgentOfflineExportAction } from "@/lib/driverStore/agentOfflineExportFlow";
 import { DRIVER_CATEGORIES, getCategoryForAgentDriver, assertAgentDriverCategoriesComplete } from "@/lib/connection/driver-category-definitions";
 import { hasAnyUpdatableDriverMatching, countInstalledDrivers, countAvailableDrivers, partitionDriversByInstallStatus, upgradeAllDriverTypes, upgradeAllMatchesFullUpdateSet, type DriverInstallStatusFilter } from "@/lib/connection/driverListFilter";
+import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -497,6 +498,7 @@ async function runDriverInstall(dbType: string) {
       if (managedResult.drivers) jdbcDrivers.value = managedResult.drivers;
       jdbcMavenBundles.value = managedResult.bundles;
       void loadDriverStoreUsage();
+      notifyComponentUpdatesChanged();
       toast(t("driverStore.driverInstallSuccess", { label }));
       return;
     }
@@ -509,6 +511,7 @@ async function runDriverInstall(dbType: string) {
     activeAgentOperationId.value = operationId;
     cancellableAgentInstallDbType.value = dbType;
     await api.installAgent(dbType, operationId);
+    notifyComponentUpdatesChanged();
     await refreshAgents();
     toast(t("driverStore.driverInstallSuccess", { label }));
   } catch (e: any) {
@@ -557,6 +560,7 @@ async function upgradeAll() {
     queuedDriverInstalls.value = [];
     resetAgentInstallProgress();
     const result = await api.upgradeAllAgents(activeAgentOperationId.value);
+    notifyComponentUpdatesChanged();
     await refreshAgents();
     if (result.cancelled > 0 && result.failed.length === 0) {
       toast(t("driverStore.upgradeAllCancelled", { count: result.cancelled }));
@@ -613,6 +617,7 @@ async function uninstallDriver(dbType: string) {
       if (managedResult.drivers) jdbcDrivers.value = managedResult.drivers;
       jdbcMavenBundles.value = managedResult.bundles;
       void loadDriverStoreUsage();
+      notifyComponentUpdatesChanged();
       toast(t("driverStore.driverUninstallSuccess", { label }));
       return;
     }
@@ -622,6 +627,7 @@ async function uninstallDriver(dbType: string) {
       return;
     }
     await api.uninstallAgent(dbType);
+    notifyComponentUpdatesChanged();
     await refreshAgents();
     toast(t("driverStore.driverUninstallSuccess", { label }));
   } catch (e: any) {
@@ -745,6 +751,7 @@ async function importOfflineZip() {
   try {
     const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
     await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
+    notifyComponentUpdatesChanged();
     toastOfflineImportResult(result);
   } catch (e: any) {
     toast(t("driverStore.offlineImportFailed", { error: backendError(e) }));
@@ -797,6 +804,7 @@ async function importDriverFile(driver: AgentDriverInfo) {
       try {
         const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
         await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
+        notifyComponentUpdatesChanged();
         toastOfflineImportResult(result);
       } finally {
         activeAgentOperationId.value = null;
@@ -805,6 +813,7 @@ async function importDriverFile(driver: AgentDriverInfo) {
     } else {
       await api.importAgentDriver(dbType, selected);
       await refreshAgents();
+      notifyComponentUpdatesChanged();
       toast(t("driverStore.driverImportSuccess", { label }));
     }
   };
@@ -1288,6 +1297,7 @@ async function installJdbcPlugin() {
   try {
     jdbcPluginStatus.value = await api.installJdbcPlugin();
     emitDriverUpdateCount();
+    notifyComponentUpdatesChanged();
     toast(t("settings.jdbcPluginInstallSuccess"));
     await loadJdbcDrivers();
   } catch (e: any) {
@@ -1318,6 +1328,7 @@ async function installJdbcPluginLocal() {
   try {
     jdbcPluginStatus.value = await api.installJdbcPluginLocal(selected);
     emitDriverUpdateCount();
+    notifyComponentUpdatesChanged();
     toast(t("settings.jdbcPluginInstallSuccess"));
     await loadJdbcDrivers();
   } catch (e: any) {
@@ -1334,6 +1345,7 @@ async function uninstallJdbcPlugin() {
   try {
     jdbcPluginStatus.value = await api.uninstallJdbcPlugin();
     emitDriverUpdateCount();
+    notifyComponentUpdatesChanged();
     toast(t("settings.jdbcPluginUninstallSuccess"));
     await loadJdbcDrivers();
   } catch (e: any) {

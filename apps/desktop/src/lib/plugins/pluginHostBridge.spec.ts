@@ -972,5 +972,66 @@ describe("plugin SDK source", () => {
     // The SDK forwards the mode verbatim: defaulting it would let a plugin reach
     // a plan mode it never asked for.
     expect(requests[1].params).toEqual({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
+  it("forwards fileTransfer requests to the host api", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const api = {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      pickFiles: vi.fn().mockResolvedValue([{ handleId: "t1", name: "a.txt", size: 1, contentType: "text/plain" }]),
+      readFileChunk: vi.fn().mockResolvedValue({ dataBase64: "YQ==", length: 1, eof: true }),
+      beginFileSave: vi.fn().mockResolvedValue({ handleId: "t2", chunkBytes: 4 }),
+      writeFileChunk: vi.fn().mockResolvedValue({ written: 2, nextOffset: 2 }),
+      finishFileSave: vi.fn().mockResolvedValue(undefined),
+      closeFileHandle: vi.fn().mockResolvedValue(undefined),
+    };
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, api);
+
+    const request = (id: string, method: string, params: unknown, data?: ArrayBuffer) => {
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params, data } } as MessageEvent);
+    };
+    request("1", "host.pickFiles", { multiple: true });
+    request("2", "host.readFileChunk", { handleId: "t1", offset: 0, length: 10 });
+    request("3", "host.beginFileSave", { name: "out.bin" });
+    request("4", "host.writeFileChunk", { handleId: "t2", offset: 0 }, new ArrayBuffer(2));
+    request("5", "host.finishFileSave", { handleId: "t2" });
+    request("6", "host.closeFileHandle", { handleId: "t1" });
+
+    await vi.waitFor(() => expect(messages.filter((message) => (message as { type?: string }).type === "response")).toHaveLength(6));
+    expect(api.pickFiles).toHaveBeenCalledWith("sample", { multiple: true });
+    expect(api.readFileChunk).toHaveBeenCalledWith("sample", "t1", 0, 10);
+    expect(api.beginFileSave).toHaveBeenCalledWith("sample", { name: "out.bin", contentType: undefined, size: undefined });
+    expect(api.writeFileChunk).toHaveBeenCalledWith("sample", "t2", 0, expect.any(Uint8Array));
+    expect(api.finishFileSave).toHaveBeenCalledWith("sample", "t2");
+    expect(api.closeFileHandle).toHaveBeenCalledWith("sample", "t1");
+    for (const message of messages) expect((message as { error?: string }).error).toBeUndefined();
+  });
+
+  it("pushes drag state and opened drop handles to the plugin", () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+
+    bridge.forwardDragState(true);
+    bridge.forwardFileDrop([{ handleId: "t1", name: "a.txt", size: 1, contentType: "text/plain" }]);
+
+    expect(messages[0]).toMatchObject({ source: "dbx-host", version: 1, type: "dragstate", active: true });
+    expect(messages[1]).toMatchObject({ source: "dbx-host", version: 1, type: "filedrop", files: [{ handleId: "t1", name: "a.txt" }] });
+  });
+
+  it("sdk exposes the fileTransfer namespace and drop listeners", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("fileTransfer");
+    expect(source).toContain("host.pickFiles");
+    expect(source).toContain("host.readFileChunk");
+    expect(source).toContain("host.beginFileSave");
+    expect(source).toContain("host.writeFileChunk");
+    expect(source).toContain("host.finishFileSave");
+    expect(source).toContain("onFileDrop");
+    expect(source).toContain("onDragState");
+    expect(source).toContain("type === 'filedrop'");
+    expect(source).toContain("type === 'dragstate'");
   });
 });

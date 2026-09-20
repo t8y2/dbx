@@ -52,6 +52,32 @@ export interface PluginDownloadRequest extends PluginSaveFileRequest {
   params: Record<string, unknown>;
 }
 
+/** An opened local-file handle handed to a plugin for streaming transfer. */
+export interface PluginFileHandleMeta {
+  handleId: string;
+  name: string;
+  size: number;
+  contentType: string;
+}
+
+export interface PluginPickFilesOptions {
+  multiple?: boolean;
+}
+
+export interface PluginFileReadChunk {
+  dataBase64: string;
+  length: number;
+  eof: boolean;
+}
+
+export interface PluginFileWriteResult {
+  written: number;
+  nextOffset: number;
+}
+
+/** Chunk size the host advertises for streamed saves; fits the bridge payload cap after base64. */
+export const PLUGIN_SAVE_CHUNK_BYTES = 1024 * 1024;
+
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
@@ -79,6 +105,18 @@ export interface PluginHostBridgeApi {
   cancelDownload?(pluginId: string, downloadId: string): Promise<void>;
   /** Write text to the system clipboard on behalf of the sandboxed plugin iframe. */
   copyText?(pluginId: string, text: string): Promise<void>;
+  /** Native open dialog; resolves opened read handles (null selection → empty list). */
+  pickFiles?(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]>;
+  /** Stream a chunk from an opened read handle. */
+  readFileChunk?(pluginId: string, handleId: string, offset: number, length?: number): Promise<PluginFileReadChunk>;
+  /** Native save dialog + opened write handle; resolves null when the user cancels. */
+  beginFileSave?(pluginId: string, request: { name?: string; contentType?: string; size?: number }): Promise<{ handleId: string; chunkBytes: number } | null>;
+  /** Stream a chunk into an opened write handle. */
+  writeFileChunk?(pluginId: string, handleId: string, offset: number, bytes: Uint8Array): Promise<PluginFileWriteResult>;
+  /** Flush and close an opened write handle. */
+  finishFileSave?(pluginId: string, handleId: string): Promise<void>;
+  /** Close any file handle, discarding unsaved state. */
+  closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
 }
 
 interface PluginRequestMessage {
@@ -233,6 +271,16 @@ export class PluginHostBridge {
     target.postMessage({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "binary", channel: event.channel, data: buffer }, "*", [buffer]);
   }
 
+  /** Tell the plugin whether an OS-level file drag is currently over its workbench. */
+  forwardDragState(active: boolean): void {
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "dragstate", active });
+  }
+
+  /** Hand the plugin already-opened handles for files dropped onto its workbench. */
+  forwardFileDrop(files: PluginFileHandleMeta[]): void {
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files });
+  }
+
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
     try {
       enforcePayloadLimit(request.params);
@@ -347,6 +395,48 @@ export class PluginHostBridge {
       if (!this.api.copyText) throw new Error("Host clipboard is unavailable");
       await this.api.copyText(this.plugin.manifest.id, input.text);
       return { success: true };
+    }
+    if (method === "host.pickFiles") {
+      // Same trust level as host.saveFile: the bytes only flow after the user
+      // picked the files in the native dialog, so no manifest permission gate.
+      const input = isRecord(params) ? params : {};
+      if (!this.api.pickFiles) throw new Error("Host file picking is unavailable");
+      const files = await this.api.pickFiles(this.plugin.manifest.id, { multiple: input.multiple === true });
+      return { files };
+    }
+    if (method === "host.readFileChunk") {
+      const input = requireRecord(params, "host.readFileChunk params");
+      if (!this.api.readFileChunk) throw new Error("Host file reading is unavailable");
+      return this.api.readFileChunk(this.plugin.manifest.id, requireHandleId(input.handleId), requireOffset(input.offset), input.length === undefined ? undefined : requireChunkLength(input.length));
+    }
+    if (method === "host.beginFileSave") {
+      const input = isRecord(params) ? params : {};
+      if (!this.api.beginFileSave) throw new Error("Host file saving is unavailable");
+      const target = await this.api.beginFileSave(this.plugin.manifest.id, {
+        name: optionalTrimmedString(input.name),
+        contentType: optionalTrimmedString(input.contentType),
+        size: input.size === undefined || typeof input.size !== "number" || !Number.isFinite(input.size) ? undefined : Math.max(0, Math.floor(input.size)),
+      });
+      return target ?? { handleId: "", chunkBytes: 0, cancelled: true };
+    }
+    if (method === "host.writeFileChunk") {
+      const input = requireRecord(params, "host.writeFileChunk params");
+      if (!this.api.writeFileChunk) throw new Error("Host file writing is unavailable");
+      const bytes = binary instanceof ArrayBuffer ? new Uint8Array(binary) : new Uint8Array(base64ToBytes(requireBase64(input.dataBase64)));
+      if (bytes.byteLength > MAX_BRIDGE_BINARY_BYTES) throw new Error("Plugin write chunk exceeds 8 MiB");
+      return this.api.writeFileChunk(this.plugin.manifest.id, requireHandleId(input.handleId), requireOffset(input.offset), bytes);
+    }
+    if (method === "host.finishFileSave") {
+      const input = requireRecord(params, "host.finishFileSave params");
+      if (!this.api.finishFileSave) throw new Error("Host file saving is unavailable");
+      await this.api.finishFileSave(this.plugin.manifest.id, requireHandleId(input.handleId));
+      return null;
+    }
+    if (method === "host.closeFileHandle") {
+      const input = requireRecord(params, "host.closeFileHandle params");
+      if (!this.api.closeFileHandle) throw new Error("Host file handling is unavailable");
+      await this.api.closeFileHandle(this.plugin.manifest.id, requireHandleId(input.handleId));
+      return null;
     }
     throw new Error(`Unsupported plugin host method '${method}'`);
   }
@@ -507,7 +597,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set() };
     let sequence = 0;
     let context;
     let locale = 'en';
@@ -644,6 +734,20 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      fileTransfer: Object.freeze({
+        pick: (options) => request('host.pickFiles', options || {}),
+        read: (handleId, offset, length) => request('host.readFileChunk', { handleId, offset, length }),
+        beginSave: (options) => request('host.beginFileSave', options || {}),
+        write: (handleId, offset, data) => {
+          if (typeof data === 'string') return request('host.writeFileChunk', { handleId, offset, dataBase64: data });
+          const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.buffer : new Uint8Array(data).buffer);
+          return request('host.writeFileChunk', { handleId, offset }, { transfer: bytes });
+        },
+        finish: (handleId) => request('host.finishFileSave', { handleId }),
+        cancel: (handleId) => request('host.closeFileHandle', { handleId }),
+      }),
+      onFileDrop: (listener) => { listeners.filedrop.add(listener); return () => listeners.filedrop.delete(listener); },
+      onDragState: (listener) => { listeners.dragstate.add(listener); return () => listeners.dragstate.delete(listener); },
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
@@ -686,6 +790,14 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const payload = { channel: message.channel, data: message.data ? new Uint8Array(message.data) : new Uint8Array(0) };
         listeners.binary.forEach((listener) => listener(payload));
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
+      } else if (message.type === 'filedrop') {
+        const files = Array.isArray(message.files) ? message.files : [];
+        listeners.filedrop.forEach((listener) => listener(files));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: files }));
+      } else if (message.type === 'dragstate') {
+        const active = message.active === true;
+        listeners.dragstate.forEach((listener) => listener(active));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
       }
     });
     addEventListener('keydown', (event) => {
@@ -769,6 +881,19 @@ function requirePluginPlanRequest(input: Record<string, unknown>): PluginPlanReq
 function clampPluginPlanTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(MAX_PLUGIN_PLAN_TIMEOUT_MS, Math.max(1, Math.round(value)));
+function requireHandleId(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
+  return value;
+}
+
+function requireOffset(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("offset is invalid");
+  return Math.floor(value);
+}
+
+function requireChunkLength(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error("length is invalid");
+  return Math.min(8 * 1024 * 1024, Math.floor(value));
 }
 
 function base64ToBytes(value: string): ArrayBuffer {

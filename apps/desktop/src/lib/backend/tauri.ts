@@ -2419,6 +2419,41 @@ export async function sendPluginBinary(pluginId: string, channel: string, dataBa
   return invoke("send_plugin_binary", { pluginId, channel, dataBase64 });
 }
 
+export interface PluginLocalFileHandle {
+  handleId: number;
+  name: string;
+  size: number;
+  contentType: string;
+  write: boolean;
+}
+
+export interface PluginLocalFileChunk {
+  dataBase64: string;
+  length: number;
+  eof: boolean;
+}
+
+export interface PluginLocalFileWriteResult {
+  written: number;
+  nextOffset: number;
+}
+
+export async function openPluginLocalFile(path: string, write: boolean): Promise<PluginLocalFileHandle> {
+  return invoke("plugin_file_open", { path, write });
+}
+
+export async function readPluginLocalFileChunk(handleId: number, offset: number, length?: number): Promise<PluginLocalFileChunk> {
+  return invoke("plugin_file_read", { handleId, offset, length });
+}
+
+export async function writePluginLocalFileChunk(handleId: number, offset: number, dataBase64: string): Promise<PluginLocalFileWriteResult> {
+  return invoke("plugin_file_write", { handleId, offset, dataBase64 });
+}
+
+export async function closePluginLocalFile(handleId: number): Promise<void> {
+  return invoke("plugin_file_close", { handleId });
+}
+
 export async function listPluginFilesystemEntries(pluginId: string, providerId: string, options: { connectionId?: string; uri?: string; cursor?: string; limit?: number } = {}): Promise<PluginFilesystemListResult> {
   return invoke("list_plugin_filesystem_entries", { pluginId, providerId, ...options });
 }

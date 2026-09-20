@@ -4,7 +4,20 @@ import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type PluginSaveFileRequest, type PluginSaveFileResult, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
+import {
+  PluginHostBridge,
+  pluginSandboxDocument,
+  PLUGIN_SAVE_CHUNK_BYTES,
+  type PluginBridgeTheme,
+  type PluginFileHandleMeta,
+  type PluginFileReadChunk,
+  type PluginFileWriteResult,
+  type PluginPickFilesOptions,
+  type PluginSaveFileRequest,
+  type PluginSaveFileResult,
+  type PluginWorkbenchContext,
+} from "@/lib/plugins/pluginHostBridge";
+import { closePluginLocalFile, openPluginLocalFile, readPluginLocalFileChunk, writePluginLocalFileChunk } from "@/lib/backend/tauri";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
@@ -45,6 +58,222 @@ let bridge: PluginHostBridge | undefined;
 let unsubscribeEvents: (() => void) | undefined;
 let disposed = false;
 let loadGeneration = 0;
+
+// --- Plugin file-transfer bridge (native dialogs + OS file drops) ---------
+// The sandboxed iframe cannot reach local files, so handles live here: Tauri
+// handles wrap the plugin_file registry in Rust (`t<n>` ids); the web host
+// keeps File objects and in-memory save buffers (`w<n>` ids). Only paths that
+// came from a native dialog or an OS drop reach plugin_file_open — never a
+// plugin-supplied string.
+
+let webFileSequence = 0;
+const webPickedFiles = new Map<string, File>();
+const webSaveBuffers = new Map<string, { name: string; contentType: string; chunks: Map<number, Uint8Array> }>();
+const openTauriHandles = new Set<number>();
+const tauriHandlePrefix = "t";
+const webHandlePrefix = "w";
+
+function encodeBytesBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function parseHandleId(handleId: string): { source: "tauri" | "web"; numericId: number } {
+  if (handleId.startsWith(tauriHandlePrefix)) return { source: "tauri", numericId: Number(handleId.slice(tauriHandlePrefix.length)) };
+  if (handleId.startsWith(webHandlePrefix)) return { source: "web", numericId: Number(handleId.slice(webHandlePrefix.length)) };
+  throw new Error("Unknown file handle");
+}
+
+async function openTauriPluginFile(path: string, write: boolean): Promise<PluginFileHandleMeta> {
+  const handle = await openPluginLocalFile(path, write);
+  if (!write) openTauriHandles.add(handle.handleId);
+  return { handleId: `${tauriHandlePrefix}${handle.handleId}`, name: handle.name, size: handle.size, contentType: handle.contentType };
+}
+
+async function pickPluginFiles(options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]> {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ multiple: options.multiple === true });
+    const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+    const files: PluginFileHandleMeta[] = [];
+    for (const path of paths) {
+      try {
+        files.push(await openTauriPluginFile(path, false));
+      } catch (error) {
+        console.warn("[DBX][plugin-workbench:pick]", error);
+      }
+    }
+    return files;
+  }
+  // Web host: a top-document file input still works there (no sandbox).
+  const selection = await new Promise<FileList | null>((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = options.multiple === true;
+    input.style.display = "none";
+    input.addEventListener("change", () => {
+      input.remove();
+      resolve(input.files);
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
+  const files: PluginFileHandleMeta[] = [];
+  for (const file of Array.from(selection || [])) {
+    const handleId = `${webHandlePrefix}${++webFileSequence}`;
+    webPickedFiles.set(handleId, file);
+    files.push({ handleId, name: file.name, size: file.size, contentType: file.type || "application/octet-stream" });
+  }
+  return files;
+}
+
+async function readPluginFileChunkById(handleId: string, offset: number, length?: number): Promise<PluginFileReadChunk> {
+  const parsed = parseHandleId(handleId);
+  if (parsed.source === "tauri") return readPluginLocalFileChunk(parsed.numericId, offset, length);
+  const file = webPickedFiles.get(handleId);
+  if (!file) throw new Error("Unknown file handle");
+  const slice = file.slice(offset, offset + (length ?? PLUGIN_SAVE_CHUNK_BYTES));
+  const bytes = new Uint8Array(await slice.arrayBuffer());
+  return { dataBase64: encodeBytesBase64(bytes), length: bytes.byteLength, eof: offset + bytes.byteLength >= file.size };
+}
+
+async function beginPluginFileSave(request: { name?: string; contentType?: string; size?: number }): Promise<{ handleId: string; chunkBytes: number } | null> {
+  if (isTauriRuntime()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const fileName = request.name || "download.bin";
+    const extension = fileName.includes(".") ? fileName.split(".").pop() : "";
+    const path = await save({
+      defaultPath: fileName,
+      filters: extension ? [{ name: extension.toUpperCase(), extensions: [extension] }] : undefined,
+    });
+    if (!path) return null;
+    const handle = await openPluginLocalFile(path, true);
+    return { handleId: `${tauriHandlePrefix}${handle.handleId}`, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
+  }
+  const handleId = `${webHandlePrefix}${++webFileSequence}`;
+  webSaveBuffers.set(handleId, { name: request.name || "download.bin", contentType: request.contentType || "application/octet-stream", chunks: new Map() });
+  return { handleId, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
+}
+
+async function writePluginFileChunkById(handleId: string, offset: number, bytes: Uint8Array): Promise<PluginFileWriteResult> {
+  const parsed = parseHandleId(handleId);
+  if (parsed.source === "tauri") return writePluginLocalFileChunk(parsed.numericId, offset, encodeBytesBase64(bytes));
+  const buffer = webSaveBuffers.get(handleId);
+  if (!buffer) throw new Error("Unknown file handle");
+  buffer.chunks.set(offset, bytes);
+  return { written: bytes.byteLength, nextOffset: offset + bytes.byteLength };
+}
+
+async function finishPluginFileSave(handleId: string): Promise<void> {
+  const parsed = parseHandleId(handleId);
+  if (parsed.source === "tauri") {
+    openTauriHandles.delete(parsed.numericId);
+    await closePluginLocalFile(parsed.numericId);
+    return;
+  }
+  const buffer = webSaveBuffers.get(handleId);
+  if (!buffer) throw new Error("Unknown file handle");
+  webSaveBuffers.delete(handleId);
+  const ordered = [...buffer.chunks.entries()].sort(([left], [right]) => left - right);
+  const size = ordered.reduce((total, [, chunk]) => total + chunk.byteLength, 0);
+  const assembled = new Uint8Array(size);
+  let cursor = 0;
+  for (const [, chunk] of ordered) {
+    assembled.set(chunk, cursor);
+    cursor += chunk.byteLength;
+  }
+  const url = URL.createObjectURL(new Blob([assembled.buffer as ArrayBuffer], { type: buffer.contentType }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = buffer.name;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function closePluginFileHandleById(handleId: string): Promise<void> {
+  const parsed = parseHandleId(handleId);
+  if (parsed.source === "tauri") {
+    openTauriHandles.delete(parsed.numericId);
+    await closePluginLocalFile(parsed.numericId);
+    return;
+  }
+  webPickedFiles.delete(handleId);
+  webSaveBuffers.delete(handleId);
+}
+
+function disposeLocalFileHandles(): void {
+  for (const handleId of openTauriHandles) Promise.resolve(closePluginLocalFile(handleId)).catch(() => undefined);
+  openTauriHandles.clear();
+  webPickedFiles.clear();
+  webSaveBuffers.clear();
+}
+
+// --- OS file-drop routing (Tauri captures drops at the webview layer) -----
+// Tauri's native drag-drop pipeline hands file PATHS to the host page; HTML5
+// drop events with real files never reach web content, and plugin iframes
+// especially. The webview-level `dbx:tauri-file-drop` event (see useFileDrop)
+// carries the physical-window position, so the workbench claims drops whose
+// converted CSS point lands on its iframe: preventDefault stops the host's
+// open-as-database fallback, and the paths are opened into handles that the
+// plugin receives through the bridge.
+
+interface TauriFileDropPayload {
+  type: "enter" | "over" | "drop" | "leave";
+  paths?: string[];
+  position?: { x: number; y: number };
+}
+
+let dropDragActive = false;
+
+function forwardDragState(active: boolean): void {
+  dropDragActive = active;
+  bridge?.forwardDragState(active);
+}
+
+function onHostFileDrop(event: Event): void {
+  const payload = (event as CustomEvent<TauriFileDropPayload>).detail;
+  if (!payload || payload.type === "leave") {
+    if (dropDragActive) forwardDragState(false);
+    return;
+  }
+  const frame = iframe.value;
+  const position = payload.position;
+  if (!frame || !position) {
+    if (dropDragActive) forwardDragState(false);
+    return;
+  }
+  // Overlay titlebar: the webview starts at the window origin, so physical
+  // window coordinates divide straight into CSS pixels via devicePixelRatio.
+  const scale = window.devicePixelRatio || 1;
+  if (document.elementFromPoint(position.x / scale, position.y / scale) !== frame) {
+    if (dropDragActive) forwardDragState(false);
+    return;
+  }
+  // Claim the drop so the host fallback (open as SQL/database) does not run.
+  event.preventDefault();
+  if (payload.type !== "drop") {
+    if (!dropDragActive) forwardDragState(true);
+    return;
+  }
+  forwardDragState(false);
+  const paths = (payload.paths || []).filter((path) => typeof path === "string" && path);
+  if (!paths.length || !bridge) return;
+  void (async () => {
+    const files: PluginFileHandleMeta[] = [];
+    for (const path of paths) {
+      try {
+        files.push(await openTauriPluginFile(path, false));
+      } catch (error) {
+        console.error("[DBX][plugin-workbench:drop]", error);
+      }
+    }
+    if (files.length) bridge?.forwardFileDrop(files);
+  })();
+}
 
 const title = computed(() => `${props.plugin.manifest.name} · ${props.contribution.label}`);
 
@@ -92,6 +321,12 @@ function createBridge() {
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       copyText: (_pluginId, text) => copyToClipboard(text),
+      pickFiles: (_pluginId, options) => pickPluginFiles(options),
+      readFileChunk: (_pluginId, handleId, offset, length) => readPluginFileChunkById(handleId, offset, length),
+      beginFileSave: (_pluginId, request) => beginPluginFileSave(request),
+      writeFileChunk: (_pluginId, handleId, offset, bytes) => writePluginFileChunkById(handleId, offset, bytes),
+      finishFileSave: (_pluginId, handleId) => finishPluginFileSave(handleId),
+      closeFileHandle: (_pluginId, handleId) => closePluginFileHandleById(handleId),
     },
     appLocale.value,
     currentBridgeTheme(),
@@ -234,6 +469,7 @@ function onFrameLoad() {
 
 onMounted(async () => {
   window.addEventListener("message", onMessage);
+  document.addEventListener("dbx:tauri-file-drop", onHostFileDrop);
   const unsubscribe = await api.subscribePluginEvents(
     (event) => bridge?.forwardEvent(event),
     (event) => bridge?.forwardBinary(event),
@@ -276,6 +512,8 @@ onBeforeUnmount(() => {
   bridge?.dispose();
   bridge = undefined;
   window.removeEventListener("message", onMessage);
+  document.removeEventListener("dbx:tauri-file-drop", onHostFileDrop);
+  disposeLocalFileHandles();
   unsubscribeEvents?.();
 });
 </script>
@@ -291,7 +529,7 @@ onBeforeUnmount(() => {
       <span>{{ error }}</span>
     </div>
     <template v-else>
-      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+      <iframe ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" allow="clipboard-write; clipboard-read" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
       <!-- Cover until the frame has actually painted: the iframe stays mounted
            underneath so its load event can fire (v-else on the overlay would
            deadlock), it just isn't visible yet. Fully opaque so the covered

@@ -40,6 +40,7 @@ pub mod mqtt_cmd;
 pub mod nacos_cmd;
 pub mod plugin_download;
 pub mod plugin_download_file;
+pub mod plugin_file;
 pub mod plugins;
 pub mod prompt_template;
 pub mod query;

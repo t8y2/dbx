@@ -297,6 +297,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
 | `capabilities` | `{ downloadFile, planApi }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
+| `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
@@ -345,6 +346,51 @@ The plan API is bounded by design:
 Gate on capability rather than probing: read `dbxPlugin.capabilities.planApi` from the init message (an older host omits it), then confirm per-connection support with `getPlanCapabilities` before calling `explainPlan`. Submitting `EXPLAIN` text of your own is neither necessary nor accepted.
 
 The plan API is Host API 1.2. A plugin that cannot work without it declares the floor in its manifest with `"engines": { "host_api": "^1.2" }`. The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
+
+### File Transfer and OS Drops
+
+Desktop hosts stream local files into plugin sandboxes through `window.dbxPlugin.fileTransfer`. Handles are opened only after explicit user consent: a native open/save dialog (`pick` / `beginSave`) or a file dropped from the OS onto this plugin's workbench area (`onDrop`). Transfers are chunked, so multi-gigabyte files never load into memory.
+
+```js
+const fileTransfer = window.dbxPlugin.fileTransfer;
+if (!fileTransfer) {
+  // Web host: fall back to <input type="file"> and sidecar disk writes.
+}
+
+// Upload: the user picks files, the plugin streams chunks to its sidecar.
+const { files } = await fileTransfer.pick({ multiple: true });
+for (const file of files) {
+  let offset = 0;
+  for (;;) {
+    const chunk = await fileTransfer.read(file.handleId, offset, 256 * 1024);
+    await uploadChunk(file.name, offset, chunk.dataBase64); // your own RPC
+    if (chunk.eof) break;
+    offset += chunk.length;
+  }
+  await fileTransfer.cancel(file.handleId);
+}
+
+// Download: open a save target, stream chunks, then flush with finish.
+const target = await fileTransfer.beginSave({ name: "export.csv", size });
+await fileTransfer.write(target.handleId, 0, bytes);
+await fileTransfer.finish(target.handleId);
+
+// OS drag & drop (desktop only): dropped files arrive as opened handles.
+const offDrop = fileTransfer.onDrop((files) => uploadAll(files));
+const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
+```
+
+| API | Purpose |
+| --- | --- |
+| `pick({ multiple })` | Native open dialog; resolves opened read handles `{ handleId, name, size, contentType }`. |
+| `read(handleId, offset, length?)` | Streams a chunk `{ dataBase64, length, eof }` from a read handle. |
+| `beginSave({ name, contentType?, size? })` | Native save dialog + write handle; resolves `{ handleId, chunkBytes }`, or `null` when the user cancels. |
+| `write(handleId, offset, data)` | Writes one chunk (transferred binary or base64); resolves `{ written, nextOffset }`. |
+| `finish(handleId)` / `cancel(handleId)` | Flush-closes a write handle / discards any handle. |
+| `onDrop(fn)` | Files dropped onto this workbench arrive as already-opened read handles. |
+| `onDragState(fn)` | Whether an OS drag is currently over this workbench; drive drop overlays with it. |
+
+Desktop only: the whole namespace is `undefined` in the web host, so feature-detect before use. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
 
 ### Themes, Layout, and Static Assets
 

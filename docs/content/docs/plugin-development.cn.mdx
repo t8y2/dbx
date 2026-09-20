@@ -297,6 +297,7 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
 | `capabilities` | 来自 init 消息的 `{ downloadFile, planApi }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
+| `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
 
 调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。
 
@@ -345,6 +346,51 @@ if (window.dbxPlugin.capabilities.planApi) {
 判断能力时请读 `dbxPlugin.capabilities.planApi`（旧宿主不会带这个字段），再用 `getPlanCapabilities` 确认这条连接是否支持，最后才调用 `explainPlan`。自行拼 `EXPLAIN` 文本既没必要，也不会被接受。
 
 计划 API 属于 Host API 1.2。无法离开它工作的插件应在 manifest 里声明下限：`"engines": { "host_api": "^1.2" }`。manifest 里的版本范围是兼容下限，`capabilities.planApi` 是运行期探测，两者都保留。
+
+### 文件传输与系统拖放
+
+桌面端宿主通过 `window.dbxPlugin.fileTransfer` 把本地文件流式接入插件沙箱。句柄只在用户明确同意后打开：原生打开/保存对话框（`pick` / `beginSave`），或从系统拖放到本插件工作台区域内的文件（`onDrop`）。传输按分块进行，多 GB 文件也不会整体载入内存。
+
+```js
+const fileTransfer = window.dbxPlugin.fileTransfer;
+if (!fileTransfer) {
+  // Web 宿主：回退到 <input type="file"> 和 sidecar 落盘。
+}
+
+// 上传：用户在原生对话框选择文件，插件把分块推给自己的 sidecar。
+const { files } = await fileTransfer.pick({ multiple: true });
+for (const file of files) {
+  let offset = 0;
+  for (;;) {
+    const chunk = await fileTransfer.read(file.handleId, offset, 256 * 1024);
+    await uploadChunk(file.name, offset, chunk.dataBase64); // 你自己的 RPC
+    if (chunk.eof) break;
+    offset += chunk.length;
+  }
+  await fileTransfer.cancel(file.handleId);
+}
+
+// 下载：打开保存目标，分块写入，最后 finish 落盘。
+const target = await fileTransfer.beginSave({ name: "export.csv", size });
+await fileTransfer.write(target.handleId, 0, bytes);
+await fileTransfer.finish(target.handleId);
+
+// 系统拖放（仅桌面端）：被拖入的文件以已打开的句柄送达。
+const offDrop = fileTransfer.onDrop((files) => uploadAll(files));
+const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
+```
+
+| API | 用途 |
+| --- | --- |
+| `pick({ multiple })` | 原生打开对话框；返回已打开的读句柄 `{ handleId, name, size, contentType }`。 |
+| `read(handleId, offset, length?)` | 从读句柄流式读取一个分块 `{ dataBase64, length, eof }`。 |
+| `beginSave({ name, contentType?, size? })` | 原生保存对话框 + 写句柄；返回 `{ handleId, chunkBytes }`，用户取消时为 `null`。 |
+| `write(handleId, offset, data)` | 写入一个分块（二进制 transfer 或 base64）；返回 `{ written, nextOffset }`。 |
+| `finish(handleId)` / `cancel(handleId)` | 冲洗并关闭写句柄 / 丢弃任意句柄。 |
+| `onDrop(fn)` | 拖入本工作台的文件以已打开的读句柄送达。 |
+| `onDragState(fn)` | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩。 |
+
+仅桌面端可用：Web 宿主下整个命名空间是 `undefined`，使用前请先探测。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
 
 ### 主题、布局和静态资源
 

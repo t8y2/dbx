@@ -525,6 +525,7 @@ interface DataGridProps {
     includeSqlSheet?: boolean;
     exportTableName?: string;
     exportColumnTypes?: Array<string | null | undefined>;
+    exportColumnExtras?: Array<string | null | undefined>;
     insertMode?: SqlInsertMode;
   }) => Promise<api.QueryResultExportRequest | undefined>;
   allExportResults?: Array<{

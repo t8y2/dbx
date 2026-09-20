@@ -36,6 +36,8 @@ export interface FormatSqlInsertOptions {
   qualifiedTableName?: string;
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
+  /** 与 `columns` 对齐的列 EXTRA 元数据，用于 identity 列的 `SET IDENTITY_INSERT` 包裹。 */
+  columnExtras?: Array<string | null | undefined>;
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
   rows: ExportCellValue[][];

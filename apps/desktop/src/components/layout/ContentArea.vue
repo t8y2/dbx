@@ -2116,8 +2116,16 @@ defineExpose({
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
                 :query-result-export-request="
-                  (options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'json' | 'txt' | 'sql'; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined>; insertMode?: SqlInsertMode }) =>
-                    queryStore.buildQueryResultExportRequest(activeTab.id, options)
+                  (options: {
+                    exportId: string;
+                    filePath: string;
+                    format: 'csv' | 'xlsx' | 'json' | 'txt' | 'sql';
+                    includeSqlSheet?: boolean;
+                    exportTableName?: string;
+                    exportColumnTypes?: Array<string | null | undefined>;
+                    exportColumnExtras?: Array<string | null | undefined>;
+                    insertMode?: SqlInsertMode;
+                  }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
                 "
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeTab.title"

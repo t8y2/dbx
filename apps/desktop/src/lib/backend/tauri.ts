@@ -5469,6 +5469,8 @@ export interface TableExportRequest {
   csvQuoteMode?: CsvQuoteMode;
   columns?: string[];
   columnTypes?: Array<string | null | undefined>;
+  /** 与 `columns` 对齐的列 EXTRA 元数据（identity 等），用于 SQL INSERT 导出的 `SET IDENTITY_INSERT`。 */
+  columnExtras?: Array<string | null | undefined>;
   columnComments?: Array<string | null> | null;
   primaryKeys?: string[];
   /** 导出 SQL 时是否排除主键列（对应数据提取设置里的“排除主键”）。 */
@@ -5531,6 +5533,11 @@ export interface QueryResultExportRequest {
   dateTimeFormat?: string;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+  /**
+   * 结果列对应的原表 EXTRA 元数据（identity 等）。后端据此为 SQL INSERT 导出
+   * 补上 `SET IDENTITY_INSERT` 包裹，缺省表示未知。
+   */
+  exportColumnExtras?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
   columnComments?: Array<string | null> | null;
   autoFilter?: boolean;

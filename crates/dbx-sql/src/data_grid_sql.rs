@@ -606,22 +606,42 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         })
         .collect::<Vec<_>>();
-    if options.insert_mode == DataGridCopyInsertMode::RowByRow
+    let statements = if options.insert_mode == DataGridCopyInsertMode::RowByRow
         || options.database_type.is_some_and(uses_single_row_insert_statements)
     {
-        return Some(
-            value_rows
+        value_rows
+            .iter()
+            .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
+            .collect::<Vec<_>>()
+    } else {
+        vec![format!(
+            "INSERT INTO {table} ({columns}) VALUES{}{};",
+            if value_rows.len() == 1 { " " } else { "\n" },
+            value_rows.join(",\n")
+        )]
+    };
+    // SQL Server and Dameng reject explicit values for identity columns unless the
+    // statement runs between `SET IDENTITY_INSERT <table> ON` and `OFF` (SQL Server
+    // error 544), so a copied INSERT that carries the identity column must ship the
+    // wrapper. Each statement is wrapped on its own so row-by-row copies stay
+    // individually executable, matching the SQL export path.
+    let needs_identity_insert_wrapper =
+        matches!(options.database_type, Some(DatabaseType::SqlServer | DatabaseType::Dameng))
+            && insert_columns
                 .iter()
-                .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
+                .any(|(_, _, info)| info.as_ref().is_some_and(is_auto_generated_column));
+    if needs_identity_insert_wrapper {
+        return Some(
+            statements
+                .iter()
+                .map(|statement| {
+                    format!("SET IDENTITY_INSERT {table} ON;\n{statement}\nSET IDENTITY_INSERT {table} OFF;")
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
     }
-    Some(format!(
-        "INSERT INTO {table} ({columns}) VALUES{}{};",
-        if value_rows.len() == 1 { " " } else { "\n" },
-        value_rows.join(",\n")
-    ))
+    Some(statements.join("\n"))
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
@@ -4624,6 +4644,96 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some("INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nINSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');")
+        );
+    }
+
+    fn sqlserver_identity_copy_insert_options(
+        rows: Vec<Vec<Value>>,
+        insert_mode: DataGridCopyInsertMode,
+    ) -> DataGridCopyInsertStatementOptions {
+        DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("dbx_test".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "gen_table".to_string(),
+                primary_keys: vec!["table_id".to_string()],
+                columns: Some(vec![
+                    column("table_id", "int", false, Some("identity")),
+                    column("table_name", "nvarchar(200)", false, None),
+                ]),
+            }),
+            columns: vec!["table_id".to_string(), "table_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows,
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode,
+        }
+    }
+
+    #[test]
+    fn sqlserver_copy_insert_wraps_identity_columns_with_identity_insert() {
+        let statement = build_data_grid_copy_insert_statement(sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        ));
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;"
+            )
+        );
+    }
+
+    #[test]
+    fn sqlserver_row_by_row_copy_insert_wraps_every_statement() {
+        let statement = build_data_grid_copy_insert_statement(sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")], vec![json!(2), json!("t_user")]],
+            DataGridCopyInsertMode::RowByRow,
+        ));
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;\nSET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (2, N't_user');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;"
+            )
+        );
+    }
+
+    #[test]
+    fn sqlserver_copy_insert_omits_identity_wrapper_without_identity_columns() {
+        let mut options = sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        );
+        options.table_meta.as_mut().expect("table meta").columns = Some(vec![
+            column("table_id", "int", false, None),
+            column("table_name", "nvarchar(200)", false, None),
+        ]);
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');")
+        );
+    }
+
+    #[test]
+    fn dameng_copy_insert_wraps_identity_columns_with_identity_insert() {
+        let mut options = sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        );
+        options.database_type = Some(DatabaseType::Dameng);
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "SET IDENTITY_INSERT \"dbo\".\"gen_table\" ON;\nINSERT INTO \"dbo\".\"gen_table\" (\"table_id\", \"table_name\") VALUES (1, 't_destype');\nSET IDENTITY_INSERT \"dbo\".\"gen_table\" OFF;"
+            )
         );
     }
 

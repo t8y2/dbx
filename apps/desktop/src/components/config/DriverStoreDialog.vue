@@ -750,8 +750,8 @@ async function importOfflineZip() {
   resetAgentInstallProgress();
   try {
     const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
-    await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
     notifyComponentUpdatesChanged();
+    await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
     toastOfflineImportResult(result);
   } catch (e: any) {
     toast(t("driverStore.offlineImportFailed", { error: backendError(e) }));
@@ -803,8 +803,8 @@ async function importDriverFile(driver: AgentDriverInfo) {
       resetAgentInstallProgress();
       try {
         const result = await api.importAgentsFromZip(selected, activeAgentOperationId.value);
-        await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
         notifyComponentUpdatesChanged();
+        await Promise.all([refreshAgents(), loadJdbcDrivers(), loadJdbcPluginStatus()]);
         toastOfflineImportResult(result);
       } finally {
         activeAgentOperationId.value = null;

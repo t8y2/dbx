@@ -27,7 +27,7 @@ import { useTheme } from "@/composables/useTheme";
 import { canDownloadAndInstallUpdate, useAppUpdater } from "@/composables/useAppUpdater";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useComponentUpdates, type ComponentUpdateCategory } from "@/composables/useComponentUpdates";
-import { COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentPluginsUpdated } from "@/lib/updates/componentUpdateEvents";
+import { COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge } from "@/lib/updates/updateBadges";
 import { markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, shouldCloseUpdateCenterAfterComponentUpdate, takePendingComponentUpdatesAfterAppRestart, type PendingComponentUpdatePlan } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
@@ -200,13 +200,14 @@ const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const recentConnectionIds = ref<readonly string[]>(parseRecentConnectionIds(safeLocalStorageGet(RECENT_CONNECTION_IDS_STORAGE_KEY)));
 connectionStore.setBeforeConnectHandler(async (config) => {
-  await ensureJdbcxRuntimeDrivers(config, api);
+  const jdbcxRuntime = await ensureJdbcxRuntimeDrivers(config, api);
   const jdbcProductRuntimeBefore = JSON.stringify({
     connectionString: config.connection_string ?? null,
     driverClass: config.jdbc_driver_class ?? null,
     driverPaths: config.jdbc_driver_paths ?? [],
   });
   const jdbcProductRuntime = await ensureRegisteredJdbcProductRuntimeDrivers(config, api);
+  if (jdbcxRuntime || jdbcProductRuntime) notifyComponentUpdatesChanged();
   const jdbcProductRuntimeAfter = JSON.stringify({
     connectionString: config.connection_string ?? null,
     driverClass: config.jdbc_driver_class ?? null,

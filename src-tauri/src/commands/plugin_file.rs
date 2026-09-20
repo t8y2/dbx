@@ -1,3 +1,12 @@
+//! Streaming local-file access for plugin workbench bridges.
+//!
+//! Plugin sandboxes run with an opaque origin, so they can neither read local
+//! files dropped onto the window nor stream multi-gigabyte transfers through a
+//! one-shot IPC. The workbench host opens handles through this registry after
+//! the user picked the file in a native dialog or dropped it onto the plugin's
+//! workbench area — both are explicit user consent, and every open goes through
+//! the workbench-host TS layer, which is the only caller of these commands.
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -8,15 +17,6 @@ use std::sync::Mutex;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 use tauri::State;
-
-/// Streaming local-file access for plugin workbench bridges.
-///
-/// Plugin sandboxes run with an opaque origin, so they can neither read local
-/// files dropped onto the window nor stream multi-gigabyte transfers through a
-/// one-shot IPC. The workbench host opens handles through this registry after
-/// the user picked the file in a native dialog or dropped it onto the plugin's
-/// workbench area — both are explicit user consent, and every open goes through
-/// the workbench-host TS layer, which is the only caller of these commands.
 
 /// Mirrors the bridge binary cap: one read/write chunk never exceeds it.
 pub const MAX_CHUNK_BYTES: usize = 8 * 1024 * 1024;
@@ -161,7 +161,7 @@ pub fn read_plugin_file_chunk(
         }
         entry.file.seek(SeekFrom::Start(offset)).map_err(|error| format!("seek failed: {error}"))?;
         let remaining = (entry.size - offset) as usize;
-        let mut buffer = vec![0u8; requested.min(remaining).max(1).min(MAX_CHUNK_BYTES)];
+        let mut buffer = vec![0u8; requested.min(remaining).clamp(1, MAX_CHUNK_BYTES)];
         let read = entry.file.read(&mut buffer).map_err(|error| format!("read failed: {error}"))?;
         buffer.truncate(read);
         let eof = offset + read as u64 >= entry.size;

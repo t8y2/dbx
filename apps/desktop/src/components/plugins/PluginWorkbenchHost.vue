@@ -17,7 +17,6 @@ import {
   type PluginSaveFileResult,
   type PluginWorkbenchContext,
 } from "@/lib/plugins/pluginHostBridge";
-import { closePluginLocalFile, openPluginLocalFile, readPluginLocalFileChunk, writePluginLocalFileChunk } from "@/lib/backend/tauri";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
@@ -88,7 +87,14 @@ function parseHandleId(handleId: string): { source: "tauri" | "web"; numericId: 
   throw new Error("Unknown file handle");
 }
 
+/** Loaded lazily: the static tauri module drags side-effectful imports (i18n boot)
+ *  into specs that mock the whole backend layer. */
+async function tauriFileApi() {
+  return import("@/lib/backend/tauri");
+}
+
 async function openTauriPluginFile(path: string, write: boolean): Promise<PluginFileHandleMeta> {
+  const { openPluginLocalFile } = await tauriFileApi();
   const handle = await openPluginLocalFile(path, write);
   if (!write) openTauriHandles.add(handle.handleId);
   return { handleId: `${tauriHandlePrefix}${handle.handleId}`, name: handle.name, size: handle.size, contentType: handle.contentType };
@@ -133,7 +139,10 @@ async function pickPluginFiles(options: PluginPickFilesOptions): Promise<PluginF
 
 async function readPluginFileChunkById(handleId: string, offset: number, length?: number): Promise<PluginFileReadChunk> {
   const parsed = parseHandleId(handleId);
-  if (parsed.source === "tauri") return readPluginLocalFileChunk(parsed.numericId, offset, length);
+  if (parsed.source === "tauri") {
+    const { readPluginLocalFileChunk } = await tauriFileApi();
+    return readPluginLocalFileChunk(parsed.numericId, offset, length);
+  }
   const file = webPickedFiles.get(handleId);
   if (!file) throw new Error("Unknown file handle");
   const slice = file.slice(offset, offset + (length ?? PLUGIN_SAVE_CHUNK_BYTES));
@@ -151,6 +160,7 @@ async function beginPluginFileSave(request: { name?: string; contentType?: strin
       filters: extension ? [{ name: extension.toUpperCase(), extensions: [extension] }] : undefined,
     });
     if (!path) return null;
+    const { openPluginLocalFile } = await tauriFileApi();
     const handle = await openPluginLocalFile(path, true);
     return { handleId: `${tauriHandlePrefix}${handle.handleId}`, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
   }
@@ -161,7 +171,10 @@ async function beginPluginFileSave(request: { name?: string; contentType?: strin
 
 async function writePluginFileChunkById(handleId: string, offset: number, bytes: Uint8Array): Promise<PluginFileWriteResult> {
   const parsed = parseHandleId(handleId);
-  if (parsed.source === "tauri") return writePluginLocalFileChunk(parsed.numericId, offset, encodeBytesBase64(bytes));
+  if (parsed.source === "tauri") {
+    const { writePluginLocalFileChunk } = await tauriFileApi();
+    return writePluginLocalFileChunk(parsed.numericId, offset, encodeBytesBase64(bytes));
+  }
   const buffer = webSaveBuffers.get(handleId);
   if (!buffer) throw new Error("Unknown file handle");
   buffer.chunks.set(offset, bytes);
@@ -171,6 +184,7 @@ async function writePluginFileChunkById(handleId: string, offset: number, bytes:
 async function finishPluginFileSave(handleId: string): Promise<void> {
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
+    const { closePluginLocalFile } = await tauriFileApi();
     openTauriHandles.delete(parsed.numericId);
     await closePluginLocalFile(parsed.numericId);
     return;
@@ -197,6 +211,7 @@ async function finishPluginFileSave(handleId: string): Promise<void> {
 async function closePluginFileHandleById(handleId: string): Promise<void> {
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
+    const { closePluginLocalFile } = await tauriFileApi();
     openTauriHandles.delete(parsed.numericId);
     await closePluginLocalFile(parsed.numericId);
     return;
@@ -206,7 +221,10 @@ async function closePluginFileHandleById(handleId: string): Promise<void> {
 }
 
 function disposeLocalFileHandles(): void {
-  for (const handleId of openTauriHandles) Promise.resolve(closePluginLocalFile(handleId)).catch(() => undefined);
+  for (const handleId of openTauriHandles)
+    tauriFileApi()
+      .then(({ closePluginLocalFile }) => closePluginLocalFile(handleId))
+      .catch(() => undefined);
   openTauriHandles.clear();
   webPickedFiles.clear();
   webSaveBuffers.clear();

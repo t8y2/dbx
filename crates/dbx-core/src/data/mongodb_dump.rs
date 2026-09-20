@@ -227,6 +227,21 @@ pub(crate) enum DumpClient {
 }
 
 impl DumpClient {
+    /// A dump reads documents through the agent's find cursor; gate it here, before any
+    /// work starts, so an outdated agent is refused rather than failing at the first
+    /// collection. Restore and preview never read a find cursor and stay ungated here.
+    async fn require_find_cursor(&self) -> Result<(), String> {
+        if let Self::Agent(client) = self {
+            if !client.lock().await.supports_capability(AgentCapability::MongoFindCursor) {
+                return Err(
+                    "MongoDB Legacy Agent does not support database dump; upgrade or reinstall the MongoDB Legacy driver"
+                        .into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     async fn run_command(&self, database: &str, command: Document) -> Result<Document, String> {
         match self {
             Self::Native(client) => client.database(database).run_command(command).await.map_err(|e| e.to_string()),
@@ -384,7 +399,8 @@ fn command_cursor_id(cursor: &Document) -> Result<i64, String> {
     match cursor.get("id") {
         Some(mongodb::bson::Bson::Int64(id)) => Ok(*id),
         Some(mongodb::bson::Bson::Int32(id)) => Ok(i64::from(*id)),
-        other => Err(format!("Unexpected cursor id in command response: {other:?}")),
+        None => Err("Cursor id missing from command response".into()),
+        Some(other) => Err(format!("Unexpected cursor id in command response: {other:?}")),
     }
 }
 
@@ -394,18 +410,14 @@ async fn dump_client(state: &AppState, id: &str, database: &str) -> Result<DumpC
     match state.pool_handle(id).await {
         Some(PoolKind::MongoDb(client)) => Ok(DumpClient::Native(client.clone())),
         Some(PoolKind::Agent(client)) => {
-            // Check everything a dump or restore will need up front, including the find cursor
-            // the BSON export relies on, so an outdated agent is refused before any work starts
-            // rather than at the first collection.
+            // Check what every dump, restore, or preview shares up front, so an outdated
+            // agent is refused before any work starts rather than mid-operation. The find
+            // cursor only the dump's BSON export relies on is gated on that path instead.
             let supported = {
                 let client = client.lock().await;
-                [
-                    AgentCapability::MongoRunCommand,
-                    AgentCapability::MongoInsertDocuments,
-                    AgentCapability::MongoFindCursor,
-                ]
-                .into_iter()
-                .all(|capability| client.supports_capability(capability))
+                [AgentCapability::MongoRunCommand, AgentCapability::MongoInsertDocuments]
+                    .into_iter()
+                    .all(|capability| client.supports_capability(capability))
             };
             if !supported {
                 return Err("MongoDB Legacy Agent does not support database dump/restore; upgrade or reinstall the MongoDB Legacy driver".into());
@@ -566,6 +578,7 @@ where
             return Err("MongoDB dump/restore cancelled".into());
         }
         let client = dump_client(state, &request.connection_id, &request.database).await?;
+        client.require_find_cursor().await?;
         let mut entries = select_entries(&database_entries(&client, &request.database).await?, &request.collections)?;
         progress.collections_total = entries.len();
         let target = PathBuf::from(&request.file_path);

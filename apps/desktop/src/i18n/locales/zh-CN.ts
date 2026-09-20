@@ -438,6 +438,14 @@ export default withEnglishFallback({
     exitAndUpdate: "退出并更新",
     dockerUsersRun: "Docker 用户请运行",
     toUpdate: "更新",
+    // Unified update hub —— 聚合更新列表
+    otherUpdatesTitle: "其他可更新项",
+    loadingExtraUpdates: "正在检查驱动、插件、MCP 更新...",
+    availableBadge: "可更新",
+    newVersionAvailable: "有新版本",
+    updateNow: "更新",
+    updateAllAuto: "全部更新",
+    updateAllMore: "更多更新方式",
   },
   sidebar: {
     connections: "连接",

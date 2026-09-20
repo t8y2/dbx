@@ -143,7 +143,7 @@ describe("legacy WebView CSS fallbacks", () => {
   });
 
   it("keeps the update dialog layout on the global legacy dialog fallbacks", () => {
-    expect(updateDialogSource).toContain('class="sm:max-w-[700px]"');
+    expect(updateDialogSource).toContain('class="sm:max-w-[700px] flex flex-col max-h-[85vh]"');
     expect(updateDialogSource).not.toContain("dbx-legacy-webview");
     expect(updateDialogSource).not.toContain("@media");
     expect(globalsCss).toContain('html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[700px]"]');

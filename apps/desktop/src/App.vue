@@ -25,6 +25,7 @@ import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useAppUpdater } from "@/composables/useAppUpdater";
+import { useUnifiedUpdates } from "@/composables/useUnifiedUpdates";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
@@ -247,6 +248,27 @@ const {
     return prepareUpdateWithDraftRecovery(() => updatePreparation!.prepare());
   },
 });
+
+// ──────────── Unified Update Hub ────────────
+const {
+  items: unifiedUpdateItems,
+  loading: unifiedUpdateLoading,
+  error: unifiedUpdateError,
+  allUpdating: unifiedUpdateAllUpdating,
+  refreshAll: refreshUnifiedUpdates,
+  updateItem: updateUnifiedItem,
+  updateAllAuto: updateAllAutoUpdates,
+} = useUnifiedUpdates({
+  appUpdateInfo: updateInfo,
+  // "全部更新"的最后一步：只触发 DBX 本体的后台下载，安装/重启仍由用户在弹窗里确认
+  onAppDownload: () => void downloadUpdateInBackground(),
+});
+
+// 打开 UpdateDialog 时并发拉取 driver / jdbc / mcp / plugin 状态
+watch(showUpdateDialog, (open) => {
+  if (open) void refreshUnifiedUpdates();
+});
+
 const { setupFileDrop } = useFileDrop();
 const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
 
@@ -332,7 +354,7 @@ const showQueryEditorDdlDialog = ref(false);
 const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
-const driverStoreActiveTab = ref<"agent" | "jdbc" | "storage" | "runtime">("agent");
+const driverStoreActiveTab = ref<DriverStoreTab>("agent");
 const pluginCenterTabOpen = ref(false);
 const pluginCenterActive = ref(false);
 const pluginCenterFocus = ref<PluginCenterFocus | null>(null);
@@ -4204,6 +4226,10 @@ onUnmounted(() => {
           :update-ready="updateReady"
           :is-ignoring-update="isIgnoringUpdate"
           :active-task-count="activeUpdateTaskCount"
+          :extra-items="unifiedUpdateItems"
+          :extra-items-loading="unifiedUpdateLoading"
+          :extra-items-error="unifiedUpdateError"
+          :extra-items-all-updating="unifiedUpdateAllUpdating"
           @open-latest-release="openLatestRelease"
           @change-download-source="changeUpdateDownloadSource"
           @download-in-background="downloadUpdateInBackground"
@@ -4211,6 +4237,9 @@ onUnmounted(() => {
           @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
           @ignore-version="ignoreCurrentVersion"
+          @update-item="(id) => void updateUnifiedItem(id).finally(() => void refreshUnifiedUpdates())"
+          @update-all-auto="() => void updateAllAutoUpdates()"
+          @refresh-extra-items="() => void refreshUnifiedUpdates()"
         />
         <ExternalSqlFileChangeDialog :prompt="externalSqlFilePrompt" @decide="externalSqlFileChanges.resolvePrompt" />
         <CloseActionPromptDialog v-if="isDesktop && showCloseActionPrompt" :open="showCloseActionPrompt" @update:open="handleCloseActionPromptOpenChange" @quit="chooseQuit" @minimize="chooseMinimize" />

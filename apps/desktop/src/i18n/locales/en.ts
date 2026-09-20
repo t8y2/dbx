@@ -522,6 +522,14 @@ export default {
     exitAndUpdate: "Exit & Update",
     dockerUsersRun: "Docker users should run",
     toUpdate: "to update",
+    // Unified update hub
+    otherUpdatesTitle: "Other available updates",
+    loadingExtraUpdates: "Checking driver, plugin, and MCP updates...",
+    availableBadge: "Update",
+    newVersionAvailable: "New version available",
+    updateNow: "Update",
+    updateAllAuto: "Update all",
+    updateAllMore: "More update options",
   },
   sidebar: {
     connections: "CONNECTIONS",

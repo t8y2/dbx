@@ -80,6 +80,20 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
               release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
               release_notes: state.releaseNotes,
             },
+            // 真实 App 会把聚合列表传进来；这里给出 DBX 本体一项，
+            // 让"全部更新"按钮组（及其"后台下载"下拉）具备渲染条件。
+            extraItems: [
+              {
+                id: "app",
+                kind: "app" as const,
+                name: "DBX",
+                currentVersion: "0.5.60",
+                latestVersion: "0.5.61",
+                hasUpdate: true,
+                canAutoUpdate: true,
+                updating: false,
+              },
+            ],
             updateCheckMessage: "",
             checkingUpdates: false,
             updateCheckFailed: false,
@@ -111,8 +125,18 @@ function buttonWithText(text: string): HTMLButtonElement | undefined {
   return Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes(text));
 }
 
-function downloadButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Download in Background") ?? buttonWithText("Retry Download");
+function buttonByTestId(testId: string): HTMLButtonElement | undefined {
+  return document.body.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`) ?? undefined;
+}
+
+/** "全部更新"按钮组的主按钮：弹窗内逐项更新（驱动 → 插件 → DBX 本体） */
+function updateAllButton(): HTMLButtonElement | undefined {
+  return buttonByTestId("update-all-button");
+}
+
+/** "后台下载"下拉触发器：等于关闭弹窗后在后台跑完整流程 */
+function downloadInBackgroundTrigger(): HTMLButtonElement | undefined {
+  return buttonByTestId("download-in-background-trigger");
 }
 
 function cancelDownloadButton(): HTMLButtonElement | undefined {
@@ -143,28 +167,29 @@ describe("UpdateDialog active task guard", () => {
     await mountDialog(2);
 
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain("2");
-    expect(downloadButton()?.disabled).toBe(false);
+    expect(downloadInBackgroundTrigger()?.disabled).toBe(false);
+    expect(updateAllButton()?.disabled).toBe(false);
   });
 
   it("allows installation after all tasks finish", async () => {
     await mountDialog(0);
 
     expect(document.body.querySelector('[role="alert"]')).toBeNull();
-    expect(downloadButton()?.disabled).toBe(false);
+    expect(downloadInBackgroundTrigger()?.disabled).toBe(false);
   });
 
   it("offers automatic installation for portable builds", async () => {
     await mountDialog(0, { portableMode: true });
 
     expect(document.body.textContent).toContain("portable ZIP");
-    expect(downloadButton()?.disabled).toBe(false);
+    expect(downloadInBackgroundTrigger()?.disabled).toBe(false);
   });
 
   it("routes Windows 7 builds to the dedicated installer", async () => {
     await mountDialog(0, { manualUpdateOnly: true });
 
     expect(document.body.textContent).toContain("WebView2 109 offline installer");
-    expect(downloadButton()).toBeUndefined();
+    expect(downloadInBackgroundTrigger()).toBeUndefined();
     expect(buttonWithText("Open Release")).toBeDefined();
   });
 
@@ -173,14 +198,14 @@ describe("UpdateDialog active task guard", () => {
 
     expect(document.body.textContent).toContain("WebView2 109 offline installer");
     expect(document.body.textContent).not.toContain("signed portable ZIP");
-    expect(downloadButton()).toBeUndefined();
+    expect(downloadInBackgroundTrigger()).toBeUndefined();
     expect(buttonWithText("Open Release")).toBeDefined();
   });
 
   it("retains the downloaded update and enables installation only after tasks finish", async () => {
     await mountDialog(1, { updateDownloaded: true, downloadProgress: 100 });
 
-    expect(downloadButton()).toBeUndefined();
+    expect(downloadInBackgroundTrigger()).toBeUndefined();
     expect(installDownloadedButton()?.disabled).toBe(true);
 
     for (const app of mountedApps.splice(0)) app.unmount();

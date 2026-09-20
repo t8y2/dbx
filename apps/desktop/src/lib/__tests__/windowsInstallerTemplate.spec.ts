@@ -154,7 +154,7 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
       expect(job).not.toMatch(/^\s+(?:CC|CXX):/m);
     }
     expect(releaseWin7Job).not.toContain("CARGO_PROFILE_RELEASE_");
-    expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_LTO: "thin"');
+    expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_LTO: "false"');
     expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"');
   });
 

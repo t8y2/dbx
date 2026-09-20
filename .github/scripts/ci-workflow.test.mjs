@@ -138,7 +138,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
 
   const win7 = job("windows-win7-bundle");
   assert.doesNotMatch(win7, /x86_64-pc-windows-msvc|Setup Rust for standard Windows/);
-  for (const setting of ["RUSTC_WRAPPER: sccache", 'SCCACHE_GHA_ENABLED: "true"', "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "thin"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
+  for (const setting of ["RUSTC_WRAPPER: sccache", 'SCCACHE_GHA_ENABLED: "true"', "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "false"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(win7.includes('version: "v0.16.0"'));
   assert.ok(win7.includes("--timings"));

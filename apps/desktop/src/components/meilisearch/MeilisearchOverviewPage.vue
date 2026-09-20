@@ -9,13 +9,13 @@ import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { formatBytes } from "@/lib/database/serverMetrics";
-import type { MeilisearchSystemOverview, OverviewSection } from "@/types/meilisearchManagement";
+import { formatMeilisearchTaskDateTime, type MeilisearchSystemOverview, type OverviewSection } from "@/types/meilisearchManagement";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{ connectionId: string }>();
-const { t } = useI18n();
+const { locale, t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const loading = ref(false);
@@ -131,7 +131,7 @@ onMounted(() => void load());
             </div>
             <div class="col-span-2">
               <div class="text-muted-foreground">{{ t("meilisearch.lastUpdate") }}</div>
-              <div class="mt-1 text-sm font-medium">{{ stats.lastUpdate || "-" }}</div>
+              <div class="mt-1 text-sm font-medium" :title="stats.lastUpdate || undefined">{{ formatMeilisearchTaskDateTime(stats.lastUpdate, locale) }}</div>
             </div>
           </div>
           <p v-else class="text-xs text-muted-foreground">{{ sectionLabel(overview.stats) }}</p>

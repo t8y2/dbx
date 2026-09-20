@@ -1548,6 +1548,7 @@ export interface SqlCompletionProviderInput {
   keywordCase?: SqlKeywordCase;
   functionCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
+  quoteIdentifiers?: boolean;
 }
 
 export function buildSqlCompletionItems(
@@ -1567,6 +1568,7 @@ export function buildSqlCompletionItems(
     keywordCase?: SqlKeywordCase;
     functionCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
+    quoteIdentifiers?: boolean;
   },
 ): SqlCompletionItem[] {
   if (isSqlCompletionSuppressedContext(sql, cursor, input)) return [];
@@ -1589,7 +1591,9 @@ class SqlCompletionProvider {
     private readonly input: SqlCompletionProviderInput,
   ) {
     this.t = input.translations;
-    this.dialect = sqlCompletionApplyDialect(input.databaseType, input.dialect);
+    const dialect = sqlCompletionApplyDialect(input.databaseType, input.dialect);
+    // "Quote identifiers in generated SQL" off: Oracle completion inserts bare names instead of quoting lowercase ones.
+    this.dialect = dialect === "oracle" && input.quoteIdentifiers === false ? undefined : dialect;
     this.databaseType = input.databaseType;
   }
 

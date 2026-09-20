@@ -925,6 +925,9 @@ function tabDropStyle(tab: QueryTab): CSSProperties | undefined {
   if (groupTabDrag.targetTabId !== tab.id) {
     return undefined;
   }
+  if (isVerticalLayout.value) {
+    return groupTabDrag.position === "before" ? { borderTop: "2px solid var(--ring)" } : { borderBottom: "2px solid var(--ring)" };
+  }
   if (groupTabDrag.position === "before") {
     return { boxShadow: "inset 3px 0 0 0 var(--ring)" };
   }
@@ -973,6 +976,12 @@ function activateTab(tabId: string) {
 
 function handleTabPointerDown(event: PointerEvent, tab: QueryTab) {
   if (event.button !== 0) {
+    return;
+  }
+  // Reordering only has a stable meaning when the strip follows the manual
+  // order. Derived sort modes would immediately move a dragged tab back to
+  // their computed position, so keep those strips click-only.
+  if (settingsStore.editorSettings.tabSortMode !== "manual") {
     return;
   }
   // A drag session is already in progress (second pointer device): ignore.
@@ -1262,9 +1271,10 @@ function handleTabPointerMove(event: PointerEvent) {
     return;
   }
   if (!drag.active) {
-    // Horizontal-only threshold, matching the legacy tab bar: absorbs click
-    // jitter and touch tap drift (touch never arms the drag at all).
-    if (Math.abs(event.clientX - drag.startX) < TAB_DRAG_HORIZONTAL_THRESHOLD) {
+    // Use the strip's primary axis for the drag threshold: horizontal strips
+    // react to horizontal movement, while left/right strips react vertically.
+    const distance = isVerticalLayout.value ? Math.abs(event.clientY - drag.startY) : Math.abs(event.clientX - drag.startX);
+    if (distance < TAB_DRAG_HORIZONTAL_THRESHOLD) {
       return;
     }
     drag.active = true;
@@ -1287,7 +1297,9 @@ function handleTabPointerMove(event: PointerEvent) {
   if (tabElement && groupElement) {
     drag.targetTabId = tabElement.dataset.tabId ?? null;
     const rect = tabElement.getBoundingClientRect();
-    drag.position = event.clientX < rect.left + rect.width / 2 ? "before" : "after";
+    const pointerPosition = isVerticalLayout.value ? event.clientY : event.clientX;
+    const targetMiddle = isVerticalLayout.value ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+    drag.position = pointerPosition < targetMiddle ? "before" : "after";
   }
 }
 

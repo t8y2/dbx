@@ -2668,6 +2668,22 @@ mod tests {
     }
 
     #[test]
+    fn keeps_top_level_order_by_when_paginating_sqlserver_set_operations() {
+        let original_sql = "SELECT id FROM a INTERSECT SELECT id FROM b ORDER BY id";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: original_sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            format!("EXEC sys.sp_executesql N'SET ROWCOUNT 100; {original_sql}'; /*__dbx_result_offset=0__*/")
+        );
+    }
+
+    #[test]
     fn keeps_sqlserver_top_when_set_operator_is_only_inside_subquery() {
         let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
             original_sql: "SELECT id FROM (SELECT id FROM a UNION SELECT id FROM b) t".to_string(),

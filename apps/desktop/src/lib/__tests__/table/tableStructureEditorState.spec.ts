@@ -4,6 +4,7 @@ import {
   cloneColumnDraftAsNew,
   combineDataTypeForDatabase,
   combineDataTypeForDatabaseWithLengthUnit,
+  copySourceColumnDetails,
   createCopiedColumnDrafts,
   createColumnDrafts,
   createTriggerDrafts,
@@ -20,6 +21,7 @@ import {
   isMysqlCharacterDataType,
   isMysqlEnumDataType,
   isSqlServerIdentityCompatibleDataType,
+  matchesCopySourceColumnSearch,
   mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
@@ -703,6 +705,54 @@ describe("tableStructureEditorState", () => {
     expect(isMysqlCharacterDataType("varbinary(255)")).toBe(false);
     expect(isMysqlCharacterDataType("blob")).toBe(false);
     expect(isMysqlCharacterDataType("geometry")).toBe(false);
+  });
+});
+
+describe("copySourceColumnDetails", () => {
+  it("keeps the comment and default shown in the copy-fields dialog", () => {
+    expect(copySourceColumnDetails({ data_type: "varchar(20)", column_default: "'unknown'", comment: "名称" })).toEqual({ defaultValue: "'unknown'", comment: "名称" });
+  });
+
+  it("keeps falsy-looking defaults such as 0 and empty strings", () => {
+    expect(copySourceColumnDetails({ data_type: "int", column_default: "0", comment: null })).toEqual({ defaultValue: "0", comment: null });
+    expect(copySourceColumnDetails({ data_type: "varchar(20)", column_default: "''", comment: null })).toEqual({ defaultValue: "''", comment: null });
+  });
+
+  it("drops blank metadata instead of rendering an empty label", () => {
+    expect(copySourceColumnDetails({ data_type: "int", column_default: null, comment: null })).toEqual({ defaultValue: null, comment: null });
+    expect(copySourceColumnDetails({ data_type: "int", column_default: undefined, comment: undefined })).toEqual({ defaultValue: null, comment: null });
+    expect(copySourceColumnDetails({ data_type: "int", column_default: "  ", comment: "   " })).toEqual({ defaultValue: null, comment: null });
+  });
+
+  it("trims padded metadata for display", () => {
+    expect(copySourceColumnDetails({ data_type: "int", column_default: " 1 ", comment: " 备注 " })).toEqual({ defaultValue: "1", comment: "备注" });
+  });
+
+  it("normalizes defaults per database like the editor grid", () => {
+    expect(copySourceColumnDetails({ data_type: "character varying", column_default: "'unknown'::character varying", comment: null }, "postgres")).toEqual({ defaultValue: "'unknown'", comment: null });
+    expect(copySourceColumnDetails({ data_type: "int", column_default: "((0))", comment: null }, "sqlserver")).toEqual({ defaultValue: "0", comment: null });
+    expect(copySourceColumnDetails({ data_type: "varchar(50)", column_default: "", comment: null }, "mysql")).toEqual({ defaultValue: "''", comment: null });
+  });
+});
+
+describe("matchesCopySourceColumnSearch", () => {
+  const column = { name: "status", data_type: "tinyint", column_default: "1", comment: "状态：1启用 0停用" };
+
+  it("matches everything for a blank query", () => {
+    expect(matchesCopySourceColumnSearch(column, "")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "   ")).toBe(true);
+  });
+
+  it("matches name and type case-insensitively", () => {
+    expect(matchesCopySourceColumnSearch(column, "STAT")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "TINY")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "missing")).toBe(false);
+  });
+
+  it("matches comments and default values too", () => {
+    expect(matchesCopySourceColumnSearch(column, "启用")).toBe(true);
+    expect(matchesCopySourceColumnSearch(column, "1")).toBe(true);
+    expect(matchesCopySourceColumnSearch({ ...column, column_default: null, comment: null }, "1")).toBe(false);
   });
 });
 

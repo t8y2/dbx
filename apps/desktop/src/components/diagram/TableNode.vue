@@ -4,10 +4,10 @@ import { Handle, Position } from "@vue-flow/core";
 import { Table2, KeyRound, Link2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import type { DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram";
-import { isDraftTable, isDroppedColumn } from "@/lib/diagram/erDiagram";
+import { isDraftTable } from "@/lib/diagram/erDiagram";
 import type { InferredRelationship } from "@/types/diagram";
 import { useLayerStore } from "@/lib/diagram/layer-store";
-import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET } from "@/lib/diagram/diagram-constants";
+import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramVisibleColumns } from "@/lib/diagram/diagram-constants";
 
 const layerStore = useLayerStore();
 
@@ -26,7 +26,12 @@ const emit = defineEmits<{
 const isDraft = computed(() => isDraftTable(props.data.table));
 
 function visibleColumns(table: DiagramTable) {
-  return table.columns.filter((column) => !isDroppedColumn(table, column.name));
+  return diagramVisibleColumns(table);
+}
+
+/** Comments are optional metadata; blank/whitespace-only values render nothing. */
+function commentText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
@@ -86,18 +91,26 @@ const handleOffsetStyle = computed(() =>
         <Badge v-if="isDraft" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">Draft</Badge>
         <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ visibleColumns(data.table).length }}</Badge>
       </div>
+      <div v-if="commentText(data.table.comment)" class="flex h-4 items-center gap-1.5 border-b border-border/40 bg-muted/20 px-3">
+        <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(data.table.comment)">{{ commentText(data.table.comment) }}</span>
+      </div>
       <div>
-        <div v-for="column in visibleColumns(data.table)" :key="column.name" class="flex h-6 min-w-0 items-center gap-1.5 border-b border-border/40 px-3 text-xs last:border-b-0">
-          <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
-          <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
-          <Link2 v-else-if="isRelationshipColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-muted-foreground" />
-          <span v-else class="h-3 w-3 shrink-0" />
-          <span class="min-w-0 flex-1 truncate font-mono" :title="column.name">
-            {{ truncateLabel(column.name, COLUMN_NAME_MAX_CHARS) }}
-          </span>
-          <span class="shrink-0 truncate text-right text-[10px] text-muted-foreground" :style="{ width: `${COLUMN_TYPE_WIDTH}px` }" :title="column.data_type">
-            {{ truncateLabel(column.data_type, COLUMN_TYPE_MAX_CHARS) }}
-          </span>
+        <div v-for="column in visibleColumns(data.table)" :key="column.name" class="border-b border-border/40 last:border-b-0">
+          <div class="flex h-6 min-w-0 items-center gap-1.5 px-3 text-xs">
+            <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
+            <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />
+            <Link2 v-else-if="isRelationshipColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-muted-foreground" />
+            <span v-else class="h-3 w-3 shrink-0" />
+            <span class="min-w-0 flex-1 truncate font-mono" :title="column.name">
+              {{ truncateLabel(column.name, COLUMN_NAME_MAX_CHARS) }}
+            </span>
+            <span class="shrink-0 truncate text-right text-[10px] text-muted-foreground" :style="{ width: `${COLUMN_TYPE_WIDTH}px` }" :title="column.data_type">
+              {{ truncateLabel(column.data_type, COLUMN_TYPE_MAX_CHARS) }}
+            </span>
+          </div>
+          <div v-if="commentText(column.comment)" class="flex h-4 items-center pb-0.5 pl-[18px] pr-3">
+            <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(column.comment)">{{ commentText(column.comment) }}</span>
+          </div>
         </div>
       </div>
     </div>

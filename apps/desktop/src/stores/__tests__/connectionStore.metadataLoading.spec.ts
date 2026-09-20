@@ -3268,6 +3268,98 @@ describe("connectionStore metadata loading", () => {
     expect(listTables).toHaveBeenCalledTimes(5);
   });
 
+  it("restores the pre-search pages when a remote sidebar search is cleared", async () => {
+    const tables = Array.from({ length: 5 }, (_, index) => ({
+      name: `t_${String(index + 1).padStart(4, "0")}`,
+      table_type: "TABLE" as const,
+      comment: null,
+    }));
+    const listTables = vi.fn((_connectionId: string, _database: string, _schema: string, searchFilter?: string, limit?: number, offset?: number) => {
+      const matches = searchFilter ? tables.filter((table) => table.name.includes(searchFilter)) : tables;
+      const start = offset ?? 0;
+      return Promise.resolve(matches.slice(start, start + (limit ?? matches.length)));
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    settingsStore.desktopSettings.sidebar_table_page_size = 2;
+
+    const connection = mysqlConnection();
+    const tablesGroup: TreeNode = {
+      id: "mysql-1:app:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: connection.id,
+      database: "app",
+      isExpanded: true,
+      children: [],
+    };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [
+      {
+        id: connection.id,
+        label: connection.name,
+        type: "connection",
+        connectionId: connection.id,
+        isExpanded: true,
+        children: [
+          {
+            id: "mysql-1:app",
+            label: "app",
+            type: "database",
+            connectionId: connection.id,
+            database: "app",
+            isExpanded: true,
+            children: [tablesGroup],
+          },
+        ],
+      },
+    ];
+
+    // The user expands the group and pages through "load more" until every table is in memory.
+    await store.loadObjectGroupChildren(tablesGroup, { force: true });
+    while (tablesGroup.children?.some((child) => child.type === "load-more")) {
+      await store.loadMoreObjectGroupChildren(tablesGroup.children.find((child) => child.type === "load-more")!);
+    }
+    expect(tablesGroup.children?.map((child) => child.label)).toEqual(tables.map((table) => table.name));
+    expect(tablesGroup.objectCount).toBe(5);
+    const unfilteredPageOneCalls = listTables.mock.calls.filter((call) => !call[3] && (call[5] ?? 0) === 0).length;
+
+    // Typing a search swaps the children for a filtered projection.
+    store.sidebarSearchQuery = "0003";
+    await store.loadObjectGroupChildren(tablesGroup, { force: true });
+    expect(tablesGroup.children?.map((child) => child.label)).toEqual(["t_0003"]);
+
+    // Clearing the query must put the previously loaded pages back, without
+    // dropping the user back to the first page through a fresh reload.
+    store.sidebarSearchQuery = "";
+    expect(store.restoreFilteredObjectGroupChildren(tablesGroup)).toBe(true);
+    expect(tablesGroup.children?.map((child) => child.label)).toEqual(tables.map((table) => table.name));
+    expect(tablesGroup.objectCount).toBe(5);
+    expect(tablesGroup.isExpanded).toBe(true);
+    expect(store.isTreeNodeChildrenLoaded(tablesGroup.id)).toBe(true);
+    expect(listTables.mock.calls.filter((call) => !call[3] && (call[5] ?? 0) === 0).length).toBe(unfilteredPageOneCalls);
+
+    // With no captured list (a group that was never loaded) the caller falls back to a reload.
+    const untouchedGroup: TreeNode = { ...tablesGroup, id: "mysql-1:app:__views", type: "group-views", children: [] };
+    expect(store.restoreFilteredObjectGroupChildren(untouchedGroup)).toBe(false);
+  });
+
   it("pages table-scoped search results instead of truncating at the search budget", async () => {
     const tables = Array.from({ length: 5 }, (_, index) => ({
       name: `t_${String(index + 1).padStart(4, "0")}`,

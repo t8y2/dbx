@@ -37,7 +37,7 @@ describe("OceanBase Oracle explain plan", () => {
     expect(plan.raw).toEqual(JSON_PLAN);
     expect(nodes.map((node) => node.id)).toEqual(["0", "1", "3", "2"]);
     expect(nodes.map((node) => node.title)).toEqual(["HASH JOIN", "SUBPLAN SCAN on T1", "EXPRESSION", "TABLE FULL SCAN on T2"]);
-    expect(nodes[0]).toMatchObject({ rows: "1", details: ["Estimated time: 5 µs", "output: output([T1.C1], [T2.C1])"] });
+    expect(nodes[0]).toMatchObject({ rows: "1", estimatedTimeUs: "5", details: ["output: output([T1.C1], [T2.C1])"] });
     expect(nodes[1]).toMatchObject({ relation: "T1", rows: "2" });
     expect(nodes[3].details).toContain("filter: filter([T2.C1 > 4])");
     expect(nodes[0].cost).toBeUndefined();
@@ -49,5 +49,25 @@ describe("OceanBase Oracle explain plan", () => {
       raw: "unexpected format",
       nodes: [],
     });
+  });
+
+  it("preserves zero estimates and sorts numbered children without exposing structural fields", () => {
+    const plan = parseExplainResult(
+      "oceanbase-oracle",
+      explainResult(
+        JSON.stringify({
+          ID: 0,
+          OPERATOR: "HASH JOIN",
+          "EST.TIME(us)": 0,
+          COST: 7,
+          CHILD_10: { ID: 10, OPERATOR: "TABLE FULL SCAN", "EST.TIME(us)": null },
+          CHILD_2: { ID: 2, OPERATOR: "TABLE FULL SCAN", filter: "C1 > 4" },
+        }),
+      ),
+    );
+    expect(plan.nodes[0]).toMatchObject({ estimatedTimeUs: "0", cost: "7", details: [] });
+    expect(plan.nodes[0].children.map((node) => node.id)).toEqual(["2", "10"]);
+    expect(plan.nodes[0].children[0]).toMatchObject({ estimatedTimeUs: undefined, details: ["filter: C1 > 4"] });
+    expect(plan.nodes[0].children[1]).toMatchObject({ estimatedTimeUs: undefined, details: [] });
   });
 });

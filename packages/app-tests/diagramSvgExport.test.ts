@@ -4,7 +4,7 @@ import { buildEngineeringDiagram } from "../../apps/desktop/src/lib/diagram/engi
 import { buildEngineeringDiagramSvg, buildTableDiagramSvg, buildTableRelationshipPaths, computeTableDiagramCanvas, diagramSvgFileName } from "../../apps/desktop/src/lib/export/diagramSvgExport.ts";
 import { buildDiagramRelationships, normalizeCustomDiagramRelationship, type DiagramTable } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
 import { pointsToSvgPath } from "../../apps/desktop/src/lib/diagram/edge-obstacle-router.ts";
-import { CARD_BOTTOM_PADDING, CARD_HEADER_HEIGHT, CARD_WIDTH, COLUMN_ROW_HEIGHT, MARGIN } from "../../apps/desktop/src/lib/diagram/diagram-constants.ts";
+import { CARD_BOTTOM_PADDING, CARD_HEADER_HEIGHT, CARD_WIDTH, COLUMN_ROW_HEIGHT, COMMENT_LINE_HEIGHT, MARGIN, diagramTableCardHeight } from "../../apps/desktop/src/lib/diagram/diagram-constants.ts";
 
 const tables: DiagramTable[] = [
   {
@@ -465,4 +465,79 @@ test("multi-schema relationship routing measures card heights by diagram key", (
   // The route must follow the source card's real vertical centre, not the 0-column height.
   const sourceCenter = 40 + (CARD_HEADER_HEIGHT + 4 * COLUMN_ROW_HEIGHT + CARD_BOTTOM_PADDING) / 2;
   assert.ok(path.includes(`${sourceCenter}`), `path ${path} should use the source card centre ${sourceCenter}`);
+});
+
+const commentedTables: DiagramTable[] = [
+  {
+    name: "copy_src",
+    comment: "复制源表",
+    columns: [
+      { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: "主键ID" },
+      { name: "name", data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: "名称" },
+      { name: "note", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ],
+    foreignKeys: [],
+  },
+  {
+    name: "copy_dst",
+    columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: "目标主键" }],
+    foreignKeys: [{ name: "copy_dst_id_fk", column: "id", ref_table: "copy_src", ref_column: "id" }],
+  },
+];
+
+test("exports table and column comments onto the cards", () => {
+  const relationships = buildDiagramRelationships(commentedTables);
+  const positions = { copy_src: { x: 40, y: 40 }, copy_dst: { x: 460, y: 40 } };
+  const svg = buildTableDiagramSvg({
+    tables: commentedTables,
+    relationships,
+    positions,
+    relationshipPaths: { [relationships[0].id]: "M 400 96 L 460 96" },
+    canvas: { width: 900, height: 400 },
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+  });
+
+  assert.match(svg, />复制源表</);
+  assert.match(svg, />主键ID</);
+  assert.match(svg, />名称</);
+  assert.match(svg, />目标主键</);
+  // Cards keep growing by one comment line per rendered table/column comment.
+  assert.ok(svg.includes(`height="${diagramTableCardHeight(commentedTables[0])}"`));
+  assert.ok(svg.includes(`height="${diagramTableCardHeight(commentedTables[1])}"`));
+});
+
+test("computeTableDiagramCanvas reserves room for the rendered comment lines", () => {
+  const positions = { copy_src: { x: 0, y: 0 } };
+  const canvas = computeTableDiagramCanvas([commentedTables[0]], positions, {
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+  });
+  // 3 columns + 1 table comment + 2 column comments = 3 comment lines
+  const expectedHeight = CARD_HEADER_HEIGHT + 3 * COLUMN_ROW_HEIGHT + CARD_BOTTOM_PADDING + 3 * COMMENT_LINE_HEIGHT;
+  assert.equal(canvas.height, Math.ceil(expectedHeight + 2 * MARGIN));
+});
+
+test("relationship routing measures commented card heights", () => {
+  const relationships = buildDiagramRelationships(commentedTables);
+  const positions = { copy_src: { x: 0, y: 0 }, copy_dst: { x: 400, y: 0 } };
+  const withComments = buildTableRelationshipPaths({
+    relationships,
+    positions,
+    tables: commentedTables,
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+  });
+  const withoutComments = buildTableRelationshipPaths({
+    relationships,
+    positions,
+    tables: commentedTables.map((table) => ({ ...table, comment: null, columns: table.columns.map((column) => ({ ...column, comment: null })) })),
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+  });
+  assert.notEqual(withComments[relationships[0].id], withoutComments[relationships[0].id]);
 });

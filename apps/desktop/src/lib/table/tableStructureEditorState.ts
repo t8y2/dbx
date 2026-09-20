@@ -1,6 +1,37 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
+export interface CopySourceColumnDetails {
+  /** Column default as shown in the copy-fields dialog, or null when there is none. */
+  defaultValue: string | null;
+  /** Column comment as shown in the copy-fields dialog, or null when there is none. */
+  comment: string | null;
+}
+
+/**
+ * Read-only summary rendered under a column name in the "copy fields from another
+ * table" dialog. The source table is not open while copying, so the comment and
+ * default value are the only hint about what an unfamiliar field means.
+ */
+export function copySourceColumnDetails(column: Pick<ColumnInfo, "column_default" | "comment" | "data_type">, databaseType?: DatabaseType): CopySourceColumnDetails {
+  // Match the main grid and the editor drafts so the dialog, the grid, and the
+  // copied result render the same normalized default for every database.
+  const defaultValue = column.column_default == null ? "" : columnDefaultForEditor(column, databaseType);
+  const rawComment = column.comment ?? "";
+  return {
+    defaultValue: defaultValue.trim() ? defaultValue.trim() : null,
+    comment: rawComment.trim() ? rawComment.trim() : null,
+  };
+}
+
+/** Copy-dialog search matches comments and default values on top of name and type. */
+export function matchesCopySourceColumnSearch(column: Pick<ColumnInfo, "name" | "data_type" | "column_default" | "comment">, search: string, databaseType?: DatabaseType): boolean {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  const details = copySourceColumnDetails(column, databaseType);
+  return [column.name, column.data_type, details.defaultValue ?? "", details.comment ?? ""].some((value) => value.toLowerCase().includes(query));
+}
+
 /**
  * Column names offered by the structure editor's "copy all column names" action.
  * Fields marked for drop disappear on save, so they are not offered.
@@ -847,7 +878,7 @@ function stripSqlServerDefaultOuterParens(defaultValue: string): string {
   return value;
 }
 
-function columnDefaultForEditor(column: ColumnInfo, databaseType?: DatabaseType): string {
+function columnDefaultForEditor(column: Pick<ColumnInfo, "column_default" | "data_type">, databaseType?: DatabaseType): string {
   if (column.column_default === null) return "";
   const defaultValue = column.column_default;
   if (databaseType === "mysql" && defaultValue === "" && isMysqlCharacterDataType(column.data_type)) {

@@ -275,8 +275,8 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
 export function buildUserPrompt(action: AiAction, context: AiContext, instruction: string, isZh: boolean): string {
   const userRequest = instruction.trim() || (isZh ? "（无额外说明）" : "(No extra instruction provided.)");
   const attachedTextData = formatAttachedTextData(context, isZh);
-  if (isVectorDbType(context.databaseType)) {
-    // Vector databases: skip SQL action instructions, only send the user's request
+  if (isVectorDbType(context.databaseType) || context.databaseType === "redis") {
+    // Non-SQL databases use their system prompt for command guidance.
     return [userRequest, attachedTextData].filter(Boolean).join("\n\n");
   }
   const skill = aiSkillForAction(action);
@@ -314,6 +314,9 @@ function attachmentSafetyInstruction(isZh: boolean): string {
 export function buildSystemPrompt(action: AiAction, context: AiContext, mode: AiAssistantMode = "ask", custom?: CustomPromptContext): string {
   if (isVectorDbType(context.databaseType)) {
     return buildVectorSystemPrompt(context, mode, custom);
+  }
+  if (context.databaseType === "redis") {
+    return buildRedisSystemPrompt(context, mode, custom);
   }
   const schema = formatSchema(context);
   const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
@@ -361,6 +364,35 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
     resultPreview,
     `Schema:\n${schema}`,
   );
+
+  return lines.filter(Boolean).join("\n");
+}
+
+function buildRedisSystemPrompt(context: AiContext, mode: AiAssistantMode, custom?: CustomPromptContext): string {
+  const isZh = isChineseLocale(currentLocale());
+  const resultPreview = context.lastResultPreview ? `\nLast result preview:\n${context.lastResultPreview}\n` : "";
+  const lastError = context.lastError ? `\nLast error:\n${context.lastError}\n` : "";
+  const lines: string[] = [
+    isZh ? "你是 DBX 内置的 Redis 数据库助手。用中文回复。" : "You are DBX's built-in Redis database assistant. Reply in English.",
+    isZh ? "精确、保守，并严格使用 Redis 命令语义；不要生成 SQL。" : "Be precise and conservative, follow Redis command semantics, and do not generate SQL.",
+    ...buildModePromptLines(mode, isZh, context.databaseType),
+    ...buildRichContentPromptLines(isZh),
+    ...buildCustomInstructionLines(custom, isZh),
+    attachmentSafetyInstruction(isZh),
+    "",
+    "Database type: redis",
+    `Connection: ${context.connectionName}`,
+    `Database: ${context.database}`,
+    context.selectedDatabases?.length
+      ? isZh
+        ? `已选择 Redis 逻辑数据库：${JSON.stringify(context.selectedDatabases)}。调用工具时使用 db 参数指定目标数据库；MCP 授权仍然生效。`
+        : `Selected Redis logical databases: ${JSON.stringify(context.selectedDatabases)}. Use the db argument to select the target database; MCP authorization still applies.`
+      : "",
+    "",
+    `Current Redis command:\n${context.currentSql.trim() || "(empty)"}`,
+    lastError,
+    resultPreview,
+  ];
 
   return lines.filter(Boolean).join("\n");
 }
@@ -487,6 +519,25 @@ function buildRichContentPromptLines(isZh: boolean): string[] {
 
 function buildModePromptLines(mode: AiAssistantMode, isZh: boolean, databaseType: DatabaseType): string[] {
   const currentTimeGuidance = currentTimeToolGuidance();
+  if (databaseType === "redis") {
+    if (mode === "agent") {
+      return [
+        isZh ? "你处于 Redis Agent 模式。查询或修改 Redis 数据时使用 dbx_execute_redis_command，不要生成或执行 SQL。" : "You are in Redis Agent mode. Use dbx_execute_redis_command to query or modify Redis data; do not generate or execute SQL.",
+        isZh
+          ? "逻辑数据库必须通过工具的 db 参数选择；当前或已选择数据库也会由 DBX 作用域自动限定。禁止执行 SELECT 命令切换数据库。"
+          : "Select the logical database with the tool's db argument; DBX also scopes the current or selected database automatically. Never send the SELECT command to switch databases.",
+        isZh ? "遍历或匹配键必须使用 SCAN，不要使用 KEYS；需要完整结果时，使用返回的游标继续扫描直到游标为 0。" : "Use SCAN, not KEYS, to enumerate or match keys. For complete results, continue with the returned cursor until it reaches 0.",
+        currentTimeGuidance,
+        isZh ? "禁止不经确认直接执行 Redis 写命令；如果安全执行条件不满足，先说明原因，再给出只读替代方案。" : "Never execute Redis write commands without confirmation. If safe execution requirements are not met, explain why and provide a read-only alternative.",
+      ];
+    }
+    return [
+      isZh
+        ? "你处于 Redis Ask 模式。只生成 Redis 命令和说明，不要生成 SQL，也不要暗示已经执行或即将自动执行。需要指定逻辑数据库时说明 DB 编号，不要生成 SELECT 命令。"
+        : "You are in Redis Ask mode. Generate Redis commands and explanations only, not SQL, and do not imply that anything has run or will auto-run. State the target database number when needed; do not generate SELECT commands.",
+      currentTimeGuidance,
+    ];
+  }
   if (databaseType === "mongodb") {
     if (mode === "agent") {
       return [

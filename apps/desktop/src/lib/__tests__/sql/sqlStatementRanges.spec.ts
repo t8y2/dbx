@@ -583,6 +583,19 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
   });
 
+  it("keeps Oracle anonymous blocks with local PROCEDURE/FUNCTION declarations together (#9634)", () => {
+    const cases = [
+      "DECLARE\nPROCEDURE local_proc IS\nBEGIN\n  NULL;\nEND;\n\nBEGIN\nlocal_proc;\nEND;",
+      "DECLARE\n  v NUMBER;\n  PROCEDURE p1 IS BEGIN NULL; END;\n  FUNCTION f1 RETURN NUMBER IS BEGIN RETURN 1; END f1;\nBEGIN\n  p1;\n  v := f1;\nEND;",
+      "DECLARE\n  PROCEDURE fwd(x NUMBER);\n  PROCEDURE fwd(x NUMBER) IS BEGIN NULL; END;\nBEGIN\n  fwd(1);\nEND;",
+      "DECLARE\n  PROCEDURE outer_p IS\n    PROCEDURE inner_p IS BEGIN NULL; END;\n  BEGIN\n    inner_p;\n  END;\nBEGIN\n  outer_p;\nEND;",
+    ];
+    for (const sql of cases) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(sql, "oracle"))).toEqual([sql]);
+    }
+    expect(rangeSqlTexts(splitSqlStatementRanges(`${cases[0]}\nSELECT 1 FROM dual;`, "oracle"))).toEqual([cases[0], "SELECT 1 FROM dual"]);
+  });
+
   it("keeps ArgoDB PL/SQL procedure bodies together (frontend splitter, mirrors backend argo_split tests)", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
     expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);

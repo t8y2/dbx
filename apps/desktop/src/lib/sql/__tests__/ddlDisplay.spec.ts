@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { ddlFormatDialectFor, formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 
 describe("omitDdlDatabaseQualifier", () => {
   it("drops the schema qualifier from Oracle table DDL without touching tablespace references", () => {
@@ -107,5 +107,31 @@ describe("omitDdlIdentifierQuotes", () => {
   it("preserves generated identifier quotes when the setting is enabled", () => {
     const ddl = 'ALTER TABLE "SYSTEM"."TEST" RENAME COLUMN "ABCD" TO "AbCd";';
     expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", true)).toBe(ddl);
+  });
+});
+
+describe("ddlFormatDialectFor", () => {
+  it("prefers the effective database type over an Oracle-like connection's MySQL highlighting dialect", () => {
+    expect(ddlFormatDialectFor({ databaseType: "oracle", highlightDialect: "mysql" })).toBe("oracle");
+    expect(ddlFormatDialectFor({ databaseType: "dameng", highlightDialect: "mysql" })).toBe("dameng");
+    expect(ddlFormatDialectFor({ databaseType: "kingbase", highlightDialect: "mysql" })).toBe("postgres");
+  });
+
+  it("honors an explicit formatter dialect first", () => {
+    expect(ddlFormatDialectFor({ formatDialect: "sqlserver", databaseType: "oracle", highlightDialect: "mysql" })).toBe("sqlserver");
+  });
+
+  it("keeps the highlighting dialect when the database type has no dedicated formatter dialect", () => {
+    expect(ddlFormatDialectFor({ databaseType: "db2", highlightDialect: "mysql" })).toBe("mysql");
+    expect(ddlFormatDialectFor({ highlightDialect: "postgres" })).toBe("postgres");
+    expect(ddlFormatDialectFor({})).toBe("generic");
+  });
+
+  it("keeps case-sensitive quoted Oracle names quoted in the DDL view", () => {
+    const ddl = 'CREATE TABLE "SYSTEM"."TEST" ("id" VARCHAR2(32), "cName" VARCHAR2(100))';
+    const highlightDialect = "mysql";
+    const resolved = ddlFormatDialectFor({ databaseType: "oracle", highlightDialect });
+    expect(omitDdlIdentifierQuotes(ddl, highlightDialect)).toBe("CREATE TABLE SYSTEM.TEST (id VARCHAR2(32), cName VARCHAR2(100))");
+    expect(omitDdlIdentifierQuotes(ddl, resolved)).toBe('CREATE TABLE SYSTEM.TEST ("id" VARCHAR2(32), "cName" VARCHAR2(100))');
   });
 });

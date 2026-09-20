@@ -5237,20 +5237,20 @@ async function openExternalUrl(url: string) {
                   "
                 >
                   <PopoverTrigger as-child>
-                    <Button variant="ghost" :class="['h-5 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'min-w-0 flex-1']">
+                    <Button variant="ghost" :title="selectedDatabaseLabel" :class="['h-5 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'min-w-0 flex-1']">
                       <span class="truncate">{{ selectedDatabaseLabel }}</span>
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent align="start" class="w-64 p-1">
+                  <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-1">
                     <div class="relative mb-1 flex items-center border-b px-2 py-1">
                       <Search class="pointer-events-none absolute left-3 h-3 w-3 text-muted-foreground" />
                       <input v-model="databaseSearchQuery" type="search" class="h-6 w-full bg-transparent pl-5 text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('ai.searchDatabases')" />
                     </div>
                     <button v-if="selectedDatabases.length > 1" type="button" class="mb-1 flex w-full items-center justify-end gap-1 border-b px-2 py-1 text-xs" @click.stop="selectedDatabases = []"><X class="h-3 w-3" />{{ t("ai.clearDatabaseSelection") }}</button>
                     <div class="max-h-64 overflow-y-auto overscroll-contain">
-                      <button v-for="option in filteredDbSelectOptions" :key="option.value" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted" @click="toggleDatabase(option.database)">
-                        <Check :class="['h-4 w-4', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
-                        <span class="truncate">{{ option.label }}</span>
+                      <button v-for="option in filteredDbSelectOptions" :key="option.value" type="button" :title="option.label" class="flex w-full min-w-0 items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted" @click="toggleDatabase(option.database)">
+                        <Check :class="['h-4 w-4 shrink-0', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
+                        <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
                       </button>
                       <div v-if="!filteredDbSelectOptions.length" class="px-2 py-1.5 text-sm text-muted-foreground">{{ t("ai.noDatabasesFound") }}</div>
                     </div>

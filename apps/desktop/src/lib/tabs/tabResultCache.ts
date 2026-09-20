@@ -69,6 +69,8 @@ interface ColumnarQueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  server_execute_time_us?: number;
+  client_request_wait_ms?: number;
   truncated?: boolean;
   has_more?: boolean;
   sourceLabel?: string;
@@ -355,6 +357,8 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,
@@ -400,6 +404,8 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
     truncated: result.truncated,
     has_more: result.has_more,
     sourceLabel: result.sourceLabel,
@@ -426,6 +432,8 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     mongo_copy_documents: result.mongo_copy_documents ? clonePlain(result.mongo_copy_documents) : undefined,
     affected_rows: result.affected_rows,
     execution_time_ms: result.execution_time_ms,
+    server_execute_time_us: result.server_execute_time_us,
+    client_request_wait_ms: result.client_request_wait_ms,
     truncated: result.truncated,
     session_id: undefined,
     has_more: result.has_more,

@@ -324,6 +324,205 @@ describe("PluginHostBridge", () => {
     expect(messages[2]).toMatchObject({ id: "not-plugin", error: "Connection is not plugin-backed" });
   });
 
+  // --- Plugin plan Host API (#9675) ----------------------------------------
+
+  const planCapabilities = {
+    dbType: "postgres",
+    dbVersion: "15.19",
+    supports: { estimatedPlan: true },
+    limits: { maxTimeoutMs: 60_000, maxPlanBytes: 4 * 1024 * 1024 },
+  };
+
+  function planCall(bridge: PluginHostBridge, target: Window, method: string, params: unknown, id: string): void {
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id, method, params },
+    } as MessageEvent);
+  }
+
+  function planHost() {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getPlanCapabilities = vi.fn().mockResolvedValue(planCapabilities);
+    const explainPlan = vi.fn().mockResolvedValue({
+      dbType: "postgres",
+      format: "json",
+      rawPlan: [{ Plan: { "Node Type": "Seq Scan" } }],
+      truncated: false,
+      warnings: [],
+    });
+    return { messages, target, getPlanCapabilities, explainPlan };
+  }
+
+  it("requires host.plans:read before any plan call", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getPlanCapabilities = vi.fn();
+    const explainPlan = vi.fn();
+    // Permission is the only gate: an undeclared plugin must not reach the host
+    // even when the host could serve the request.
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getPlanCapabilities,
+      explainPlan,
+    });
+
+    planCall(bridge, target, "host.getPlanCapabilities", { connectionId: "c1" }, "caps");
+    planCall(bridge, target, "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated" }, "plan");
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+
+    expect(messages[0]).toMatchObject({ id: "caps", error: "Plugin has not declared permission 'host.plans:read'" });
+    expect(messages[1]).toMatchObject({ id: "plan", error: "Plugin has not declared permission 'host.plans:read'" });
+    expect(getPlanCapabilities).not.toHaveBeenCalled();
+    expect(explainPlan).not.toHaveBeenCalled();
+  });
+
+  it("dispatches an estimated plan request and returns the raw plan", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getPlanCapabilities = vi.fn().mockResolvedValue(planCapabilities);
+    const explainPlan = vi.fn().mockResolvedValue({
+      dbType: "postgres",
+      format: "json",
+      rawPlan: [{ Plan: { "Node Type": "Seq Scan" } }],
+      truncated: true,
+      warnings: ["plan_truncated"],
+    });
+    const bridge = new PluginHostBridge(plugin(["host.plans:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getPlanCapabilities,
+      explainPlan,
+    });
+
+    planCall(bridge, target, "host.getPlanCapabilities", { connectionId: "  c1  " }, "caps");
+    planCall(bridge, target, "host.explainPlan", { connectionId: "c1", database: "app", schema: "  ", sql: "  SELECT * FROM orders  ", mode: "estimated", timeoutMs: 1_500.4 }, "plan");
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+
+    expect(getPlanCapabilities).toHaveBeenCalledWith("c1");
+    // The plugin never sends EXPLAIN text: the host receives the source SQL,
+    // trimmed, with blank scopes dropped rather than forwarded as empty strings.
+    expect(explainPlan).toHaveBeenCalledWith({ connectionId: "c1", database: "app", sql: "SELECT * FROM orders", mode: "estimated", timeoutMs: 1_500 });
+    expect(messages[0]).toMatchObject({ id: "caps", result: planCapabilities });
+    expect(messages[1]).toMatchObject({
+      id: "plan",
+      result: { dbType: "postgres", format: "json", truncated: true, warnings: ["plan_truncated"] },
+    });
+  });
+
+  it("refuses every plan mode other than estimated", async () => {
+    const { messages, target, explainPlan } = planHost();
+    const bridge = new PluginHostBridge(plugin(["host.plans:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      explainPlan,
+    });
+
+    // Actual plans execute the statement, so an unexpected mode is refused
+    // rather than silently downgraded to an estimated one.
+    for (const [id, mode] of [
+      ["actual", "actual"],
+      ["analyze", "analyze"],
+      ["case", "Estimated"],
+      ["missing", undefined],
+    ] as const) {
+      planCall(bridge, target, "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode }, id);
+    }
+    await vi.waitFor(() => expect(messages).toHaveLength(4));
+
+    for (const message of messages) {
+      expect(message).toMatchObject({ error: 'host.explainPlan serves mode "estimated" only' });
+    }
+    expect(explainPlan).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed plan requests before they reach the host", async () => {
+    const { messages, target, getPlanCapabilities, explainPlan } = planHost();
+    const bridge = new PluginHostBridge(plugin(["host.plans:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getPlanCapabilities,
+      explainPlan,
+    });
+
+    const cases: [string, string, unknown, string][] = [
+      ["caps-missing", "host.getPlanCapabilities", {}, "connectionId"],
+      ["caps-blank", "host.getPlanCapabilities", { connectionId: "   " }, "connectionId"],
+      ["caps-type", "host.getPlanCapabilities", { connectionId: 7 }, "connectionId"],
+      ["caps-long", "host.getPlanCapabilities", { connectionId: "c".repeat(257) }, "connectionId"],
+      ["sql-missing", "host.explainPlan", { connectionId: "c1", mode: "estimated" }, "sql"],
+      ["sql-blank", "host.explainPlan", { connectionId: "c1", sql: "  \n ", mode: "estimated" }, "sql"],
+      ["sql-long", "host.explainPlan", { connectionId: "c1", sql: "x".repeat(200_001), mode: "estimated" }, "sql"],
+      ["scope-type", "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated", database: 1 }, "database"],
+      ["timeout-type", "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated", timeoutMs: "soon" }, "timeoutMs"],
+      ["timeout-nan", "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated", timeoutMs: Number.NaN }, "timeoutMs"],
+    ];
+    for (const [id, method, params] of cases) planCall(bridge, target, method, params, id);
+    planCall(bridge, target, "host.explainPlan", "not an object", "params-object");
+    await vi.waitFor(() => expect(messages).toHaveLength(cases.length + 1));
+
+    cases.forEach(([id, , , expected], index) => {
+      expect(messages[index]).toMatchObject({ id });
+      expect((messages[index] as { error?: string }).error).toContain(expected);
+    });
+    expect(messages[cases.length]).toMatchObject({ id: "params-object", error: "host.explainPlan params must be an object" });
+    expect(getPlanCapabilities).not.toHaveBeenCalled();
+    expect(explainPlan).not.toHaveBeenCalled();
+  });
+
+  it("clamps the requested plan timeout to the host ceiling", async () => {
+    const { messages, target, explainPlan } = planHost();
+    const bridge = new PluginHostBridge(plugin(["host.plans:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      explainPlan,
+    });
+
+    planCall(bridge, target, "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated", timeoutMs: 10 * 60_000 }, "huge");
+    planCall(bridge, target, "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated", timeoutMs: -5 }, "tiny");
+    planCall(bridge, target, "host.explainPlan", { connectionId: "c1", sql: "SELECT 1", mode: "estimated" }, "absent");
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+
+    expect(explainPlan.mock.calls[0][0].timeoutMs).toBe(60_000);
+    expect(explainPlan.mock.calls[1][0].timeoutMs).toBe(1);
+    // No timeout is a host decision; the bridge must not invent one.
+    expect(explainPlan.mock.calls[2][0]).not.toHaveProperty("timeoutMs");
+  });
+
+  it("advertises the plan API only when the host can serve it", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const base = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() };
+
+    const capable = new PluginHostBridge(plugin(["host.plans:read"]), workbench, {}, () => target, {
+      ...base,
+      getPlanCapabilities: vi.fn().mockResolvedValue(planCapabilities),
+      explainPlan: vi.fn().mockResolvedValue({ dbType: "postgres", format: "json", rawPlan: {}, truncated: false, warnings: [] }),
+    });
+    capable.sendInit();
+    expect(messages[0].capabilities).toMatchObject({ planApi: true });
+
+    // An older host omits the adapters: the plugin must see planApi false and
+    // get an explicit failure instead of a silent no-op.
+    const legacy = new PluginHostBridge(plugin(["host.plans:read"]), workbench, {}, () => target, { ...base });
+    legacy.sendInit();
+    expect(messages[1].capabilities).toMatchObject({ planApi: false });
+    planCall(legacy, target, "host.getPlanCapabilities", { connectionId: "c1" }, "legacy");
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+    expect(messages[2]).toMatchObject({ id: "legacy", error: "Host plan API is unavailable" });
+  });
+
   it("opens only the owning plugin filesystem with explicit permission", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -684,7 +883,11 @@ describe("PluginHostBridge", () => {
 
 describe("plugin SDK source", () => {
   interface SdkWindow {
-    dbxPlugin?: { invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown> };
+    dbxPlugin?: {
+      invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
+      getPlanCapabilities: (connectionId: string) => Promise<unknown>;
+      explainPlan: (request: unknown) => Promise<unknown>;
+    };
   }
 
   function loadSdk(posted: unknown[], initialTheme?: { appearance: "dark" | "light"; tokens: Record<string, string> }): SdkWindow {
@@ -751,5 +954,23 @@ describe("plugin SDK source", () => {
     expect(params.count).toBe(3);
     expect(params.stamp).toBeInstanceOf(Date);
     expect(params.nested).toBeInstanceOf(Map);
+  });
+
+  it("exposes the plan Host API to plugin UI without defaulting the mode", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+
+    void dbxPlugin!.getPlanCapabilities("c1");
+    void dbxPlugin!.explainPlan({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
+    const requests = posted.filter((message) => (message as { type: string }).type === "request") as {
+      method: string;
+      params: Record<string, unknown>;
+    }[];
+
+    expect(requests.map((request) => request.method)).toEqual(["host.getPlanCapabilities", "host.explainPlan"]);
+    expect(requests[0].params).toEqual({ connectionId: "c1" });
+    // The SDK forwards the mode verbatim: defaulting it would let a plugin reach
+    // a plan mode it never asked for.
+    expect(requests[1].params).toEqual({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
   });
 });

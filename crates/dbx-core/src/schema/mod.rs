@@ -3210,6 +3210,7 @@ mod tests {
             rows,
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4078,6 +4079,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4105,6 +4107,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4129,6 +4132,7 @@ done
             rows: vec![vec![serde_json::json!("users"), serde_json::json!("CREATE TABLE `users` (`id` bigint);\n")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4157,6 +4161,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4184,6 +4189,7 @@ done
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5154,6 +5160,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5202,6 +5209,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5385,6 +5393,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!("Customer table")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5403,6 +5412,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!("  ")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5439,6 +5449,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5633,6 +5644,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5738,6 +5750,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11807,6 +11820,41 @@ mod ddl_tests {
     }
 
     #[test]
+    fn sqlserver_table_ddl_groups_composite_foreign_key_columns() {
+        let fk = |name: &str, column: &str, ref_table: &str, ref_column: &str| db::ForeignKeyInfo {
+            name: name.to_string(),
+            column: column.to_string(),
+            ref_schema: Some("dbo".to_string()),
+            ref_table: ref_table.to_string(),
+            ref_column: ref_column.to_string(),
+            on_update: None,
+            on_delete: None,
+        };
+        let fkeys = [
+            fk("FK_TRIGGERS_JOB", "sched_name", "JOB_DETAILS", "sched_name"),
+            fk("FK_TRIGGERS_JOB", "job_name", "JOB_DETAILS", "job_name"),
+            fk("FK_TRIGGERS_JOB", "job_group", "JOB_DETAILS", "job_group"),
+            fk("FK_TRIGGERS_CAL", "calendar_name", "CALENDARS", "calendar_name"),
+        ];
+
+        let ddl = render_sqlserver_table_ddl("dbo", "TRIGGERS", &[column("sched_name", "nvarchar")], &[], &fkeys, None);
+
+        assert!(
+            ddl.contains(
+                "CONSTRAINT [FK_TRIGGERS_JOB] FOREIGN KEY ([sched_name], [job_name], [job_group]) REFERENCES [JOB_DETAILS]([sched_name], [job_name], [job_group])"
+            ),
+            "ddl: {ddl}"
+        );
+        assert_eq!(ddl.matches("CONSTRAINT [FK_TRIGGERS_JOB]").count(), 1, "ddl: {ddl}");
+        assert!(
+            ddl.contains(
+                "CONSTRAINT [FK_TRIGGERS_CAL] FOREIGN KEY ([calendar_name]) REFERENCES [CALENDARS]([calendar_name])"
+            ),
+            "ddl: {ddl}"
+        );
+    }
+
+    #[test]
     fn opengauss_table_ddl_uses_native_tabledef_function() {
         assert_eq!(
             opengauss_table_ddl_sql("tenant's schema", "active users"),
@@ -13485,13 +13533,18 @@ pub fn render_sqlserver_table_ddl(
             pks.iter().map(|k| sqlserver_ident(k)).collect::<Vec<_>>().join(", ")
         ));
     }
-    for fk in fkeys {
+    for fk_group in group_foreign_keys_by_name(fkeys) {
+        let Some(first_fk) = fk_group.first() else {
+            continue;
+        };
+        let columns = fk_group.iter().map(|fk| sqlserver_ident(&fk.column)).collect::<Vec<_>>().join(", ");
+        let ref_columns = fk_group.iter().map(|fk| sqlserver_ident(&fk.ref_column)).collect::<Vec<_>>().join(", ");
         ddl.push_str(&format!(
             ",\n  CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
-            sqlserver_ident(&fk.name),
-            sqlserver_ident(&fk.column),
-            sqlserver_ident(&fk.ref_table),
-            sqlserver_ident(&fk.ref_column)
+            sqlserver_ident(&first_fk.name),
+            columns,
+            sqlserver_ident(&first_fk.ref_table),
+            ref_columns
         ));
     }
     ddl.push_str("\n);\n");

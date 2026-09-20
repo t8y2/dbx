@@ -8,6 +8,8 @@ const driverStoreSource = readFileSync(new URL("../../../components/config/Drive
 const appDialogsSource = readFileSync(new URL("../../../components/layout/AppDialogs.vue", import.meta.url), "utf8");
 const connectionDialogSource = readFileSync(new URL("../../../components/connection/ConnectionDialog.vue", import.meta.url), "utf8");
 const pluginCenterSource = readFileSync(new URL("../../../components/plugins/PluginContributionsPanel.vue", import.meta.url), "utf8");
+const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
+const connectionStoreSource = readFileSync(new URL("../../../stores/connectionStore.ts", import.meta.url), "utf8");
 
 describe("plugin center integration", () => {
   it("opens from the top toolbar as an independent app surface", () => {
@@ -41,6 +43,15 @@ describe("plugin center integration", () => {
     expect(pluginCenterSource).toContain("COMPONENT_PLUGINS_UPDATED_EVENT");
     expect(pluginCenterSource).toContain("window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated)");
     expect(pluginCenterSource).toContain("installedPlugins.value = await api.listPlugins()");
+  });
+
+  it("refreshes global component update state after manual management-surface changes", () => {
+    expect(appSource).toContain("COMPONENT_UPDATES_CHANGED_EVENT");
+    expect(appSource).toContain("window.addEventListener(COMPONENT_UPDATES_CHANGED_EVENT, handleComponentUpdatesChanged)");
+    expect(appSource).toContain("componentUpdates.refresh({ force: true })");
+    for (const source of [pluginCenterSource, driverStoreSource, settingsDialogSource, connectionDialogSource, connectionStoreSource]) {
+      expect(source).toContain("notifyComponentUpdatesChanged()");
+    }
   });
 
   it("formats structured backend errors for local and URL package installs", () => {

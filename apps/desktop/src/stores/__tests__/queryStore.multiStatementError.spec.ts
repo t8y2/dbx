@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { isActiveResultLoading } from "@/lib/sql/queryExecutionState";
 import { BackendErrorException } from "@/lib/backend/errorUtils";
+import type { QueryResult } from "@/types/database";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -155,6 +156,35 @@ describe("queryStore multi-statement errors", () => {
       });
       return results;
     });
+  });
+
+  it.each(["oceanbase-oracle", "mysql"] as const)("measures complete result wait only for a single %s query result", async (databaseType) => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "timing-1",
+      name: "Timing",
+      db_type: databaseType,
+      database: "APP",
+      query_timeout_secs: 30,
+    });
+    let clock = 100;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const pending = deferred<QueryResult[]>();
+    mocks.executeMulti.mockReturnValue(pending.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("timing-1", "APP", "Query", "query", "APP");
+    try {
+      const execution = store.executeTabSql(tabId, "SELECT VALUE FROM T");
+      await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(1));
+      clock = 145;
+      pending.resolve([{ columns: ["VALUE"], rows: [[1]], affected_rows: 0, execution_time_ms: 12 }]);
+      await execution;
+      const result = store.tabs.find((item) => item.id === tabId)?.result;
+      expect(result?.execution_time_ms).toBe(12);
+      expect(result?.client_request_wait_ms).toBe(databaseType === "oceanbase-oracle" ? 45 : undefined);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("opens the first error result from a mixed result batch", async () => {

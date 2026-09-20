@@ -50,7 +50,6 @@ import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editab
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
-import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, updateCachedTableMetadataType, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
@@ -312,6 +311,10 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     mongo_documents: appendParallelValues(previous.mongo_documents, segment.mongo_documents),
     mongo_copy_documents: appendParallelValues(previous.mongo_copy_documents, segment.mongo_copy_documents),
     execution_time_ms: (previous.execution_time_ms ?? 0) + (segment.execution_time_ms ?? 0),
+    // A JDBC cursor's terminal page audits the entire original statement.
+    // Independent page SQLs need every page sampled before a total is shown.
+    server_execute_time_us: previous.session_id ? segment.server_execute_time_us : previous.server_execute_time_us !== undefined && segment.server_execute_time_us !== undefined ? previous.server_execute_time_us + segment.server_execute_time_us : undefined,
+    client_request_wait_ms: previous.client_request_wait_ms !== undefined && segment.client_request_wait_ms !== undefined ? previous.client_request_wait_ms + segment.client_request_wait_ms : undefined,
     has_more: previous.rows.length + appendedRowCount >= maxRows ? false : segment.has_more,
   });
 }
@@ -1434,10 +1437,8 @@ export const useQueryStore = defineStore("query", () => {
     const transferredResultSessionId = worker?.resultSessionId && tabs.value.some((tab) => tab.resultRuns?.some((run) => run.resultSessionId === worker.resultSessionId)) ? worker.resultSessionId : undefined;
     await closeResultSession(worker, transferredResultSessionId);
     if (transferredResultSessionId && worker) {
-      const connection = useConnectionStore().getConfig(worker.connectionId);
-      const executionDatabase = dataTabExecutionDatabase(connection, worker.database, worker.catalog);
       for (const suffix of BACKGROUND_CLIENT_SESSION_SUFFIXES) {
-        await closeClientSessionId(worker.connectionId, executionDatabase, tabClientSessionId(worker, suffix), worker.catalog, { tabId: worker.id });
+        await closeClientSessionId(worker.connectionId, worker.database, tabClientSessionId(worker, suffix), worker.catalog, { tabId: worker.id });
       }
     } else {
       await closeClientConnectionSession(worker);
@@ -1483,12 +1484,10 @@ export const useQueryStore = defineStore("query", () => {
     const resultClientSessionId = tab.resultClientSessionId;
     const catalog = tab.mode === "data" ? tab.tableMeta?.catalog : tab.catalog;
     const location = tab.mode === "query" ? queryResultExecutionLocation(tab) : { connectionId: tab.connectionId, database: tab.database, catalog };
-    const connection = location.catalog ? useConnectionStore().getConfig(location.connectionId) : undefined;
-    const executionDatabase = dataTabExecutionDatabase(connection, location.database, location.catalog);
     try {
       const clientSessionId = tab.resultClientSessionId ?? tab.id;
-      if (location.catalog) await api.closeQuerySession(location.connectionId, executionDatabase, sessionId, clientSessionId, location.catalog);
-      else await api.closeQuerySession(location.connectionId, executionDatabase, sessionId, clientSessionId);
+      if (location.catalog) await api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId, location.catalog);
+      else await api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId);
     } catch (error) {
       console.warn("[DBX][query-session:close:error]", { tabId: tab.id, sessionId, error });
       if (throwOnError) throw error;
@@ -1501,7 +1500,7 @@ export const useQueryStore = defineStore("query", () => {
         invalidateResultEstimateForPayload(tab.result);
       }
       if (resultClientSessionId && resultClientSessionId !== tab.id) {
-        await closeClientSessionId(location.connectionId, executionDatabase, resultClientSessionId, location.catalog, { tabId: tab.id }, throwOnError);
+        await closeClientSessionId(location.connectionId, location.database, resultClientSessionId, location.catalog, { tabId: tab.id }, throwOnError);
       }
     }
   }
@@ -1519,11 +1518,9 @@ export const useQueryStore = defineStore("query", () => {
   async function closeClientConnectionSession(tab: QueryTab | undefined, throwOnError = false) {
     if (!tab?.connectionId) return;
     const catalog = tab.mode === "data" ? tab.tableMeta?.catalog : tab.catalog;
-    const connection = catalog ? useConnectionStore().getConfig(tab.connectionId) : undefined;
-    const executionDatabase = dataTabExecutionDatabase(connection, tab.database, catalog);
     const clientSessionIds = [...new Set([tabClientSessionId(tab), ...BACKGROUND_CLIENT_SESSION_SUFFIXES.map((suffix) => tabClientSessionId(tab, suffix)), tab.explainClientSessionId].filter((sessionId): sessionId is string => !!sessionId))];
     for (const clientSessionId of clientSessionIds) {
-      await closeClientSessionId(tab.connectionId, executionDatabase, clientSessionId, catalog, { tabId: tab.id }, throwOnError);
+      await closeClientSessionId(tab.connectionId, tab.database, clientSessionId, catalog, { tabId: tab.id }, throwOnError);
     }
   }
 
@@ -6433,6 +6430,7 @@ export const useQueryStore = defineStore("query", () => {
     let useAgentResultSession = false;
     let paginationRowNumberColumn: string | undefined;
     let executionDispatched = false;
+    let clientRequestStartedAt: number | undefined;
     let producedResult = false;
     const resumedExecutionTarget = batchResume?.batch.executionTarget;
     const executionConnectionId = resumedExecutionTarget?.connectionId ?? options?.executionTarget?.connectionId ?? tab.connectionId;
@@ -6483,7 +6481,7 @@ export const useQueryStore = defineStore("query", () => {
         await connStore.ensureDatabaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database);
       }
       const targetSchema = resumedExecutionTarget ? resumedExecutionTarget.schema : targetContext?.scope === "connection" ? undefined : (databaseTargetContext?.schema ?? executionTarget?.schema ?? tab.schema);
-      const executionDatabase = dataTabExecutionDatabase(conn, targetDatabase, executionCatalog);
+      const executionDatabase = targetDatabase;
       const sqlStatementParameterOptions = sqlStatementParameterOptionsForCompatibility(effectiveDbType, effectiveDbType === "opengauss" ? connStore.databaseCompatibilityMode(executionConnectionId, targetDatabase || conn?.database) : undefined);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type, conn?.driver_profile);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
@@ -7266,6 +7264,7 @@ export const useQueryStore = defineStore("query", () => {
           clientSession: Boolean(executionClientSessionId),
         });
         executionDispatched = true;
+        if (effectiveDbType === "oceanbase-oracle" && tab.mode === "query") clientRequestStartedAt = performance.now();
         if (useAgentResultSession && tab.mode === "query" && typeof pageOffset === "number" && pageOffset > 0 && !options?.pagination?.sessionId && !(tab.batchSqlExecution && tab.batchSqlExecution.total > 1)) {
           return (async () => {
             let sessionId: string | undefined;
@@ -7338,6 +7337,7 @@ export const useQueryStore = defineStore("query", () => {
         } else {
           queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
           executionDispatched = true;
+          if (effectiveDbType === "oceanbase-oracle" && tab.mode === "query") clientRequestStartedAt = performance.now();
           // Only an initial manual execution classifies the user SQL (sticky
           // proven-read-only dialects). A later cursor-page fetch must neither
           // set nor clear the sticky bit.
@@ -7386,6 +7386,11 @@ export const useQueryStore = defineStore("query", () => {
         void api.cancelQuery(executionId).catch((error) => queryExecutionLog("warn", "frontend-timeout:cancel-failed", { traceId, error }));
       });
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
+      // A single result has an unambiguous request boundary. This includes fetch and
+      // transport, but excludes SQL preparation and the grid's later render work.
+      if (clientRequestStartedAt !== undefined && responseResults.length === 1 && !responseResults[0]?.execution_error) {
+        responseResults[0]!.client_request_wait_ms = Math.max(0, Math.round(performance.now() - clientRequestStartedAt));
+      }
       const annotatedResults = annotateQueryResultSources(markQueryResultsRowsRaw(responseResults), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset, sqlStatementParameterOptions, sqlToExecute, options?.sourceOffset === undefined ? undefined : tab.sql);
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);
       if (paginationRowNumberColumn && results.length === 1) {
@@ -8222,7 +8227,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode === "query" && sourceStatement && splitMongoCommandRanges(sourceStatement).length === 0) {
       const metadataStartedAt = performance.now();
       const connection = useConnectionStore().getConfig(tab.connectionId);
-      const executionDatabase = dataTabExecutionDatabase(connection, tab.database, tab.catalog);
+      const executionDatabase = tab.database;
       analyzeQueryMetadataInBackground(id, sourceStatement, tab.result, executionDatabase, uuid().slice(0, 8), () => `${Math.round(performance.now() - metadataStartedAt)}ms`, effectiveDatabaseTypeForConnection(connection), [], connection);
     }
   }
@@ -8483,7 +8488,7 @@ export const useQueryStore = defineStore("query", () => {
       const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
-      const executionDatabase = dataTabExecutionDatabase(conn, tab.database, tableMeta.catalog);
+      const executionDatabase = tab.database;
       const rows: QueryResult["rows"] = [];
       let columns: string[] = [];
       let executionTimeMs = 0;
@@ -8572,7 +8577,7 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(location.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const executableSql = effectiveDbType === "mysql" ? stripMysqlClientDisplayCommand(sql) : sql;
-    const executionDatabase = dataTabExecutionDatabase(conn, location.database, location.catalog);
+    const executionDatabase = location.database;
     // main 引入全局查询超时：queryTimeoutSecsForConnection 现需传入全局默认值；
     // settingsStore 取 defineStore 顶层声明的实例（本函数无局部覆盖）。
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
@@ -8698,8 +8703,8 @@ export const useQueryStore = defineStore("query", () => {
         offset += result.rows.length;
       }
     } finally {
-      if (sessionId) void api.closeQuerySession(location.connectionId, executionDatabase, sessionId, clientSessionId, location.catalog);
-      void closeClientSessionId(location.connectionId, executionDatabase, clientSessionId, location.catalog, { tabId: tab.id });
+      if (sessionId) void api.closeQuerySession(location.connectionId, location.database, sessionId, clientSessionId, location.catalog);
+      void closeClientSessionId(location.connectionId, location.database, clientSessionId, location.catalog, { tabId: tab.id });
     }
 
     return {
@@ -8741,7 +8746,7 @@ export const useQueryStore = defineStore("query", () => {
     return {
       exportId: options.exportId,
       connectionId: location.connectionId,
-      database: dataTabExecutionDatabase(conn, location.database, location.catalog),
+      database: location.database,
       schema: location.schema,
       catalog: location.catalog,
       sql: executableSql,

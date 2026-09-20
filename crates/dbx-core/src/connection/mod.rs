@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
@@ -337,12 +338,36 @@ macro_rules! agent_connection_pool_database_type {
     };
 }
 
+#[derive(Clone)]
+pub struct ConnectionLifecycleSnapshot {
+    generation: u64,
+    cancellation: CancellationToken,
+}
+
+impl ConnectionLifecycleSnapshot {
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+}
+
+struct ConnectionLifecycle {
+    generation: u64,
+    cancellation: CancellationToken,
+}
+
+struct SharedResourceBudget {
+    capacity: usize,
+    semaphore: Arc<Semaphore>,
+}
+
 pub struct AppState {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     task_supervisor: TaskSupervisor,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     draining_pools: Arc<std::sync::Mutex<HashMap<String, watch::Sender<bool>>>>,
     connection_attempts: RwLock<HashMap<String, ConnectionAttemptState>>,
+    connection_lifecycles: std::sync::Mutex<HashMap<String, ConnectionLifecycle>>,
+    shared_resource_budgets: std::sync::Mutex<HashMap<String, SharedResourceBudget>>,
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub tunnels: TunnelManager,
@@ -1244,6 +1269,68 @@ fn mysql_metadata_fallback_url(
 }
 
 impl AppState {
+    pub fn shared_resource_budget(&self, name: &str, capacity: usize) -> Result<Arc<Semaphore>, String> {
+        if capacity == 0 {
+            return Err("Shared resource budget capacity must be greater than zero".to_string());
+        }
+        let mut budgets = self.shared_resource_budgets.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(budget) = budgets.get(name) {
+            if budget.capacity != capacity {
+                return Err(format!(
+                    "Shared resource budget {name:?} already has capacity {}, not {capacity}",
+                    budget.capacity
+                ));
+            }
+            return Ok(budget.semaphore.clone());
+        }
+        let semaphore = Arc::new(Semaphore::new(capacity));
+        budgets.insert(name.to_string(), SharedResourceBudget { capacity, semaphore: semaphore.clone() });
+        Ok(semaphore)
+    }
+
+    pub fn connection_lifecycle_snapshot(&self, connection_id: &str) -> ConnectionLifecycleSnapshot {
+        let mut lifecycles = self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner());
+        let lifecycle = lifecycles
+            .entry(connection_id.to_string())
+            .or_insert_with(|| ConnectionLifecycle { generation: 0, cancellation: CancellationToken::new() });
+        ConnectionLifecycleSnapshot { generation: lifecycle.generation, cancellation: lifecycle.cancellation.clone() }
+    }
+
+    pub fn connection_lifecycle_is_current(&self, connection_id: &str, snapshot: &ConnectionLifecycleSnapshot) -> bool {
+        self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner()).get(connection_id).is_some_and(
+            |lifecycle| lifecycle.generation == snapshot.generation && !snapshot.cancellation.is_cancelled(),
+        )
+    }
+
+    pub fn invalidate_connection_lifecycle(&self, connection_id: &str) {
+        let previous = {
+            let mut lifecycles = self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner());
+            let lifecycle = lifecycles
+                .entry(connection_id.to_string())
+                .or_insert_with(|| ConnectionLifecycle { generation: 0, cancellation: CancellationToken::new() });
+            let previous = std::mem::replace(&mut lifecycle.cancellation, CancellationToken::new());
+            lifecycle.generation = lifecycle.generation.wrapping_add(1);
+            previous
+        };
+        previous.cancel();
+    }
+
+    fn invalidate_all_connection_lifecycles(&self) {
+        let previous = {
+            let mut lifecycles = self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner());
+            lifecycles
+                .values_mut()
+                .map(|lifecycle| {
+                    lifecycle.generation = lifecycle.generation.wrapping_add(1);
+                    std::mem::replace(&mut lifecycle.cancellation, CancellationToken::new())
+                })
+                .collect::<Vec<_>>()
+        };
+        for cancellation in previous {
+            cancellation.cancel();
+        }
+    }
+
     /// Return an owned pool handle. The registry read lock is released before
     /// the caller can perform any asynchronous database operation.
     pub async fn pool_handle(&self, pool_key: &str) -> Option<PoolKind> {
@@ -1275,6 +1362,25 @@ impl AppState {
     pub async fn with_connection_pools<R>(&self, inspect: impl FnOnce(&HashMap<String, PoolKind>) -> R) -> R {
         let connections = self.connections.read().await;
         inspect(&connections.pools)
+    }
+
+    /// Whether DBX currently holds a pool for `connection_id`, i.e. the
+    /// connection is open right now.
+    ///
+    /// A saved config proves nothing on its own: a disconnected connection keeps
+    /// its config while every one of its pools has been drained. The registry is
+    /// the only state that answers "is this connection open", so callers that
+    /// must not connect on a user's behalf gate on this instead of on
+    /// [`Self::configs`].
+    ///
+    /// Deliberately a pure registry read: it never calls
+    /// `get_or_create_pool`, so checking the state cannot itself open the
+    /// connection. Ownership uses the same key convention as
+    /// `drain_connection_pools` — the connection id, optionally followed by `:`
+    /// and the database/catalog/role/session suffix that `base_pool_key_for` and
+    /// its session-scoped variant build.
+    pub async fn is_connection_open(&self, connection_id: &str) -> bool {
+        self.connections.read().await.keys().any(|key| pool_key_belongs_to_connection(key, connection_id))
     }
 
     /// Mutate the registry atomically. The callback is deliberately
@@ -1398,6 +1504,8 @@ impl AppState {
             pool_activity: Arc::new(RwLock::new(HashMap::new())),
             draining_pools: Arc::new(std::sync::Mutex::new(HashMap::new())),
             connection_attempts: RwLock::new(HashMap::new()),
+            connection_lifecycles: std::sync::Mutex::new(HashMap::new()),
+            shared_resource_budgets: std::sync::Mutex::new(HashMap::new()),
             configs: RwLock::new(HashMap::new()),
             running_queries: RunningQueries::default(),
             tunnels: TunnelManager::new(data_dir),
@@ -2064,6 +2172,7 @@ impl AppState {
     }
 
     pub async fn shutdown(&self, deadline: Duration) {
+        self.invalidate_all_connection_lifecycles();
         self.running_queries.cancel_all();
         let removed_pools = self.drain_all_connection_pools().await;
         self.transaction_sessions.write().await.clear();
@@ -5251,6 +5360,7 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
+        self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
@@ -5266,6 +5376,7 @@ impl AppState {
     /// user disconnect still goes through remove_connection_pools* and does
     /// send connection/disconnect.
     pub async fn drop_connection_pools_without_close(&self, connection_id: &str) {
+        self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
@@ -5273,6 +5384,7 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
+        self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
@@ -5896,15 +6008,24 @@ fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
     pool_key.contains(":session:manual-txn-")
 }
 
+/// Whether `pool_key` names a pool owned by `connection_id`.
+///
+/// Every pool key starts with its connection id and appends `:` plus the
+/// database, catalog, role, or session suffix, so the separator is what keeps
+/// `conn` from matching a `conn-2` pool. Used by
+/// [`AppState::is_connection_open`] and [`config_for_pool_key`];
+/// `drain_connection_pools` filters on the same convention.
+fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
+    pool_key.strip_prefix(connection_id).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+}
+
 pub(crate) fn config_for_pool_key<'a>(
     pool_key: &str,
     configs: &'a HashMap<String, ConnectionConfig>,
 ) -> Option<&'a ConnectionConfig> {
     configs
         .iter()
-        .filter(|(connection_id, _)| {
-            pool_key.strip_prefix(connection_id.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
-        })
+        .filter(|(connection_id, _)| pool_key_belongs_to_connection(pool_key, connection_id))
         .max_by_key(|(connection_id, _)| connection_id.len())
         .map(|(_, config)| config)
 }
@@ -6974,6 +7095,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("M")]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -7385,6 +7507,64 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
+    }
+
+    #[tokio::test]
+    async fn connection_lifecycle_invalidation_rotates_generation_and_cancels_previous_snapshot() {
+        let (state, dir) = test_app_state().await;
+        let first = state.connection_lifecycle_snapshot("conn");
+        assert!(state.connection_lifecycle_is_current("conn", &first));
+
+        state.invalidate_connection_lifecycle("conn");
+
+        tokio::time::timeout(Duration::from_millis(100), first.cancellation().cancelled())
+            .await
+            .expect("previous lifecycle must be cancelled");
+        assert!(!state.connection_lifecycle_is_current("conn", &first));
+        let second = state.connection_lifecycle_snapshot("conn");
+        assert!(state.connection_lifecycle_is_current("conn", &second));
+        assert!(!second.cancellation().is_cancelled());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn every_connection_pool_removal_boundary_invalidates_lifecycle_snapshots() {
+        let (state, dir) = test_app_state().await;
+
+        let removed = state.connection_lifecycle_snapshot("removed");
+        state.remove_connection_pools("removed").await;
+        assert!(removed.cancellation().is_cancelled());
+
+        let dropped = state.connection_lifecycle_snapshot("dropped");
+        state.drop_connection_pools_without_close("dropped").await;
+        assert!(dropped.cancellation().is_cancelled());
+
+        let detached = state.connection_lifecycle_snapshot("detached");
+        state.remove_connection_pools_detached("detached").await;
+        assert!(detached.cancellation().is_cancelled());
+
+        let shutdown = state.connection_lifecycle_snapshot("shutdown");
+        state.shutdown(Duration::from_millis(100)).await;
+        assert!(shutdown.cancellation().is_cancelled());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn named_resource_budget_is_shared_across_app_state_views() {
+        let (state, dir) = test_app_state().await;
+        let first = state.shared_resource_budget("fixed-owner", 2).unwrap();
+        let second = state.shared_resource_budget("fixed-owner", 2).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let first_permit = first.clone().try_acquire_owned().unwrap();
+        let second_permit = second.clone().try_acquire_owned().unwrap();
+        assert!(first.clone().try_acquire_owned().is_err());
+        drop(first_permit);
+        assert!(second.clone().try_acquire_owned().is_ok());
+        drop(second_permit);
+
+        assert!(state.shared_resource_budget("fixed-owner", 3).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn agent_pool_stub() -> PoolKind {
@@ -8649,6 +8829,41 @@ mod tests {
         assert!(!conns.contains_key("conn:session:tab-1"));
         assert!(!conns.contains_key("conn:analytics:session:tab-1"));
         assert!(conns.contains_key("other"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The plan Host API gates on this, so it has to be exactly "DBX holds a pool
+    /// for this connection": no pool means closed, and the read must not create
+    /// the pool it is checking for.
+    #[tokio::test]
+    async fn connection_is_open_only_while_one_of_its_pools_exists() {
+        let (state, dir) = test_app_state().await;
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+
+        assert!(!state.is_connection_open("conn").await);
+        assert!(state.with_connection_pools(|pools| pools.is_empty()).await, "the check must not create a pool");
+
+        for pool_key in ["conn", "conn:analytics", "conn:analytics:catalog:app", "conn:analytics:session:tab-1"] {
+            state.update_connection_pools(|connections| connections.clear()).await;
+            state
+                .update_connection_pools(|connections| {
+                    connections.insert(pool_key.to_string(), PoolKind::Sqlite(pool.clone()))
+                })
+                .await;
+            assert!(state.is_connection_open("conn").await, "{pool_key} belongs to conn");
+        }
+
+        // A sibling id that merely starts with the same characters is another
+        // connection, and draining one must not report the other as open.
+        state.update_connection_pools(|connections| connections.clear()).await;
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("conn-2:analytics".to_string(), PoolKind::Sqlite(pool))
+            })
+            .await;
+        assert!(!state.is_connection_open("conn").await);
+        assert!(state.is_connection_open("conn-2").await);
 
         let _ = std::fs::remove_dir_all(dir);
     }

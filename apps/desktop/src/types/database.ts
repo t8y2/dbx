@@ -1136,6 +1136,10 @@ export interface QueryResult {
   mongo_copy_documents?: unknown[];
   affected_rows: number;
   execution_time_ms: number;
+  /** OceanBase SQL Audit EXECUTE_TIME for a completed statement, in microseconds. */
+  server_execute_time_us?: number;
+  /** Desktop wait from query request dispatch to the complete result payload; summed across appended pages. OceanBase Oracle query tabs only. */
+  client_request_wait_ms?: number;
   /** Whether a backend-reported result total is exact. */
   total_is_exact?: boolean;
   truncated?: boolean;

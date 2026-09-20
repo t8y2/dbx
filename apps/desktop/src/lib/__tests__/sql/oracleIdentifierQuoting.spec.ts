@@ -70,3 +70,23 @@ describe("oracle completion apply identifiers", () => {
     expect(routine?.apply).toBe('"GetBom"()');
   });
 });
+
+describe("oracle completion with identifier quoting disabled (#9735)", () => {
+  const sql = "SELECT t.c FROM abc t";
+  const cursor = "SELECT t.c".length;
+  const input = {
+    databaseType: "oracle" as const,
+    tables: [{ name: "abc", type: "table" as const }],
+    columnsByTable: new Map([["abc", [{ name: "col1", table: "abc" }]]]),
+  };
+  const applyOf = (extra: { quoteIdentifiers?: boolean }) => buildSqlCompletionItems(sql, cursor, { ...input, ...extra }).find((item) => item.label === "col1")?.apply;
+
+  it("keeps lowercase columns bare when quoting is disabled", () => {
+    expect(applyOf({ quoteIdentifiers: false })).toBe("col1");
+  });
+
+  it("still quotes lowercase columns by default and when quoting is enabled", () => {
+    expect(applyOf({})).toBe('"col1"');
+    expect(applyOf({ quoteIdentifiers: true })).toBe('"col1"');
+  });
+});

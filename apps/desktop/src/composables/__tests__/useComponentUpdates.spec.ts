@@ -87,6 +87,26 @@ describe("useComponentUpdates", () => {
     expect(updates.totalUpdateCount.value).toBe(4);
   });
 
+  it("forces a fresh snapshot when a management surface changes during an in-flight refresh", async () => {
+    const firstAgents = deferred<Array<{ db_type: string; update_available: boolean }>>();
+    const secondAgents = deferred<Array<{ db_type: string; update_available: boolean }>>();
+    mocks.listInstalledAgents.mockReturnValueOnce(firstAgents.promise).mockReturnValueOnce(secondAgents.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const initialRefresh = updates.refresh();
+    await Promise.resolve();
+    const forcedRefresh = updates.refresh({ force: true });
+    await Promise.resolve();
+
+    secondAgents.resolve([{ db_type: "mysql", update_available: false }]);
+    expect(await forcedRefresh).toBe(true);
+    firstAgents.resolve([{ db_type: "mysql", update_available: true }]);
+    expect(await initialRefresh).toBe(false);
+
+    expect(mocks.listInstalledAgents).toHaveBeenCalledTimes(2);
+    expect(updates.driverUpdateCount.value).toBe(0);
+  });
+
   it("clears driver and MCP update state after a successful update and refresh", async () => {
     mocks.listInstalledAgents.mockResolvedValueOnce([{ db_type: "mysql", update_available: true }]).mockResolvedValueOnce([{ db_type: "mysql", update_available: false }]);
     mocks.checkMcpServerStatus.mockResolvedValueOnce(mcpStatus).mockResolvedValueOnce({ ...mcpStatus, latest_version: "1.0.0", update_available: false });

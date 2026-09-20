@@ -1988,6 +1988,7 @@ function oraclePlSqlBlockEnd(sql: string): number | null {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token.kind === "semicolon") {
+      if (stack[stack.length - 1] === "ROUTINE_HEADER") stack.pop();
       const complete = objectKind !== null ? stack.length === 0 : sawBegin && stack.length === 0;
       if (complete) return token.to;
       continue;
@@ -1998,12 +1999,21 @@ function oraclePlSqlBlockEnd(sql: string): number | null {
       if (stack[stack.length - 1] !== "DECLARATION") stack.push("DECLARATION");
       continue;
     }
+    // Local PROCEDURE/FUNCTION in a DECLARE section owns its own BEGIN..END.
+    if ((token.value === "PROCEDURE" || token.value === "FUNCTION") && (stack[stack.length - 1] === "DECLARATION" || stack[stack.length - 1] === "ROUTINE")) {
+      stack.push("ROUTINE_HEADER");
+      continue;
+    }
+    if ((token.value === "IS" || token.value === "AS") && stack[stack.length - 1] === "ROUTINE_HEADER") {
+      stack[stack.length - 1] = "ROUTINE";
+      continue;
+    }
     if (token.value === "BEGIN") {
       if (tokens[index - 1]?.kind === "word" && tokens[index - 1]?.value === "TRANSACTION") continue;
       const previous = previousWordToken(tokens, index);
       if (previous === "END") continue;
       sawBegin = true;
-      if (stack[stack.length - 1] === "DECLARATION") stack[stack.length - 1] = "BLOCK";
+      if (stack[stack.length - 1] === "DECLARATION" || stack[stack.length - 1] === "ROUTINE") stack[stack.length - 1] = "BLOCK";
       else stack.push("BLOCK");
       continue;
     }

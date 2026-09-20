@@ -185,6 +185,7 @@ import { startsQueryEditorRectangularSelection, startsQueryEditorSelectionDrag, 
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 import { queryEditorClipboardPasteChange } from "@/lib/editor/queryEditorClipboardPaste";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
+import { needsDiagnosticCaretReanchor } from "@/lib/editor/queryEditorDiagnosticCaretAnchor";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
@@ -3690,18 +3691,49 @@ function sqlSemanticDecorationRanges(currentState: import("@codemirror/state").E
     );
 }
 
+// Mirrors CodeMirror's own root handling: shadow roots only expose
+// `getSelection` on some browsers, otherwise the owner document holds it.
+function editorRootSelection(currentView: EditorViewType): Selection | null {
+  const root = currentView.root as unknown as ShadowRoot & { getSelection?: () => Selection | null };
+  if (root.nodeType !== 11) return (root as unknown as Document).getSelection();
+  if (typeof root.getSelection === "function") return root.getSelection() ?? null;
+  return root.ownerDocument?.getSelection() ?? null;
+}
+
+// See queryEditorDiagnosticCaretAnchor.ts for why the browser caret needs re-anchoring.
+function reanchorCaretAfterDiagnostics(currentView: EditorViewType) {
+  const selection = currentView.state.selection;
+  const target = selection.ranges.length === 1 && selection.main.empty ? currentView.domAtPos(selection.main.head) : null;
+  const domSelection = editorRootSelection(currentView);
+  const reanchor = needsDiagnosticCaretReanchor({
+    hasFocus: currentView.hasFocus,
+    composing: currentView.composing,
+    domRangeCount: domSelection?.rangeCount ?? 0,
+    currentAnchorNode: domSelection?.anchorNode ?? null,
+    currentAnchorOffset: domSelection?.anchorOffset ?? 0,
+    targetNode: target?.node ?? null,
+    targetOffset: target?.offset ?? 0,
+  });
+  if (!reanchor || !domSelection || !target) return;
+  domSelection.collapse(target.node, target.offset);
+}
+
 function reconfigureDiagnostics() {
-  if (!view.value) return;
+  const currentView = view.value;
+  if (!currentView) return;
   if (setSqlDiagnosticsEffect) {
-    view.value.dispatch({
+    currentView.dispatch({
       effects: setSqlDiagnosticsEffect.of(semanticDiagnostics),
     });
-    return;
+  } else {
+    if (!diagnosticComp || !buildSqlDiagnosticExtension) return;
+    currentView.dispatch({
+      effects: diagnosticComp.reconfigure(buildSqlDiagnosticExtension()),
+    });
   }
-  if (!diagnosticComp || !buildSqlDiagnosticExtension) return;
-  view.value.dispatch({
-    effects: diagnosticComp.reconfigure(buildSqlDiagnosticExtension()),
-  });
+  // Diagnostic decorations re-parent the DOM text nodes around the caret; put the
+  // browser's insertion point back on the caret before the next keystroke (#9480).
+  reanchorCaretAfterDiagnostics(currentView);
 }
 
 function setSemanticDiagnostics(next: SqlSemanticDiagnostic[]) {

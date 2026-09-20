@@ -310,6 +310,8 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "thin"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -361,7 +363,16 @@ jobs:
         shell: pwsh
         run: |
           $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
-          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --timings
+
+      - name: Upload Windows 7 Cargo timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-win7-cargo-timings
+          path: target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Audit Windows 7 PE imports
         shell: pwsh

@@ -948,8 +948,27 @@ pub async fn get_explain_info(
         schema.as_deref(),
         &sql,
         mode.as_deref(),
+        None,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn get_plugin_plan_capabilities(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::query::plugin_plan::PluginPlanCapabilities, String> {
+    dbx_core::query::plugin_plan::plugin_plan_capabilities(&state, &connection_id).await
+}
+
+/// Read-only estimated plan acquisition for the plugin Host API. The request
+/// carries the original SQL only; the host generates and owns the EXPLAIN.
+#[tauri::command]
+pub async fn get_plugin_estimated_plan(
+    state: tauri::State<'_, std::sync::Arc<dbx_core::connection::AppState>>,
+    request: dbx_core::query::plugin_plan::PluginPlanRequest,
+) -> Result<dbx_core::query::plugin_plan::PluginPlanResult, String> {
+    dbx_core::query::plugin_plan::explain_estimated_plan(&state, request).await
 }
 
 #[tauri::command]

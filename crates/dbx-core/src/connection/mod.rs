@@ -1364,6 +1364,25 @@ impl AppState {
         inspect(&connections.pools)
     }
 
+    /// Whether DBX currently holds a pool for `connection_id`, i.e. the
+    /// connection is open right now.
+    ///
+    /// A saved config proves nothing on its own: a disconnected connection keeps
+    /// its config while every one of its pools has been drained. The registry is
+    /// the only state that answers "is this connection open", so callers that
+    /// must not connect on a user's behalf gate on this instead of on
+    /// [`Self::configs`].
+    ///
+    /// Deliberately a pure registry read: it never calls
+    /// `get_or_create_pool`, so checking the state cannot itself open the
+    /// connection. Ownership uses the same key convention as
+    /// `drain_connection_pools` — the connection id, optionally followed by `:`
+    /// and the database/catalog/role/session suffix that `base_pool_key_for` and
+    /// its session-scoped variant build.
+    pub async fn is_connection_open(&self, connection_id: &str) -> bool {
+        self.connections.read().await.keys().any(|key| pool_key_belongs_to_connection(key, connection_id))
+    }
+
     /// Mutate the registry atomically. The callback is deliberately
     /// synchronous; asynchronous cleanup must use values returned from it.
     pub async fn update_connection_pools<R>(&self, update: impl FnOnce(&mut ConnectionPoolRegistry) -> R) -> R {
@@ -5989,15 +6008,24 @@ fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
     pool_key.contains(":session:manual-txn-")
 }
 
+/// Whether `pool_key` names a pool owned by `connection_id`.
+///
+/// Every pool key starts with its connection id and appends `:` plus the
+/// database, catalog, role, or session suffix, so the separator is what keeps
+/// `conn` from matching a `conn-2` pool. Used by
+/// [`AppState::is_connection_open`] and [`config_for_pool_key`];
+/// `drain_connection_pools` filters on the same convention.
+fn pool_key_belongs_to_connection(pool_key: &str, connection_id: &str) -> bool {
+    pool_key.strip_prefix(connection_id).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+}
+
 pub(crate) fn config_for_pool_key<'a>(
     pool_key: &str,
     configs: &'a HashMap<String, ConnectionConfig>,
 ) -> Option<&'a ConnectionConfig> {
     configs
         .iter()
-        .filter(|(connection_id, _)| {
-            pool_key.strip_prefix(connection_id.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
-        })
+        .filter(|(connection_id, _)| pool_key_belongs_to_connection(pool_key, connection_id))
         .max_by_key(|(connection_id, _)| connection_id.len())
         .map(|(_, config)| config)
 }
@@ -8801,6 +8829,41 @@ mod tests {
         assert!(!conns.contains_key("conn:session:tab-1"));
         assert!(!conns.contains_key("conn:analytics:session:tab-1"));
         assert!(conns.contains_key("other"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The plan Host API gates on this, so it has to be exactly "DBX holds a pool
+    /// for this connection": no pool means closed, and the read must not create
+    /// the pool it is checking for.
+    #[tokio::test]
+    async fn connection_is_open_only_while_one_of_its_pools_exists() {
+        let (state, dir) = test_app_state().await;
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+
+        assert!(!state.is_connection_open("conn").await);
+        assert!(state.with_connection_pools(|pools| pools.is_empty()).await, "the check must not create a pool");
+
+        for pool_key in ["conn", "conn:analytics", "conn:analytics:catalog:app", "conn:analytics:session:tab-1"] {
+            state.update_connection_pools(|connections| connections.clear()).await;
+            state
+                .update_connection_pools(|connections| {
+                    connections.insert(pool_key.to_string(), PoolKind::Sqlite(pool.clone()))
+                })
+                .await;
+            assert!(state.is_connection_open("conn").await, "{pool_key} belongs to conn");
+        }
+
+        // A sibling id that merely starts with the same characters is another
+        // connection, and draining one must not report the other as open.
+        state.update_connection_pools(|connections| connections.clear()).await;
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("conn-2:analytics".to_string(), PoolKind::Sqlite(pool))
+            })
+            .await;
+        assert!(!state.is_connection_open("conn").await);
+        assert!(state.is_connection_open("conn-2").await);
 
         let _ = std::fs::remove_dir_all(dir);
     }

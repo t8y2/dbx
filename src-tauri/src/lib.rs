@@ -1996,6 +1996,8 @@ pub fn run() {
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
             commands::query::get_explain_info,
+            commands::query::get_plugin_plan_capabilities,
+            commands::query::get_plugin_estimated_plan,
             commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,

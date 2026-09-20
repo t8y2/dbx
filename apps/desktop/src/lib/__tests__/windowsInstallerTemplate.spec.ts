@@ -152,8 +152,10 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
       expect(job).toContain("mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba");
       expect(job).toContain('version: "v0.16.0"');
       expect(job).not.toMatch(/^\s+(?:CC|CXX):/m);
-      expect(job).not.toContain("CARGO_PROFILE_RELEASE_");
     }
+    expect(releaseWin7Job).not.toContain("CARGO_PROFILE_RELEASE_");
+    expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_LTO: "thin"');
+    expect(ciWin7Job).toContain('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"');
   });
 
   it("probes the fixed runtime through the Win7-compatible loader", () => {

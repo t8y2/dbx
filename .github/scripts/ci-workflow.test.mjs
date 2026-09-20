@@ -14,16 +14,19 @@ function job(name, content = workflow) {
 
 test("fast checks run format and contracts before graph resolution or compilation", () => {
   const fast = job("fast-checks");
-  for (const command of ["cargo fmt --check", "node --test scripts/core-architecture.test.mjs",
-    "node scripts/sync-connection-types.mjs --check", "node .github/scripts/ci-lockfiles.mjs", "node .github/scripts/ci-rust-coverage.mjs"]) assert.ok(fast.includes(command));
+  for (const command of ["cargo fmt --check", "node --test scripts/core-architecture.test.mjs", "node scripts/sync-connection-types.mjs --check", "node .github/scripts/ci-lockfiles.mjs", "node .github/scripts/ci-rust-coverage.mjs"]) assert.ok(fast.includes(command));
   assert.ok(fast.indexOf("cargo fmt --check") < fast.indexOf("ci-lockfiles.mjs"));
   assert.doesNotMatch(fast, /cargo (?:test|build|clippy)/);
   assert.ok(fast.includes("needs.changes.outputs.rust_groups_known == 'true'"));
 });
 
 test("Agent and Rust matrices are bounded and do not cancel sibling failures", () => {
-  for (const [name, output, parallel] of [["rust-test", "rust_matrix", 3], ["agent-rust", "agent_rust", 2],
-    ["agent-go", "agent_go", 8], ["agent-integration", "agent_integration", 8]]) {
+  for (const [name, output, parallel] of [
+    ["rust-test", "rust_matrix", 3],
+    ["agent-rust", "agent_rust", 2],
+    ["agent-go", "agent_go", 8],
+    ["agent-integration", "agent_integration", 8],
+  ]) {
     const content = job(name);
     assert.match(content, /fail-fast: false/);
     assert.ok(content.includes(`max-parallel: ${parallel}`));
@@ -34,10 +37,12 @@ test("Agent and Rust matrices are bounded and do not cancel sibling failures", (
 });
 
 test("stable Rust, Agent and overall gates always inspect selected upstream results", () => {
-  for (const [name, mode, dependencies] of [["rust", "rust", ["fast-checks", "rust-fmt-clippy", "rust-test"]],
+  for (const [name, mode, dependencies] of [
+    ["rust", "rust", ["fast-checks", "rust-fmt-clippy", "rust-test"]],
     ["agents", "agents", ["fast-checks", "agent-checks", "agent-rust", "agent-go", "agent-integration", "agent-java"]],
     ["frontend", "frontend", ["frontend-checks", "frontend-typecheck", "frontend-test"]],
-    ["ci", "all", ["rust", "agents", "frontend", "packages", "windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver", "nix-packaging"]]]) {
+    ["ci", "all", ["rust", "agents", "frontend", "packages", "windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver", "nix-packaging"]],
+  ]) {
     const content = job(name);
     assert.match(content, /if: always\(\)/);
     assert.ok(content.includes(`node .github/scripts/ci-gate.mjs ${mode}`));
@@ -75,22 +80,19 @@ test("every old Agent stage has an independent owner and Java packaging remains 
 
 test("native Rust driver caches exclude failed build artifacts", () => {
   const content = job("agent-rust");
-  assert.ok(content.includes('shared-key: ci-agent-rust-v2-${{ matrix.driver }}'));
+  assert.ok(content.includes("shared-key: ci-agent-rust-v2-${{ matrix.driver }}"));
   assert.ok(content.includes("cache-on-failure: false"));
 });
 
 test("Rust test jobs install pinned nextest and retain separate doctests", () => {
   const pluginDevHost = readFileSync(new URL("../workflows/plugin-dev-host.yml", import.meta.url), "utf8");
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
-  const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"),
-    job("test", pluginDevHost), job("prepare", pluginRelease)];
+  const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
     assert.ok(content.includes("uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3"));
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
-    const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run"
-      : content.includes("pnpm test:packages") ? "pnpm test:packages"
-        : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";
+    const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";
     assert.ok(content.indexOf("tool: cargo-nextest@0.9.137") < content.indexOf(testCommand));
   }
   assert.ok(job("rust-test").includes('ci-rust.mjs doctest "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"'));
@@ -136,10 +138,12 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
 
   const win7 = job("windows-win7-bundle");
   assert.doesNotMatch(win7, /x86_64-pc-windows-msvc|Setup Rust for standard Windows/);
-  for (const setting of ["RUSTC_WRAPPER: sccache", 'SCCACHE_GHA_ENABLED: "true"',
-    "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"']) assert.ok(win7.includes(setting));
+  for (const setting of ["RUSTC_WRAPPER: sccache", 'SCCACHE_GHA_ENABLED: "true"', "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "thin"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(win7.includes('version: "v0.16.0"'));
+  assert.ok(win7.includes("--timings"));
+  assert.ok(win7.includes("name: DBX-win7-cargo-timings"));
+  assert.ok(win7.includes("path: target/cargo-timings/"));
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 

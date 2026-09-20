@@ -810,6 +810,12 @@ pub struct GetExplainInfoRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GetPluginPlanCapabilitiesRequest {
+    pub connection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildCreateUserSqlRequest {
     pub username: String,
     pub password: String,
@@ -827,10 +833,34 @@ pub async fn get_explain_info(
         req.schema.as_deref(),
         &req.sql,
         req.mode.as_deref(),
+        None,
     )
     .await
     .map_err(AppError::from)?;
     Ok(Json(plan))
+}
+
+/// Plugin Host API: what the current host and connection can plan, reported
+/// without connecting or running any SQL.
+pub async fn get_plugin_plan_capabilities(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<GetPluginPlanCapabilitiesRequest>,
+) -> Result<Json<dbx_core::query::plugin_plan::PluginPlanCapabilities>, AppError> {
+    let capabilities = dbx_core::query::plugin_plan::plugin_plan_capabilities(&state.app, &req.connection_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(capabilities))
+}
+
+/// Plugin Host API: read-only estimated plan acquisition. The request carries
+/// the original SQL only; the host generates and owns the EXPLAIN.
+pub async fn get_plugin_estimated_plan(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::query::plugin_plan::PluginPlanRequest>,
+) -> Result<Json<dbx_core::query::plugin_plan::PluginPlanResult>, AppError> {
+    let result =
+        dbx_core::query::plugin_plan::explain_estimated_plan(&state.app, request).await.map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn build_create_user_sql(Json(req): Json<BuildCreateUserSqlRequest>) -> Result<Json<String>, AppError> {

@@ -23,6 +23,10 @@ async function getBackend(): Promise<Backend> {
 // ---------------------------------------------------------------------------
 
 function forward<K extends keyof Backend>(name: K): Backend[K] {
+  // SAFETY: the resolved module is one of exactly two implementations of the same
+  // surface — `http.ts` imports its request/response types from `tauri.ts` on
+  // purpose, so both transports are kept signature-compatible by construction.
+  // TypeScript cannot express that cross-module equivalence, hence the cast.
   return (async (...args: unknown[]) => {
     const startedAt = performance.now();
     const operation = String(name);
@@ -262,6 +266,8 @@ export const prepareQueryPaginationExecutionPlan = forward("prepareQueryPaginati
 export const buildSortedQuerySql = forward("buildSortedQuerySql");
 export const buildExplainSql = forward("buildExplainSql");
 export const getExplainInfo = forward("getExplainInfo");
+export const getPluginPlanCapabilities = forward("getPluginPlanCapabilities");
+export const getPluginEstimatedPlan = forward("getPluginEstimatedPlan");
 export const buildCreateUserSql = forward("buildCreateUserSql");
 export const buildDroppedFilePreviewSql = forward("buildDroppedFilePreviewSql");
 export const buildTableSelectSql = forward("buildTableSelectSql");

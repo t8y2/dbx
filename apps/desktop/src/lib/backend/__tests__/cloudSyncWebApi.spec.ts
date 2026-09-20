@@ -74,3 +74,27 @@ describe("WebDAV sync HTTP API", () => {
     });
   });
 });
+
+describe("GitLab snippet sync HTTP API", () => {
+  it("passes the selected instance to settings, ID, and transfer requests", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { snippetSyncSettings, saveSnippetSyncId, snippetSyncTest } = await import("@/lib/backend/http");
+    const instanceUrl = "https://gitlab.example.com";
+    await snippetSyncSettings("gitlab", instanceUrl);
+    let [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(url).toBe("/api/cloud-sync/snippet/settings");
+    expect(JSON.parse(String(init.body))).toEqual({ provider: "gitlab", instanceUrl });
+
+    await saveSnippetSyncId("gitlab", "42", instanceUrl);
+    [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(url).toBe("/api/cloud-sync/snippet/save-id");
+    expect(JSON.parse(String(init.body))).toEqual({ provider: "gitlab", snippetId: "42", instanceUrl });
+
+    await snippetSyncTest({ provider: "gitlab", instanceUrl, token: "test-token" });
+    [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(url).toBe("/api/cloud-sync/snippet/test");
+    expect(JSON.parse(String(init.body))).toEqual({ config: { provider: "gitlab", instanceUrl, token: "test-token" } });
+    vi.unstubAllGlobals();
+  });
+});

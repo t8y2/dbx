@@ -697,6 +697,13 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         };
     }
 
+    // TOP injected into the first SELECT only bounds that branch of a UNION /
+    // INTERSECT / EXCEPT, so the combined result comes out wrong. Bound the
+    // whole statement instead.
+    if has_top_level_set_operator(statement) {
+        return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
+    }
+
     let order_by_index = find_top_level_trailing_order_by(statement);
     if order_by_index.is_none() && has_top_level_select_distinct(statement) {
         return (offset == 0).then(|| inject_sql_server_top(statement, limit));
@@ -2199,6 +2206,10 @@ fn has_top_level_select_top(sql: &str) -> bool {
     top_level_select_tokens_before_from(sql).iter().any(|token| token.text == "TOP")
 }
 
+fn has_top_level_set_operator(sql: &str) -> bool {
+    top_level_sql_tokens(sql).iter().any(|token| matches!(token.text.as_str(), "UNION" | "INTERSECT" | "EXCEPT"))
+}
+
 fn has_top_level_select_distinct(sql: &str) -> bool {
     top_level_select_tokens_before_from(sql).iter().any(|token| token.text == "DISTINCT")
 }
@@ -2622,6 +2633,50 @@ mod tests {
         let sql = result.sql.expect("build unnamed expression page");
         assert!(sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; SELECT id + 1 FROM TicketInfo'"));
         assert_eq!(sqlserver_result_offset(&sql), 100);
+    }
+
+    #[test]
+    fn paginates_sqlserver_set_operations_with_rowcount_instead_of_limiting_first_branch() {
+        // TOP injected into the first SELECT of INTERSECT/EXCEPT/UNION only bounds
+        // that branch, so the combined result is wrong (e.g. 0 rows instead of the
+        // real intersection). The whole statement must be bounded instead.
+        for operator in ["INTERSECT", "EXCEPT", "UNION", "UNION ALL"] {
+            let original_sql = format!("SELECT id FROM a {operator} SELECT id FROM b");
+            let first_page = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: original_sql.clone(),
+                database_type: Some(DatabaseType::SqlServer),
+                limit: 100,
+                offset: 0,
+            });
+            let sql = first_page.sql.expect("build set operation first page");
+            assert!(!sql.contains("TOP ("), "{operator}: {sql}");
+            assert_eq!(
+                sql,
+                format!("EXEC sys.sp_executesql N'SET ROWCOUNT 100; {original_sql}'; /*__dbx_result_offset=0__*/")
+            );
+
+            let later_page = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql,
+                database_type: Some(DatabaseType::SqlServer),
+                limit: 100,
+                offset: 100,
+            });
+            let sql = later_page.sql.expect("build set operation later page");
+            assert!(sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; "), "{operator}: {sql}");
+            assert_eq!(sqlserver_result_offset(&sql), 100);
+        }
+    }
+
+    #[test]
+    fn keeps_sqlserver_top_when_set_operator_is_only_inside_subquery() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id FROM (SELECT id FROM a UNION SELECT id FROM b) t".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT TOP (100) id FROM (SELECT id FROM a UNION SELECT id FROM b) t");
     }
 
     #[test]

@@ -5192,13 +5192,26 @@ async function openExternalUrl(url: string) {
           </div>
         </div>
       </ScrollArea>
+      <!-- Scroll-to-bottom affordance with an AI busy indicator. Shown when the
+           viewport is scrolled away from the bottom (hysteresis in
+           updateMessageScrollState) OR while a run is active for the visible
+           conversation — then the button doubles as a status marker: a
+           decorative rotating arc ring (aria-hidden; static under
+           prefers-reduced-motion) tells the user at a glance that the
+           assistant is still working, even when auto-scroll already pins the
+           view to the bottom. -->
       <button
-        v-if="showScrollToBottom"
+        v-if="showScrollToBottom || isGenerating"
         type="button"
         class="absolute bottom-3 right-3 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full border bg-background/95 text-foreground shadow-md backdrop-blur hover:bg-muted"
         :title="t('ai.scrollToBottom')"
         @click="scrollToBottom({ force: true })"
       >
+        <svg v-if="isGenerating" data-ai-scroll-ring aria-hidden="true" class="pointer-events-none absolute inset-0 h-full w-full animate-spin text-primary motion-reduce:animate-none" viewBox="0 0 32 32" fill="none">
+          <!-- ~288° open arc of the r=13 ring box (statement-gutter spinner
+               geometry scaled to 32 units); spins clockwise via animate-spin. -->
+          <path d="M29 16a13 13 0 1 1-8.98-12.36" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+        </svg>
         <ArrowDown class="h-4 w-4" />
         <span class="sr-only">{{ t("ai.scrollToBottom") }}</span>
       </button>

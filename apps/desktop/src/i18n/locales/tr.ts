@@ -5487,6 +5487,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Puan eşiği",
     results: "Sonuçlar",
     exportResults: "Sonuçları dışa aktar",
+    exportFiltered: "Filtrelenmiş sonuçları dışa aktar",
+    exportAll: "Tüm belgeleri dışa aktar",
+    exportLimitReached: "{total} sonuçtan yalnızca {count} tanesi kullanılabilir; Meilisearch sınırı tam dışa aktarmayı engelliyor.",
+    importResults: "JSON içe aktar",
+    importSuccess: "{count} belge içe aktarıldı",
+    importFailed: "İçe aktarma başarısız: {message}",
+    importInvalidJson: "JSON bir nesne veya nesne dizisi içermelidir",
     exportSearchUnsupported: "Meilisearch arama sayfalamasını sınırladığı için metin, karma veya puan eşikli aramalarda tam dışa aktarma kullanılamaz. Filtrelenen tüm belgeleri dışa aktarmak için bu seçenekleri temizleyin.",
   },
   dynamodb: {

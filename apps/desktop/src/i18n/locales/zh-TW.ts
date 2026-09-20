@@ -4813,6 +4813,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "分數閾值",
     results: "搜尋結果",
     exportResults: "匯出結果",
+    exportFiltered: "匯出篩選結果",
+    exportAll: "匯出全部文件",
+    exportLimitReached: "只能取得 {count}/{total} 筆結果；Meilisearch 限制導致無法完整匯出。",
+    importResults: "匯入 JSON",
+    importSuccess: "已匯入 {count} 份文件",
+    importFailed: "匯入失敗：{message}",
+    importInvalidJson: "JSON 必須是物件或物件陣列",
     exportSearchUnsupported: "Meilisearch 會限制文字、混合或分數閾值搜尋的分頁，無法保證完整匯出。請清除這些選項後匯出全部篩選文件。",
   },
   dynamodb: {

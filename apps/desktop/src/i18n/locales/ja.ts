@@ -5519,6 +5519,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "スコアしきい値",
     results: "検索結果",
     exportResults: "結果をエクスポート",
+    exportFiltered: "絞り込み結果をエクスポート",
+    exportAll: "すべてのドキュメントをエクスポート",
+    exportLimitReached: "{total} 件中 {count} 件のみ取得できました。Meilisearch の上限により完全なエクスポートはできません。",
+    importResults: "JSON をインポート",
+    importSuccess: "{count} 件のドキュメントをインポートしました",
+    importFailed: "インポートに失敗しました: {message}",
+    importInvalidJson: "JSON はオブジェクトまたはオブジェクトの配列である必要があります",
     exportSearchUnsupported: "Meilisearch はテキスト検索、ハイブリッド検索、スコアしきい値付き検索のページングを制限します。すべての絞り込み済みドキュメントを出力するには、これらの条件を解除してください。",
   },
   dynamodb: {

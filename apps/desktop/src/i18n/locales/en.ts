@@ -5793,6 +5793,13 @@ export default {
     rankingScoreThreshold: "Score threshold",
     results: "Results",
     exportResults: "Export results",
+    exportFiltered: "Export filtered results",
+    exportAll: "Export all documents",
+    exportLimitReached: "Only {count} of {total} results are available; the Meilisearch limit prevents a complete export.",
+    importResults: "Import JSON",
+    importSuccess: "Imported {count} document(s)",
+    importFailed: "Import failed: {message}",
+    importInvalidJson: "JSON must contain an object or an array of objects",
     exportSearchUnsupported: "Full export is unavailable for text, hybrid, or score-threshold searches because Meilisearch caps search pagination. Clear those options to export every filtered document.",
   },
   dynamodb: {

@@ -19,6 +19,7 @@ import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
 import { beaconPluginInstall, buildMarketplacePluginListings, filterMarketplacePluginListings, listingRepositoryCanVerify, marketplaceHomepageUrl, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { isBatchSelectableListing, runBatch } from "@/lib/plugins/pluginBatch";
+import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -243,6 +244,19 @@ async function refreshAfterBatch() {
   } catch (cause) {
     error.value = [error.value, t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) })].filter(Boolean).join("\n");
   }
+}
+
+async function refreshAfterExternalPluginUpdate() {
+  clearPluginIconCache();
+  try {
+    installedPlugins.value = await api.listPlugins();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+function handleComponentPluginsUpdated() {
+  void refreshAfterExternalPluginUpdate();
 }
 
 function toggleBatchMode() {
@@ -737,10 +751,12 @@ watch(allowUnsigned, (value) => {
 });
 onMounted(() => {
   void refresh();
+  window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
   if (isTauriRuntime()) document.addEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
 watch(marketplaceViewMode, (mode) => safeLocalStorageSet(MARKETPLACE_VIEW_MODE_STORAGE_KEY, mode));
 onBeforeUnmount(() => {
+  window.removeEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
   if (isTauriRuntime()) document.removeEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
 </script>

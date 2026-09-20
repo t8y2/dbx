@@ -168,9 +168,11 @@ async function beginPluginFileSave(pluginId: string, request: { name?: string; c
       filters: extension ? [{ name: extension.toUpperCase(), extensions: [extension] }] : undefined,
     });
     if (!path) return null;
-    const { openPluginLocalFile } = await tauriFileApi();
-    const handle = await openPluginLocalFile(pluginId, path, true);
-    return { handleId: `${tauriHandlePrefix}${handle.handleId}`, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
+    // Route through openTauriPluginFile so the write handle joins
+    // openTauriHandles: a beginSave the plugin abandons must still be
+    // reclaimed on unmount instead of burning the shared registry quota.
+    const handle = await openTauriPluginFile(pluginId, path, true);
+    return { handleId: handle.handleId, chunkBytes: PLUGIN_SAVE_CHUNK_BYTES };
   }
   const handleId = `${webHandlePrefix}${++webFileSequence}`;
   webSaveBuffers.set(handleId, { name: request.name || "download.bin", contentType: request.contentType || "application/octet-stream", chunks: new Map() });

@@ -140,6 +140,7 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
     "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"']) assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(win7.includes('version: "v0.16.0"'));
+  assert.ok(win7.includes("run: sccache --show-stats"));
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 

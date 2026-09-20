@@ -2500,14 +2500,14 @@ const copyableSourceColumns = computed(() => {
   const existingNames = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)));
   return copySourceColumns.value.map((column) => ({
     column,
-    details: copySourceColumnDetails(column),
+    details: copySourceColumnDetails(column, databaseType.value),
     alreadyExists: existingNames.has(tableStructureIdentifierComparisonKey(column.name, databaseType.value, databaseInfo)),
   }));
 });
 
 const filteredCopyableSourceColumns = computed(() => {
   if (!normalizedColumnSearch(copySourceColumnSearch.value)) return copyableSourceColumns.value;
-  return copyableSourceColumns.value.filter(({ column }) => matchesCopySourceColumnSearch(column, copySourceColumnSearch.value));
+  return copyableSourceColumns.value.filter(({ column }) => matchesCopySourceColumnSearch(column, copySourceColumnSearch.value, databaseType.value));
 });
 
 const copyableSourceColumnNames = computed(() => copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name));

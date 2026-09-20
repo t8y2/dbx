@@ -13,20 +13,29 @@ export interface CopySourceColumnDetails {
  * table" dialog. The source table is not open while copying, so the comment and
  * default value are the only hint about what an unfamiliar field means.
  */
-export function copySourceColumnDetails(column: Pick<ColumnInfo, "column_default" | "comment">): CopySourceColumnDetails {
-  const rawDefault = column.column_default === null || column.column_default === undefined ? "" : String(column.column_default);
+export function copySourceColumnDetails(
+  column: Pick<ColumnInfo, "column_default" | "comment" | "data_type">,
+  databaseType?: DatabaseType,
+): CopySourceColumnDetails {
+  // Match the main grid and the editor drafts so the dialog, the grid, and the
+  // copied result render the same normalized default for every database.
+  const defaultValue = column.column_default == null ? "" : columnDefaultForEditor(column, databaseType);
   const rawComment = column.comment ?? "";
   return {
-    defaultValue: rawDefault.trim() ? rawDefault.trim() : null,
+    defaultValue: defaultValue.trim() ? defaultValue.trim() : null,
     comment: rawComment.trim() ? rawComment.trim() : null,
   };
 }
 
 /** Copy-dialog search matches comments and default values on top of name and type. */
-export function matchesCopySourceColumnSearch(column: Pick<ColumnInfo, "name" | "data_type" | "column_default" | "comment">, search: string): boolean {
+export function matchesCopySourceColumnSearch(
+  column: Pick<ColumnInfo, "name" | "data_type" | "column_default" | "comment">,
+  search: string,
+  databaseType?: DatabaseType,
+): boolean {
   const query = search.trim().toLowerCase();
   if (!query) return true;
-  const details = copySourceColumnDetails(column);
+  const details = copySourceColumnDetails(column, databaseType);
   return [column.name, column.data_type, details.defaultValue ?? "", details.comment ?? ""].some((value) => value.toLowerCase().includes(query));
 }
 

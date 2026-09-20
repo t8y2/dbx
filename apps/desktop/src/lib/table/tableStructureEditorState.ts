@@ -1,6 +1,26 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
+/**
+ * Column names offered by the structure editor's "copy all column names" action.
+ * Fields marked for drop disappear on save, so they are not offered.
+ */
+export function structureColumnNamesForCopy(columns: readonly Pick<EditableStructureColumn, "name" | "markedForDrop">[]): string[] {
+  return columns.filter((column) => !column.markedForDrop && column.name.trim()).map((column) => column.name.trim());
+}
+
+/** Comment lookup for the same action, keyed by the trimmed column name. */
+export function structureColumnCommentsForCopy(columns: readonly Pick<EditableStructureColumn, "name" | "comment" | "markedForDrop">[]): Map<string, string> {
+  const comments = new Map<string, string>();
+  for (const column of columns) {
+    if (column.markedForDrop) continue;
+    const name = column.name.trim();
+    const comment = column.comment?.trim();
+    if (name && comment) comments.set(name, comment);
+  }
+  return comments;
+}
+
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }

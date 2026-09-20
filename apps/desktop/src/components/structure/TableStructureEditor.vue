@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardList, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -34,6 +34,7 @@ import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
 import { formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
 import { formatSqlForDisplay, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
@@ -104,6 +105,8 @@ import {
   structureColumnSelectionRange,
   isSyntheticContextMenuClick,
   resolveColumnSelectionActiveId,
+  structureColumnCommentsForCopy,
+  structureColumnNamesForCopy,
   tableStructureIdentifierComparisonKey,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -3706,6 +3709,20 @@ async function recordStructureHistory(sql: string, start: number, success: boole
   }
 }
 
+const copyColumnNamesDialogOpen = ref(false);
+// Fields marked for drop no longer exist after saving, so they are excluded.
+const copyableStructureColumnNames = computed(() => structureColumnNamesForCopy(columns.value));
+const copyableStructureColumnComments = computed(() => structureColumnCommentsForCopy(columns.value));
+
+async function copyColumnNamesText(text: string) {
+  try {
+    await copyToClipboard(text);
+    toast(t("grid.copied"));
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function copyPreviewSql() {
   if (sqlPreviewPending.value || sqlPreviewLoading.value || !previewSqlText.value.trim()) return;
   try {
@@ -4437,6 +4454,10 @@ watch(
               <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.copyColumns") }}
+              </Button>
+              <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="copyableStructureColumnNames.length === 0" @click="copyColumnNamesDialogOpen = true">
+                <ClipboardList :class="structureIconClass" />
+                {{ t("grid.copyColumnNames") }}
               </Button>
               <Button v-if="isCreateMode && activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="applyColumnTemplate(PRESET_FIELDS_TEMPLATE_ID)">
                 <Copy :class="structureIconClass" />
@@ -5340,6 +5361,7 @@ watch(
       </Button>
     </div>
 
+    <DataGridCopyColumnNamesDialog v-model:open="copyColumnNamesDialogOpen" :column-names="copyableStructureColumnNames" :database-type="databaseType" :column-comments="copyableStructureColumnComments" @copy="copyColumnNamesText" />
     <Dialog v-model:open="copyColumnsDialogOpen">
       <DialogContent class="max-w-xl">
         <DialogHeader>

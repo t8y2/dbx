@@ -811,7 +811,7 @@ onBeforeUnmount(() => {
             <div class="ml-auto flex flex-wrap items-center gap-2">
               <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length || batchRunning" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
               <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || mutationRunning" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
-              <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="clearBatchSelection">{{ t("common.cancel") }}</Button>
+              <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
             </div>
           </div>
 
@@ -994,7 +994,7 @@ onBeforeUnmount(() => {
               <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || mutationRunning" @click="runBatchUninstall">
                 <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" /><Trash2 class="size-3.5" />{{ t("pluginPlatform.batchUninstall") }}
               </Button>
-              <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="clearBatchSelection">{{ t("common.cancel") }}</Button>
+              <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
             </template>
           </div>
           <div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">

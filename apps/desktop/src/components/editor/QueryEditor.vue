@@ -136,6 +136,7 @@ import { createHoverSearch, type HoverSearchController } from "@/lib/editor/sqlH
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "@/lib/sql/sqlDiagnostics";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
+import { buildSqlServerRoutineSyntaxDiagnostics } from "@/lib/sql/sqlServerRoutineSyntaxDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
@@ -216,6 +217,7 @@ import {
   isSqlVirtualTableReference,
   shouldRunSqlSemanticDiagnostics,
   sqlSemanticDiagnosticRangesForViewport,
+  sqlServerRoutineDefinitionRangesForViewport,
   tableReferenceKey,
   type SqlSemanticDiagnostic,
 } from "@/lib/sql/semantic/diagnostics";
@@ -3908,7 +3910,11 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
   }
   const diagnosticRanges = sqlSemanticDiagnosticRangesForViewport(sql, visibleRanges, props.databaseType, props.databaseType === "sqlserver" ? undefined : executableStatementRangeCache?.ranges, sqlStatementParameterOptions());
-  if (diagnosticRanges.length === 0) {
+  // SQL Server routine batches are excluded from `diagnosticRanges` (see
+  // `sqlServerRoutineDefinitionRangesForViewport`), so they are recomputed here
+  // and stay part of the replaced range set below.
+  const sqlServerRoutineRanges = props.databaseType === "sqlserver" ? sqlServerRoutineDefinitionRangesForViewport(sql, visibleRanges) : [];
+  if (diagnosticRanges.length === 0 && sqlServerRoutineRanges.length === 0) {
     if (!options.preserveOutsideRanges) setSemanticDiagnostics([]);
     return;
   }
@@ -3921,6 +3927,12 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
       return !!diagnosticRange && diagnosticRanges.some((range) => rangesOverlap(diagnosticRange, range));
     }),
   );
+  // The analyzer never sees routine batches (the MsSql grammar cannot parse their
+  // parameter list), so run the token-based routine syntax rules instead of leaving
+  // a stored procedure without any check at all (dbx#9315).
+  for (const range of sqlServerRoutineRanges) {
+    nextDiagnostics.push(...offsetSqlSemanticDiagnostics(buildSqlServerRoutineSyntaxDiagnostics(range.sql, props.databaseType), range, sql));
+  }
   const mysqlRoutineAnalysis = props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
   if (mysqlRoutineAnalysis) {
     nextDiagnostics.push(
@@ -3986,7 +3998,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     }
   }
   if (options.preserveOutsideRanges) {
-    replaceSemanticDiagnosticsInRanges(nextDiagnostics, diagnosticRanges, sql);
+    replaceSemanticDiagnosticsInRanges(nextDiagnostics, [...diagnosticRanges, ...sqlServerRoutineRanges], sql);
   } else {
     setSemanticDiagnostics(nextDiagnostics.sort(compareSqlSemanticDiagnostics));
   }

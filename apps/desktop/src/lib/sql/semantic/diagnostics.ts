@@ -41,6 +41,28 @@ export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRange
   return selected;
 }
 
+/**
+ * SQL Server routine definition batches (`CREATE/ALTER PROCEDURE | FUNCTION`) are
+ * deliberately excluded from reference diagnostics: the MsSql grammar in the
+ * analyzer cannot parse the parameter list, and metadata checks inside a routine
+ * body (temp tables, table variables) would report noise (see
+ * `isSqlServerRoutineDefinitionBatch`). That suppression also dropped the
+ * *syntax* errors of the body, so a routine that does not even compile looked
+ * clean (issue #9315). Callers use these ranges to run the routine-only syntax
+ * rules that survive the suppression, while reference diagnostics stay off.
+ */
+export function sqlServerRoutineDefinitionRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[]): SqlTextRange[] {
+  if (visibleRanges.length === 0) return [];
+
+  const selected: SqlTextRange[] = [];
+  for (const batch of sqlServerBatchRanges(sql)) {
+    if (!isSqlServerRoutineDefinitionBatch(batch.sql)) continue;
+    if (!visibleRanges.some((visibleRange) => rangesIntersect(batch, visibleRange))) continue;
+    selected.push(batch);
+  }
+  return selected;
+}
+
 function sqlServerSemanticDiagnosticRanges(sql: string): SqlTextRange[] {
   const ranges: SqlTextRange[] = [];
   for (const batch of sqlServerBatchRanges(sql)) {

@@ -1,6 +1,35 @@
 import type { ColumnInfo, DatabaseConnectionInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
+export interface CopySourceColumnDetails {
+  /** Column default as shown in the copy-fields dialog, or null when there is none. */
+  defaultValue: string | null;
+  /** Column comment as shown in the copy-fields dialog, or null when there is none. */
+  comment: string | null;
+}
+
+/**
+ * Read-only summary rendered under a column name in the "copy fields from another
+ * table" dialog. The source table is not open while copying, so the comment and
+ * default value are the only hint about what an unfamiliar field means.
+ */
+export function copySourceColumnDetails(column: Pick<ColumnInfo, "column_default" | "comment">): CopySourceColumnDetails {
+  const rawDefault = column.column_default === null || column.column_default === undefined ? "" : String(column.column_default);
+  const rawComment = column.comment ?? "";
+  return {
+    defaultValue: rawDefault.trim() ? rawDefault.trim() : null,
+    comment: rawComment.trim() ? rawComment.trim() : null,
+  };
+}
+
+/** Copy-dialog search matches comments and default values on top of name and type. */
+export function matchesCopySourceColumnSearch(column: Pick<ColumnInfo, "name" | "data_type" | "column_default" | "comment">, search: string): boolean {
+  const query = search.trim().toLowerCase();
+  if (!query) return true;
+  const details = copySourceColumnDetails(column);
+  return [column.name, column.data_type, details.defaultValue ?? "", details.comment ?? ""].some((value) => value.toLowerCase().includes(query));
+}
+
 export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
   return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
 }

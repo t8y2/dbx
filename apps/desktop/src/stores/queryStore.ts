@@ -55,7 +55,7 @@ import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, updateCachedTableMetadataType, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
-import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, connectionQueryExecutionSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint, jdbcConnectionUsesDriverRowOffset, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultNameFromPreamble, queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
@@ -4525,7 +4525,7 @@ export const useQueryStore = defineStore("query", () => {
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const limit = tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
       const offset = tab.resultPageOffset ?? 0;
-      const useDriverRowOffset = conn?.db_type === "jdbc" && effectiveDbType === "iris";
+      const useDriverRowOffset = jdbcConnectionUsesDriverRowOffset(conn, effectiveDbType);
 
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
@@ -7229,7 +7229,7 @@ export const useQueryStore = defineStore("query", () => {
         // connection-local state and avoid MySQL pool resets on every refresh.
         const dataTabMeta = tab.mode === "data" ? tableMetaForDataTab(tab) : undefined;
         const useTableDataPreview = canUseTableDataLargeValuePreview(effectiveDbType, dataTabMeta?.columns ?? [], dataTabMeta?.primaryKeys ?? []);
-        const useJdbcDriverRowOffset = tab.mode === "data" && conn?.db_type === "jdbc" && effectiveDbType === "iris";
+        const useJdbcDriverRowOffset = tab.mode === "data" && jdbcConnectionUsesDriverRowOffset(conn, effectiveDbType);
         const executionOptions = {
           ...(typeof pageLimit === "number"
             ? useAgentResultSession

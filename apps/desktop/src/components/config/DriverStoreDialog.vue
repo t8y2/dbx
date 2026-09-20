@@ -1505,7 +1505,7 @@ watch(driverStoreTab, (tab) => {
 
 <template>
   <div class="driver-store-view h-full flex flex-col">
-    <div class="driver-store-scroll flex-1 min-h-0 overflow-y-auto">
+    <div class="driver-store-scroll flex-1 min-h-0">
       <div class="driver-store-container max-w-4xl mx-auto px-6 py-6">
         <Tabs v-model="driverStoreTab" default-value="agent" class="driver-store-tabs-root">
           <div class="driver-store-header flex flex-wrap items-center justify-between gap-2">
@@ -1631,7 +1631,7 @@ watch(driverStoreTab, (tab) => {
               </div>
             </div>
             <!-- Global update section — always above category navigation -->
-            <div v-if="globalUpdatableDrivers.length > 0" class="rounded-lg border divide-y">
+            <div v-if="globalUpdatableDrivers.length > 0" class="driver-store-global-updates rounded-lg border divide-y">
               <div class="flex items-center justify-between bg-amber-500/10 px-4 py-2.5">
                 <div class="min-w-0">
                   <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableDrivers.length }})</div>
@@ -2158,6 +2158,13 @@ watch(driverStoreTab, (tab) => {
 .driver-store-agent-tab > :not([hidden]) ~ :not([hidden]),
 .driver-store-jdbc-tab > :not([hidden]) ~ :not([hidden]) {
   margin-top: 0 !important;
+}
+
+/* 全局更新区自身可收缩并在内部滚动，避免把下方驱动列表挤到零高度 */
+.driver-store-global-updates {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* 列表行和操作区保持不收缩 */

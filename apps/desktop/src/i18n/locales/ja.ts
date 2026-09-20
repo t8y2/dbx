@@ -202,6 +202,7 @@ export default withEnglishFallback({
     allPluginsUpToDate: "すべてのプラグインは最新です。",
     updateCheckUnavailable: "プラグインの更新を確認できません",
     updateCheckUnavailableDescription: "プラグインカタログの読み込みに失敗したため、更新状態が不正確な可能性があります。",
+    updateCheckPartialFailure: "一部のプラグインリポジトリの確認に失敗したため、更新状態が不完全な可能性があります。",
     noRepositoriesEnabled: "有効なプラグインリポジトリがありません",
     notInRepositories: "リポジトリ外",
     notInRepositoriesHint: "ローカルインストールまたはリポジトリが無効のため、更新を確認できません。",

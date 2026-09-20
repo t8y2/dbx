@@ -100,6 +100,7 @@ type PanelState = {
   installedUpdateProgress: { current: number; total: number } | null;
   catalogChecked: boolean;
   marketplaceUnavailable: boolean;
+  catalogPartialFailure: boolean;
   pendingSourceChange: { listing: MarketplacePluginListing } | null;
   installedUnsupportedListingFor: (pluginId: string) => MarketplacePluginListing | null;
   updateInstalledPlugin: (pluginId: string) => Promise<void>;
@@ -388,6 +389,27 @@ describe("PluginContributionsPanel installed-tab updates", () => {
     await flushUi();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0", allowSourceChange: true });
     expect(state.pendingSourceChange).toBeNull();
+  });
+
+  it("treats a failing enabled repository as an incomplete check, not as up to date", async () => {
+    state.batchMode = false;
+    state.repositories = [
+      { id: "first", name: "first", kind: "custom", enabled: true, managed: false },
+      { id: "second", name: "second", kind: "custom", enabled: true, managed: false },
+    ];
+    // "first" answers fine (a is up to date through it); "second" — b's only source — errors.
+    state.catalogResults = [catalog("first", ["a"]), { ...catalog("second", ["b"]), catalog: undefined, error: "catalog offline" }];
+    state.installedPlugins = [installed("a", "3.0.0"), installed("b", "1.0.0")];
+    await nextTick();
+
+    expect(state.catalogPartialFailure).toBe(true);
+    // a is up to date via the first catalog, but the check is incomplete: no "all up to date".
+    expect(host.textContent).not.toContain("pluginPlatform.allPluginsUpToDate");
+    // b's only repository failed: it must not be labelled "not in repositories".
+    expect(host.textContent).not.toContain("pluginPlatform.notInRepositories");
+    // The incomplete state is surfaced instead, with the failing repository named.
+    expect(host.textContent).toContain("pluginPlatform.updateCheckPartialFailure");
+    expect(host.textContent).toContain("second: catalog offline");
   });
 
   it("flips to the up-to-date state only after a real catalog check", async () => {

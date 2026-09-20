@@ -156,6 +156,11 @@ const selectedUpdateEntry = computed(() => (selectedDefinition.value && installe
 const repositoriesEnabled = computed(() => repositories.value.some((repository) => repository.enabled));
 // "Checked" means a catalog actually loaded: a failed/missing fetch must never read as up to date.
 const catalogChecked = computed(() => !marketplaceLoading.value && !marketplaceUnavailable.value && repositoriesEnabled.value && catalogResults.value.some((result) => result.catalog));
+// The backend answers a mixed fetch with successful catalogs AND per-repository errors, so
+// "some catalog loaded" is not enough: one failing enabled repository makes the whole check
+// incomplete (plugins whose only source is that repo would read as "not in repositories" /
+// "all up to date").
+const catalogPartialFailure = computed(() => repositoriesEnabled.value && catalogResults.value.some((result) => result.error));
 function installedUpdateEntryFor(pluginId: string): InstalledPluginUpdateEntry | null {
   return installedUpdateIndex.value.get(pluginId) || null;
 }
@@ -1140,6 +1145,18 @@ onBeforeUnmount(() => {
             /></Button>
           </div>
 
+          <!-- Partial catalog failure (some enabled repositories errored): the check is incomplete,
+               so it is surfaced on its own and must never degrade into "all up to date". -->
+          <div v-if="catalogPartialFailure" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div>{{ t("pluginPlatform.updateCheckPartialFailure") }}</div>
+          </div>
+          <div v-for="result in catalogErrors" :key="`installed-${result.repository.id}`" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
+            <div>
+              <span class="font-medium">{{ result.repository.name }}:</span> {{ result.error }}
+            </div>
+          </div>
           <!-- Honest update-check states: a failed or missing catalog must never read as "up to date". -->
           <div v-if="marketplaceUnavailable" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
             <CircleAlert class="mt-0.5 size-3.5 shrink-0" />
@@ -1165,7 +1182,7 @@ onBeforeUnmount(() => {
               </Button>
             </div>
           </div>
-          <div v-else-if="catalogChecked && installedPlugins.length" class="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
+          <div v-else-if="catalogChecked && !catalogPartialFailure && installedPlugins.length" class="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs text-muted-foreground">
             <BadgeCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />
             <div>{{ t("pluginPlatform.allPluginsUpToDate") }}</div>
           </div>
@@ -1203,7 +1220,9 @@ onBeforeUnmount(() => {
                         <ArrowUp class="size-2.5" />v{{ installedUpdateEntryFor(definition.plugin.manifest.id)?.listing.plugin.latestVersion }}
                       </span>
                       <Badge :variant="definition.plugin.compatibility.compatible ? 'secondary' : 'destructive'" class="h-4 px-1.5 text-[10px]">{{ definition.plugin.compatibility.compatible ? t("pluginPlatform.compatible") : t("pluginPlatform.blocked") }}</Badge>
-                      <Badge v-if="catalogChecked && !pluginInCatalog(definition.plugin.manifest.id)" variant="outline" class="h-4 border-dashed px-1.5 text-[10px] text-muted-foreground" :title="t('pluginPlatform.notInRepositoriesHint')">{{ t("pluginPlatform.notInRepositories") }}</Badge>
+                      <Badge v-if="catalogChecked && !catalogPartialFailure && !pluginInCatalog(definition.plugin.manifest.id)" variant="outline" class="h-4 border-dashed px-1.5 text-[10px] text-muted-foreground" :title="t('pluginPlatform.notInRepositoriesHint')">{{
+                        t("pluginPlatform.notInRepositories")
+                      }}</Badge>
                       <Badge
                         v-else-if="installedUnsupportedListingFor(definition.plugin.manifest.id)"
                         variant="outline"

@@ -202,6 +202,7 @@ export default withEnglishFallback({
     allPluginsUpToDate: "所有外掛均已是最新版本。",
     updateCheckUnavailable: "無法檢查外掛更新",
     updateCheckUnavailableDescription: "外掛目錄載入失敗，更新狀態可能不準確。",
+    updateCheckPartialFailure: "部分外掛倉庫檢查失敗，更新狀態可能不完整。",
     noRepositoriesEnabled: "未啟用任何外掛倉庫",
     notInRepositories: "不在倉庫",
     notInRepositoriesHint: "本機安裝或所在倉庫已停用，無法檢查更新。",

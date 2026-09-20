@@ -206,6 +206,7 @@ export default withEnglishFallback({
     allPluginsUpToDate: "모든 플러그인이 최신 버전입니다.",
     updateCheckUnavailable: "플러그인 업데이트를 확인할 수 없음",
     updateCheckUnavailableDescription: "플러그인 카탈로그를 불러오지 못해 업데이트 상태가 부정확할 수 있습니다.",
+    updateCheckPartialFailure: "일부 플러그인 저장소 확인에 실패하여 업데이트 상태가 불완전할 수 있습니다.",
     noRepositoriesEnabled: "활성화된 플러그인 저장소가 없습니다",
     notInRepositories: "저장소에 없음",
     notInRepositoriesHint: "로컬 설치이거나 저장소가 비활성화되어 업데이트를 확인할 수 없습니다.",

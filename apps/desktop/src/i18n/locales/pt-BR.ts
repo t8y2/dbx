@@ -202,6 +202,7 @@ export default withEnglishFallback({
     allPluginsUpToDate: "Todos os plugins instalados estão atualizados.",
     updateCheckUnavailable: "Não é possível verificar atualizações de plugins",
     updateCheckUnavailableDescription: "O catálogo de plugins não pôde ser carregado; o status de atualização pode estar impreciso.",
+    updateCheckPartialFailure: "Alguns repositórios de plugins falharam na verificação; o status de atualização pode estar incompleto.",
     noRepositoriesEnabled: "Nenhum repositório de plugins habilitado",
     notInRepositories: "Fora dos repositórios",
     notInRepositoriesHint: "Instalado fora dos repositórios configurados (.dbxp local ou repositório desabilitado); status de atualização desconhecido.",

@@ -204,6 +204,7 @@ export default {
     allPluginsUpToDate: "All installed plugins are up to date.",
     updateCheckUnavailable: "Plugin updates cannot be checked",
     updateCheckUnavailableDescription: "The plugin catalog could not be loaded, so update status may be outdated.",
+    updateCheckPartialFailure: "Some plugin repositories failed to check; update status may be incomplete.",
     noRepositoriesEnabled: "No plugin repositories are enabled",
     notInRepositories: "Not in repositories",
     notInRepositoriesHint: "Installed outside the configured repositories (local .dbxp or repository disabled); update status unknown.",

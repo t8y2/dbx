@@ -124,6 +124,7 @@ export default withEnglishFallback({
     allPluginsUpToDate: "所有插件均已是最新版本。",
     updateCheckUnavailable: "无法检查插件更新",
     updateCheckUnavailableDescription: "插件目录加载失败，更新状态可能不准确。",
+    updateCheckPartialFailure: "部分插件仓库检查失败，更新状态可能不完整。",
     noRepositoriesEnabled: "未启用任何插件仓库",
     notInRepositories: "不在仓库",
     notInRepositoriesHint: "本地安装或所在仓库已停用，无法检查更新。",

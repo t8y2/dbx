@@ -1647,6 +1647,12 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "Error al leer el portapapeles: {message}",
       convertNamingStyle: "Cambiar estilo de nomenclatura",
     },
+    gotoLine: {
+      placeholder: "Número de línea",
+      total: "{total} líneas",
+      outOfRange: "Introduce un número de línea entre 1 y {total}",
+      empty: "Introduce un número de línea",
+    },
     search: {
       find: "Buscar",
       replace: "Reemplazar",
@@ -7360,6 +7366,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "Ejecutar SQL",
     shortcutExecuteSqlInNewResultTab: "Ejecutar SQL en una nueva pestaña de resultados",
     shortcutFind: "Buscar",
+    shortcutGotoLine: "Ir a la línea",
     shortcutReplace: "Reemplazar",
     shortcutSaveSql: "Guardar SQL",
     shortcutAcceptCompletion: "Aceptar completado",

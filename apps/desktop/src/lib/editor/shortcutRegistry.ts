@@ -66,6 +66,7 @@ export type ShortcutActionId =
   | "zoomOutUi"
   | "resetUiZoom"
   | "find"
+  | "gotoLine"
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
@@ -127,6 +128,14 @@ export function toggleAiPanelDefaultShortcut(platform = globalThis.navigator?.pl
   return isMacShortcutPlatform(platform) ? "Ctrl+Mod+I" : "Ctrl+Alt+I";
 }
 
+// 「跳转到行」的平台默认键。Windows/Linux 上用 Ctrl+G，与 VS Code / SSMS /
+// DataGrip 的惯例一致（编辑器内查找下一个仍有 F3 与搜索面板回车）；
+// macOS 的 Ctrl+G 已分配给「选中下一个相同词」（JetBrains 风格），因此沿用
+// CodeMirror 搜索键位里原本就指向 gotoLine 的 ⌘⌥G。
+export function gotoLineDefaultShortcut(platform = globalThis.navigator?.platform || ""): string {
+  return isMacShortcutPlatform(platform) ? "Mod+Alt+G" : "Mod+G";
+}
+
 const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<string>>> = {
   closeOtherTabs: new Set(["Alt+Mod+W", "Shift+Alt+W"]),
   navigateTabHistoryBack: new Set(["Ctrl+Alt+ArrowLeft", "Mod+Alt+ArrowLeft"]),
@@ -134,6 +143,7 @@ const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<s
   addNextSelectionOccurrence: new Set(["Ctrl+G", "Alt+J"]),
   selectAllSelectionOccurrences: new Set(["Ctrl+Mod+G", "Ctrl+Alt+Shift+J"]),
   toggleAiPanel: new Set(["Ctrl+Mod+I", "Ctrl+Alt+I"]),
+  gotoLine: new Set(["Mod+G", "Mod+Alt+G"]),
 };
 const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 const LEGACY_COPY_CURRENT_ROW_DEFAULT = "Mod+D";
@@ -532,6 +542,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+F",
   },
   {
+    id: "gotoLine",
+    labelKey: "settings.shortcutGotoLine",
+    scope: "editor",
+    defaultShortcut: gotoLineDefaultShortcut(),
+  },
+  {
     id: "replace",
     labelKey: "settings.shortcutReplace",
     scope: "editor",
@@ -652,6 +668,7 @@ function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: st
   if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
   if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
   if (definition.id === "closeOtherTabs") return closeOtherTabsDefaultShortcut(platform);
+  if (definition.id === "gotoLine") return gotoLineDefaultShortcut(platform);
   if (definition.id === "navigateTabHistoryBack") return tabNavigationHistoryDefaultShortcut("back", platform);
   if (definition.id === "navigateTabHistoryForward") return tabNavigationHistoryDefaultShortcut("forward", platform);
   if (definition.id === "toggleAiPanel") return toggleAiPanelDefaultShortcut(platform);

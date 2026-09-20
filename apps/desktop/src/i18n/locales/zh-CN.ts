@@ -1610,6 +1610,12 @@ export default withEnglishFallback({
       confirm: "确定",
       selectFirst: "请选择列表文本",
     },
+    gotoLine: {
+      placeholder: "行号",
+      total: "共 {total} 行",
+      outOfRange: "请输入 1–{total} 之间的行号",
+      empty: "请输入行号",
+    },
     search: {
       find: "查找",
       replace: "替换",
@@ -7838,6 +7844,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "执行 SQL",
     shortcutExecuteSqlInNewResultTab: "在新结果标签页中执行 SQL",
     shortcutFind: "查找",
+    shortcutGotoLine: "跳转到行",
     shortcutReplace: "替换",
     shortcutSaveSql: "保存 SQL",
     shortcutAcceptCompletion: "接受补全",

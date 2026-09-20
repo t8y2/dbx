@@ -1646,6 +1646,12 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "讀取剪貼簿失敗：{message}",
       convertNamingStyle: "切換命名風格",
     },
+    gotoLine: {
+      placeholder: "行號",
+      total: "共 {total} 行",
+      outOfRange: "請輸入 1–{total} 之間的行號",
+      empty: "請輸入行號",
+    },
     search: {
       find: "尋找",
       replace: "取代",
@@ -6666,6 +6672,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "執行 SQL",
     shortcutExecuteSqlInNewResultTab: "在新結果分頁中執行 SQL",
     shortcutFind: "尋找",
+    shortcutGotoLine: "跳至行",
     shortcutReplace: "取代",
     shortcutSaveSql: "儲存 SQL",
     shortcutAcceptCompletion: "接受補全",

@@ -1664,6 +1664,12 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "クリップボードの読み取りに失敗しました：{message}",
       convertNamingStyle: "命名スタイルの切り替え",
     },
+    gotoLine: {
+      placeholder: "行番号",
+      total: "全 {total} 行",
+      outOfRange: "1〜{total} の行番号を入力してください",
+      empty: "行番号を入力してください",
+    },
     search: {
       find: "検索",
       replace: "置換",
@@ -7364,6 +7370,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "SQLを実行",
     shortcutExecuteSqlInNewResultTab: "新しい結果タブでSQLを実行",
     shortcutFind: "検索",
+    shortcutGotoLine: "指定行へ移動",
     shortcutReplace: "置換",
     shortcutSaveSql: "SQLを保存",
     shortcutAcceptCompletion: "補完を受け入れる",

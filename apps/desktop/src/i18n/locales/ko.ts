@@ -1577,6 +1577,12 @@ export default withEnglishFallback({
       confirm: "확인",
       selectFirst: "목록 텍스트를 먼저 선택하세요",
     },
+    gotoLine: {
+      placeholder: "줄 번호",
+      total: "총 {total}행",
+      outOfRange: "1~{total} 사이의 줄 번호를 입력하세요",
+      empty: "줄 번호를 입력하세요",
+    },
     search: {
       find: "찾기",
       replace: "바꾸기",
@@ -7142,6 +7148,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "SQL 실행",
     shortcutExecuteSqlInNewResultTab: "새 결과 탭에서 SQL 실행",
     shortcutFind: "찾기",
+    shortcutGotoLine: "줄로 이동",
     shortcutReplace: "바꾸기",
     shortcutSaveSql: "SQL 저장",
     shortcutAcceptCompletion: "완성 수락",

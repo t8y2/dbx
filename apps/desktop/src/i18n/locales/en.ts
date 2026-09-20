@@ -1696,6 +1696,12 @@ export default {
       confirm: "Confirm",
       selectFirst: "Please select list text",
     },
+    gotoLine: {
+      placeholder: "Line number",
+      total: "{total} lines",
+      outOfRange: "Enter a line number between 1 and {total}",
+      empty: "Enter a line number",
+    },
     search: {
       find: "Find",
       replace: "Replace",
@@ -7868,6 +7874,7 @@ export default {
     shortcutExecuteSql: "Execute SQL",
     shortcutExecuteSqlInNewResultTab: "Execute SQL in new result tab",
     shortcutFind: "Find",
+    shortcutGotoLine: "Go to Line",
     shortcutReplace: "Replace",
     shortcutSaveSql: "Save SQL",
     shortcutAcceptCompletion: "Accept completion",

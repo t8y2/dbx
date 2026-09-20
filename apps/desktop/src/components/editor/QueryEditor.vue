@@ -23,6 +23,7 @@ import type { EditorState, Text } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
+import EditorGotoLinePanel from "./EditorGotoLinePanel.vue";
 import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
@@ -522,6 +523,7 @@ const gestureStartFontSize = ref(settingsStore.editorSettings.fontSize);
 const isGestureZooming = ref(false);
 
 const searchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
+const gotoLinePanelRef = ref<InstanceType<typeof EditorGotoLinePanel>>();
 const selectedSql = ref("");
 const executableSql = ref("");
 const previewContextSql = ref("");
@@ -2557,6 +2559,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           run: toggleSelectedBatchColumnSelection,
         },
         ...binding(shortcuts.find, openSearch),
+        ...binding(shortcuts.gotoLine, openGotoLine),
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeBindings,
@@ -8204,6 +8207,10 @@ function openSearch(): boolean {
   return searchPanelRef.value?.openSearch() ?? false;
 }
 
+function openGotoLine(): boolean {
+  return gotoLinePanelRef.value?.openGotoLine() ?? false;
+}
+
 function openReplace(): boolean {
   if (props.readOnly) return false;
   return searchPanelRef.value?.openReplace() ?? false;
@@ -8291,7 +8298,8 @@ defineExpose({
       />
     </CustomContextMenu>
     <div v-show="queryEditorDropCaret" data-query-editor-drop-caret class="pointer-events-none absolute z-20 w-0.5 rounded-full bg-primary/70" :style="queryEditorDropCaretStyle" />
-    <EditorSearchPanel ref="searchPanelRef" :view="view" />
+    <EditorSearchPanel ref="searchPanelRef" :view="view" @open="gotoLinePanelRef?.closeGotoLine()" />
+    <EditorGotoLinePanel ref="gotoLinePanelRef" :view="view" @open="searchPanelRef?.closeSearch()" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
     <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />

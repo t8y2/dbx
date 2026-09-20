@@ -1521,6 +1521,12 @@ export default withEnglishFallback({
       confirm: "Təsdiqlə",
       selectFirst: "Siyahı mətnini seçin",
     },
+    gotoLine: {
+      placeholder: "Sətir nömrəsi",
+      total: "{total} sətir",
+      outOfRange: "1–{total} aralığında sətir nömrəsi daxil edin",
+      empty: "Sətir nömrəsi daxil edin",
+    },
     search: {
       find: "Tap",
       replace: "Əvəz et",
@@ -7565,6 +7571,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "SQL-i icra et",
     shortcutExecuteSqlInNewResultTab: "SQL-i yeni nəticə vərəqində icra et",
     shortcutFind: "Tap",
+    shortcutGotoLine: "Sətirə keç",
     shortcutReplace: "Əvəz et",
     shortcutSaveSql: "SQL-i yadda saxla",
     shortcutAcceptCompletion: "Tamamlamanı qəbul et",

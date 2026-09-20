@@ -1645,6 +1645,12 @@ export default withEnglishFallback({
       pasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
       convertNamingStyle: "Alternar estilo de nomenclatura",
     },
+    gotoLine: {
+      placeholder: "Número da linha",
+      total: "{total} linhas",
+      outOfRange: "Informe um número de linha entre 1 e {total}",
+      empty: "Informe um número de linha",
+    },
     search: {
       find: "Localizar",
       replace: "Substituir",
@@ -7361,6 +7367,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "Executar SQL",
     shortcutExecuteSqlInNewResultTab: "Executar SQL em uma nova aba de resultados",
     shortcutFind: "Localizar",
+    shortcutGotoLine: "Ir para a linha",
     shortcutReplace: "Substituir",
     shortcutSaveSql: "Salvar SQL",
     shortcutAcceptCompletion: "Aceitar autocompletar",

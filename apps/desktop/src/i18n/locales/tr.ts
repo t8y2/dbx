@@ -1522,6 +1522,12 @@ export default withEnglishFallback({
       confirm: "Onayla",
       selectFirst: "Lütfen liste metnini seçin",
     },
+    gotoLine: {
+      placeholder: "Satır numarası",
+      total: "{total} satır",
+      outOfRange: "1 ile {total} arasında bir satır numarası girin",
+      empty: "Bir satır numarası girin",
+    },
     search: {
       find: "Bul",
       replace: "Değiştir",
@@ -7464,6 +7470,7 @@ export default withEnglishFallback({
     shortcutExecuteSql: "SQL'i çalıştır",
     shortcutExecuteSqlInNewResultTab: "SQL'i yeni sonuç sekmesinde çalıştır",
     shortcutFind: "Bul",
+    shortcutGotoLine: "Satıra git",
     shortcutReplace: "Değiştir",
     shortcutSaveSql: "SQL'i Kaydet",
     shortcutAcceptCompletion: "Tamamlamayı kabul et",

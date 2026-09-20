@@ -9,6 +9,7 @@ import LightDropdown from "@/components/ui/LightDropdown.vue";
 import WindowControls from "@/components/layout/WindowControls.vue";
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
 import ToolbarUpdateIcon from "@/components/layout/ToolbarUpdateIcon.vue";
+import FavoritesDropdown from "@/components/favorites/FavoritesDropdown.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -567,6 +568,7 @@ const toolbarStyle = computed(() => {
       <span :class="toolbarTextLabelClass">{{ t("toolbar.newQuery") }}</span>
     </Button>
 
+    <FavoritesDropdown />
     <template v-if="!toolbarCollapsed">
       <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">
         <ArrowLeftRight class="h-3.5 w-3.5" />

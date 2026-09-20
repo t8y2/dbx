@@ -1,4 +1,21 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { CreateTableFavorite, CreatedTableFavorite, RelinkTableFavorite, TableFavorite, TableFavorites, UpdateTableFavorite } from "@/types/favorites";
+
+export function listTableFavorites(): Promise<TableFavorites> {
+  return invoke("list_table_favorites");
+}
+export function createTableFavorite(input: CreateTableFavorite): Promise<CreatedTableFavorite> {
+  return invoke("create_table_favorite", { input });
+}
+export function updateTableFavorite(id: string, input: UpdateTableFavorite): Promise<TableFavorite> {
+  return invoke("update_table_favorite", { id, input });
+}
+export function relinkTableFavorite(id: string, input: RelinkTableFavorite): Promise<TableFavorite> {
+  return invoke("relink_table_favorite", { id, input });
+}
+export function removeTableFavorite(id: string, expectedRevision: number): Promise<void> {
+  return invoke("remove_table_favorite", { id, expectedRevision });
+}
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import { assertUpdateAllowsCommand } from "@/lib/app/updatePreparation";

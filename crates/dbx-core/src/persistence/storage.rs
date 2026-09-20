@@ -35,6 +35,9 @@ use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, Databa
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
+#[path = "../favorites/storage.rs"]
+mod favorite_storage;
+
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 const STORAGE_DB_FILE_NAME: &str = "dbx.db";
@@ -51,6 +54,7 @@ const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
 const SNIPPET_PENDING_CLEANUPS_KEY: &str = "snippet_pending_legacy_cleanups";
 const USER_DATA_TABLES: &[&str] = &[
+    "table_favorites",
     "connections",
     "connection_secrets",
     "history",
@@ -705,6 +709,9 @@ impl DesktopIconTheme {
 }
 
 const SCHEMA_STATEMENTS: &[&str] = &[
+    crate::favorites::TABLE_SCHEMA,
+    crate::favorites::SEQUENCE_SCHEMA,
+    crate::favorites::SEQUENCE_SEED,
     "CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
         config_json TEXT NOT NULL

@@ -1,5 +1,32 @@
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
+import type { CreateTableFavorite, CreatedTableFavorite, RelinkTableFavorite, TableFavorite, TableFavorites, UpdateTableFavorite } from "@/types/favorites";
+
+export function listTableFavorites(): Promise<TableFavorites> {
+  return get("/api/favorites/tables");
+}
+export function createTableFavorite(input: CreateTableFavorite): Promise<CreatedTableFavorite> {
+  return post("/api/favorites/tables", input);
+}
+async function patchTableFavorite(id: string, suffix: string, input: UpdateTableFavorite | RelinkTableFavorite): Promise<TableFavorite> {
+  const response = await fetch(apiUrl(`/api/favorites/tables/${encodeURIComponent(id)}${suffix}`), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await backendResponseError(response);
+  return response.json();
+}
+export function updateTableFavorite(id: string, input: UpdateTableFavorite): Promise<TableFavorite> {
+  return patchTableFavorite(id, "", input);
+}
+export function relinkTableFavorite(id: string, input: RelinkTableFavorite): Promise<TableFavorite> {
+  return patchTableFavorite(id, "/target", input);
+}
+export async function removeTableFavorite(id: string, expectedRevision: number): Promise<void> {
+  const response = await fetch(apiUrl(`/api/favorites/tables/${encodeURIComponent(id)}?expectedRevision=${encodeURIComponent(expectedRevision)}`), { method: "DELETE" });
+  if (!response.ok) throw await backendResponseError(response);
+}
 import type {
   ConnectionConfig,
   ConnectionTestResult,

@@ -1,4 +1,5 @@
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
+import { favoritesEn as favorites } from "./favorites";
 import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
@@ -81,6 +82,7 @@ const consul = {
 };
 
 export default {
+  favorites,
   cellTransform: {
     title: "Convert preview",
     description: "Convert the current value for viewing or copying. The source value and editor draft stay unchanged.",

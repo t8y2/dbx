@@ -65,6 +65,7 @@ import {
   Link2,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { tableFavoriteMenuItems } from "@/lib/favorites/menu";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -6757,6 +6758,7 @@ function buildContextMenu(node: TreeNode): ContextMenuItem[] {
   let rawItems: ContextMenuItem[];
   try {
     rawItems = treeItemMenuItems();
+    rawItems.push(...tableFavoriteMenuItems(node, node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined, t));
   } finally {
     acceptedSelectionIds = null;
   }

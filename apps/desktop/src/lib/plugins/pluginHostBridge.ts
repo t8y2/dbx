@@ -745,9 +745,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         },
         finish: (handleId) => request('host.finishFileSave', { handleId }),
         cancel: (handleId) => request('host.closeFileHandle', { handleId }),
+        onDragState: (listener) => { listeners.dragstate.add(listener); return () => listeners.dragstate.delete(listener); },
+        onDrop: (listener) => { listeners.filedrop.add(listener); return () => listeners.filedrop.delete(listener); },
       }),
-      onFileDrop: (listener) => { listeners.filedrop.add(listener); return () => listeners.filedrop.delete(listener); },
-      onDragState: (listener) => { listeners.dragstate.add(listener); return () => listeners.dragstate.delete(listener); },
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
@@ -881,6 +881,8 @@ function requirePluginPlanRequest(input: Record<string, unknown>): PluginPlanReq
 function clampPluginPlanTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(MAX_PLUGIN_PLAN_TIMEOUT_MS, Math.max(1, Math.round(value)));
+}
+
 function requireHandleId(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
   return value;

@@ -972,6 +972,8 @@ describe("plugin SDK source", () => {
     // The SDK forwards the mode verbatim: defaulting it would let a plugin reach
     // a plan mode it never asked for.
     expect(requests[1].params).toEqual({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
+  });
+
   it("forwards fileTransfer requests to the host api", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -1029,7 +1031,7 @@ describe("plugin SDK source", () => {
     expect(source).toContain("host.beginFileSave");
     expect(source).toContain("host.writeFileChunk");
     expect(source).toContain("host.finishFileSave");
-    expect(source).toContain("onFileDrop");
+    expect(source).toContain("onDrop");
     expect(source).toContain("onDragState");
     expect(source).toContain("type === 'filedrop'");
     expect(source).toContain("type === 'dragstate'");

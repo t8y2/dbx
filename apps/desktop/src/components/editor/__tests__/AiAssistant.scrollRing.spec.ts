@@ -44,6 +44,10 @@ describe("AI assistant scroll-to-bottom button status ring", () => {
     expect(ringEl).toContain("motion-reduce:animate-none");
     // Semantic token color — theme/dark-mode support comes free via currentColor.
     expect(ringEl).toContain("text-primary");
+    // The ring must never swallow clicks, and fill="none" keeps the open arc
+    // from rendering as a filled pie slice.
+    expect(ringEl).toContain("pointer-events-none");
+    expect(ringEl).toContain('fill="none"');
     // Open ~288° arc (statement-gutter spinner geometry scaled to the 32-unit
     // ring box), round-capped like every other arc/spinner in the repo.
     expect(ringEl).toContain("M29 16a13 13 0 1 1-8.98-12.36");

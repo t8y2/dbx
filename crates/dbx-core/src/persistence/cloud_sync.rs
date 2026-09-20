@@ -845,14 +845,27 @@ impl SnippetSyncClient {
                 .get("files")
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(|| "Snippet response did not include files".to_string())?;
-            if !files
+            let file = files
                 .iter()
-                .any(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
-            {
-                return Err(format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"));
-            }
-            let raw_url = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
+                .find(|file| file.get("path").and_then(serde_json::Value::as_str) == Some(DEFAULT_SNIPPET_FILE_NAME))
+                .ok_or_else(|| format!("Snippet does not contain {DEFAULT_SNIPPET_FILE_NAME}"))?;
+            // Snippet repositories default to `main` on current instances but
+            // `master` on older ones; the per-file `raw_url` always carries the
+            // snippet's actual default branch, so prefer it over guessing.
+            let constructed_main = format!("{url}/files/main/{DEFAULT_SNIPPET_FILE_NAME}/raw");
+            let raw_url = file
+                .get("raw_url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| constructed_main.clone());
             let response = self.request(Method::GET, &raw_url)?.send().await.map_err(|e| e.to_string())?;
+            if response.status() == StatusCode::NOT_FOUND && raw_url == constructed_main {
+                let master_url = format!("{url}/files/master/{DEFAULT_SNIPPET_FILE_NAME}/raw");
+                let response = self.request(Method::GET, &master_url)?.send().await.map_err(|e| e.to_string())?;
+                ensure_snippet_success(response.status(), "raw download")?;
+                return response.text().await.map_err(|e| e.to_string());
+            }
             ensure_snippet_success(response.status(), "raw download")?;
             return response.text().await.map_err(|e| e.to_string());
         }
@@ -1858,13 +1871,20 @@ mod tests {
     }
 
     async fn spawn_gitlab_server(responses: Vec<String>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        spawn_gitlab_server_with_status(responses.into_iter().map(|body| (200, body)).collect()).await
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn spawn_gitlab_server_with_status(
+        responses: Vec<(u16, String)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for body in responses {
+            for response in responses {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let header_end = loop {
@@ -1892,8 +1912,15 @@ mod tests {
                     request.extend_from_slice(&chunk[..size]);
                 }
                 requests.push(String::from_utf8(request).unwrap());
+                let (status, body) = response;
+                let body = body.replace("{SERVER_BASE}", &format!("http://{address}"));
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Status",
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket.write_all(response.as_bytes()).await.unwrap();
@@ -2848,6 +2875,66 @@ mod tests {
         assert!(body["files"][0]["content"].as_str().unwrap().contains("dbx-encrypted-sync-snapshot"));
         assert!(requests[1].starts_with("GET /api/v4/snippets/42 HTTP/1.1"));
         assert!(requests[2].starts_with("GET /api/v4/snippets/42/files/main/dbx-sync.json/raw HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_uses_snippet_raw_url_branch() {
+        let storage = Storage::open(&temp_db_path("gitlab-raw-url-branch")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        let (base, server) = spawn_gitlab_server_with_status(vec![
+            (
+                200,
+                serde_json::json!({"files": [{"path": "dbx-sync.json", "raw_url": "{SERVER_BASE}/api/v4/snippets/42/files/master/dbx-sync.json/raw"}]}).to_string(),
+            ),
+            (200, encrypted),
+        ])
+        .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: None,
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            },
+            base,
+        );
+        let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+        assert_eq!(restored.app_version, snapshot.app_version);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /api/v4/snippets/42 HTTP/1.1"));
+        assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn gitlab_download_falls_back_to_master_when_main_raw_file_is_missing() {
+        let storage = Storage::open(&temp_db_path("gitlab-master-fallback")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
+        let (base, server) = spawn_gitlab_server_with_status(vec![
+            (200, serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string()),
+            (404, String::new()),
+            (200, encrypted),
+        ])
+        .await;
+        let client = SnippetSyncClient::with_api_base(
+            SnippetSyncConfig {
+                provider: SnippetProvider::GitLab,
+                instance_url: None,
+                token: Some("test-token".to_string()),
+                snippet_id: Some("42".to_string()),
+                replace_legacy_snippet: false,
+            },
+            base,
+        );
+        let (restored, _) = client.get_snapshot(Some("password")).await.unwrap();
+        assert_eq!(restored.app_version, snapshot.app_version);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].starts_with("GET /api/v4/snippets/42/files/main/dbx-sync.json/raw HTTP/1.1"));
+        assert!(requests[2].starts_with("GET /api/v4/snippets/42/files/master/dbx-sync.json/raw HTTP/1.1"));
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Copy, Loader2, RefreshCcw, Search } from "@lucide/vue";
+import { Activity, AlertTriangle, ArrowDown, ArrowUp, Ban, Copy, Loader2, PlugZap, RefreshCcw, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -53,12 +53,16 @@ let timer: ReturnType<typeof setInterval> | undefined;
 
 const cancelTarget = ref<ProcessRow | null>(null);
 const canceling = ref(false);
+const terminateTarget = ref<ProcessRow | null>(null);
+const terminating = ref(false);
 const batchSupported = computed(() => driver.value?.supportsBatchCancel === true);
+// Engines without a terminate statement only expose query cancellation.
+const terminateSupported = computed(() => typeof driver.value?.buildTerminateSessionSql === "function");
 const selectedIds = ref(new Set<number>());
 const batchTargets = ref<ProcessRow[] | null>(null);
 const batchResult = ref<{ succeeded: number; failures: { id: number; message: string }[] } | null>(null);
 const refreshing = ref(false);
-const actionsLocked = computed(() => canceling.value || cancelTarget.value !== null || batchTargets.value !== null);
+const actionsLocked = computed(() => canceling.value || cancelTarget.value !== null || terminating.value || terminateTarget.value !== null || batchTargets.value !== null);
 let connectionGeneration = 0;
 let disposed = false;
 const fallbackListSql = ref<string | null>(null);
@@ -294,6 +298,62 @@ async function confirmCancel() {
   }
 }
 
+function requestTerminate(row: ProcessRow) {
+  if (isOwnSession(row) || actionsLocked.value || refreshing.value || !terminateSupported.value) return;
+  terminateTarget.value = row;
+}
+
+/**
+ * Close the session itself. `KILL QUERY` / `pg_cancel_backend` leave an idle session
+ * connected, so an idle row could never be removed from the list before this action.
+ */
+async function confirmTerminate() {
+  const target = terminateTarget.value;
+  const activeDriver = driver.value;
+  const buildTerminateSql = activeDriver?.buildTerminateSessionSql;
+  if (!target || !activeDriver || !buildTerminateSql || terminating.value) return;
+  const connection = { ...props.connection };
+  const generation = connectionGeneration;
+  const isCurrent = () => !disposed && generation === connectionGeneration;
+  terminating.value = true;
+  try {
+    const terminateSql = buildTerminateSql.call(activeDriver, target.id);
+    let usedFallbackTerminateSql = false;
+    const executeTerminateSql = async (sql: string) => {
+      if (!isCurrent()) return undefined;
+      const results = await api.executeMulti(connection.id, "", sql, undefined, undefined, { maxRows: 1 });
+      const executionError = processListExecutionError(results);
+      if (executionError) throw new Error(executionError);
+      return results;
+    };
+    const result = await executeWithProductionSqlGuard({
+      connection,
+      database: "",
+      sql: terminateSql,
+      source: t("production.sourceAdmin"),
+      execute: async () => {
+        try {
+          return await executeTerminateSql(terminateSql);
+        } catch (error) {
+          if (!activeDriver.buildFallbackTerminateSessionSql || !activeDriver.shouldUseFallbackTerminateSessionSql?.(error)) throw error;
+          usedFallbackTerminateSql = true;
+          return executeTerminateSql(activeDriver.buildFallbackTerminateSessionSql(target.id));
+        }
+      },
+    });
+    if (result === undefined || !isCurrent()) return;
+    const terminateResultError = usedFallbackTerminateSql ? activeDriver.fallbackTerminateSessionResultError?.(result) : activeDriver.terminateSessionResultError?.(result);
+    if (terminateResultError) throw new Error(terminateResultError);
+    toast(t("processList.terminateSuccess", { id: target.id }), 2500);
+    terminateTarget.value = null;
+  } catch (error: any) {
+    if (isCurrent()) toast(t("processList.terminateFailed", { message: error?.message || String(error) }), 5000);
+  } finally {
+    terminating.value = false;
+    if (terminateTarget.value === null) void load({ silent: true });
+  }
+}
+
 function stopTimer() {
   if (timer) {
     clearInterval(timer);
@@ -420,7 +480,7 @@ onBeforeUnmount(() => {
                 <ArrowDown v-else-if="sortKey === column.key && sortDir === 'desc'" class="h-3 w-3" />
               </span>
             </th>
-            <th class="w-16 whitespace-nowrap border-b px-3 py-2 text-right font-medium">{{ t("processList.colActions") }}</th>
+            <th class="w-40 whitespace-nowrap border-b px-3 py-2 text-right font-medium">{{ t("processList.colActions") }}</th>
           </tr>
         </thead>
         <tbody>
@@ -450,17 +510,31 @@ onBeforeUnmount(() => {
               <template v-else>{{ row[column.key] === null || row[column.key] === undefined ? "—" : row[column.key] }}</template>
             </td>
             <td class="px-3 py-1.5 text-right">
-              <Button
-                variant="ghost"
-                size="sm"
-                class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
-                :disabled="isOwnSession(row) || actionsLocked || refreshing"
-                :title="isOwnSession(row) ? t('processList.cannotKillSelf') : t('processList.kill')"
-                @click="requestCancel(row)"
-              >
-                <Ban class="h-3.5 w-3.5" />
-                {{ t("processList.kill") }}
-              </Button>
+              <span class="inline-flex items-center justify-end gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  :disabled="isOwnSession(row) || actionsLocked || refreshing"
+                  :title="isOwnSession(row) ? t('processList.cannotKillSelf') : t('processList.kill')"
+                  @click="requestCancel(row)"
+                >
+                  <Ban class="h-3.5 w-3.5" />
+                  {{ t("processList.kill") }}
+                </Button>
+                <Button
+                  v-if="terminateSupported"
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 gap-1 px-1.5 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive disabled:opacity-40"
+                  :disabled="isOwnSession(row) || actionsLocked || refreshing"
+                  :title="isOwnSession(row) ? t('processList.cannotTerminateSelf') : t('processList.terminate')"
+                  @click="requestTerminate(row)"
+                >
+                  <PlugZap class="h-3.5 w-3.5" />
+                  {{ t("processList.terminate") }}
+                </Button>
+              </span>
             </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
@@ -495,6 +569,34 @@ onBeforeUnmount(() => {
           <Button variant="destructive" :disabled="canceling" @click="confirmCancel">
             <Loader2 v-if="canceling" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
             {{ t("processList.kill") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog
+      :open="terminateTarget !== null"
+      @update:open="
+        (open) => {
+          if (!open && !terminating) terminateTarget = null;
+        }
+      "
+    >
+      <DialogContent class="max-w-sm" :show-close-button="!terminating">
+        <DialogHeader>
+          <DialogTitle class="flex items-center gap-2">
+            <AlertTriangle class="h-4 w-4 text-destructive" />
+            {{ t("processList.terminateTitle") }}
+          </DialogTitle>
+        </DialogHeader>
+        <p v-if="terminateTarget" class="text-sm text-muted-foreground">
+          {{ t("processList.terminateConfirm", { id: terminateTarget.id, user: terminateTarget.user }) }}
+        </p>
+        <DialogFooter>
+          <Button variant="outline" :disabled="terminating" @click="terminateTarget = null">{{ t("dangerDialog.cancel") }}</Button>
+          <Button variant="destructive" :disabled="terminating" @click="confirmTerminate">
+            <Loader2 v-if="terminating" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+            {{ t("processList.terminate") }}
           </Button>
         </DialogFooter>
       </DialogContent>

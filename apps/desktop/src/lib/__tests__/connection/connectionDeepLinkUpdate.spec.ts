@@ -66,4 +66,16 @@ describe("saved connection update links", () => {
     const update = parseConnectionDeepLinkUpdate("dbx://connection/new?id=saved-id")!;
     expect(applyConnectionDeepLinkUpdate(saved, update)).toEqual(saved);
   });
+
+  it("rejects oversized parameter values while accepting values at the bound", () => {
+    expect(parseConnectionDeepLinkUpdate(`dbx://connection/new?id=saved-id&name=${"n".repeat(4096)}`)!.patch.name).toBe("n".repeat(4096));
+    for (const key of ["name", "host", "password", "url_params"]) {
+      expect(() => parseConnectionDeepLinkUpdate(`dbx://connection/new?id=saved-id&${key}=${"x".repeat(4097)}`)).toThrow(`Connection update ${key} is too long`);
+    }
+  });
+
+  it("rejects an oversized update URL without rejecting other long deep links", () => {
+    expect(() => parseConnectionDeepLinkUpdate(`dbx://connection/new?id=saved-id&url_params=${"k=v&".repeat(5000)}`)).toThrow("Connection update URL is too long");
+    expect(parseConnectionDeepLinkUpdate(`dbx://query/open?sql=${"x".repeat(20000)}`)).toBe(null);
+  });
 });

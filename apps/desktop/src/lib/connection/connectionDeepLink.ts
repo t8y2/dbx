@@ -68,6 +68,10 @@ export function connectionDeepLinkServiceHydrationValue(config: ConnectionDeepLi
 
 const CONNECTION_DEEP_LINK_TARGET = "connection/new";
 const CONNECTION_UPDATE_PARAMS = new Set(["id", "v", "name", "host", "port", "user", "password", "database", "url_params", "ssl"]);
+// Untrusted pages build these URLs; cap them so a deep link cannot prefill
+// unbounded strings into a saved connection's fields.
+const CONNECTION_UPDATE_MAX_URL_LENGTH = 16384;
+const CONNECTION_UPDATE_MAX_PARAM_LENGTH = 4096;
 
 function normalizePath(url: URL): string {
   return [url.hostname, url.pathname.replace(/^\/+/, "")].filter(Boolean).join("/").replace(/\/+$/, "");
@@ -82,12 +86,14 @@ export function parseConnectionDeepLinkUpdate(value: string): ConnectionDeepLink
     return null;
   }
   if (url.protocol !== "dbx:" || normalizePath(url) !== CONNECTION_DEEP_LINK_TARGET || !url.searchParams.has("id")) return null;
+  if (value.length > CONNECTION_UPDATE_MAX_URL_LENGTH) throw new Error("Connection update URL is too long");
   if (url.username || url.password || url.port || url.hash) throw new Error("Invalid connection update URL");
 
   const params = url.searchParams;
   for (const key of params.keys()) {
     if (!CONNECTION_UPDATE_PARAMS.has(key)) throw new Error("Unsupported connection update parameter");
     if (params.getAll(key).length !== 1) throw new Error("Duplicate connection update parameter");
+    if (params.get(key)!.length > CONNECTION_UPDATE_MAX_PARAM_LENGTH) throw new Error(`Connection update ${key} is too long`);
   }
   if (params.has("v") && params.get("v")?.trim() !== "1") throw new Error("Unsupported connection update version");
 

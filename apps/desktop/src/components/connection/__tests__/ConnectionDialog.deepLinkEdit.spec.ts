@@ -362,4 +362,21 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     expect(store.connect).not.toHaveBeenCalled();
     expect(backend.connectDb).not.toHaveBeenCalled();
   });
+
+  it("recomputes the SQL Server explicit-port flag after a manual port edit in an update session", async () => {
+    await mountDialog(savedConnection({ db_type: "sqlserver", driver_profile: "sqlserver", driver_label: "SQL Server", port: 1433, external_config: { customSetting: "retained" } }), "dbx://connection/new?id=saved-production&port=1444");
+    const port = [...document.querySelectorAll("input")].find((input) => input.value === "1444");
+    expect(port).toBeTruthy();
+    port!.value = "1445";
+    port!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
+    expect(save).toBeTruthy();
+    save!.click();
+    await settle();
+
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", port: 1445, external_config: { portExplicit: true } }));
+    expect(store.addConnection).not.toHaveBeenCalled();
+  });
 });

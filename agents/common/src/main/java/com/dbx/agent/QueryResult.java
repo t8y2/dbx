@@ -17,6 +17,7 @@ public final class QueryResult {
     private List<List<Object>> rows;
     private long affected_rows;
     private long execution_time_ms;
+    private Long server_execute_time_us;
     private boolean truncated;
 
     public QueryResult() {
@@ -84,6 +85,10 @@ public final class QueryResult {
         return execution_time_ms;
     }
 
+    public Long getServer_execute_time_us() {
+        return server_execute_time_us;
+    }
+
     public boolean getTruncated() {
         return truncated;
     }
@@ -117,6 +122,10 @@ public final class QueryResult {
 
     public void setExecution_time_ms(long execution_time_ms) {
         this.execution_time_ms = execution_time_ms;
+    }
+
+    public void setServer_execute_time_us(Long server_execute_time_us) {
+        this.server_execute_time_us = server_execute_time_us;
     }
 
     public void setTruncated(boolean truncated) {
@@ -190,6 +199,7 @@ public final class QueryResult {
         QueryResult that = (QueryResult) other;
         return affected_rows == that.affected_rows
             && execution_time_ms == that.execution_time_ms
+            && Objects.equals(server_execute_time_us, that.server_execute_time_us)
             && truncated == that.truncated
             && Objects.equals(columns, that.columns)
             && Objects.equals(column_types, that.column_types)
@@ -200,7 +210,7 @@ public final class QueryResult {
 
     @Override
     public int hashCode() {
-        return Objects.hash(columns, column_types, spatial_columns, spatial_values, rows, affected_rows, execution_time_ms, truncated);
+        return Objects.hash(columns, column_types, spatial_columns, spatial_values, rows, affected_rows, execution_time_ms, server_execute_time_us, truncated);
     }
 
     @Override
@@ -212,6 +222,7 @@ public final class QueryResult {
             + ", rows=" + rows
             + ", affected_rows=" + affected_rows
             + ", execution_time_ms=" + execution_time_ms
+            + ", server_execute_time_us=" + server_execute_time_us
             + ", truncated=" + truncated
             + ")";
     }

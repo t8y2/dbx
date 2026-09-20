@@ -118,6 +118,122 @@ describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior 
     return tabId;
   }
 
+  it("starts one session for a result-grid save before the next SQL execution", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+
+    const sessionId = await store.ensureManualTransactionSession(tabId, "ORCL", "APP");
+    expect(sessionId).toBe("txn-oracle");
+    expect(mocks.beginManualTransaction).toHaveBeenCalledWith("oracle-1", "ORCL", "APP", undefined);
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBe("txn-oracle");
+    await store.ensureManualTransactionSession(tabId, "ORCL", "APP");
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back a session opened after the tab leaves manual mode", async () => {
+    let finishBegin!: (sessionId: string) => void;
+    mocks.beginManualTransaction.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finishBegin = resolve;
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, false);
+
+    const starting = store.ensureManualTransactionSession(tabId, "ORCL", "APP");
+    store.setAutoCommit(tabId, true);
+    finishBegin("txn-late");
+
+    await expect(starting).rejects.toThrow("Query tab changed");
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-late");
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBeUndefined();
+  });
+
+  it("rolls back a session opened for a database the tab has left", async () => {
+    let finishBegin!: (sessionId: string) => void;
+    mocks.beginManualTransaction.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finishBegin = resolve;
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query");
+    store.setAutoCommit(tabId, false);
+
+    const starting = store.ensureManualTransactionSession(tabId, "ORCL");
+    store.updateDatabase(tabId, "OTHER_DB");
+    finishBegin("txn-old-database");
+
+    await expect(starting).rejects.toThrow("Query tab changed");
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-old-database");
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBeUndefined();
+  });
+
+  it("does not attach a pending session after leaving and returning to the same database", async () => {
+    let finishBegin!: (sessionId: string) => void;
+    mocks.beginManualTransaction.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finishBegin = resolve;
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query");
+    store.setAutoCommit(tabId, false);
+
+    const starting = store.ensureManualTransactionSession(tabId, "ORCL");
+    store.updateDatabase(tabId, "OTHER_DB");
+    store.updateDatabase(tabId, "ORCL");
+    finishBegin("txn-before-switch");
+
+    await expect(starting).rejects.toThrow("Query tab changed");
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-before-switch");
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBeUndefined();
+  });
+
+  it("rolls back a session opened for a catalog the tab has left", async () => {
+    let finishBegin!: (sessionId: string) => void;
+    mocks.beginManualTransaction.mockReturnValue(
+      new Promise<string>((resolve) => {
+        finishBegin = resolve;
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query");
+    store.setAutoCommit(tabId, false);
+
+    const starting = store.ensureManualTransactionSession(tabId, "ORCL");
+    store.updateCatalog(tabId, "NEW_CATALOG", "ORCL");
+    finishBegin("txn-old-catalog");
+
+    await expect(starting).rejects.toThrow("Query tab changed");
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-old-catalog");
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBeUndefined();
+  });
+
+  it("does not reuse a previous database's transaction while rollback is pending", async () => {
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockResolvedValueOnce("txn-new");
+    mocks.rollbackManualTransaction.mockReturnValueOnce(new Promise<void>(() => {}));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query");
+    store.setAutoCommit(tabId, false);
+    await store.ensureManualTransactionSession(tabId, "ORCL");
+
+    store.updateDatabase(tabId, "OTHER_DB");
+    const newSession = await store.ensureManualTransactionSession(tabId, "OTHER_DB");
+
+    expect(newSession).toBe("txn-new");
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-old");
+    expect(mocks.beginManualTransaction).toHaveBeenNthCalledWith(2, "oracle-1", "OTHER_DB", undefined, undefined);
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBe("txn-new");
+  });
+
   it("sends classificationSql only for the initial Oracle manual execution", async () => {
     mocks.executeInManualTransaction.mockResolvedValue(cleanSelect());
 
@@ -259,6 +375,54 @@ describe("queryStore Oracle/OceanBase manual-transaction sticky state (behavior 
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.txnSessionId).toBe("txn-new");
     expect(tab.txnPossiblyDirty).not.toBe(true);
+  });
+
+  it("does not replay an expired transaction's SQL after its database changes during recovery", async () => {
+    let finishBegin!: (sessionId: string) => void;
+    mocks.beginManualTransaction.mockResolvedValueOnce("txn-old").mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finishBegin = resolve;
+        }),
+    );
+    mocks.executeInManualTransaction.mockRejectedValueOnce(expiredTransactionError()).mockResolvedValueOnce(cleanSelect());
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+
+    const running = store.executeTabSql(tabId, "SELECT * FROM EMP");
+    await vi.waitFor(() => expect(mocks.beginManualTransaction).toHaveBeenCalledTimes(2));
+    store.updateDatabase(tabId, "OTHER_DB");
+    finishBegin("txn-recovered-old-database");
+    await running;
+
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-recovered-old-database");
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(1);
+    expect(store.tabs.find((item) => item.id === tabId)?.txnSessionId).toBeUndefined();
+    expect(store.tabs.find((item) => item.id === tabId)?.result).toBeUndefined();
+  });
+
+  it("does not publish results from a database the tab has left", async () => {
+    let finishQuery!: (results: StickyResult[]) => void;
+    mocks.executeInManualTransaction.mockReturnValueOnce(
+      new Promise<StickyResult[]>((resolve) => {
+        finishQuery = resolve;
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+
+    const running = store.executeTabSql(tabId, "SELECT * FROM EMP");
+    await vi.waitFor(() => expect(mocks.executeInManualTransaction).toHaveBeenCalledTimes(1));
+    store.updateDatabase(tabId, "OTHER_DB");
+    finishQuery(cleanSelect());
+    await running;
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.database).toBe("OTHER_DB");
+    expect(tab.result).toBeUndefined();
+    expect(tab.isExecuting).toBe(false);
   });
 
   it("clears the sticky state together with the session on DBX rollback", async () => {

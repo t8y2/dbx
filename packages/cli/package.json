@@ -29,7 +29,7 @@
   "type": "module",
   "scripts": {
     "start": "cargo run -p dbx-cli --no-default-features --",
-    "test": "cargo test -p dbx-cli --no-default-features",
+    "test": "cargo nextest run -p dbx-cli --no-default-features --no-fail-fast",
     "build": "cargo build -p dbx-cli --release --no-default-features",
     "prepublishOnly": "node --check bin/dbx.js"
   },

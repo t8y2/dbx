@@ -26,6 +26,23 @@ describe("plugin center integration", () => {
     expect(driverStoreSource).not.toContain("PluginContributionsPanel");
   });
 
+  it("refreshes toolbar update state after manual and component update checks", () => {
+    expect(appSource).toContain('if (componentRefresh.status === "fulfilled" && componentRefresh.value) syncToolbarComponentUpdateState()');
+    expect(appSource).toContain("if (result.failed.length === 0) syncToolbarComponentUpdateState()");
+    expect(appSource).toContain("function syncToolbarComponentUpdateState()");
+  });
+
+  it("refreshes all update sources in the background whenever the update center opens", () => {
+    expect(appSource).toContain("function handleToolbarUpdateClick() {\n  showUpdateDialog.value = true;\n  if (!checkingAllUpdates.value) void checkAllUpdates();\n}");
+  });
+
+  it("refreshes the plugin center after component-level plugin updates", () => {
+    expect(appSource).toContain("notifyComponentPluginsUpdated()");
+    expect(pluginCenterSource).toContain("COMPONENT_PLUGINS_UPDATED_EVENT");
+    expect(pluginCenterSource).toContain("window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated)");
+    expect(pluginCenterSource).toContain("installedPlugins.value = await api.listPlugins()");
+  });
+
   it("formats structured backend errors for local and URL package installs", () => {
     const localInstall = pluginCenterSource.slice(pluginCenterSource.indexOf("async function installPlugin("), pluginCenterSource.indexOf("function isHttpPackageUrl("));
     const urlInstall = pluginCenterSource.slice(pluginCenterSource.indexOf("async function installPluginFromUrl("), pluginCenterSource.indexOf("const urlProgressPercent"));

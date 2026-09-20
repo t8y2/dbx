@@ -2849,12 +2849,7 @@ where
     if is_cancelled(&request.export_id).await {
         return Err("Export cancelled".to_string());
     }
-    // BSON dumps must carry native BSON types, so they are written straight from the native
-    // driver's documents; the legacy agent's canonical Extended JSON round trip does not apply.
-    let client = match state.pool_handle(&request.connection_id).await {
-        Some(PoolKind::MongoDb(client)) => client,
-        _ => return Err("BSON dump export requires the native MongoDB driver".into()),
-    };
+    let pool = state.pool_handle(&request.connection_id).await.ok_or_else(|| "Not found".to_string())?;
     let file = File::create(temp).map_err(|error| error.to_string())?;
     let buffered = BufWriter::new(file);
     let mut writer = if request.gzip {
@@ -2864,48 +2859,64 @@ where
     };
     let mut documents_read = 0u64;
     let mut bytes_written = 0u64;
+    let mut write_document = |document: Document| -> Result<(), String> {
+        let bytes = mongodb::bson::to_vec(&document).map_err(|error| error.to_string())?;
+        writer.write_all(&bytes).map_err(|error| error.to_string())?;
+        bytes_written += bytes.len() as u64;
+        documents_read += 1;
+        if documents_read == 1 || documents_read.is_multiple_of(500) {
+            on_progress(export_progress(
+                &request.export_id,
+                MongoExportStatus::Running,
+                documents_read,
+                bytes_written,
+                total_documents,
+                None,
+                started_at,
+            ));
+        }
+        Ok(())
+    };
 
-    let export = for_each_find_document(
-        &client,
-        &request.database,
-        &request.collection,
-        request.filter.as_deref(),
-        request.projection.as_deref(),
-        request.sort.as_deref(),
-        request.collation.as_deref(),
-        DEFAULT_EXPORT_BATCH_SIZE,
-        |document| {
-            let bytes = mongodb::bson::to_vec(&document).map_err(|error| error.to_string())?;
-            writer.write_all(&bytes).map_err(|error| error.to_string())?;
-            bytes_written += bytes.len() as u64;
-            documents_read += 1;
-            if documents_read == 1 || documents_read.is_multiple_of(500) {
-                on_progress(export_progress(
-                    &request.export_id,
-                    MongoExportStatus::Running,
-                    documents_read,
-                    bytes_written,
-                    total_documents,
-                    None,
-                    started_at,
-                ));
-            }
-            Ok(())
-        },
-    );
-    {
-        tokio::pin!(export);
-        let mut poll_cancel = tokio::time::interval(std::time::Duration::from_millis(100));
-        loop {
-            tokio::select! {
-                result = &mut export => { result?; break; }
-                _ = poll_cancel.tick() => {
-                    if is_cancelled(&request.export_id).await {
-                        return Err("Export cancelled".to_string());
+    match &pool {
+        PoolKind::MongoDb(client) => {
+            let export = for_each_find_document(
+                client,
+                &request.database,
+                &request.collection,
+                request.filter.as_deref(),
+                request.projection.as_deref(),
+                request.sort.as_deref(),
+                request.collation.as_deref(),
+                DEFAULT_EXPORT_BATCH_SIZE,
+                &mut write_document,
+            );
+            tokio::pin!(export);
+            let mut poll_cancel = tokio::time::interval(std::time::Duration::from_millis(100));
+            loop {
+                tokio::select! {
+                    result = &mut export => { result?; break; }
+                    _ = poll_cancel.tick() => {
+                        if is_cancelled(&request.export_id).await {
+                            return Err("Export cancelled".to_string());
+                        }
                     }
                 }
             }
         }
+        PoolKind::Agent(client) => {
+            // A BSON dump must keep every BSON type. The agent's find cursor streams canonical
+            // Extended JSON, which round-trips losslessly; the older page-based fallback is
+            // relaxed JSON (Int32/Int64 collapse), so it is not accepted here.
+            if !client.lock().await.supports_capability(AgentCapability::MongoFindCursor) {
+                return Err("BSON export over the MongoDB Legacy Agent needs find-cursor support; upgrade or reinstall the MongoDB Legacy driver".into());
+            }
+            for_each_agent_export_document(client, request, is_cancelled, |value| {
+                write_document(mongo_driver::json_object_to_document_extended_json(&value)?)
+            })
+            .await?;
+        }
+        _ => return Err("Not a MongoDB connection".to_string()),
     }
     writer.finish()?;
     if is_cancelled(&request.export_id).await {

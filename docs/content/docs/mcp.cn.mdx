@@ -104,6 +104,9 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 | `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，默认返回 100 行，可用 `max_rows` 参数提高到最多 1000 行 |
 | `dbx_execute_batch` | 一次执行包含多条语句的 SQL 脚本，按语句返回结果（多语句脚本搭配 `use_transaction` 时返回单个合并结果） |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
+| `dbx_begin_transaction` | 在已启用事务的原生 MySQL 会话上开始事务 |
+| `dbx_commit_transaction` | 在 MySQL 确认 `COMMIT` 后提交当前会话事务 |
+| `dbx_rollback_transaction` | 回滚当前会话事务 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
 | `dbx_peek_messages` | 读取 Kafka 消息，不提交消费位点 |
@@ -162,6 +165,16 @@ DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权
 会话只支持 SQL 连接，并固定到一个连接和数据库。未知、已关闭或过期的 `sessionId` 会失败，不会静默退化为普通查询。完成后应调用 `dbx_close_session`；空闲 30 分钟的会话会被回收，同时最多允许 32 个并发会话。
 
 <Callout type="warn">有状态会话不会放宽 SQL 策略。`USE` 只有在会话中才有意义，但写入、DDL、生产保护、连接只读和数据库权限仍按每次请求重新检查。</Callout>
+
+### 原生 MySQL 显式事务
+
+调用 `dbx_open_session` 时传入 `enable_transactions: true`，DBX 会立即保留一条物理原生 MySQL 连接。随后依次调用 `dbx_begin_transaction`、带该 `session_id` 的一个或多个 `dbx_execute_query`/`dbx_execute_batch`，最后调用 `dbx_commit_transaction` 或 `dbx_rollback_transaction`。事务前后的查询仍使用同一条受管连接。`use_transaction` 仍不能与 `session_id` 同时使用；它是前文所述的独立原子批处理功能。
+
+该 opt-in 模式仅支持本地原生 MySQL 连接。DBX Web/`DBX_WEB_URL`、外部驱动 profile、兼容引擎及其他数据库类型会返回 `TRANSACTION_UNSUPPORTED`，不会静默退化为自动提交。事务会话每次操作只接受一条经过解析的 `SELECT`（含锁定读）、`INSERT`、`UPDATE`、`DELETE` 或 `REPLACE`；原始事务控制、DDL/临时 DDL、`CALL`、`LOAD`、表锁、`SET`、`USE`、XA、文件/输出子句、可执行注释、优化器 hint 及多语句均会被拒绝。完整批次持有同一个操作槽位，并为每条语句返回执行后的事务状态。
+
+响应包含 `transaction_state`（`idle`、`active` 或 `unknown`），并在适用时包含 `transaction_outcome`（`committed`、`rolled_back` 或 `unknown`）。普通 MySQL 语句错误可能仍让事务保持 active；DBX 会在同一连接上重新探测服务器状态后再返回。超时、取消、传输故障或丢失 `COMMIT` 确认会把结果永久标为 `unknown`，禁止该会话继续执行 SQL，并在不重放语句或 `COMMIT` 的前提下销毁连接。显式正值的连接查询超时同样用于事务操作；当连接配置为“无限制”（`0`）时，事务 owner 仍使用默认 300 秒操作上限，确保 busy 操作保持有界。关闭、过期、协议会话删除和服务退出会对状态已知的 active 事务执行有界回滚，然后销毁连接。
+
+<Callout type="warn">回滚保证依赖 InnoDB 等事务型存储。触发器、存储函数、非事务表及外部副作用可能产生 MySQL 无法回滚的效果。DBX 会在排队完成后重新检查当前连接/数据库范围、工具 allowlist、只读与生产保护以及已确认 SQL。即使写权限被撤销，仍允许原会话执行回滚和关闭以完成清理。</Callout>
 
 ## 数据库访问
 

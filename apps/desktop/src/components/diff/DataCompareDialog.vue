@@ -30,6 +30,8 @@ import {
 import CompareKeyColumnsSelect from "@/components/diff/CompareKeyColumnsSelect.vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, RotateCcw, Square } from "@lucide/vue";
 
@@ -75,6 +77,14 @@ const compareProgressCurrent = ref(0);
 const compareProgressTotal = ref(0);
 const compareProgressTable = ref("");
 const executing = ref(false);
+const manualTransaction = ref(false);
+const txnSessionId = ref<string>();
+let commitUncertain = false;
+const resolvingTransaction = ref(false);
+const transactionFailed = ref(false);
+let executionInterrupted = false;
+const executionLocked = computed(() => executing.value || resolvingTransaction.value || !!txnSessionId.value);
+const canUseManualTransaction = computed(() => supportsTransaction(store.getConfig(targetConnectionId.value)?.db_type));
 const executedCount = ref(0);
 const executeTotal = ref(0);
 const syncErrors = ref<{ sql: string; error: string }[]>([]);
@@ -465,6 +475,7 @@ function applyDataCompareSession(session: DataCompareSession | undefined): void 
 }
 
 function swapSourceTarget() {
+  if (executionLocked.value) return;
   const previousSelectedTables = [...selectedSourceTableNames.value];
   const nextSingleTarget = previousSelectedTables.length === 1 ? (previousSelectedTables[0] ?? "") : "";
   const nextSourceSelection = previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
@@ -622,6 +633,7 @@ function toggleShowAll(table: DataCompareTableResult, kind: DiffKind) {
 }
 
 function setDiffSelection(kind: DiffKind, selected: boolean) {
+  if (executionLocked.value) return;
   batchResults.value.forEach((table) => {
     table.diff[kind].forEach((row) => {
       row.selected = selected;
@@ -631,6 +643,7 @@ function setDiffSelection(kind: DiffKind, selected: boolean) {
 }
 
 function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, selected: boolean) {
+  if (executionLocked.value) return;
   table.diff[kind].forEach((row) => {
     row.selected = selected;
   });
@@ -638,6 +651,7 @@ function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, se
 }
 
 function clearAllSelections() {
+  if (executionLocked.value) return;
   (["added", "removed", "modified"] as DiffKind[]).forEach((kind) => {
     batchResults.value.forEach((table) => {
       table.diff[kind].forEach((row) => {
@@ -649,6 +663,7 @@ function clearAllSelections() {
 }
 
 function toggleRowSelection(row: SelectableDataCompareRow | SelectableDataCompareModifiedRow) {
+  if (executionLocked.value) return;
   row.selected = !row.selected;
   rebuildSyncPlan().catch((e) => toast(String(e), 5000));
 }
@@ -695,7 +710,7 @@ async function rebuildSyncPlan() {
 }
 
 function startCompare(): void {
-  if (!canCompare.value || comparing.value || executing.value) return;
+  if (!canCompare.value || comparing.value || executionLocked.value) return;
   const tasks = buildCompareTasks();
   if (tasks.length === 0) {
     toast(t("dataCompare.noComparableTables"), 5000);
@@ -747,30 +762,46 @@ async function copySql() {
 }
 
 async function executeSql() {
-  if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || executing.value) return;
-  const targetConnection = store.getConfig(targetConnectionId.value);
+  if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || planningSync.value || comparing.value || executionLocked.value) return;
+  const connectionId = targetConnectionId.value;
+  const database = targetDatabase.value;
+  const schema = targetSchema.value;
+  const statements = [...syncPlan.value.syncStatements];
+  const useTransaction = manualTransaction.value && canUseManualTransaction.value;
+  const targetConnection = store.getConfig(connectionId);
+  executing.value = true;
+  executionInterrupted = false;
+  transactionFailed.value = false;
   try {
     const failed = await executeWithProductionSqlGuard({
       connection: targetConnection,
-      database: targetDatabase.value,
+      database,
       sql: syncPlan.value.syncSql,
       source: t("production.sourceDataCompare"),
       execute: async () => {
-        executing.value = true;
         syncErrors.value = [];
-        executeTotal.value = syncPlan.value.syncStatements.length;
+        executeTotal.value = statements.length;
         executedCount.value = 0;
-        await store.ensureConnected(targetConnectionId.value);
-        const statements = syncPlan.value.syncStatements;
+        await store.ensureConnected(connectionId);
+        if (useTransaction && (componentUnmounted || executionInterrupted)) return undefined;
+        if (useTransaction) {
+          txnSessionId.value = await api.beginManualTransaction(connectionId, database, schema);
+          commitUncertain = false;
+        }
         for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
+          if (useTransaction && (componentUnmounted || executionInterrupted)) return undefined;
           const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
           try {
-            await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
+            if (useTransaction) await api.executeInManualTransaction(txnSessionId.value!, batch.join(";\n"), database, schema);
+            else await api.executeBatch(connectionId, database, batch, schema);
             executedCount.value += batch.length;
           } catch (e: any) {
+            // A failed manual transaction is rolled back by the backend. Never
+            // replay its statements on an ordinary connection.
+            if (useTransaction) throw e;
             for (const stmt of batch) {
               try {
-                await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
+                await api.executeBatch(connectionId, database, [stmt], schema);
               } catch (singleError: any) {
                 syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
               }
@@ -782,17 +813,75 @@ async function executeSql() {
       },
     });
     if (failed === undefined) return;
-    if (failed === 0) {
+    if (failed === 0 && !txnSessionId.value) {
       toast(t("dataCompare.syncSuccess"), 2000);
-    } else {
-      toast(t("diff.syncSummary", { success: syncPlan.value.syncStatements.length - failed, failed }), 5000);
+    } else if (failed > 0) {
+      toast(t("diff.syncSummary", { success: statements.length - failed, failed }), 5000);
     }
   } catch (e: any) {
+    transactionFailed.value = true;
     toast(e?.message || String(e), 5000);
   } finally {
+    if (txnSessionId.value && (transactionFailed.value || componentUnmounted || executionInterrupted)) await finishTransaction(false);
     executing.value = false;
   }
 }
+
+async function finishTransaction(commit: boolean): Promise<boolean> {
+  const sessionId = txnSessionId.value;
+  if (!sessionId || resolvingTransaction.value || (commit && (executing.value || transactionFailed.value))) return false;
+  resolvingTransaction.value = true;
+  try {
+    let committed = false;
+    let outcomeUnknown = false;
+    try {
+      if (commit) {
+        await api.commitManualTransaction(sessionId);
+        committed = true;
+      } else await api.rollbackManualTransaction(sessionId);
+    } catch (error) {
+      if (!isManualTransactionSessionExpired(error) && formatError(error) !== "Transaction session not found") {
+        if (commit) {
+          commitUncertain = true;
+          transactionFailed.value = true;
+        }
+        throw error;
+      }
+      outcomeUnknown = commitUncertain;
+      if (outcomeUnknown) toast(t("toolbar.commitOutcomeUnknown"), 5000);
+      else if (commit) toast(t("dataCompare.transactionEnded"), 5000);
+    }
+    txnSessionId.value = undefined;
+    if (committed || outcomeUnknown) {
+      const session = getDataCompareSession(activeSessionId.value);
+      if (session) {
+        session.batchResults = [];
+        session.syncPlan = emptyDataCompareSyncPlan();
+        session.version++;
+      }
+      clearResult();
+      if (committed) toast(t("dataCompare.syncSuccess"), 2000);
+    }
+    return true;
+  } catch (error) {
+    toast(formatError(error), 5000);
+    return false;
+  } finally {
+    resolvingTransaction.value = false;
+  }
+}
+
+async function handleOpenChange(value: boolean) {
+  if (!value && ((executing.value && manualTransaction.value) || resolvingTransaction.value)) return;
+  if (!value && txnSessionId.value) {
+    if (!window.confirm(t("dataCompare.rollbackBeforeClose")) || !(await finishTransaction(false))) return;
+  }
+  open.value = value;
+}
+
+watch(canUseManualTransaction, (supported) => {
+  if (!supported && !executionLocked.value) manualTransaction.value = false;
+});
 
 function formatValue(value: DataCompareCellValue): string {
   if (value == null) return "NULL";
@@ -912,7 +1001,12 @@ watch(targetTable, () => {
 watch(
   [() => open.value, () => props.sessionId],
   async ([value, sessionId]) => {
-    if (!value) return;
+    if (!value) {
+      executionInterrupted = true;
+      if (!executing.value && txnSessionId.value) void finishTransaction(false);
+      return;
+    }
+    if (executionLocked.value) return;
     clearResult();
     shownSessionError = "";
     const session = getDataCompareSession(sessionId);
@@ -960,11 +1054,12 @@ watch(
 );
 onBeforeUnmount(() => {
   componentUnmounted = true;
+  if (!executing.value && txnSessionId.value) void finishTransaction(false);
 });
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent class="sm:max-w-5xl max-h-[85vh] flex flex-col overflow-hidden" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
@@ -973,7 +1068,7 @@ onBeforeUnmount(() => {
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
+      <fieldset :disabled="executionLocked" class="flex-1 min-h-0 min-w-0 overflow-auto space-y-4 py-2">
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
           <div class="space-y-2 rounded-lg border border-blue-500/35 bg-blue-500/5 p-3">
             <div class="flex items-center gap-2 text-sm font-medium text-blue-600 dark:text-blue-400">
@@ -982,7 +1077,7 @@ onBeforeUnmount(() => {
             </div>
             <ConnectionTreeSelect
               v-model="sourceConnectionId"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :connections="sqlConnections"
               :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
@@ -997,7 +1092,7 @@ onBeforeUnmount(() => {
               :placeholder="t('diff.selectDatabase')"
               :search-placeholder="t('diff.searchDatabase')"
               :empty-text="t('common.noResults')"
-              :disabled="comparing || !sourceDatabases.length"
+              :disabled="comparing || executionLocked || !sourceDatabases.length"
               trigger-variant="outline"
               trigger-class="h-8 w-full justify-between text-xs"
               content-class="w-[var(--reka-popover-trigger-width)]"
@@ -1006,7 +1101,7 @@ onBeforeUnmount(() => {
               v-if="sourceSchemas.length"
               v-model="sourceSchema"
               :options="sourceSchemas"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :placeholder="t('diff.selectSchema')"
               :search-placeholder="t('diff.searchSchema')"
               :empty-text="t('common.noResults')"
@@ -1021,12 +1116,12 @@ onBeforeUnmount(() => {
               :tables="sourceTables"
               :title="t('dataCompare.sourceTables')"
               :empty-text="!sourceConnectionId || !sourceDatabase ? t('dataCompare.selectSourceTables') : t('dataCompare.noTables')"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
             />
           </div>
 
           <div class="flex items-center pt-6">
-            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing" @click="swapSourceTarget">
+            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing || executionLocked" @click="swapSourceTarget">
               <ArrowLeftRight class="w-3.5 h-3.5" />
             </Button>
           </div>
@@ -1038,7 +1133,7 @@ onBeforeUnmount(() => {
             </div>
             <ConnectionTreeSelect
               v-model="targetConnectionId"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :connections="sqlConnections"
               :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
@@ -1053,7 +1148,7 @@ onBeforeUnmount(() => {
               :placeholder="t('diff.selectDatabase')"
               :search-placeholder="t('diff.searchDatabase')"
               :empty-text="t('common.noResults')"
-              :disabled="comparing || !targetDatabases.length"
+              :disabled="comparing || executionLocked || !targetDatabases.length"
               trigger-variant="outline"
               trigger-class="h-8 w-full justify-between text-xs"
               content-class="w-[var(--reka-popover-trigger-width)]"
@@ -1062,7 +1157,7 @@ onBeforeUnmount(() => {
               v-if="targetSchemas.length"
               v-model="targetSchema"
               :options="targetSchemas"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :placeholder="t('diff.selectSchema')"
               :search-placeholder="t('diff.searchSchema')"
               :empty-text="t('common.noResults')"
@@ -1079,7 +1174,7 @@ onBeforeUnmount(() => {
                 :placeholder="t('dataCompare.selectTable')"
                 :search-placeholder="t('dataCompare.searchTable')"
                 :empty-text="t('common.noResults')"
-                :disabled="comparing"
+                :disabled="comparing || executionLocked"
                 trigger-variant="outline"
                 trigger-class="h-8 w-full justify-between text-xs"
                 content-class="w-[var(--reka-popover-trigger-width)]"
@@ -1112,7 +1207,7 @@ onBeforeUnmount(() => {
             <span v-if="singleKeyColumnRow" class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium" :class="singleKeyColumnRow.manual ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">
               {{ singleKeyColumnRow.manual ? t("dataCompare.keyColumnsStatusManual") : t("dataCompare.keyColumnsStatusAuto") }}
             </span>
-            <Button v-if="singleKeyColumnRow?.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing" @click="clearTableKeyColumnsOverride(singleKeyColumnRow.table)">
+            <Button v-if="singleKeyColumnRow?.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing || executionLocked" @click="clearTableKeyColumnsOverride(singleKeyColumnRow.table)">
               {{ t("dataCompare.keyColumnsResetAuto") }}
             </Button>
           </div>
@@ -1123,7 +1218,13 @@ onBeforeUnmount(() => {
 
           <!-- Single table: pick match columns straight from the real database columns. -->
           <div v-else-if="singleKeyColumnRow" class="space-y-1">
-            <CompareKeyColumnsSelect :model-value="singleKeyColumnRow.columns" :columns="columnsForTable(singleKeyColumnRow.table)" :loading="singleKeyColumnRow.loading" :disabled="comparing" @update:model-value="(columns) => setTableKeyColumns(singleKeyColumnRow!.table, columns)" />
+            <CompareKeyColumnsSelect
+              :model-value="singleKeyColumnRow.columns"
+              :columns="columnsForTable(singleKeyColumnRow.table)"
+              :loading="singleKeyColumnRow.loading"
+              :disabled="comparing || executionLocked"
+              @update:model-value="(columns) => setTableKeyColumns(singleKeyColumnRow!.table, columns)"
+            />
             <div class="text-[11px]" data-key-column-hint :class="singleKeyColumnRow.error || singleKeyColumnRow.status === 'missing' ? 'text-destructive' : 'text-muted-foreground'">
               {{ singleKeyColumnRow.hint }}
             </div>
@@ -1149,10 +1250,10 @@ onBeforeUnmount(() => {
                     </span>
                   </button>
                   <div v-if="expandedKeyColumnTable === row.table" class="space-y-1 border-t bg-muted/10 px-2 py-2">
-                    <CompareKeyColumnsSelect :model-value="row.columns" :columns="columnsForTable(row.table)" :loading="row.loading" :disabled="comparing" @update:model-value="(columns) => setTableKeyColumns(row.table, columns)" />
+                    <CompareKeyColumnsSelect :model-value="row.columns" :columns="columnsForTable(row.table)" :loading="row.loading" :disabled="comparing || executionLocked" @update:model-value="(columns) => setTableKeyColumns(row.table, columns)" />
                     <div class="flex flex-wrap items-center gap-2 text-[11px]">
                       <span data-key-column-hint :class="row.error || (row.status === 'missing' && row.matched) ? 'text-destructive' : 'text-muted-foreground'">{{ row.hint }}</span>
-                      <Button v-if="row.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing" @click="clearTableKeyColumnsOverride(row.table)">
+                      <Button v-if="row.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing || executionLocked" @click="clearTableKeyColumnsOverride(row.table)">
                         {{ t("dataCompare.keyColumnsResetAuto") }}
                       </Button>
                     </div>
@@ -1341,10 +1442,10 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-      </div>
+      </fieldset>
 
       <DialogFooter v-if="!hasResults">
-        <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
+        <Button variant="outline" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
         <span v-if="compareProgressLabel" class="text-xs text-muted-foreground self-center">{{ compareProgressLabel }}</span>
         <Button size="sm" :disabled="!canCompare || comparing" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3.5 h-3.5 animate-spin mr-1" />
@@ -1354,8 +1455,8 @@ onBeforeUnmount(() => {
       </DialogFooter>
 
       <DialogFooter v-else class="flex items-center gap-2">
-        <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
-        <Button variant="outline" size="sm" :disabled="comparing || executing || !canCompare" @click="startCompare">
+        <Button variant="outline" :disabled="(executing && manualTransaction) || resolvingTransaction" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
+        <Button variant="outline" size="sm" :disabled="comparing || executionLocked || !canCompare" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3 h-3 animate-spin mr-1" />
           <RotateCcw v-else class="w-3 h-3 mr-1" />
           {{ t("dataCompare.recompare") }}
@@ -1378,7 +1479,16 @@ onBeforeUnmount(() => {
           }}
         </span>
         <Button variant="outline" size="sm" :disabled="!syncPlan.syncSql.trim()" @click="copySql"> <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }} </Button>
-        <Button size="sm" :disabled="planningSync || executing || syncPlan.statementCount === 0" @click="executeSql">
+        <template v-if="txnSessionId && !executing">
+          <span class="text-xs text-muted-foreground">{{ t("dataCompare.pendingTransaction") }}</span>
+          <Button variant="outline" size="sm" :disabled="resolvingTransaction" @click="finishTransaction(false)">{{ t("toolbar.rollback") }}</Button>
+          <Button size="sm" :disabled="resolvingTransaction || transactionFailed" @click="finishTransaction(true)">{{ t("toolbar.commit") }}</Button>
+        </template>
+        <label v-else-if="canUseManualTransaction" class="flex items-center gap-2 text-xs" :title="t('dataCompare.manualTransactionHint')">
+          <input v-model="manualTransaction" type="checkbox" :disabled="executionLocked" />
+          {{ t("toolbar.manualTransaction") }}
+        </label>
+        <Button v-if="!txnSessionId" size="sm" :disabled="planningSync || comparing || executionLocked || syncPlan.statementCount === 0" @click="executeSql">
           <Loader2 v-if="executing" class="w-3 h-3 animate-spin mr-1" />
           <Play v-else class="w-3 h-3 mr-1" />
           {{ t("diff.executeSync") }}

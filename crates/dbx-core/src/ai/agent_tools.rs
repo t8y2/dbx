@@ -344,7 +344,7 @@ pub fn read_only_tools(db_type: DatabaseType) -> Vec<ToolDefinition> {
     if is_vector_db(db_type) {
         vec![list_collections_tool(), get_current_time_tool()]
     } else {
-        vec![list_databases_tool(), list_tables_tool(), get_columns_tool(), get_current_time_tool()]
+        vec![list_databases_tool(), list_tables_tool(), get_columns_tool(db_type), get_current_time_tool()]
     }
 }
 
@@ -355,7 +355,7 @@ pub fn all_tools(db_type: DatabaseType, sql_permissions: AgentSqlPermissions) ->
     if is_vector_db(db_type) {
         return vec![list_collections_tool(), browse_collection_tool(), get_current_time_tool()];
     }
-    let mut tools = vec![list_databases_tool(), list_tables_tool(), get_columns_tool(), get_current_time_tool()];
+    let mut tools = vec![list_databases_tool(), list_tables_tool(), get_columns_tool(db_type), get_current_time_tool()];
     if db_type == DatabaseType::MongoDb {
         tools.push(mongo_execute_query_tool(sql_permissions));
     } else if supports_sql_query(db_type) {
@@ -426,13 +426,18 @@ fn list_tables_tool() -> ToolDefinition {
 }
 
 /// get_columns tool definition.
-fn get_columns_tool() -> ToolDefinition {
+fn get_columns_tool(db_type: DatabaseType) -> ToolDefinition {
     ToolDefinition {
         name: "get_columns",
-        description:
+        description: if db_type == DatabaseType::MongoDb {
+            "Sample up to 100 documents from a MongoDB collection and infer up to 512 top-level field names and types. \
+             The sample may be smaller and is not a complete schema or a guarantee of required fields. \
+             Nested documents and arrays remain object and array fields; numeric BSON types are reported as number."
+        } else {
             "Get column definitions for a table: names, types, primary keys, nullable, defaults, and comments. \
              Use this when the user asks about table structure, column details, or field information — \
-             even if some schema context was provided, this tool returns the authoritative and complete column list.",
+             even if some schema context was provided, this tool returns the authoritative and complete column list."
+        },
         parameters: json!({
             "type": "object",
             "properties": {
@@ -751,7 +756,7 @@ async fn execute_get_columns(
     connection_id: &str,
     database: &str,
     default_schema: Option<&str>,
-    _db_type: &DatabaseType,
+    db_type: &DatabaseType,
 ) -> Result<String, String> {
     let database = effective_database(tool_call, database);
     let table = tool_call
@@ -780,11 +785,20 @@ async fn execute_get_columns(
         .map_err(|e| format!("Failed to get columns for {table}: {e}"))?;
 
     if columns.is_empty() {
+        if *db_type == DatabaseType::MongoDb {
+            return Ok(format!(
+                "No fields could be inferred from collection '{table}': the sample contains no documents or fields."
+            ));
+        }
         return Ok(format!("No columns found for table '{table}'."));
     }
 
     let mut lines = Vec::new();
-    lines.push(format!("Columns of {table}:"));
+    lines.push(if *db_type == DatabaseType::MongoDb {
+        format!("Sampled fields of {table} (up to 100 documents and 512 top-level fields; not a complete schema or a guarantee of required fields):")
+    } else {
+        format!("Columns of {table}:")
+    });
     for col in &columns {
         let mut flags: Vec<String> = Vec::new();
         if col.is_primary_key {
@@ -1821,6 +1835,7 @@ for line in sys.stdin:
             rows,
             affected_rows,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

@@ -1505,7 +1505,7 @@ watch(driverStoreTab, (tab) => {
 
 <template>
   <div class="driver-store-view h-full flex flex-col">
-    <div class="driver-store-scroll flex-1 min-h-0 overflow-y-auto">
+    <div class="driver-store-scroll flex-1 min-h-0">
       <div class="driver-store-container max-w-4xl mx-auto px-6 py-6">
         <Tabs v-model="driverStoreTab" default-value="agent" class="driver-store-tabs-root">
           <div class="driver-store-header flex flex-wrap items-center justify-between gap-2">
@@ -1631,7 +1631,7 @@ watch(driverStoreTab, (tab) => {
               </div>
             </div>
             <!-- Global update section — always above category navigation -->
-            <div v-if="globalUpdatableDrivers.length > 0" class="rounded-lg border divide-y">
+            <div v-if="globalUpdatableDrivers.length > 0" class="driver-store-global-updates rounded-lg border divide-y">
               <div class="flex items-center justify-between bg-amber-500/10 px-4 py-2.5">
                 <div class="min-w-0">
                   <div class="text-sm font-semibold">{{ t("driverStore.updatesAvailableTitle") }} ({{ globalUpdatableDrivers.length }})</div>
@@ -1754,7 +1754,7 @@ watch(driverStoreTab, (tab) => {
           <!-- JDBC Tab -->
           <TabsContent value="jdbc" class="driver-store-tab driver-store-jdbc-tab mt-5 space-y-5">
             <!-- JDBC Plugin -->
-            <div class="rounded-lg border bg-muted/20 p-4">
+            <div class="shrink-0 rounded-lg border bg-muted/20 p-4">
               <div class="flex min-h-12 items-center justify-between gap-3">
                 <div class="min-w-0 space-y-1">
                   <Label>{{ t("settings.jdbcPlugin") }}</Label>
@@ -1799,7 +1799,7 @@ watch(driverStoreTab, (tab) => {
             </div>
 
             <!-- JDBC Drivers -->
-            <div class="space-y-3">
+            <div class="space-y-3 shrink-0">
               <div class="space-y-1">
                 <Label>{{ t("settings.jdbcDrivers") }}</Label>
               </div>
@@ -2082,16 +2082,22 @@ watch(driverStoreTab, (tab) => {
 .driver-store-scroll {
   height: 100%;
   min-height: 0;
-  overflow-y: auto !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
 }
 
 .driver-store-container {
   box-sizing: border-box;
   width: 100%;
+  flex: 1 1 0;
+  min-height: 0;
   max-width: none !important;
   margin-left: 0 !important;
   margin-right: 0 !important;
   padding: 1.25rem 1.5rem 1.5rem !important;
+  display: flex;
+  flex-direction: column;
 }
 
 .driver-store-tabs {
@@ -2104,12 +2110,19 @@ watch(driverStoreTab, (tab) => {
   display: flex !important;
   width: 100%;
   min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
   flex-direction: column !important;
 }
 
 .driver-store-tabs-root > [data-slot="tabs-content"] {
   width: 100%;
   min-width: 0;
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .driver-store-header {
@@ -2118,7 +2131,8 @@ watch(driverStoreTab, (tab) => {
 
 .driver-store-tab {
   min-height: 0;
-  overflow: visible;
+  overflow: hidden;
+  flex: 1 1 0;
 }
 
 .driver-store-tabs-root > [data-slot="tabs-content"][hidden] {
@@ -2127,8 +2141,12 @@ watch(driverStoreTab, (tab) => {
 
 .driver-store-agent-tab,
 .driver-store-jdbc-tab {
+  display: flex !important;
   flex-direction: column;
   gap: 1rem;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .driver-store-agent-tab:not([hidden]),
@@ -2136,14 +2154,26 @@ watch(driverStoreTab, (tab) => {
   display: flex !important;
 }
 
+/* 覆盖 tailwind space-y-5 产生的子元素间距 */
 .driver-store-agent-tab > :not([hidden]) ~ :not([hidden]),
 .driver-store-jdbc-tab > :not([hidden]) ~ :not([hidden]) {
   margin-top: 0 !important;
 }
 
-.driver-store-agent-tab > *,
-.driver-store-jdbc-tab > * {
-  flex-shrink: 0;
+/* 全局更新区自身可收缩并在内部滚动，避免把下方驱动列表挤到零高度 */
+.driver-store-global-updates {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 列表行和操作区保持不收缩 */
+.driver-store-agent-row,
+.driver-store-agent-meta,
+.driver-store-agent-actions,
+.driver-store-jdbc-row > .shrink-0,
+.driver-store-jdbc-row > button {
+  flex-shrink: 0 !important;
 }
 
 .driver-store-agent-row {
@@ -2169,12 +2199,28 @@ html.dark .driver-store-agent-row--installed::before {
   background: rgb(74 222 128);
 }
 
-.driver-store-agent-list,
-.driver-store-jdbc-list {
+.driver-store-agent-list {
   width: 100%;
-  flex: 0 0 auto !important;
   min-height: 0;
   overflow-y: visible;
+  overflow-x: hidden;
+}
+
+.driver-store-jdbc-list {
+  width: 100%;
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Storage tab: cards scroll together inside the tab */
+.driver-store-storage-tab {
+  display: flex !important;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
   overflow-x: hidden;
 }
 

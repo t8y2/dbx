@@ -100,6 +100,11 @@ core 保留原来的 default feature 集合，并向实际实现 crate 转发
 Linux 的文件权限回归测试应由非 root 用户执行；root 可绕过目录写权限，会让测试
 前提失效。测试进程的代理应排除 localhost，避免本地 HTTP 模拟器请求被转发。
 
+Rust 单元与集成测试使用 `cargo nextest run`，CI 固定 nextest `0.9.137`。
+首次使用执行 `cargo install cargo-nextest --locked --version 0.9.137`。
+文档测试仍单独使用 `cargo test --doc`；`make cargo-test-fast` 会依次运行 nextest
+和文档测试，并保留跳过 DuckDB、启用 bundled SQLite 的本地验证配置。
+
 ```sh
 pnpm test:architecture
 cargo check -p dbx-core --no-default-features --all-targets
@@ -107,14 +112,14 @@ cargo check -p dbx-core --no-default-features --all-targets
 env -u DOCKER_CONTEXT \
   DOCKER_HOST=unix:///tmp/dbx-disabled-docker.sock \
   RUST_MIN_STACK=33554432 \
-  cargo test -p dbx-core -p dbx-drivers -p dbx-sql \
+  cargo nextest run -p dbx-core -p dbx-drivers -p dbx-sql \
     -p dbx-types -p dbx-formats -p dbx-platform \
     -p dbx-ai-provider -p dbx-plugin-runtime \
-    --no-default-features --features dbx-core/sqlite-bundled --lib
+    --no-default-features --features dbx-core/sqlite-bundled --lib --no-fail-fast
 
-cargo test -p dbx-core --no-default-features --features sqlite-bundled \
+cargo nextest run -p dbx-core --no-default-features --features sqlite-bundled \
   --test public_api_compatibility --test connection_url_compatibility \
-  --test agent_recovery_contract
+  --test agent_recovery_contract --no-fail-fast
 ```
 
 交付验证还应覆盖桌面/Web/CLI/MCP 消费者、合法 feature 组合、前端类型与源码契约、

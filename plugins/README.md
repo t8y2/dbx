@@ -412,7 +412,7 @@ Plugin-authored names, descriptions, contribution labels, form-field text, and s
 
 ### `result-view`
 
-A result view contributes a plugin-rendered visualization for query results. DBX shows one toolbar button per installed view next to the result grid; clicking it opens the plugin workbench with the current result as context:
+A result view contributes a plugin-rendered visualization for query results. DBX shows one toolbar button per installed view next to the result grid; clicking it opens a plugin tab that renders the plugin's UI entrypoint with the current result as context:
 
 ```json
 {
@@ -422,7 +422,9 @@ A result view contributes a plugin-rendered visualization for query results. DBX
 }
 ```
 
-The workbench `context.result` is a bounded snapshot — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need the full or streamed result set should re-execute through their backend using the SQL and connection reference. Requires a UI entrypoint.
+A result view declares display metadata only: it carries no UI of its own and never names a workbench. The opened contribution id reaches the plugin UI in the init payload (`dbx-plugin-init` detail `contributionId`), so a plugin that declares several result views selects the matching one inside its single UI entrypoint.
+
+The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need the full or streamed result set should re-execute through their backend using the SQL and connection reference. Requires a UI entrypoint.
 
 ### `context-menu`
 

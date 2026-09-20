@@ -316,6 +316,11 @@ import {
   showDropAllMongoIndexesConfirm,
   dropAllMongoIndexesLoading,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
+  meilisearchCreateIndexUid,
+  meilisearchCreateIndexPrimaryKey,
+  meilisearchCreateIndexError,
+  meilisearchCreateIndexLoading,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
@@ -566,6 +571,9 @@ const {
   mongoCreateIndexCanSubmit,
   mongoCreateIndexCanAddField,
   prepareCreateMongoIndexDialog,
+  canCreateMeilisearchIndex,
+  prepareCreateMeilisearchIndexDialog,
+  confirmCreateMeilisearchIndex,
   addMongoCreateIndexField,
   removeMongoCreateIndexField,
   confirmCreateMongoIndex,
@@ -1444,6 +1452,12 @@ function openCreateMongoIndexDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   prepareCreateMongoIndexDialog();
+}
+
+function openCreateMeilisearchIndexDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareCreateMeilisearchIndexDialog();
 }
 
 function openMongoIndexManagerDialog() {
@@ -2595,6 +2609,7 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
       title: `Source - ${node.label}`,
       schema,
       catalog: node.catalog,
+      initialEditing,
       request: { name: sourceTarget.name, objectType: sourceTarget.objectType, signature: sourceNode.signature },
     });
     return;
@@ -5310,6 +5325,12 @@ function databaseSpecificDialogCapabilities() {
     cloneMongoCollectionLoading,
     confirmCloneMongoCollection,
     showCreateMongoIndexDialog,
+    showCreateMeilisearchIndexDialog,
+    meilisearchCreateIndexUid,
+    meilisearchCreateIndexPrimaryKey,
+    meilisearchCreateIndexError,
+    meilisearchCreateIndexLoading,
+    confirmCreateMeilisearchIndex,
     mongoCreateIndexForm,
     mongoCreateIndexFieldOptions,
     mongoCreateIndexError,
@@ -5547,6 +5568,9 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       if (supportsAiContext) {
         items.push(addToAiMenuItem(node));
       }
+    }
+    if (canCreateMeilisearchIndex.value) {
+      items.push({ label: t("meilisearch.createIndex"), action: openCreateMeilisearchIndexDialog, icon: Plus });
     }
     const connectionWorkspace = node.connectionId ? driverProfileDatabaseWorkspace(connectionStore.getConfig(node.connectionId)?.driver_profile) : undefined;
     if (connectionWorkspace?.entryScopes.includes("connection")) {
@@ -6077,9 +6101,17 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
 
   if (node.type === "elasticsearch-index" || node.type === "vector-collection") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
-    items.push({ label: "", separator: true });
-    items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
-    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    // Meilisearch indexes open through their dedicated search workspace; the
+    // generic data/query actions are not valid for this connection type.
+    const isMeilisearchIndex = currentDatabaseType() === "meilisearch";
+    const hasAdditionalIndexActions = canRenameMongoCollection.value || canManageElasticsearchIndex.value || canDropMilvusCollection.value;
+    if (!isMeilisearchIndex || hasAdditionalIndexActions) {
+      items.push({ label: "", separator: true });
+    }
+    if (!isMeilisearchIndex) {
+      items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
+      items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    }
     if (canRenameMongoCollection.value) {
       items.push({ label: t("contextMenu.renameObject"), action: openRenameMongoCollectionDialog, icon: Pencil, shortcut: shortcutRename });
     }
@@ -6380,8 +6412,11 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "sequence") {
+  if (node.type === "sequence" || (node.type === "synonym" && currentDatabaseType() === "oceanbase-oracle")) {
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (currentDatabaseType() === "oceanbase-oracle") {
+      items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+    }
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
     return true;

@@ -99,7 +99,7 @@ function shiftClause(clause: InsertValuesClause, offset: number): InsertValuesCl
   return {
     ...clause,
     span: { start: clause.span.start + offset, end: clause.span.end + offset },
-    rows: clause.rows.map((row) => row.map((from) => from + offset)),
+    rows: clause.rows.map((row) => row.map((source) => ({ ...source, from: source.from + offset }))),
   };
 }
 

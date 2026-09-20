@@ -1,10 +1,12 @@
 package com.dbx.agent.oceanbaseoracle;
 
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.DdlBuilder;
+import com.dbx.agent.ExecuteQueryOptions;
 import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcAgentProfile;
@@ -16,12 +18,17 @@ import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.OracleObjectPrivilege;
 import com.dbx.agent.PartitionInfo;
+import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
+import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -51,6 +58,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         "GGSYS", "FLOWS_FILES", "APEX_PUBLIC_USER", "GSMROOTUSER", "SYSRAC"
     );
     private boolean queryTimeoutChanged;
+    private String auditEligibleCursorId;
+    private static final String SQL_AUDIT_BY_TRACE = "SELECT EXECUTE_TIME, RETURN_ROWS FROM SYS.GV$OB_SQL_AUDIT "
+        + "WHERE TRACE_ID = ? AND IS_INNER_SQL = 0 AND IS_EXECUTOR_RPC = 0 AND ROWNUM <= 2";
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -68,6 +78,97 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     public OceanBaseOracleAgent() {
         super(OCEANBASE_ORACLE_PROFILE);
+    }
+
+    @Override
+    public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
+        auditEligibleCursorId = null;
+        QueryResult result = super.executeQuery(sql, schema, options);
+        if (!result.getTruncated() && !result.getColumns().isEmpty()) {
+            result.setServer_execute_time_us(availableServerExecuteTimeUs(
+                result.getRows().size(), JdbcExecutor.statementMaxRows(options.getMaxRows())
+            ));
+        }
+        return result;
+    }
+
+    @Override
+    public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
+        auditEligibleCursorId = null;
+        QueryPageResult result = super.executeQueryPage(sql, schema, options);
+        if (result.getHas_more()) {
+            auditEligibleCursorId = result.getSession_id();
+            return result;
+        }
+        return withCompletedCursorServerTiming(result);
+    }
+
+    @Override
+    public QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
+        boolean auditEligible = sessionId != null && sessionId.equals(auditEligibleCursorId);
+        QueryPageResult result = super.fetchQueryPage(sessionId, pageSize);
+        if (!result.getHas_more()) auditEligibleCursorId = null;
+        return auditEligible ? withCompletedCursorServerTiming(result) : result;
+    }
+
+    @Override
+    protected void beforeAgentMethod(String method, String querySessionId) {
+        if (!AgentProtocol.METHOD_FETCH_QUERY_PAGE.equals(method)
+            || auditEligibleCursorId == null
+            || !auditEligibleCursorId.equals(querySessionId)) {
+            auditEligibleCursorId = null;
+        }
+    }
+
+    private QueryPageResult withCompletedCursorServerTiming(QueryPageResult result) {
+        // JdbcExecutor closes the ResultSet and Statement before returning a terminal
+        // page. Never issue audit SQL while Connector/J still owns an open cursor.
+        if (!result.getHas_more() && !result.getTruncated() && !result.getColumns().isEmpty()) {
+            result.setServer_execute_time_us(availableServerExecuteTimeUs(result.getCursor_rows_read(), 0));
+        }
+        return result;
+    }
+
+    private Long availableServerExecuteTimeUs(long expectedRows, int statementMaxRows) {
+        try {
+            return serverExecuteTimeUs(requireConnected(), expectedRows, statementMaxRows);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    static Long serverExecuteTimeUs(Connection connection, long expectedRows, int statementMaxRows) {
+        try {
+            String traceId;
+            try (Statement statement = connection.createStatement()) {
+                // Connector/J resets the session's SQL_SELECT_LIMIT in execute prolog
+                // when this differs from the previous statement. That SET would
+                // replace the query's LAST_TRACE_ID before we can read it.
+                statement.setMaxRows(statementMaxRows);
+                statement.setQueryTimeout(1);
+                try (ResultSet traces = statement.executeQuery("SELECT LAST_TRACE_ID() FROM DUAL")) {
+                    traceId = traces.next() ? traces.getString(1) : null;
+                }
+            }
+            if (traceId == null || traceId.isBlank()) return null;
+            try (PreparedStatement statement = connection.prepareStatement(SQL_AUDIT_BY_TRACE)) {
+                statement.setMaxRows(statementMaxRows);
+                statement.setQueryTimeout(1);
+                statement.setString(1, traceId);
+                try (ResultSet audit = statement.executeQuery()) {
+                    if (!audit.next()) return null;
+                    long executionUs = audit.getLong(1);
+                    if (audit.wasNull() || executionUs < 0) return null;
+                    long returnedRows = audit.getLong(2);
+                    if (audit.wasNull() || returnedRows != expectedRows || audit.next()) return null;
+                    return executionUs;
+                }
+            }
+        } catch (SQLException | RuntimeException ignored) {
+            // SQL Audit can be disabled, unavailable to this account, or evicted.
+            // The user's query result remains valid; no wall-clock substitute is used.
+            return null;
+        }
     }
 
     @Override
@@ -383,6 +484,10 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
+        if ("SYNONYM".equals(objectType)) {
+            // GET_DDL does not cover synonyms on every supported OB version.
+            return OceanBaseSchemaObjects.synonymSource(requireConnection(), owner, name);
+        }
         String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
         try (var stmt = requireConnection().prepareStatement(sql)) {
             stmt.setString(1, objectType);
@@ -395,6 +500,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     private String queryDictionarySource(String owner, String name, String objectType) throws SQLException {
+        if ("SEQUENCE".equals(objectType)) {
+            return OceanBaseSchemaObjects.sequenceSource(requireConnection(), owner, name);
+        }
         if ("VIEW".equals(objectType)) {
             String sql = "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?";
             try (var stmt = requireConnection().prepareStatement(sql)) {
@@ -435,7 +543,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             ? ""
             : objectType.trim().toUpperCase(Locale.ROOT).replace(' ', '_');
         return switch (normalized) {
-            case "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE",
+            case "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM",
                 "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> normalized;
             default -> throw new IllegalArgumentException("Unsupported object type: " + objectType);
         };
@@ -443,7 +551,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     private static boolean supportsDictionarySource(String objectType) {
         return switch (objectType) {
-            case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY" -> true;
+            case "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY", "SEQUENCE" -> true;
             default -> false;
         };
     }

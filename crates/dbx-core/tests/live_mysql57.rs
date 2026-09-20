@@ -1285,6 +1285,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
 "#
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
@@ -1373,6 +1374,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
 "#
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
@@ -1448,6 +1450,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
     script.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
     script.extend_from_slice(b"');\n");
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),

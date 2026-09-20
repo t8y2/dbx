@@ -81,6 +81,8 @@ describe("tab result cache statement execution metadata", () => {
           rows: [[1]],
           affected_rows: 0,
           execution_time_ms: 1,
+          server_execute_time_us: 370,
+          client_request_wait_ms: 45,
           statement_index: 0,
           sourceStatement: "SELECT 1",
         },
@@ -101,6 +103,7 @@ describe("tab result cache statement execution metadata", () => {
     const restored = decodeTabResultSnapshot(encoded);
 
     expect(restored?.resultEditorFingerprint).toBe("15:0123456789abcdef");
+    expect(restored?.results?.[0]).toMatchObject({ server_execute_time_us: 370, client_request_wait_ms: 45 });
     expect(restored?.results?.map((result) => ({ statementIndex: result.statement_index, error: result.execution_error }))).toEqual([
       { statementIndex: 0, error: undefined },
       { statementIndex: 1, error: true },

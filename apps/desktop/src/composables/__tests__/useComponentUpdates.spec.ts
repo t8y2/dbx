@@ -87,6 +87,19 @@ describe("useComponentUpdates", () => {
     expect(updates.totalUpdateCount.value).toBe(4);
   });
 
+  it("clears driver and MCP update state after a successful update and refresh", async () => {
+    mocks.listInstalledAgents.mockResolvedValueOnce([{ db_type: "mysql", update_available: true }]).mockResolvedValueOnce([{ db_type: "mysql", update_available: false }]);
+    mocks.checkMcpServerStatus.mockResolvedValueOnce(mcpStatus).mockResolvedValueOnce({ ...mcpStatus, latest_version: "1.0.0", update_available: false });
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    await updates.installCategories(["drivers", "mcp"]);
+
+    expect(mocks.upgradeAllAgents).toHaveBeenCalledOnce();
+    expect(mocks.installMcpServer).toHaveBeenCalledOnce();
+    expect(updates.driverUpdateCount.value).toBe(0);
+    expect(updates.mcpUpdateAvailable.value).toBe(false);
+  });
+
   it("installs every enabled component category after an app update", async () => {
     const updates = useComponentUpdates({ isDesktop: true });
 

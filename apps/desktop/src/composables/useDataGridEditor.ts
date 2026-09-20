@@ -109,6 +109,7 @@ export interface UseDataGridEditorOptions {
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
   customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
   manualTransactionSessionId?: ComputedRef<string | undefined>;
+  ensureManualTransactionSession?: ComputedRef<(() => Promise<string>) | undefined>;
   onManualTransactionMutation?: () => void;
   sql: ComputedRef<string | undefined>;
   searchText: Ref<string>;
@@ -1598,9 +1599,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // A keyless save can only be trusted once the server confirms that each
   // predicate it sends addresses a single physical row; the loaded page cannot
   // see rows outside it. Returns the error to fail with, or undefined to allow.
-  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string) {
+  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string, txnSessionId = manualTransactionSessionId.value) {
     if (!guards.length) return undefined;
-    const txnSessionId = manualTransactionSessionId.value;
     // Without a connection to count against there is no way to verify the
     // predicate, and an unverified keyless write is exactly what must not run.
     if (!hasBackendSaveTarget.value) return KEYLESS_GUARD_UNVERIFIED_ERROR;
@@ -1948,8 +1948,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    let txnSessionId = manualTransactionSessionId.value;
+    if (options.ensureManualTransactionSession?.value && hasBackendSaveTarget.value) {
+      try {
+        txnSessionId = await options.ensureManualTransactionSession.value();
+        if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+      } catch (error) {
+        saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
     try {
-      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema);
+      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema, txnSessionId);
       if (guardError) {
         saveError.value = guardError;
         await finishInterruptedSaveChanges(snapshot);
@@ -1991,10 +2002,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       statements: stmts,
       rollbackStatements: rollbackStmts,
     });
-    if (manualTransactionSessionId.value && hasBackendSaveTarget.value) {
+    if (txnSessionId && hasBackendSaveTarget.value) {
       options.onManualTransactionMutation?.();
       try {
-        const results = await api.executeInManualTransaction(manualTransactionSessionId.value, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
+        const results = await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
         apiResult = {
           affected_rows: results.reduce((total, result) => total + (result.affected_rows ?? 0), 0),
         };
@@ -2038,7 +2049,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     applyDirtyRowsToResult(snapshot);
     options.onResultPayloadMutated?.();
     let savedRowsRefreshed = false;
-    if (!joinedWriteTargets.value?.length && !manualTransactionSessionId.value && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
+    if (!joinedWriteTargets.value?.length && !txnSessionId && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
       try {
         savedRowsRefreshed = await options.refreshSavedRows({
           dirtyRows: snapshot.dirtyRows,

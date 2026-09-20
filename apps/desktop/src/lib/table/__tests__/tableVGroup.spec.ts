@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { reactive } from "vue";
+import { applyPinnedTreeNodeState, syncPinnedTreeNodeStateInPlace, treeNodePinKey, updatePinnedTreeNodeInPlace } from "@/lib/app/pinnedItems";
 import type { TreeNode } from "@/types/database";
 import {
   applyTableVGroupsToChildren,
@@ -18,6 +20,7 @@ import {
   tableVGroupPathForTable,
   tableVGroupScopeKey,
   toggleTableVGroupCollapsed,
+  type TableVGroupLayout,
 } from "@/lib/table/tableVGroup";
 
 const SCOPE = { connectionId: "conn-1", database: "db1" };
@@ -172,6 +175,110 @@ describe("applyTableVGroupsToChildren", () => {
     const stripped = stripTableVGroupsFromChildren(projected);
     expect(stripped.map((node) => node.label)).toEqual(["t_order"]);
     expect(stripped[0]).toBe(tOrder);
+  });
+});
+
+describe("table virtual groups with pinned tree ordering", () => {
+  function groupedTree() {
+    const tables = ["t_a", "t_b", "t_c", "t_d", "t_e", "t_f"].map(tableNode);
+    const loadMore = otherNode("load-more");
+    const container: TreeNode = { id: "database", label: "db1", type: "database", ...SCOPE, children: [...tables, loadMore] };
+    const tree = [container];
+    const pinOrder = [treeNodePinKey(tables[5]!), treeNodePinKey(tables[0]!)];
+    const pinnedIds = new Set(pinOrder);
+    const layout: TableVGroupLayout = {
+      version: 1,
+      groups: [
+        { id: "business", name: "Business", collapsed: false },
+        { id: "nested", name: "Nested", collapsed: true },
+        { id: "audit", name: "Audit", collapsed: false },
+      ],
+      order: [
+        {
+          type: "group",
+          id: "business",
+          children: [
+            { type: "table", name: "t_d" },
+            { type: "group", id: "nested", children: [{ type: "table", name: "t_b" }] },
+            { type: "table", name: "t_a" },
+          ],
+        },
+        { type: "group", id: "audit", children: [{ type: "table", name: "t_c" }] },
+      ],
+    };
+    syncPinnedTreeNodeStateInPlace(tree, pinnedIds, pinOrder);
+    container.children = applyTableVGroupsToChildren(container.children!, layout, SCOPE);
+    return { tree, container, tables, loadMore, layout, pinnedIds, pinOrder };
+  }
+
+  it.each(["in-place", "reactive", "clone"])("preserves root and nested layout order during repeated %s pin synchronization", (mode) => {
+    const fixture = groupedTree();
+    let tree = mode === "reactive" ? reactive(fixture.tree) : fixture.tree;
+    const snapshot = () => JSON.stringify(tree, ["id", "children", "isExpanded"]);
+    const expected = snapshot();
+    const savedLayout = JSON.stringify(fixture.layout);
+
+    for (let iteration = 0; iteration < 3; iteration++) {
+      if (mode === "clone") tree = applyPinnedTreeNodeState(tree, fixture.pinnedIds, fixture.pinOrder);
+      else syncPinnedTreeNodeStateInPlace(tree, fixture.pinnedIds, fixture.pinOrder);
+      expect(snapshot()).toBe(expected);
+    }
+
+    expect(tree[0]!.children?.map((node) => node.label)).toEqual(["Business", "Audit", "t_f", "t_e", "load-more"]);
+    expect(tree[0]!.children?.[0]?.children?.map((node) => node.label)).toEqual(["t_d", "Nested", "t_a"]);
+    expect(tree[0]!.children?.[0]?.children?.[2]?.pinned).toBe(true);
+    expect(JSON.stringify(fixture.layout)).toBe(savedLayout);
+    if (mode === "in-place") {
+      expect(tree[0]!.children?.[0]?.children?.[0]).toBe(fixture.tables[3]);
+      expect(tree[0]!.children?.at(-1)).toBe(fixture.loadMore);
+    }
+  });
+
+  it("keeps explicit group member order when a member is pinned or unpinned directly", () => {
+    const { tree, container, tables } = groupedTree();
+    const members = container.children![0]!.children!;
+    const expected = members.map((node) => node.id);
+
+    expect(updatePinnedTreeNodeInPlace(tree, tables[0]!, false)).toBe("siblings");
+    expect(container.children![0]!.children!.map((node) => node.id)).toEqual(expected);
+    expect(updatePinnedTreeNodeInPlace(tree, tables[0]!, true)).toBe("siblings");
+    expect(container.children![0]!.children!.map((node) => node.id)).toEqual(expected);
+  });
+
+  it("uses the latest group layout after drag reordering", () => {
+    const { tree, container, layout, pinnedIds, pinOrder } = groupedTree();
+    const reordered = reorderTableVGroupEntry(layout, "audit", "business", "before");
+    container.children = applyTableVGroupsToChildren(container.children!, reordered, SCOPE);
+
+    syncPinnedTreeNodeStateInPlace(tree, pinnedIds, pinOrder);
+
+    expect(groupIds(container.children!)).toEqual(["table-vgroup:audit", "table-vgroup:business"]);
+  });
+
+  it("restores ordinary pinned and natural ordering when groups are disabled", () => {
+    const { tree, container, tables, layout, pinnedIds, pinOrder } = groupedTree();
+    syncPinnedTreeNodeStateInPlace(tree, pinnedIds, pinOrder);
+    container.children = applyTableVGroupsToChildren(stripTableVGroupsFromChildren(container.children!), { ...layout, enabled: false }, SCOPE);
+
+    syncPinnedTreeNodeStateInPlace(tree, pinnedIds, pinOrder);
+    expect(container.children?.map((node) => node.label)).toEqual(["t_f", "t_a", "t_b", "t_c", "t_d", "t_e", "load-more"]);
+
+    syncPinnedTreeNodeStateInPlace(tree, new Set());
+    expect(container.children).toEqual([...tables, container.children!.at(-1)]);
+  });
+
+  it("still orders metadata below grouped tables by pin state", () => {
+    const { tree, tables, pinnedIds, pinOrder } = groupedTree();
+    const firstColumn: TreeNode = { id: "column-a", label: "a", type: "column", ...SCOPE };
+    const lastColumn: TreeNode = { id: "column-z", label: "z", type: "column", ...SCOPE };
+    tables[3]!.children = [firstColumn, lastColumn];
+    const columnKey = treeNodePinKey(lastColumn);
+
+    syncPinnedTreeNodeStateInPlace(tree, new Set([...pinnedIds, columnKey]), [...pinOrder, columnKey]);
+    expect(tables[3]!.children).toEqual([lastColumn, firstColumn]);
+
+    syncPinnedTreeNodeStateInPlace(tree, pinnedIds, pinOrder);
+    expect(tables[3]!.children).toEqual([firstColumn, lastColumn]);
   });
 });
 

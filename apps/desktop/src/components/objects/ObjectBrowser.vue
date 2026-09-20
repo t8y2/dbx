@@ -152,7 +152,7 @@ import {
   type ObjectBrowserSortDirection,
   type ObjectBrowserSortKey,
 } from "@/lib/table/objectBrowserRows";
-import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
+import { isSourceOnlyObjectBrowserRow, resolveRowClickAction, shouldDeferSingleClick, singleClickRowAction, type ObjectBrowserRowAction } from "@/lib/table/objectBrowserRowAction";
 import { objectBrowserTableSelectionAnchor, objectBrowserTableSelectionRange } from "@/lib/table/objectBrowserSelection";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
@@ -1036,13 +1036,18 @@ function onRowClick(row: ObjectBrowserRow, event: MouseEvent) {
   if (row.type === "TABLE") tableSelectionAnchorId.value = row.id;
   const activation = settingsStore.editorSettings.sidebarActivation;
   const { action, isDouble } = resolveRowClickAction(row, event.detail, activation, effectiveDatabaseType.value);
-  // Double click: cancel any pending single-click and fire immediately
+  // Double click: cancel any pending single-click and fire immediately. When
+  // the row's single/double actions are identical (e.g. VIEW → open-source),
+  // this gesture's first click already ran it — re-executing would toggle the
+  // just-opened side panel back off (or emit open-table twice for MongoDB).
   if (isDouble) {
     if (singleClickTimer) {
       clearTimeout(singleClickTimer);
       singleClickTimer = null;
     }
-    executeRowAction(row, action);
+    if (action !== singleClickRowAction(row, effectiveDatabaseType.value)) {
+      executeRowAction(row, action);
+    }
     return;
   }
   // Single click: defer when the row has a distinct double-click action so a
@@ -1457,7 +1462,7 @@ async function openSource(row: ObjectBrowserRow) {
   try {
     const result = await api.getObjectSource(connectionId, database, schema, row.name, row.type as ObjectSourceKind, row.signature ?? undefined);
     if (sidePanelGuard.isStale(epoch)) return;
-    sourceCanEdit.value = result.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type);
+    sourceCanEdit.value = result.editable !== false && !["TRIGGER", "TYPE", "TYPE_BODY"].includes(row.type) && (row.type !== "SEQUENCE" || effectiveDatabaseType.value === "oceanbase-oracle");
     const editable = sourceCanEdit.value
       ? await api.buildEditableObjectSource({
           databaseType: effectiveDatabaseType.value,
@@ -1471,9 +1476,9 @@ async function openSource(row: ObjectBrowserRow) {
     // Viewing database source must preserve its original whitespace and comments;
     // formatting remains an explicit editor action instead of altering it on open.
     sourceEditableText.value = editable;
-    sourceContent.value = editable;
+    sourceContent.value = row.type === "SEQUENCE" ? result.source : editable;
     sourceDraft.value = editable;
-    sourceEditing.value = sourceCanEdit.value;
+    sourceEditing.value = sourceCanEdit.value && row.type !== "SEQUENCE";
     if (!sourceCanEdit.value && row.type !== "SEQUENCE") {
       toast(t("objects.sourceReadOnly"), 3000);
     }

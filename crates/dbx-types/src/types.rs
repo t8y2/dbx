@@ -429,6 +429,10 @@ pub struct QueryResult {
     pub rows: Vec<Vec<serde_json::Value>>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
+    /// OceanBase SQL Audit EXECUTE_TIME in microseconds. Absent when the
+    /// completed statement cannot be correlated to one audit row.
+    #[serde(default)]
+    pub server_execute_time_us: Option<u64>,
     #[serde(default)]
     pub truncated: bool,
     #[serde(default)]
@@ -469,6 +473,7 @@ impl Serialize for QueryResult {
             + usize::from(!self.spatial_columns.is_empty())
             + usize::from(!self.spatial_values.is_empty())
             + usize::from(self.elasticsearch_raw_body.is_some())
+            + usize::from(self.server_execute_time_us.is_some())
             + usize::from(!self.messages.is_empty());
         let mut state = serializer.serialize_struct("QueryResult", field_count)?;
         state.serialize_field("columns", &self.columns)?;
@@ -483,6 +488,9 @@ impl Serialize for QueryResult {
         state.serialize_field("rows", &JsSafeRows(&self.rows))?;
         state.serialize_field("affected_rows", &self.affected_rows)?;
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
+        if let Some(server_execute_time_us) = &self.server_execute_time_us {
+            state.serialize_field("server_execute_time_us", server_execute_time_us)?;
+        }
         state.serialize_field("truncated", &self.truncated)?;
         state.serialize_field("session_id", &self.session_id)?;
         state.serialize_field("has_more", &self.has_more)?;
@@ -1100,6 +1108,7 @@ mod tests {
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -1204,6 +1213,19 @@ mod tests {
         assert!(serialized.get("elasticsearch_raw_body").is_none());
         assert!(serialized.get("messages").is_none());
         assert_eq!(serialized["session_id"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn query_result_server_execution_microseconds_survive_agent_and_ui_wire() {
+        let mut result = bigint_result_sample();
+        let without_audit = serde_json::to_value(&result).unwrap();
+        assert!(without_audit.get("server_execute_time_us").is_none());
+        assert_eq!(serde_json::from_value::<super::QueryResult>(without_audit).unwrap().server_execute_time_us, None);
+
+        result.server_execute_time_us = Some(370);
+        let audited = serde_json::to_value(&result).unwrap();
+        assert_eq!(audited["server_execute_time_us"], 370);
+        assert_eq!(serde_json::from_value::<super::QueryResult>(audited).unwrap().server_execute_time_us, Some(370));
     }
 
     /// Numeric cells nested inside JSON-typed columns must not lose precision

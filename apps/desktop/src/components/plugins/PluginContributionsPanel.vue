@@ -19,6 +19,7 @@ import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
 import { beaconPluginInstall, buildMarketplacePluginListings, filterMarketplacePluginListings, listingRepositoryCanVerify, marketplaceHomepageUrl, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { isBatchSelectableListing, runBatch } from "@/lib/plugins/pluginBatch";
+import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -243,6 +244,19 @@ async function refreshAfterBatch() {
   } catch (cause) {
     error.value = [error.value, t("pluginPlatform.batchRefreshFailed", { error: cause instanceof Error ? cause.message : String(cause) })].filter(Boolean).join("\n");
   }
+}
+
+async function refreshAfterExternalPluginUpdate() {
+  clearPluginIconCache();
+  try {
+    installedPlugins.value = await api.listPlugins();
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+function handleComponentPluginsUpdated() {
+  void refreshAfterExternalPluginUpdate();
 }
 
 function toggleBatchMode() {
@@ -737,10 +751,12 @@ watch(allowUnsigned, (value) => {
 });
 onMounted(() => {
   void refresh();
+  window.addEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
   if (isTauriRuntime()) document.addEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
 watch(marketplaceViewMode, (mode) => safeLocalStorageSet(MARKETPLACE_VIEW_MODE_STORAGE_KEY, mode));
 onBeforeUnmount(() => {
+  window.removeEventListener(COMPONENT_PLUGINS_UPDATED_EVENT, handleComponentPluginsUpdated);
   if (isTauriRuntime()) document.removeEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
 });
 </script>
@@ -811,7 +827,7 @@ onBeforeUnmount(() => {
             <div class="ml-auto flex flex-wrap items-center gap-2">
               <Button variant="outline" size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchUpdatableListings.length || batchRunning" @click="selectAllUpdatable"><Download class="size-3.5" />{{ t("pluginPlatform.batchSelectAllUpdatable") }}</Button>
               <Button size="sm" class="h-7 gap-1.5 text-xs" :disabled="!batchSelectedListings.length || mutationRunning" @click="runBatchInstallUpdate"> <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" />{{ t("pluginPlatform.batchInstallUpdate") }} </Button>
-              <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="clearBatchSelection">{{ t("common.cancel") }}</Button>
+              <Button variant="ghost" size="sm" class="h-7 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
             </div>
           </div>
 
@@ -994,7 +1010,7 @@ onBeforeUnmount(() => {
               <Button size="sm" variant="outline" class="ml-auto h-8 gap-1.5 text-xs text-destructive" :disabled="!batchSelectedInstalled.length || mutationRunning" @click="runBatchUninstall">
                 <Loader2 v-if="batchRunning" class="size-3.5 animate-spin" /><Trash2 class="size-3.5" />{{ t("pluginPlatform.batchUninstall") }}
               </Button>
-              <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="clearBatchSelection">{{ t("common.cancel") }}</Button>
+              <Button variant="ghost" size="sm" class="h-8 text-xs" :disabled="batchRunning" @click="toggleBatchMode">{{ t("common.cancel") }}</Button>
             </template>
           </div>
           <div class="grid min-h-0 flex-1 gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">

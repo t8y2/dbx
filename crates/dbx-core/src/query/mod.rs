@@ -3788,6 +3788,7 @@ fn error_query_result(message: String) -> db::QueryResult {
         rows: vec![vec![serde_json::Value::String(message)]],
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -3806,6 +3807,7 @@ fn empty_query_result(execution_time_ms: u128) -> db::QueryResult {
         rows: vec![],
         affected_rows: 0,
         execution_time_ms,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4065,6 +4067,7 @@ async fn execute_statements_inner(
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4674,6 +4677,7 @@ async fn exec_tx_pg_inner(
             rows: vec![],
             affected_rows: total_affected,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4767,6 +4771,7 @@ async fn exec_tx_mysql_inner(
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -4959,6 +4964,7 @@ async fn exec_tx_sqlite_inner(
                         rows: vec![],
                         affected_rows: total_affected,
                         execution_time_ms: start.elapsed().as_millis(),
+                        server_execute_time_us: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -5042,6 +5048,7 @@ async fn exec_tx_explicit_inner(
         rows: vec![],
         affected_rows: total_affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6149,6 +6156,7 @@ async fn execute_manual_txn_postgres_statement(
             rows: vec![],
             affected_rows: affected,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6192,6 +6200,7 @@ async fn execute_manual_txn_mysql_statement(
             rows: data,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -6211,6 +6220,7 @@ async fn execute_manual_txn_mysql_statement(
             rows: vec![],
             affected_rows,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6267,6 +6277,7 @@ pub async fn commit_manual_transaction(state: &AppState, txn_session_id: &str) -
         rows: vec![],
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -6296,6 +6307,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
         rows: vec![],
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -7073,7 +7085,6 @@ mod tests {
         assert!(!is_destructive_schema_diff_statement("SELECT 'DROP TABLE users'"));
         assert!(!is_destructive_schema_diff_statement("ALTER TABLE \"DROP INDEX audit\" ADD COLUMN note TEXT"));
     }
-    #[cfg(unix)]
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec};
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
     #[cfg(unix)]
@@ -8426,6 +8437,7 @@ for line in sys.stdin:
                     rows: vec![vec![serde_json::json!(2)]],
                     affected_rows: 0,
                     execution_time_ms: 4,
+                    server_execute_time_us: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -8700,6 +8712,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!(value)]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -9755,6 +9768,7 @@ for line in sys.stdin:
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -9780,6 +9794,7 @@ for line in sys.stdin:
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -10683,7 +10698,6 @@ for line in sys.stdin:
     /// Spawns a fake Python agent and registers a manual transaction session in
     /// the app state so `execute_in_manual_transaction_with_options` can run
     /// end to end without a live database.
-    #[cfg(unix)]
     async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
         use std::io::Write;
 
@@ -10699,6 +10713,9 @@ for line in sys.stdin:
     method = request.get("method")
     if method == "execute_query":
         sql = request.get("params", {{}}).get("sql", "")
+        if "RAISE_FILE_ERROR" in sql:
+            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "file statement rejected"}}}}), flush=True)
+            continue
         row = [sql]
     else:
         # commit_manual_transaction / rollback_manual_transaction / disconnect
@@ -10720,8 +10737,9 @@ for line in sys.stdin:
         .unwrap();
         script.flush().unwrap();
 
+        let python = if cfg!(windows) { "python" } else { "python3" };
         let client = AgentDriverClient::spawn(
-            AgentLaunchSpec::new("python3").with_args([script.path().to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(python).with_args([script.path().to_string_lossy().to_string()]),
         )
         .await
         .unwrap();
@@ -10762,6 +10780,162 @@ for line in sys.stdin:
             },
         );
         (state, txn_session_id, dir)
+    }
+
+    fn manual_sql_file_request(session_id: &str) -> crate::sql::SqlFileRequest {
+        crate::sql::SqlFileRequest {
+            txn_session_id: Some(session_id.to_string()),
+            execution_id: "manual-file-test".to_string(),
+            connection_id: "agent-conn".to_string(),
+            database: "ORCL".to_string(),
+            file_path: String::new(),
+            continue_on_error: false,
+            selected_tables: None,
+            part_cooldown_ms: 0,
+            skip_relational_constraints: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_retains_session_until_commit() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let mut events = Vec::new();
+        // Only the held transaction has a connected agent. A fallback through
+        // the ordinary pool cannot execute these statements successfully.
+        crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1; UPDATE T SET V = 2;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap();
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.status, crate::sql::SqlFileStatus::Done);
+        assert_eq!(terminal.success_count, 2);
+        assert!(state.transaction_sessions.read().await.contains_key(&session_id));
+        commit_manual_transaction(&state, &session_id).await.unwrap();
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_cancel_stops_next_statement_and_releases_session() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let token = CancellationToken::new();
+        let mut events = Vec::new();
+        crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1; UPDATE T SET V = 2;",
+            token.clone(),
+            std::time::Instant::now(),
+            |event| {
+                if event.success_count == 1 {
+                    token.cancel();
+                }
+                events.push(event);
+            },
+        )
+        .await
+        .unwrap();
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.status, crate::sql::SqlFileStatus::Cancelled);
+        assert_eq!(terminal.success_count, 1);
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_read_failure_rolls_back_held_session() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let result = crate::data::sql_file_import::execute_sql_file_path(
+            &state,
+            &request,
+            &dir.join("missing.sql"),
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |_| {},
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_statement_failure_rolls_back_without_retry_or_later_execution() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        let request = manual_sql_file_request(&session_id);
+        let mut events = Vec::new();
+        let error = crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &request,
+            "UPDATE T SET V = 1; UPDATE RAISE_FILE_ERROR SET V = 2; UPDATE T SET V = 3;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |event| events.push(event),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("file statement rejected"));
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.status, crate::sql::SqlFileStatus::Error);
+        assert_eq!(terminal.success_count, 1);
+        assert_eq!(terminal.failure_count, 1);
+        assert_eq!(terminal.statement_index, 2);
+        assert!(!state.transaction_sessions.read().await.contains_key(&session_id));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn manual_sql_file_rejects_different_target_without_using_or_closing_its_session() {
+        let (state, session_id, dir) = manual_transaction_test_state(DatabaseType::OceanbaseOracle).await;
+        for mismatch_connection in [false, true] {
+            let mut request = manual_sql_file_request(&session_id);
+            if mismatch_connection {
+                request.connection_id = "other".to_string();
+            } else {
+                request.database = "other".to_string();
+            }
+            let mut events = Vec::new();
+            let error = crate::data::sql_file_import::execute_sql_file_content(
+                &state,
+                &request,
+                "UPDATE T SET V = 1;",
+                CancellationToken::new(),
+                std::time::Instant::now(),
+                |event| events.push(event),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("target does not match"));
+            assert!(events.is_empty());
+            assert!(state.transaction_sessions.read().await.contains_key(&session_id));
+        }
+        rollback_manual_transaction(&state, &session_id).await.unwrap();
+        let error = crate::data::sql_file_import::execute_sql_file_content(
+            &state,
+            &manual_sql_file_request(&session_id),
+            "UPDATE T SET V = 1;",
+            CancellationToken::new(),
+            std::time::Instant::now(),
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("session not found"));
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Regression: multi-statement scripts under a manual transaction must keep
@@ -10916,6 +11090,7 @@ for line in sys.stdin:
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -10953,6 +11128,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11020,6 +11196,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11059,6 +11236,7 @@ for line in sys.stdin:
             rows: vec![vec![serde_json::json!("0x0102030405"), serde_json::json!("B:4:5")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11090,6 +11268,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11128,6 +11307,7 @@ for line in sys.stdin:
             ],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -11160,6 +11340,7 @@ for line in sys.stdin:
             rows: Vec::new(),
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

@@ -1656,6 +1656,31 @@ fn transfer_column_names_match(
     }
 }
 
+/// Maps the source column names written in INSERT/COPY SQL onto the target
+/// table's declared column names.
+///
+/// Write SQL quotes column names, which makes the identifier case-sensitive on
+/// targets that fold unquoted identifiers (Oracle and OceanBase Oracle fold to
+/// uppercase, PostgreSQL to lowercase). A target table that already exists —
+/// typically created outside DBX with unquoted DDL — therefore rejects the
+/// source-cased name (`ORA-00904: invalid identifier`, #9320) even though the
+/// column exists. Reusing the catalog's declared name keeps the statement on a
+/// column that really exists; an exact match still wins so case-sensitive
+/// targets that do have the source-cased column keep addressing it.
+fn resolve_transfer_target_column_names(col_names: &[String], target_columns: &[db::ColumnInfo]) -> Vec<String> {
+    col_names
+        .iter()
+        .map(|name| {
+            target_columns
+                .iter()
+                .find(|column| column.name == *name)
+                .or_else(|| target_columns.iter().find(|column| column.name.eq_ignore_ascii_case(name)))
+                .map(|column| column.name.clone())
+                .unwrap_or_else(|| name.clone())
+        })
+        .collect()
+}
+
 fn missing_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
@@ -5288,8 +5313,10 @@ fn transfer_copy_fast_path_supported(
 /// Builds the COPY read/write statements for the fast path. The column lists
 /// mirror the quoting rules of the paged SELECT / multi-row INSERT statements,
 /// so identifier folding behaves identically on both paths.
+#[allow(clippy::too_many_arguments)]
 fn postgres_copy_transfer_sql(
     col_names: &[String],
+    target_col_names: &[String],
     table: &str,
     source_schema: &str,
     source_db_type: &DatabaseType,
@@ -5304,7 +5331,7 @@ fn postgres_copy_transfer_sql(
     let full_source_table = qualified_table(table, source_schema, source_db_type, source_catalog);
     let copy_out = format!("COPY (SELECT {source_col_list} FROM {full_source_table}) TO STDOUT");
 
-    let target_col_list = col_names
+    let target_col_list = target_col_names
         .iter()
         .map(|c| transfer_column_identifier(c, target_db_type, quote_target_column_names))
         .collect::<Vec<_>>()
@@ -9161,7 +9188,10 @@ where
         return Ok(0);
     }
 
-    let needs_target_columns = (request.create_table && target_table_preexisting)
+    // A preexisting target also needs its columns read, even for a data-only
+    // transfer: the write SQL has to address the target's declared column
+    // names, which can differ from the source in case (#9320).
+    let needs_target_columns = target_table_preexisting
         || (request.mode == TransferMode::Upsert
             && !matches!(
                 target_db_type,
@@ -9218,6 +9248,14 @@ where
             })
             .collect();
     }
+
+    // Read SQL keeps the source names (the source table is untouched); write SQL
+    // has to use the names the target table actually declares.
+    let write_col_names = if target_table_preexisting && !target_columns.is_empty() {
+        resolve_transfer_target_column_names(&col_names, &target_columns)
+    } else {
+        col_names.clone()
+    };
 
     // Truncate target if overwrite mode (only when not rebuilding the table).
     // When drop_target_before_create is true, the target table was just created
@@ -9280,6 +9318,7 @@ where
     if transfer_copy_fast_path_supported(pg_compat_transfer, &effective_mode, overrides_postgres_system_values) {
         let (copy_out_sql, copy_in_sql) = postgres_copy_transfer_sql(
             &col_names,
+            &write_col_names,
             table,
             &request.source_schema,
             source_db_type,
@@ -9443,7 +9482,7 @@ where
 
             let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &effective_mode,
-                &col_names,
+                &write_col_names,
                 &col_types,
                 &result.rows,
                 &target_table,
@@ -10735,6 +10774,7 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             rows,
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -12416,6 +12456,43 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         assert_eq!(
             missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres, true),
             vec!["id".to_string(), "name".to_string()]
+        );
+    }
+
+    #[test]
+    fn write_column_names_reuse_preexisting_target_case() {
+        // MySQL source columns are lowercase while the preexisting Oracle target
+        // declares them uppercase, so the write SQL must address ID/NAME (#9320).
+        let target_columns = vec![test_column("ID", "NUMBER"), test_column("NAME", "VARCHAR2")];
+        let col_names = vec!["id".to_string(), "name".to_string()];
+
+        assert_eq!(
+            resolve_transfer_target_column_names(&col_names, &target_columns),
+            vec!["ID".to_string(), "NAME".to_string()]
+        );
+    }
+
+    #[test]
+    fn write_column_names_prefer_exact_target_match() {
+        // A case-sensitive target can declare both `id` and `ID`; the exact match
+        // wins so DBX keeps addressing the column the source name refers to.
+        let target_columns = vec![test_column("ID", "NUMBER"), test_column("id", "NUMBER")];
+        let col_names = vec!["id".to_string(), "ID".to_string()];
+
+        assert_eq!(
+            resolve_transfer_target_column_names(&col_names, &target_columns),
+            vec!["id".to_string(), "ID".to_string()]
+        );
+    }
+
+    #[test]
+    fn write_column_names_keep_source_name_without_target_match() {
+        let target_columns = vec![test_column("ID", "NUMBER")];
+        let col_names = vec!["id".to_string(), "missing".to_string()];
+
+        assert_eq!(
+            resolve_transfer_target_column_names(&col_names, &target_columns),
+            vec!["ID".to_string(), "missing".to_string()]
         );
     }
 
@@ -14465,6 +14542,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         // columns follow the INSERT path quoting rules.
         let (copy_out, copy_in) = postgres_copy_transfer_sql(
             &cols,
+            &cols,
             "users",
             "public",
             &DatabaseType::Postgres,
@@ -14482,6 +14560,7 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
         // names — the same rule the multi-row INSERT fallback uses.
         let (_, copy_in) = postgres_copy_transfer_sql(
             &cols,
+            &cols,
             "users",
             "",
             &DatabaseType::OpenGauss,
@@ -14493,6 +14572,25 @@ PARTITION p_old VALUES LESS THAN (TO_DAYS('2026-01-01')))";
             false,
         );
         assert_eq!(copy_in, r#"COPY "users" (id, userName) FROM STDIN"#);
+
+        // A preexisting target declares its own column names, so COPY IN has to
+        // address those while COPY OUT keeps reading the source names (#9320).
+        let target_cols = vec!["ID".to_string(), "USERNAME".to_string()];
+        let (copy_out, copy_in) = postgres_copy_transfer_sql(
+            &cols,
+            &target_cols,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            "users",
+            "backup",
+            &DatabaseType::Postgres,
+            None,
+            false,
+        );
+        assert_eq!(copy_out, r#"COPY (SELECT "id", "userName" FROM "public"."users") TO STDOUT"#);
+        assert_eq!(copy_in, r#"COPY "backup"."users" ("ID", "USERNAME") FROM STDIN"#);
     }
 
     #[test]

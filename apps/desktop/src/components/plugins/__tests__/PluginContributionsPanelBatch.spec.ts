@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { COMPONENT_PLUGINS_UPDATED_EVENT } from "@/lib/updates/componentUpdateEvents";
 
 const mocks = vi.hoisted(() => ({
   listPlugins: vi.fn(),
@@ -296,6 +297,19 @@ describe("PluginContributionsPanel installed plugin pin controls", () => {
     await nextTick();
     expect(state.selectedPluginId).toBe("b");
     expect(localStorage.getItem("dbx-plugin-pinned-ids")).toBe('["b"]');
+  });
+});
+
+describe("PluginContributionsPanel external component updates", () => {
+  it("refreshes installed plugins when the update center updates plugins", async () => {
+    expect(state.marketplaceListings.every((listing) => listing.status === "update")).toBe(true);
+    mocks.listPlugins.mockResolvedValueOnce([installed("a", "3.0.0"), installed("b", "3.0.0"), installed("c", "3.0.0")]);
+
+    window.dispatchEvent(new Event(COMPONENT_PLUGINS_UPDATED_EVENT));
+    await flushUi();
+
+    expect(mocks.listPlugins).toHaveBeenCalledOnce();
+    expect(state.marketplaceListings.every((listing) => listing.status === "installed")).toBe(true);
   });
 });
 

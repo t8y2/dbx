@@ -2259,6 +2259,7 @@ dependencies = [
  "dbx-core",
  "dirs",
  "log",
+ "mysql_async",
  "reqwest 0.12.28",
  "rmcp",
  "rustls 0.23.43",
@@ -2266,6 +2267,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sqlparser",
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -7343,6 +7345,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rmcp-macros",
  "schemars 1.2.2",
  "serde",
@@ -10653,9 +10656,8 @@ dependencies = [
 [[package]]
 name = "webview2-com-sys"
 version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c"
 dependencies = [
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "windows 0.61.3",
  "windows-core 0.61.2",

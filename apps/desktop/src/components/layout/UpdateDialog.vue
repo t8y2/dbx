@@ -95,9 +95,11 @@ const selectedCategoryHasUpdate = computed(() => {
   if (selectedTab.value === "plugins") return props.pluginUpdates.length > 0;
   return false;
 });
-const isUpdatingSelectedCategory = computed(() => selectedCategory.value !== null && props.updatingComponent === selectedCategory.value);
 const isAnyComponentUpdating = computed(() => props.componentUpdatesUpdating || props.updatingComponent !== null);
-const isCloseBlocked = computed(() => props.isInstallingUpdate || isUpdatingSelectedCategory.value);
+// Component update tasks are owned by the app-level composable. Closing the
+// dialog only leaves them running in the background; replacing an app update
+// is the only operation that must keep the modal open.
+const isCloseBlocked = computed(() => props.isInstallingUpdate);
 const blocksImplicitDismiss = computed(() => isCloseBlocked.value);
 const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady && !props.isUpdatingAll);
 
@@ -359,9 +361,15 @@ watch(
         </DialogFooter>
 
         <DialogFooter v-else data-update-footer class="mx-0 mb-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
-          <Button v-if="selectedCategory" :disabled="!selectedCategoryHasUpdate || isAnyComponentUpdating || isInstallingUpdate || isUpdatingAll" @click="emit('install-component-updates', selectedCategory)">
-            <Loader2 v-if="isUpdatingSelectedCategory" class="h-4 w-4 animate-spin" />
-            {{ t(isUpdatingSelectedCategory ? "updates.updating" : "updates.updateNow") }}
+          <template v-if="isAnyComponentUpdating">
+            <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
+            <Button class="shrink-0" disabled>
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("updates.updating") }}
+            </Button>
+          </template>
+          <Button v-else-if="selectedCategory" :disabled="!selectedCategoryHasUpdate || isInstallingUpdate || isUpdatingAll" @click="emit('install-component-updates', selectedCategory)">
+            {{ t("updates.updateNow") }}
           </Button>
         </DialogFooter>
       </div>

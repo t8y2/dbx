@@ -250,6 +250,36 @@ pub async fn list_indexes(client: &MeilisearchClient) -> Result<Vec<String>, Str
     Ok(names)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchCreateIndexInput {
+    pub uid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<String>,
+}
+
+pub async fn create_index(client: &MeilisearchClient, input: &MeilisearchCreateIndexInput) -> Result<(), String> {
+    let uid = input.uid.trim();
+    if uid.is_empty() {
+        return Err("Meilisearch index UID cannot be empty".to_string());
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("uid".to_string(), Value::String(uid.to_string()));
+    if let Some(primary_key) = input.primary_key.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("primaryKey".to_string(), Value::String(primary_key.to_string()));
+    }
+
+    let response = client
+        .post("/indexes")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let task = task_from_response(response, "index creation").await?;
+    wait_for_task(client, task.task_uid).await
+}
+
 #[derive(Debug, Deserialize)]
 struct DocumentsResponse {
     results: Vec<Value>,
@@ -1858,6 +1888,7 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
         rows: vec![vec![Value::Number(status.into()), Value::String(body)]],
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated,
         session_id: None,
         has_more: false,

@@ -88,6 +88,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",
     "wordWrap",
+    "showWhitespace",
     "vimModeEnabled",
     "autoCloseBrackets",
     "sqlSemanticDiagnosticsMode",
@@ -120,6 +121,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarBrowseObjectsOnDatabaseActivation",
     "openTabsRestoreMode",
     "disconnectTabHandlingMode",
+    "deleteConnectionTabHandlingMode",
+    "rememberConnectionDatabaseOnDelete",
     "dataTabReuseMode",
     "openDataTabsNextToActive",
     "clickTableNavigationTarget",
@@ -255,6 +258,7 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  */
 const PASS_THROUGH_BOOLEAN_KEYS = [
   "wordWrap",
+  "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
   "confirmDangerousSqlExecution",

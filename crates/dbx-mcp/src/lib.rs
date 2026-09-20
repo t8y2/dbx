@@ -8,6 +8,7 @@ pub mod paths;
 pub mod runtime;
 pub mod server;
 pub mod session;
+pub mod transaction;
 pub mod transport;
 
 pub use backend::{ConnectionSummary, DbxBackend, LocalBackend, WebBackend};

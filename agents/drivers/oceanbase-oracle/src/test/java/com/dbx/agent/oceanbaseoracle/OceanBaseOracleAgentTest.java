@@ -1,5 +1,6 @@
 package com.dbx.agent.oceanbaseoracle;
 
+import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.ExecuteQueryOptions;
@@ -7,6 +8,7 @@ import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.QueryPageOptions;
+import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.TestSupport;
@@ -131,6 +133,68 @@ class OceanBaseOracleAgentTest {
     @Test
     void rejectsNegativeQueryTimeout() {
         Assertions.assertThrows(IllegalArgumentException.class, () -> OceanBaseOracleAgent.queryTimeoutSql(-1));
+    }
+
+    @Test
+    void readsServerExecutionOnlyFromOneMatchingAuditRow() {
+        List<String> statements = new ArrayList<>();
+        List<String> parameters = new ArrayList<>();
+        List<Integer> maxRows = new ArrayList<>();
+        Assertions.assertEquals(370L, OceanBaseOracleAgent.serverExecuteTimeUs(
+            auditTimingConnection(1, 500, false, statements, parameters, maxRows), 500, 1001
+        ));
+        Assertions.assertEquals(List.of(1001, 1001), maxRows,
+            "trace and audit statements must preserve the target statement's session row limit");
+        Assertions.assertEquals(List.of("trace-1"), parameters);
+        Assertions.assertTrue(statements.get(1).contains("IS_INNER_SQL = 0 AND IS_EXECUTOR_RPC = 0"));
+        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(0, 500, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
+        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(2, 500, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
+        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(1, 1, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
+        Assertions.assertEquals(null, OceanBaseOracleAgent.serverExecuteTimeUs(auditTimingConnection(1, 500, true, new ArrayList<>(), new ArrayList<>(), new ArrayList<>()), 500, 0));
+    }
+
+
+    @Test
+    void doesNotAuditAnOpenCursorAfterAnotherSessionMethodCanReplaceItsTrace() {
+        int[] row = {-1};
+        ResultSetMetaData meta = proxy(ResultSetMetaData.class, (method, args) -> {
+            if ("getColumnCount".equals(method.getName())) return 1;
+            if ("getColumnLabel".equals(method.getName())) return "N";
+            if ("getColumnType".equals(method.getName())) return Types.INTEGER;
+            if ("getColumnTypeName".equals(method.getName())) return "NUMBER";
+            return defaultValue(method.getReturnType());
+        });
+        ResultSet cursor = proxy(ResultSet.class, (method, args) -> {
+            if ("next".equals(method.getName())) return ++row[0] < 2;
+            if ("getMetaData".equals(method.getName())) return meta;
+            if ("getObject".equals(method.getName()) || "getInt".equals(method.getName())) return row[0] + 1;
+            return defaultValue(method.getReturnType());
+        });
+        int[] statementsCreated = {0};
+        Statement statement = proxy(Statement.class, (method, args) -> {
+            if ("execute".equals(method.getName())) return !String.valueOf(args[0]).startsWith("ALTER SESSION");
+            if ("getResultSet".equals(method.getName())) return cursor;
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) {
+                statementsCreated[0]++;
+                return statement;
+            }
+            if ("isClosed".equals(method.getName())) return false;
+            return defaultValue(method.getReturnType());
+        });
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, connection);
+        QueryPageResult first = agent.executeQueryPage("SELECT N FROM T", null, new QueryPageOptions(1, null, 10, 5));
+        Assertions.assertTrue(first.getHas_more());
+        Assertions.assertEquals(2, statementsCreated[0]);
+
+        agent.beforeAgentMethod(AgentProtocol.METHOD_LIST_TABLES, null);
+        QueryPageResult last = agent.fetchQueryPage(first.getSession_id(), 1);
+        Assertions.assertFalse(last.getHas_more());
+        Assertions.assertNull(last.getServer_execute_time_us());
+        Assertions.assertEquals(2, statementsCreated[0], "no LAST_TRACE_ID query may run for an invalidated cursor");
     }
 
     @Test
@@ -478,6 +542,76 @@ class OceanBaseOracleAgentTest {
             );
             Assertions.assertTrue(sql.get(1).contains("ALL_SOURCE"), sql.get(1));
             Assertions.assertTrue(sql.get(1).contains("ORDER BY LINE"), sql.get(1));
+        }
+    }
+
+    @Test
+    void synonymSourcePreservesOwnersQuotedNamesAndRemoteLinkDomains() {
+        for (String owner : List.of("Mixed.Owner", "PUBLIC")) {
+            List<String> sql = new ArrayList<>();
+            List<String> params = new ArrayList<>();
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(sql, params, resultSet(
+                new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"},
+                new Object[][]{{"Target.Owner", "A\"B", "REMOTE.EXAMPLE"}}
+            )));
+            ObjectSource source = agent.getObjectSource(owner, "Syn.Name", "SYNONYM");
+            String declaration = owner.equals("PUBLIC") ? "PUBLIC SYNONYM \"Syn.Name\"" : "SYNONYM \"Mixed.Owner\".\"Syn.Name\"";
+            Assertions.assertEquals("CREATE OR REPLACE " + declaration + " FOR \"Target.Owner\".\"A\"\"B\"@REMOTE.EXAMPLE;", source.getSource());
+            Assertions.assertEquals(List.of(owner, "Syn.Name"), params);
+            Assertions.assertEquals(1, sql.size());
+            Assertions.assertTrue(sql.get(0).contains("ALL_SYNONYMS"));
+        }
+    }
+
+    @Test
+    void synonymSourceHandlesMissingAndLocalTargetsWithoutGuessing() {
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{{null, "T", null}}
+        )));
+        Assertions.assertEquals("CREATE OR REPLACE SYNONYM \"APP\".\"S\" FOR \"T\";", agent.getObjectSource("APP", "S", "SYNONYM").getSource());
+        TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+            new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{}
+        )));
+        Assertions.assertEquals("", agent.getObjectSource("APP", "missing", "SYNONYM").getSource());
+    }
+
+    @Test
+    void synonymSourceRejectsUnsafeRemoteMetadata() {
+        for (String link : List.of("x; DROP TABLE T", "x--", "a..b")) {
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, preparedConnection(new ArrayList<>(), resultSet(
+                new String[]{"TABLE_OWNER", "TABLE_NAME", "DB_LINK"}, new Object[][]{{"APP", "T", link}}
+            )));
+            Assertions.assertThrows(RuntimeException.class, () -> agent.getObjectSource("APP", "S", "SYNONYM"));
+        }
+    }
+
+    @Test
+    void sequenceFallbackUsesExactIntegerMetadataWithoutConsumingNextValue() {
+        List<String> sql = new ArrayList<>();
+        List<String> params = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(sql, params, resultSet(
+            new String[]{"MIN_VALUE", "MAX_VALUE", "INCREMENT_BY", "CYCLE_FLAG", "ORDER_FLAG", "CACHE_SIZE", "LAST_NUMBER"},
+            new Object[][]{{"-999", "9999999999999999999999999999", "-2", "N", "Y", "0", "40"}}
+        )));
+        String source = agent.getObjectSource("Mixed.Owner", "S\"Q", "SEQUENCE").getSource();
+        Assertions.assertEquals("CREATE SEQUENCE \"Mixed.Owner\".\"S\"\"Q\"\n  MINVALUE -999\n  MAXVALUE 9999999999999999999999999999\n  INCREMENT BY -2\n  START WITH 40\n  NOCACHE\n  NOCYCLE\n  ORDER;", source);
+        Assertions.assertEquals(List.of("SEQUENCE", "S\"Q", "Mixed.Owner", "Mixed.Owner", "S\"Q"), params);
+        Assertions.assertFalse(sql.stream().anyMatch(query -> query.contains("NEXTVAL")));
+    }
+
+    @Test
+    void sequenceFallbackRejectsIncompleteOrNonIntegerMetadata() {
+        for (String maximum : Arrays.asList(null, "1.5", "1E28", "1; DROP TABLE T")) {
+            OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+            TestSupport.setPrivateConnection(agent, objectSourceFallbackConnection(new ArrayList<>(), new ArrayList<>(), resultSet(
+                new String[]{"MIN_VALUE", "MAX_VALUE", "INCREMENT_BY", "CYCLE_FLAG", "ORDER_FLAG", "CACHE_SIZE", "LAST_NUMBER"},
+                new Object[][]{{"1", maximum, "1", "N", "N", "20", "40"}}
+            )));
+            Assertions.assertThrows(RuntimeException.class, () -> agent.getObjectSource("APP", "SEQ", "SEQUENCE"));
         }
     }
 
@@ -1123,6 +1257,50 @@ class OceanBaseOracleAgentTest {
             }
             if ("isClosed".equals(method.getName())) {
                 return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection auditTimingConnection(int auditRows, long returnedRows, boolean denied,
+                                                    List<String> sql, List<String> parameters, List<Integer> maxRows) {
+        ResultSet trace = resultSet(new String[]{"TRACE_ID"}, new Object[][]{{"trace-1"}});
+        int[] auditIndex = {-1};
+        ResultSet audit = proxy(ResultSet.class, (method, args) -> {
+            switch (method.getName()) {
+                case "next":
+                    auditIndex[0]++;
+                    return auditIndex[0] < auditRows;
+                case "getLong":
+                    return ((Number) args[0]).intValue() == 1 ? 370L : returnedRows;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
+        Statement traceStatement = proxy(Statement.class, (method, args) -> {
+            if ("setQueryTimeout".equals(method.getName())) Assertions.assertEquals(1, args[0]);
+            if ("setMaxRows".equals(method.getName())) maxRows.add((Integer) args[0]);
+            if ("executeQuery".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return trace;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        PreparedStatement auditStatement = proxy(PreparedStatement.class, (method, args) -> {
+            if ("setQueryTimeout".equals(method.getName())) Assertions.assertEquals(1, args[0]);
+            if ("setMaxRows".equals(method.getName())) maxRows.add((Integer) args[0]);
+            if ("setString".equals(method.getName())) parameters.add(String.valueOf(args[1]));
+            if ("executeQuery".equals(method.getName())) {
+                if (denied) throw new SQLException("audit access denied", "42000", 1044);
+                return audit;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            if ("createStatement".equals(method.getName())) return traceStatement;
+            if ("prepareStatement".equals(method.getName())) {
+                sql.add(String.valueOf(args[0]));
+                return auditStatement;
             }
             return defaultValue(method.getReturnType());
         });

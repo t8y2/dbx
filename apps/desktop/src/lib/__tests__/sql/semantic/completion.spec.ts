@@ -507,7 +507,7 @@ FROM (
       autoAliasTables: true,
     });
 
-    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi2");
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi2");
   });
 
   it("omits generated aliases on a DELETE target table (issue #9186)", () => {
@@ -576,7 +576,7 @@ FROM (
       autoAliasTables: true,
     });
 
-    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi");
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
   });
 
   it("keeps generated aliases after a multi-table DELETE target list", () => {
@@ -585,7 +585,7 @@ FROM (
       autoAliasTables: true,
     });
 
-    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi");
+    expect(items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
   });
 
   it("keeps generated aliases on FROM and JOIN sources", () => {
@@ -598,8 +598,8 @@ FROM (
       autoAliasTables: true,
     });
 
-    expect(joined.items.find((item) => item.label === "order_items")?.apply).toBe("order_items AS oi");
-    expect(queried.items.find((item) => item.label === "DH_MODEL_CAP")?.apply).toBe("DH_MODEL_CAP AS dmc");
+    expect(joined.items.find((item) => item.label === "order_items")?.apply).toBe("order_items oi");
+    expect(queried.items.find((item) => item.label === "DH_MODEL_CAP")?.apply).toBe("DH_MODEL_CAP dmc");
   });
 
   it("preserves dialect-aware identifier quoting in apply text", () => {

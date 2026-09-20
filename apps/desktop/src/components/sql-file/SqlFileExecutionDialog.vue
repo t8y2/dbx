@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -17,10 +17,13 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
-import { cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
+import { beginManualTransaction, commitManualTransaction, rollbackManualTransaction, cancelSqlFileExecution, executeSqlFiles, inspectSqlFileTables, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus, type SqlFileTable } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
+import { parseSqlFilePathInput } from "./sqlFilePathInput";
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -74,6 +77,32 @@ const filePathDisplay = computed(() => {
   return previews.value.map((item) => displayFileNames.value.get(item.filePath) ?? item.fileName).join("; ");
 });
 
+// Desktop only: the path input is editable so a path can be pasted instead of
+// browsing. The draft follows the loaded previews and is committed on Enter/blur.
+const pathInput = ref("");
+watch(filePathDisplay, (value) => (pathInput.value = value), { immediate: true });
+
+async function commitPathInput() {
+  if (!isDesktopRuntime || executionLocked.value || selectingFile.value || loadingPreview.value) return;
+  const paths = parseSqlFilePathInput(pathInput.value);
+  if (paths.length === 0 || paths.join("; ") === filePathDisplay.value) {
+    pathInput.value = filePathDisplay.value;
+    return;
+  }
+  const typed = pathInput.value;
+  await loadPreviews(paths);
+  // Failed load: keep what was typed so the path can be corrected.
+  pathInput.value = previews.value.length > 0 ? filePathDisplay.value : typed;
+}
+
+// Ignore the Enter that confirms an IME composition (e.g. Chinese paths) so it
+// does not commit a half-typed path; only a real Enter commits.
+function commitPathInputOnEnter(event: KeyboardEvent) {
+  if (event.isComposing) return;
+  event.preventDefault();
+  void commitPathInput();
+}
+
 // Desktop tooltip shows the real file path; Web tooltip shows the user-facing
 // label only — never the server temp path (which contains a meaningless UUID).
 function tooltipText(item: SqlFilePreview): string {
@@ -87,6 +116,11 @@ const databaseOptions = ref<string[]>([]);
 const loadingDatabases = ref(false);
 const continueOnError = ref(false);
 const skipRelationalConstraints = ref(false);
+const manualTransaction = ref(false);
+const txnSessionId = ref<string>();
+const commitUncertain = ref(false);
+const resolvingTransaction = ref(false);
+let disposed = false;
 
 const running = ref(false);
 const cancelling = ref(false);
@@ -154,6 +188,64 @@ const supportsRelationalConstraintBypass = computed(() => {
 });
 
 const selectedConnection = computed(() => sqlConnections.value.find((c) => c.id === connectionId.value));
+const canUseManualTransaction = computed(() => supportsTransaction(selectedConnection.value?.db_type));
+const executionLocked = computed(() => running.value || resolvingTransaction.value || !!txnSessionId.value);
+
+async function finishTransaction(commit: boolean) {
+  const sessionId = txnSessionId.value;
+  if (!sessionId || resolvingTransaction.value || (commit && (terminalStatus.value !== "done" || commitUncertain.value))) return false;
+  resolvingTransaction.value = true;
+  try {
+    let committed = false;
+    let outcomeUnknown = false;
+    try {
+      if (commit) {
+        await commitManualTransaction(sessionId);
+        committed = true;
+      } else await rollbackManualTransaction(sessionId);
+    } catch (error) {
+      if (!isManualTransactionSessionExpired(error) && formatError(error) !== "Transaction session not found") {
+        if (commit) commitUncertain.value = true;
+        throw error;
+      }
+      outcomeUnknown = commitUncertain.value;
+      if (outcomeUnknown) toast(t("toolbar.commitOutcomeUnknown"), 5000);
+      else if (commit) toast(t("sqlFile.transactionEnded"), 5000);
+    }
+    txnSessionId.value = undefined;
+    if (terminalStatus.value === "done") {
+      terminalStatus.value = outcomeUnknown ? "error" : committed ? "done" : "cancelled";
+      if (progress.value) updateSqlFileTask(executionId.value, { ...progress.value, status: terminalStatus.value });
+    }
+    await refreshTargetAfterImport();
+    return true;
+  } catch (error: any) {
+    toast(error?.message || String(error), 5000);
+    return false;
+  } finally {
+    resolvingTransaction.value = false;
+  }
+}
+
+watch(manualTransaction, (enabled) => {
+  if (enabled) {
+    continueOnError.value = false;
+    skipRelationalConstraints.value = false;
+  }
+});
+watch(canUseManualTransaction, (supported) => {
+  if (!supported && !txnSessionId.value) manualTransaction.value = false;
+});
+onBeforeUnmount(() => {
+  disposed = true;
+  if (running.value && manualTransaction.value) {
+    cancelRequested.value = true;
+    if (executionStarted.value) void cancelSqlFileExecution(executionId.value).catch(() => {});
+  }
+  // The running call releases the session in its finally block; do not race a
+  // rollback with an active statement. A late begin response is handled below.
+  if (!running.value && txnSessionId.value) void finishTransaction(false);
+});
 
 const restoreSelectedTables = ref(false);
 const backupTables = ref<SqlFileTable[]>([]);
@@ -206,7 +298,7 @@ watch([restoreSelectedTables, canSelectTables, () => previews.value[0]?.filePath
 
 const canStart = computed(() => {
   const connection = selectedConnection.value;
-  if (previews.value.length === 0 || !connection || running.value || loadingPreview.value || loadingDatabases.value) return false;
+  if (previews.value.length === 0 || !connection || executionLocked.value || loadingPreview.value || loadingDatabases.value) return false;
   if (restoreSelectedTables.value && (loadingTables.value || tableScanError.value || selectedTables.value.length === 0)) return false;
   let hasDatabaseContext = false;
   const canExecuteWithoutSelectedDatabase = previews.value.every((item) => {
@@ -276,6 +368,8 @@ function formatElapsed(ms: number) {
 }
 
 function statusLabel(status: SqlFileStatus | "idle") {
+  if (status === "error" && commitUncertain.value) return t("toolbar.commitOutcomeUnknown");
+  if (status === "done" && txnSessionId.value) return t("sqlFile.pendingTransaction");
   return t(`sqlFile.status.${status}`);
 }
 
@@ -322,6 +416,7 @@ function resetState() {
   loadingDatabases.value = false;
   continueOnError.value = false;
   skipRelationalConstraints.value = false;
+  manualTransaction.value = false;
   restoreSelectedTables.value = false;
   resetExecution();
 }
@@ -372,6 +467,7 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
 }
 
 async function loadPreviews(filesOrPaths: Array<string | File>) {
+  if (executionLocked.value) return;
   loadingPreview.value = true;
   previews.value = [];
   resetExecution();
@@ -389,7 +485,7 @@ async function loadPreviews(filesOrPaths: Array<string | File>) {
 }
 
 async function selectFile() {
-  if (running.value) return;
+  if (executionLocked.value) return;
   if (!isTauriRuntime()) {
     fileInput.value?.click();
     return;
@@ -416,7 +512,7 @@ async function handleFileInputChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
   input.value = "";
-  if (files.length === 0 || running.value) return;
+  if (files.length === 0 || executionLocked.value) return;
   selectingFile.value = true;
   try {
     await loadPreviews(files);
@@ -486,6 +582,7 @@ async function startExecution() {
   failureDetailsExpanded.value = false;
   const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
   activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
+  let completedSuccessfully = false;
 
   try {
     await store.ensureConnected(connectionId.value);
@@ -494,13 +591,22 @@ async function startExecution() {
       return;
     }
 
+    if (manualTransaction.value) {
+      const sessionId = await beginManualTransaction(connectionId.value, database.value.trim());
+      txnSessionId.value = sessionId;
+      commitUncertain.value = false;
+      if (disposed || cancelRequested.value) {
+        terminalStatus.value = "cancelled";
+        return;
+      }
+    }
+
     let resolveTerminalProgress: (progress: SqlFileProgress) => void = () => {};
     let rejectTerminalProgress: (error: Error) => void = () => {};
     const terminalProgress = new Promise<SqlFileProgress>((resolve, reject) => {
       resolveTerminalProgress = resolve;
       rejectTerminalProgress = reject;
     });
-    let completedSuccessfully = false;
     const unlisten = await listenProgress(
       batchId,
       (next) => {
@@ -537,7 +643,8 @@ async function startExecution() {
           }
         }
 
-        updateSqlFileTask(batchId, next, {
+        const taskProgress = txnSessionId.value && next.status === "done" ? { ...next, status: "running" as const, statementSummary: t("sqlFile.pendingTransaction") } : next;
+        updateSqlFileTask(batchId, taskProgress, {
           fileIndex: currentFileIndex.value >= 0 ? currentFileIndex.value : previews.value.length === 1 ? 0 : undefined,
           fileName: currentFileName.value || (previews.value.length === 1 ? (displayFileNames.value.get(previews.value[0]!.filePath) ?? previews.value[0]!.fileName) : undefined),
         });
@@ -551,6 +658,10 @@ async function startExecution() {
     );
 
     try {
+      if (cancelRequested.value) {
+        terminalStatus.value = "cancelled";
+        return;
+      }
       executionStarted.value = true;
       const executionPaths = previews.value.flatMap((item) => item.packageFilePaths ?? [item.filePath]);
       await executeSqlFiles(
@@ -560,6 +671,7 @@ async function startExecution() {
           database: database.value.trim(),
           filePath: executionPaths[0]!,
           continueOnError: continueOnError.value,
+          ...(txnSessionId.value ? { txnSessionId: txnSessionId.value } : {}),
           ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
           partCooldownMs: previews.value.some((item) => item.packageFilePaths) ? 500 : 0,
           skipRelationalConstraints: skipRelationalConstraints.value,
@@ -579,7 +691,7 @@ async function startExecution() {
       unlisten();
     }
 
-    if (completedSuccessfully) await refreshTargetAfterImport();
+    if (completedSuccessfully && !txnSessionId.value) await refreshTargetAfterImport();
   } catch (e: any) {
     terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
     terminalError.value = e?.message || String(e);
@@ -599,6 +711,12 @@ async function startExecution() {
       toast(terminalError.value, 5000);
     }
   } finally {
+    if (txnSessionId.value && (!completedSuccessfully || disposed || cancelRequested.value)) {
+      await finishTransaction(false);
+    }
+    if (cancelRequested.value && !progress.value) {
+      updateSqlFileTask(batchId, { executionId: batchId, status: "cancelled", statementIndex: 0, successCount: 0, failureCount: 0, affectedRows: 0, elapsedMs: 0, statementSummary: "" });
+    }
     running.value = false;
     cancelling.value = false;
     executionStarted.value = false;
@@ -622,7 +740,12 @@ async function cancelExecution() {
   }
 }
 
-function handleOpenChange(nextOpen: boolean) {
+async function handleOpenChange(nextOpen: boolean) {
+  if (!nextOpen && (resolvingTransaction.value || (running.value && manualTransaction.value))) return;
+  if (!nextOpen && txnSessionId.value) {
+    if (!window.confirm(t("sqlFile.rollbackBeforeClose"))) return;
+    if (!(await finishTransaction(false))) return;
+  }
   open.value = nextOpen;
 }
 
@@ -631,15 +754,19 @@ watch(connectionId, (id) => {
 });
 
 watch(sqlConnections, () => {
-  if (!open.value || running.value || selectedConnection.value) return;
+  if (!open.value || executionLocked.value || selectedConnection.value) return;
   connectionId.value = resolveInitialConnectionId();
 });
 
 watch(
   open,
   (value) => {
-    if (!value) return;
-    if (running.value) return;
+    if (!value) {
+      if (manualTransaction.value && running.value) void cancelExecution();
+      else if (txnSessionId.value) void finishTransaction(false);
+      return;
+    }
+    if (running.value || txnSessionId.value || resolvingTransaction.value) return;
     resetState();
     if (connectionId.value) {
       loadDatabasesForConnection(connectionId.value);
@@ -673,8 +800,9 @@ watch(
 
           <div class="flex items-center gap-2">
             <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
-            <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
-            <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
+            <Input v-if="isDesktopRuntime" v-model="pathInput" :disabled="executionLocked" class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" @keydown.enter="commitPathInputOnEnter" @blur="commitPathInput" />
+            <Input v-else :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
+            <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="executionLocked || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
               <FolderOpen v-else class="w-3.5 h-3.5 mr-1.5" />
               {{ t("sqlFile.browse") }}
@@ -733,7 +861,7 @@ watch(
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("sqlFile.connection") }}</Label>
-              <Select v-model="connectionId" :disabled="running">
+              <Select v-model="connectionId" :disabled="executionLocked">
                 <SelectTrigger class="h-8 text-xs">
                   <div v-if="connectionId" class="flex items-center gap-1.5 min-w-0">
                     <DatabaseIcon :db-type="connectionIconType(connectionId)" class="w-3.5 h-3.5 shrink-0" />
@@ -755,7 +883,7 @@ watch(
 
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("sqlFile.database") }}</Label>
-              <Select v-if="databaseOptions.length" v-model="database" :disabled="running || loadingDatabases">
+              <Select v-if="databaseOptions.length" v-model="database" :disabled="executionLocked || loadingDatabases">
                 <SelectTrigger class="h-8 text-xs">
                   <SelectValue :placeholder="t('sqlFile.selectDatabase')" />
                 </SelectTrigger>
@@ -764,7 +892,7 @@ watch(
                 </SelectContent>
               </Select>
               <div v-else class="relative">
-                <Input v-model="database" class="h-8 text-xs" :disabled="running || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
+                <Input v-model="database" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
               </div>
             </div>
@@ -774,22 +902,22 @@ watch(
         <div v-if="canSelectTables" class="min-w-0 space-y-2.5" data-table-restore>
           <Label class="text-xs">{{ t("sqlFile.restoreScope") }}</Label>
           <div class="flex items-center gap-4 text-xs">
-            <label class="flex items-center gap-2"><input v-model="restoreSelectedTables" type="radio" :value="false" :disabled="running" name="sql-file-restore-scope" />{{ t("sqlFile.restoreAll") }}</label>
-            <label class="flex items-center gap-2"><input v-model="restoreSelectedTables" type="radio" :value="true" :disabled="running" name="sql-file-restore-scope" />{{ t("sqlFile.restoreSelectedTables") }}</label>
+            <label class="flex items-center gap-2"><input v-model="restoreSelectedTables" type="radio" :value="false" :disabled="executionLocked" name="sql-file-restore-scope" />{{ t("sqlFile.restoreAll") }}</label>
+            <label class="flex items-center gap-2"><input v-model="restoreSelectedTables" type="radio" :value="true" :disabled="executionLocked" name="sql-file-restore-scope" />{{ t("sqlFile.restoreSelectedTables") }}</label>
           </div>
           <template v-if="restoreSelectedTables">
             <p class="text-xs text-muted-foreground">{{ t("sqlFile.restoreTablesOnly") }}</p>
             <div v-if="loadingTables" class="flex items-center gap-2 text-xs" role="status"><Loader2 class="h-3.5 w-3.5 animate-spin" />{{ t("sqlFile.scanningTables") }}</div>
             <p v-else-if="tableScanError" class="break-words text-xs text-destructive" role="alert">{{ tableScanError }}</p>
             <template v-else>
-              <Input v-model="tableSearch" :placeholder="t('sqlFile.searchBackupTables')" :aria-label="t('sqlFile.searchBackupTables')" :disabled="running" class="h-8 text-xs" />
+              <Input v-model="tableSearch" :placeholder="t('sqlFile.searchBackupTables')" :aria-label="t('sqlFile.searchBackupTables')" :disabled="executionLocked" class="h-8 text-xs" />
               <div class="flex items-center justify-between gap-3 text-xs">
-                <label class="flex items-center gap-2"><input type="checkbox" :checked="allFilteredTablesSelected" :disabled="running || filteredBackupTables.length === 0" @change="toggleFilteredTables" />{{ t("sqlFile.selectVisibleTables") }}</label>
+                <label class="flex items-center gap-2"><input type="checkbox" :checked="allFilteredTablesSelected" :disabled="executionLocked || filteredBackupTables.length === 0" @change="toggleFilteredTables" />{{ t("sqlFile.selectVisibleTables") }}</label>
                 <span>{{ t("sqlFile.selectedTableCount", { selected: selectedTables.length, total: backupTables.length }) }}</span>
               </div>
               <div class="max-h-44 overflow-y-auto border rounded-md p-2 text-xs">
                 <label v-for="table in filteredBackupTables" :key="tableKey(table)" class="flex min-w-0 items-center gap-2 py-1">
-                  <input type="checkbox" :checked="selectedTableKeys.has(tableKey(table))" :disabled="running" @change="toggleTable(table)" />
+                  <input type="checkbox" :checked="selectedTableKeys.has(tableKey(table))" :disabled="executionLocked" @change="toggleTable(table)" />
                   <span class="min-w-0 break-all">{{ tableLabel(table) }}</span>
                 </label>
                 <p v-if="filteredBackupTables.length === 0" class="text-muted-foreground">{{ t("sqlFile.noBackupTables") }}</p>
@@ -803,12 +931,17 @@ watch(
             {{ t("sqlFile.options") }}
           </div>
 
-          <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="running" @click="continueOnError = !continueOnError">
+          <label v-if="canUseManualTransaction" class="flex items-center gap-2 text-xs">
+            <input v-model="manualTransaction" type="checkbox" :disabled="executionLocked" />
+            {{ t("toolbar.manualTransaction") }}
+          </label>
+          <p v-if="manualTransaction" class="text-xs text-muted-foreground">{{ t("sqlFile.manualTransactionHint") }}</p>
+          <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="executionLocked || manualTransaction" @click="continueOnError = !continueOnError">
             <CheckSquare v-if="continueOnError" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
             {{ t("sqlFile.continueOnError") }}
           </button>
-          <button v-if="supportsRelationalConstraintBypass" type="button" class="flex items-center gap-2 text-xs text-left" :disabled="running" @click="skipRelationalConstraints = !skipRelationalConstraints">
+          <button v-if="supportsRelationalConstraintBypass" type="button" class="flex items-center gap-2 text-xs text-left" :disabled="executionLocked || manualTransaction" @click="skipRelationalConstraints = !skipRelationalConstraints">
             <CheckSquare v-if="skipRelationalConstraints" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
             {{ t("sqlFile.skipRelationalConstraints") }}
@@ -940,17 +1073,24 @@ watch(
 
       <DialogFooter class="shrink-0">
         <template v-if="running">
-          <Button variant="outline" size="sm" @click="open = false">
+          <p v-if="manualTransaction" class="mr-auto text-xs text-muted-foreground">{{ t("sqlFile.manualCancelHint") }}</p>
+          <Button v-else variant="outline" size="sm" @click="handleOpenChange(false)">
             {{ t("sqlFile.runInBackground") }}
           </Button>
-          <Button variant="destructive" size="sm" :disabled="cancelling" @click="cancelExecution">
+          <Button variant="destructive" size="sm" class="w-32" :disabled="cancelling" @click="cancelExecution">
             <Loader2 v-if="cancelling" class="w-3.5 h-3.5 mr-1.5 animate-spin" />
             <X v-else class="w-3.5 h-3.5 mr-1.5" />
             {{ cancelling ? t("sqlFile.cancelling") : t("sqlFile.cancel") }}
           </Button>
         </template>
+        <template v-else-if="txnSessionId">
+          <p class="mr-auto text-xs text-muted-foreground">{{ t("sqlFile.pendingTransaction") }}</p>
+          <!-- Preserve the whole cancel hit area when execution finishes. -->
+          <Button size="sm" :disabled="resolvingTransaction || commitUncertain || terminalStatus !== 'done'" @click="finishTransaction(true)">{{ t("toolbar.commit") }}</Button>
+          <Button variant="outline" size="sm" class="w-32" :disabled="resolvingTransaction" @click="finishTransaction(false)">{{ t("toolbar.rollback") }}</Button>
+        </template>
         <template v-else>
-          <Button variant="outline" size="sm" @click="open = false">
+          <Button variant="outline" size="sm" @click="handleOpenChange(false)">
             {{ t("common.close") }}
           </Button>
           <Button size="sm" :disabled="!canStart" @click="startExecution">

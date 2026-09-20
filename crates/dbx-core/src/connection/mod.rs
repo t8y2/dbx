@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use mysql_async::prelude::Queryable;
 use mysql_async::Row as MysqlRow;
@@ -337,12 +338,36 @@ macro_rules! agent_connection_pool_database_type {
     };
 }
 
+#[derive(Clone)]
+pub struct ConnectionLifecycleSnapshot {
+    generation: u64,
+    cancellation: CancellationToken,
+}
+
+impl ConnectionLifecycleSnapshot {
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+}
+
+struct ConnectionLifecycle {
+    generation: u64,
+    cancellation: CancellationToken,
+}
+
+struct SharedResourceBudget {
+    capacity: usize,
+    semaphore: Arc<Semaphore>,
+}
+
 pub struct AppState {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     task_supervisor: TaskSupervisor,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     draining_pools: Arc<std::sync::Mutex<HashMap<String, watch::Sender<bool>>>>,
     connection_attempts: RwLock<HashMap<String, ConnectionAttemptState>>,
+    connection_lifecycles: std::sync::Mutex<HashMap<String, ConnectionLifecycle>>,
+    shared_resource_budgets: std::sync::Mutex<HashMap<String, SharedResourceBudget>>,
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub tunnels: TunnelManager,
@@ -1244,6 +1269,68 @@ fn mysql_metadata_fallback_url(
 }
 
 impl AppState {
+    pub fn shared_resource_budget(&self, name: &str, capacity: usize) -> Result<Arc<Semaphore>, String> {
+        if capacity == 0 {
+            return Err("Shared resource budget capacity must be greater than zero".to_string());
+        }
+        let mut budgets = self.shared_resource_budgets.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(budget) = budgets.get(name) {
+            if budget.capacity != capacity {
+                return Err(format!(
+                    "Shared resource budget {name:?} already has capacity {}, not {capacity}",
+                    budget.capacity
+                ));
+            }
+            return Ok(budget.semaphore.clone());
+        }
+        let semaphore = Arc::new(Semaphore::new(capacity));
+        budgets.insert(name.to_string(), SharedResourceBudget { capacity, semaphore: semaphore.clone() });
+        Ok(semaphore)
+    }
+
+    pub fn connection_lifecycle_snapshot(&self, connection_id: &str) -> ConnectionLifecycleSnapshot {
+        let mut lifecycles = self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner());
+        let lifecycle = lifecycles
+            .entry(connection_id.to_string())
+            .or_insert_with(|| ConnectionLifecycle { generation: 0, cancellation: CancellationToken::new() });
+        ConnectionLifecycleSnapshot { generation: lifecycle.generation, cancellation: lifecycle.cancellation.clone() }
+    }
+
+    pub fn connection_lifecycle_is_current(&self, connection_id: &str, snapshot: &ConnectionLifecycleSnapshot) -> bool {
+        self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner()).get(connection_id).is_some_and(
+            |lifecycle| lifecycle.generation == snapshot.generation && !snapshot.cancellation.is_cancelled(),
+        )
+    }
+
+    pub fn invalidate_connection_lifecycle(&self, connection_id: &str) {
+        let previous = {
+            let mut lifecycles = self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner());
+            let lifecycle = lifecycles
+                .entry(connection_id.to_string())
+                .or_insert_with(|| ConnectionLifecycle { generation: 0, cancellation: CancellationToken::new() });
+            let previous = std::mem::replace(&mut lifecycle.cancellation, CancellationToken::new());
+            lifecycle.generation = lifecycle.generation.wrapping_add(1);
+            previous
+        };
+        previous.cancel();
+    }
+
+    fn invalidate_all_connection_lifecycles(&self) {
+        let previous = {
+            let mut lifecycles = self.connection_lifecycles.lock().unwrap_or_else(|error| error.into_inner());
+            lifecycles
+                .values_mut()
+                .map(|lifecycle| {
+                    lifecycle.generation = lifecycle.generation.wrapping_add(1);
+                    std::mem::replace(&mut lifecycle.cancellation, CancellationToken::new())
+                })
+                .collect::<Vec<_>>()
+        };
+        for cancellation in previous {
+            cancellation.cancel();
+        }
+    }
+
     /// Return an owned pool handle. The registry read lock is released before
     /// the caller can perform any asynchronous database operation.
     pub async fn pool_handle(&self, pool_key: &str) -> Option<PoolKind> {
@@ -1398,6 +1485,8 @@ impl AppState {
             pool_activity: Arc::new(RwLock::new(HashMap::new())),
             draining_pools: Arc::new(std::sync::Mutex::new(HashMap::new())),
             connection_attempts: RwLock::new(HashMap::new()),
+            connection_lifecycles: std::sync::Mutex::new(HashMap::new()),
+            shared_resource_budgets: std::sync::Mutex::new(HashMap::new()),
             configs: RwLock::new(HashMap::new()),
             running_queries: RunningQueries::default(),
             tunnels: TunnelManager::new(data_dir),
@@ -2064,6 +2153,7 @@ impl AppState {
     }
 
     pub async fn shutdown(&self, deadline: Duration) {
+        self.invalidate_all_connection_lifecycles();
         self.running_queries.cancel_all();
         let removed_pools = self.drain_all_connection_pools().await;
         self.transaction_sessions.write().await.clear();
@@ -5251,6 +5341,7 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools(&self, connection_id: &str) {
+        self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
@@ -5266,6 +5357,7 @@ impl AppState {
     /// user disconnect still goes through remove_connection_pools* and does
     /// send connection/disconnect.
     pub async fn drop_connection_pools_without_close(&self, connection_id: &str) {
+        self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
@@ -5273,6 +5365,7 @@ impl AppState {
     }
 
     pub async fn remove_connection_pools_detached(&self, connection_id: &str) {
+        self.invalidate_connection_lifecycle(connection_id);
         self.rollback_manual_transaction_sessions(connection_id).await;
         let removed = self.drain_connection_pools(connection_id).await;
         self.clear_metadata_gates_for_connection(connection_id).await;
@@ -6974,6 +7067,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("M")]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -7385,6 +7479,64 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         (AppState::new(storage), dir)
+    }
+
+    #[tokio::test]
+    async fn connection_lifecycle_invalidation_rotates_generation_and_cancels_previous_snapshot() {
+        let (state, dir) = test_app_state().await;
+        let first = state.connection_lifecycle_snapshot("conn");
+        assert!(state.connection_lifecycle_is_current("conn", &first));
+
+        state.invalidate_connection_lifecycle("conn");
+
+        tokio::time::timeout(Duration::from_millis(100), first.cancellation().cancelled())
+            .await
+            .expect("previous lifecycle must be cancelled");
+        assert!(!state.connection_lifecycle_is_current("conn", &first));
+        let second = state.connection_lifecycle_snapshot("conn");
+        assert!(state.connection_lifecycle_is_current("conn", &second));
+        assert!(!second.cancellation().is_cancelled());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn every_connection_pool_removal_boundary_invalidates_lifecycle_snapshots() {
+        let (state, dir) = test_app_state().await;
+
+        let removed = state.connection_lifecycle_snapshot("removed");
+        state.remove_connection_pools("removed").await;
+        assert!(removed.cancellation().is_cancelled());
+
+        let dropped = state.connection_lifecycle_snapshot("dropped");
+        state.drop_connection_pools_without_close("dropped").await;
+        assert!(dropped.cancellation().is_cancelled());
+
+        let detached = state.connection_lifecycle_snapshot("detached");
+        state.remove_connection_pools_detached("detached").await;
+        assert!(detached.cancellation().is_cancelled());
+
+        let shutdown = state.connection_lifecycle_snapshot("shutdown");
+        state.shutdown(Duration::from_millis(100)).await;
+        assert!(shutdown.cancellation().is_cancelled());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn named_resource_budget_is_shared_across_app_state_views() {
+        let (state, dir) = test_app_state().await;
+        let first = state.shared_resource_budget("fixed-owner", 2).unwrap();
+        let second = state.shared_resource_budget("fixed-owner", 2).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let first_permit = first.clone().try_acquire_owned().unwrap();
+        let second_permit = second.clone().try_acquire_owned().unwrap();
+        assert!(first.clone().try_acquire_owned().is_err());
+        drop(first_permit);
+        assert!(second.clone().try_acquire_owned().is_ok());
+        drop(second_permit);
+
+        assert!(state.shared_resource_budget("fixed-owner", 3).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn agent_pool_stub() -> PoolKind {

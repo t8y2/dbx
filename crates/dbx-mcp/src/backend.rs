@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
-    connection::{connection_configs_pool_equivalent, AppState},
+    connection::{connection_configs_pool_equivalent, AppState, ConnectionLifecycleSnapshot},
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     history::HistoryEntry,
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
@@ -21,7 +21,10 @@ use tokio::sync::Mutex;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use crate::mongo::MongoCommand;
+use crate::{
+    mongo::MongoCommand,
+    transaction::{MysqlTransactionIo, TransactionOwner, TransactionOwnerConfig, TransactionOwnerRegistry},
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionSummary {
@@ -119,10 +122,32 @@ pub struct BatchStatementResult {
     /// false.
     #[serde(skip_serializing_if = "is_false")]
     pub merged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_state: Option<crate::transaction::TransactionState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_outcome: Option<crate::transaction::TransactionOutcome>,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+pub(crate) fn native_mysql_transaction_connection(connection: &ConnectionConfig) -> bool {
+    connection.db_type == DatabaseType::Mysql
+        && connection.driver_profile.as_deref().is_none_or(|profile| {
+            let profile = profile.trim();
+            profile.is_empty() || profile.eq_ignore_ascii_case("mysql")
+        })
+}
+
+fn transaction_operation_timeout(
+    connection: &ConnectionConfig,
+    configured: std::time::Duration,
+) -> std::time::Duration {
+    match connection.effective_query_timeout_secs() {
+        0 => configured,
+        seconds => std::time::Duration::from_secs(seconds),
+    }
 }
 
 impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
@@ -136,6 +161,8 @@ impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
             statement_index: result.statement_index,
             error_message,
             merged: false,
+            transaction_state: None,
+            transaction_outcome: None,
         }
     }
 }
@@ -160,7 +187,15 @@ fn batch_statement_result_from_json(value: &Value) -> Result<BatchStatementResul
         .and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| value.pointer("/rows/0/0").and_then(Value::as_str).map(str::to_owned));
-    Ok(BatchStatementResult { result, execution_error, statement_index, error_message, merged: false })
+    Ok(BatchStatementResult {
+        result,
+        execution_error,
+        statement_index,
+        error_message,
+        merged: false,
+        transaction_state: None,
+        transaction_outcome: None,
+    })
 }
 
 /// Wire-level options for a documentation snapshot. Mirrors
@@ -241,6 +276,15 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<dbx_core::db::QueryResult, String> {
         let _ = (connection, database, sql, max_rows, timeout_secs);
         Err("SQL queries are not supported by this backend.".to_string())
+    }
+    async fn open_transaction_owner(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        let _ = (connection, database, client_session_id);
+        Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection.".to_string())
     }
     /// Execute a multi-statement SQL script, returning one result per statement.
     ///
@@ -374,6 +418,8 @@ pub trait DbxBackend: Send + Sync {
 pub struct LocalBackend {
     state: Arc<AppState>,
     data_dir: std::path::PathBuf,
+    transaction_owners: Arc<TransactionOwnerRegistry>,
+    transaction_owner_config: TransactionOwnerConfig,
 }
 
 #[derive(Debug, Default)]
@@ -389,6 +435,12 @@ pub struct WebBackend {
     headers: HeaderMap,
     auth: Mutex<WebAuthState>,
     connected: Mutex<HashMap<String, ConnectionConfig>>,
+}
+
+impl Drop for LocalBackend {
+    fn drop(&mut self) {
+        self.transaction_owners.invalidate_all();
+    }
 }
 
 // Manual impl: the derived one would print `password` (and the session cookie
@@ -580,14 +632,60 @@ impl WebBackend {
 }
 
 impl LocalBackend {
+    fn spawn_connection_lifecycle_watcher(
+        &self,
+        lifecycle: ConnectionLifecycleSnapshot,
+        owner: &Arc<TransactionOwner>,
+    ) -> tokio::task::JoinHandle<()> {
+        let cancellation = lifecycle.cancellation().clone();
+        let owner_closed = owner.closed_token();
+        let watched_owner = Arc::downgrade(owner);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    if let Some(owner) = watched_owner.upgrade() {
+                        owner.invalidate();
+                    }
+                }
+                _ = owner_closed.cancelled() => {}
+            }
+        })
+    }
+
+    async fn finalize_transaction_owner(
+        &self,
+        connection_id: &str,
+        lifecycle: ConnectionLifecycleSnapshot,
+        owner: Arc<TransactionOwner>,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        self.spawn_connection_lifecycle_watcher(lifecycle.clone(), &owner);
+        self.transaction_owners.register(connection_id, &owner);
+        if !self.state.connection_lifecycle_is_current(connection_id, &lifecycle) {
+            owner.invalidate();
+            let _ = owner.close().await;
+            return Err("The connection was removed while its fixed transaction session was opening.".to_string());
+        }
+        Ok(owner)
+    }
+
     /// Reuse an already initialized DBX application state, for hosts that
     /// embed MCP alongside their own HTTP server.
     pub fn from_app_state(state: Arc<AppState>, data_dir: PathBuf) -> Self {
-        Self { state, data_dir }
+        Self {
+            state,
+            data_dir,
+            transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
+            transaction_owner_config: TransactionOwnerConfig::default(),
+        }
     }
 
     pub async fn open(path: &Path) -> Result<Self, String> {
-        Self::open_with_app_version(path, env!("CARGO_PKG_VERSION")).await
+        // The standalone MCP binary and CLI are versioned independently from
+        // the DBX app, so their crate version must not stand in for the app
+        // version during plugin `engines.dbx` checks: a plugin requiring
+        // DBX >= 0.5.68 would be rejected against e.g. 0.4.90 (#9595). An
+        // empty version makes the compatibility check skip that requirement.
+        Self::open_with_app_version(path, "").await
     }
 
     /// Same as [`open`], but lets tests and embedded callers pin the app version
@@ -608,7 +706,18 @@ impl LocalBackend {
         let config_map: HashMap<String, ConnectionConfig> =
             configs.into_iter().map(|config| (config.id.clone(), config)).collect();
         *state.configs.write().await = config_map;
-        Ok(Self { state, data_dir })
+        Ok(Self {
+            state,
+            data_dir,
+            transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
+            transaction_owner_config: TransactionOwnerConfig::default(),
+        })
+    }
+
+    #[cfg(feature = "transaction-test-hooks")]
+    pub fn with_transaction_test_config(mut self, config: TransactionOwnerConfig) -> Self {
+        self.transaction_owner_config = config;
+        self
     }
 
     pub fn state(&self) -> &Arc<AppState> {
@@ -706,6 +815,7 @@ impl LocalBackend {
         };
 
         for id in pool_ids_to_drop {
+            self.transaction_owners.invalidate_connection(&id);
             self.state.remove_connection_pools_detached(&id).await;
         }
     }
@@ -870,6 +980,57 @@ impl DbxBackend for LocalBackend {
         .await
     }
 
+    async fn open_transaction_owner(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        client_session_id: &str,
+    ) -> Result<Arc<TransactionOwner>, String> {
+        if !native_mysql_transaction_connection(connection) {
+            return Err("TRANSACTION_UNSUPPORTED: fixed-session transactions require a native local MySQL connection."
+                .to_string());
+        }
+        let lifecycle = self.state.connection_lifecycle_snapshot(&connection.id);
+        let resource_permit =
+            self.state.shared_resource_budget("dbx-mcp-transaction-owners", 32)?.try_acquire_owned().map_err(|_| {
+                "Too many open transaction-enabled MCP sessions (max 32). Close an existing transaction session first."
+                    .to_string()
+            })?;
+        let pool_database = (!database.trim().is_empty()).then_some(database);
+        let pool_key =
+            self.state.get_or_create_pool_for_session(&connection.id, pool_database, Some(client_session_id)).await?;
+        let pool = match self.state.pool_handle(&pool_key).await {
+            Some(dbx_core::connection::PoolKind::Mysql(pool, dbx_core::connection::MysqlMode::Normal)) => pool,
+            _ => {
+                let _ = self.state.close_client_session_pool(&connection.id, pool_database, client_session_id).await;
+                return Err(
+                    "TRANSACTION_UNSUPPORTED: fixed-session transactions require the native MySQL driver.".to_string()
+                );
+            }
+        };
+        let conn = match dbx_core::db::mysql::get_conn_with_health_check(&pool).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let _ = self.state.close_client_session_pool(&connection.id, pool_database, client_session_id).await;
+                return Err(format!("Failed to acquire the fixed MySQL session connection: {error}"));
+            }
+        };
+        let mut owner_config = self.transaction_owner_config;
+        owner_config.operation_timeout = transaction_operation_timeout(connection, owner_config.operation_timeout);
+        let owner = TransactionOwner::spawn_with_resource_permit(
+            MysqlTransactionIo::new(
+                conn,
+                self.state.clone(),
+                connection.id.clone(),
+                database.to_string(),
+                client_session_id.to_string(),
+            ),
+            owner_config,
+            resource_permit,
+        );
+        self.finalize_transaction_owner(&connection.id, lifecycle, owner).await
+    }
+
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -947,6 +1108,7 @@ impl DbxBackend for LocalBackend {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
+            self.transaction_owners.invalidate_connection(connection_id);
             self.state.remove_connection_pools_detached(connection_id).await;
         }
         Ok(removed)
@@ -2272,6 +2434,7 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         rows,
         affected_rows,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -2459,7 +2622,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         time::Duration,
     };
 
@@ -2498,6 +2664,50 @@ mod tests {
         assert_eq!(parse_database_type("Postgres").unwrap(), DatabaseType::Postgres);
         assert_eq!(parse_database_type("mongodb").unwrap(), DatabaseType::MongoDb);
         assert!(parse_database_type("unknown").is_err());
+    }
+
+    #[test]
+    fn native_mysql_transaction_gate_accepts_the_builtin_mysql_profile_only() {
+        let mut connection: ConnectionConfig = serde_json::from_value(json!({
+            "id": "mysql",
+            "name": "mysql",
+            "db_type": "mysql",
+            "host": "",
+            "port": 3306,
+            "username": "",
+            "password": "",
+            "database": "test",
+            "ssl": false
+        }))
+        .unwrap();
+        assert!(native_mysql_transaction_connection(&connection));
+        connection.driver_profile = Some("mysql".to_string());
+        assert!(native_mysql_transaction_connection(&connection));
+        connection.driver_profile = Some("MySQL".to_string());
+        assert!(native_mysql_transaction_connection(&connection));
+        for profile in ["dolt", "tidb", "oceanbase", "custom-profile"] {
+            connection.driver_profile = Some(profile.to_string());
+            assert!(!native_mysql_transaction_connection(&connection), "unexpectedly accepted {profile}");
+        }
+    }
+
+    #[test]
+    fn unlimited_connection_timeout_preserves_bounded_transaction_default() {
+        let mut connection: ConnectionConfig = serde_json::from_value(json!({
+            "id": "mysql",
+            "name": "mysql",
+            "db_type": "mysql",
+            "host": "",
+            "port": 3306,
+            "username": "",
+            "password": "",
+            "database": "test",
+            "ssl": false
+        }))
+        .unwrap();
+        connection.query_timeout_secs = 0;
+
+        assert_eq!(transaction_operation_timeout(&connection, Duration::from_secs(300)), Duration::from_secs(300));
     }
 
     #[test]
@@ -3826,6 +4036,128 @@ mod tests {
         let backend = LocalBackend::open(&database_path).await.unwrap();
 
         assert_eq!(backend.state().agent_manager.base_dir(), &agent_dir);
+    }
+
+    struct LifecycleTestIo {
+        disconnects: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::transaction::TransactionIo for LifecycleTestIo {
+        async fn execute(
+            &mut self,
+            _sql: &str,
+            _max_rows: Option<usize>,
+        ) -> Result<crate::transaction::TransactionIoSuccess, crate::transaction::TransactionIoError> {
+            panic!("lifecycle test owner must stay idle")
+        }
+
+        async fn ping_in_transaction(&mut self) -> Result<bool, crate::transaction::TransactionIoError> {
+            panic!("lifecycle test owner must not probe")
+        }
+
+        async fn disconnect(&mut self) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_transaction_owner_rejects_stale_connection_lifecycle_before_registration() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        state.invalidate_connection_lifecycle("conn");
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: disconnects.clone() },
+            TransactionOwnerConfig::default(),
+        );
+
+        let error = backend.finalize_transaction_owner("conn", lifecycle, owner.clone()).await.unwrap_err();
+
+        assert!(error.contains("removed"), "{error}");
+        owner.wait_closed().await;
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_app_state_removal_cancels_a_registered_local_transaction_owner() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: disconnects.clone() },
+            TransactionOwnerConfig::default(),
+        );
+        backend.finalize_transaction_owner("conn", lifecycle, owner.clone()).await.unwrap();
+
+        state.remove_connection_pools_detached("conn").await;
+        owner.wait_closed().await;
+
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn connection_lifecycle_watcher_exits_after_normal_owner_disposal() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&data_dir.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        let backend = LocalBackend::from_app_state(state.clone(), data_dir.path().to_path_buf());
+        let lifecycle = state.connection_lifecycle_snapshot("conn");
+        let owner = TransactionOwner::spawn(
+            LifecycleTestIo { disconnects: Arc::new(AtomicUsize::new(0)) },
+            TransactionOwnerConfig::default(),
+        );
+        let watcher = backend.spawn_connection_lifecycle_watcher(lifecycle, &owner);
+
+        owner.close().await.unwrap();
+
+        tokio::time::timeout(Duration::from_millis(100), watcher)
+            .await
+            .expect("lifecycle watcher must not outlive a normally disposed owner")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_backend_standalone_open_skips_plugin_dbx_engine_gate() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let database_path = data_dir.path().join("dbx.db");
+        let plugin_dir = data_dir.path().join("plugins").join("io.dbx.gated");
+        std::fs::create_dir_all(plugin_dir.join("ui")).unwrap();
+        std::fs::write(plugin_dir.join("ui").join("index.html"), "<!doctype html>").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{
+                "manifest_version": 1,
+                "id": "io.dbx.gated",
+                "name": "Gated",
+                "version": "1.0.0",
+                "publisher": "example",
+                "engines": { "dbx": ">=999.0.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+                "permissions": ["host.events"]
+            }"#,
+        )
+        .unwrap();
+        let storage = Storage::open(&database_path).await.unwrap();
+        drop(storage);
+
+        // The standalone host has no app version to compare against (#9595).
+        let backend = LocalBackend::open(&database_path).await.unwrap();
+        let installed = backend.state().plugins.list_installed().unwrap();
+        let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
+        assert!(plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
+
+        // A host that knows the app version keeps enforcing the requirement.
+        let backend = LocalBackend::open_with_app_version(&database_path, "0.6.16").await.unwrap();
+        let installed = backend.state().plugins.list_installed().unwrap();
+        let plugin = installed.iter().find(|plugin| plugin.manifest.id == "io.dbx.gated").unwrap();
+        assert!(!plugin.compatibility.compatible, "{:?}", plugin.compatibility.errors);
     }
 
     #[test]

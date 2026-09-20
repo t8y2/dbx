@@ -214,7 +214,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 
 同一插件内通过 `id` 互相引用：Connection Provider 的 `workbench` 必须指向一个已声明的工作台，`filesystem_provider` 必须指向一个已声明的文件系统 Provider。图标优先使用 Contribution 的 `icon`，缺失时回退到插件级 `icon`。
 
-自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。`context-menu` 调用后端 `contextMenu/<contribution-id>`，`result-view` 则在工作台 context 中接收结果快照；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
+自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。`context-menu` 调用后端 `contextMenu/<contribution-id>`，`result-view` 则在工作台 context 中接收结果快照，被打开的 contribution id 会通过 `dbx-plugin-init` 负载下发，因此单个 UI 入口可以为多个工作台和结果视图服务；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
 
 ### 文件系统协议
 

@@ -1843,7 +1843,9 @@ function currentDiagramSvg(): string {
 
   prepareTableDiagramExportGeometry();
 
-  const exportTables = canvasVisibleTables.value;
+  // Positions are keyed by the diagram table id (`getTableKey`), which is schema-qualified in
+  // multi-schema mode; hand that id to the exporter so cards are not all drawn at the origin.
+  const exportTables = canvasVisibleTables.value.map((table) => ({ ...table, diagramKey: getTableKey(table) }));
   const exportRelationships = canvasVisibleRelationships.value;
   const layers = exportSvgLayers();
   const geometryInput = {

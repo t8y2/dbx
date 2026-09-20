@@ -6,7 +6,8 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type PluginSaveFileRequest, type PluginSaveFileResult, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
-import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
+import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
+import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -15,7 +16,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 const props = withDefaults(
   defineProps<{
     plugin: InstalledPlugin;
-    contribution: PluginWorkbenchContribution;
+    contribution: PluginUiContribution;
     context?: PluginWorkbenchContext;
   }>(),
   { context: () => ({}) },
@@ -68,6 +69,7 @@ function currentBridgeTheme(): PluginBridgeTheme {
 }
 
 function createBridge() {
+  bridge?.dispose();
   bridge = new PluginHostBridge(
     props.plugin,
     props.contribution,
@@ -83,6 +85,8 @@ function createBridge() {
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
       closeTab: () => emit("closeTab"),
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
+      downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
+      cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
       copyText: (_pluginId, text) => copyToClipboard(text),
     },
     appLocale.value,

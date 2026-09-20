@@ -140,18 +140,20 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(releaseWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");
   });
 
-  it("keeps compile caching away from the Win7 WebView2 loader patch", () => {
+  it("caches Win7 Rust compilation without wrapping C or C++ compilers", () => {
     const releaseWin7Job = releaseWorkflow.slice(releaseWorkflow.indexOf("  build-windows-7-offline:"), releaseWorkflow.indexOf("  static-browser:"));
     const ciWin7Job = ciWorkflow.slice(ciWorkflow.indexOf("  windows-win7-bundle:"), ciWorkflow.indexOf("  duckdb-windows-driver:"));
 
-    // The loader patch rewrites a file inside the cargo registry, which no
-    // compile cache can see. v0.6.0 linked a >= 1.0.1054.31 loader despite the
-    // patched 1.0.902.49 one being verified on disk, so neither Win7 job may
-    // route rustc through sccache until the loader is vendored into the tree.
-    expect(releaseWin7Job).not.toContain("RUSTC_WRAPPER");
-    expect(releaseWin7Job).not.toContain("sccache-action");
-    expect(ciWin7Job).not.toContain("RUSTC_WRAPPER");
-    expect(ciWin7Job).not.toContain("sccache-action");
+    for (const job of [releaseWin7Job, ciWin7Job]) {
+      expect(job).toContain("RUSTC_WRAPPER: sccache");
+      expect(job).toContain('SCCACHE_GHA_ENABLED: "true"');
+      expect(job).toContain("SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1");
+      expect(job).toContain('SCCACHE_IDLE_TIMEOUT: "0"');
+      expect(job).toContain("mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba");
+      expect(job).toContain('version: "v0.16.0"');
+      expect(job).not.toMatch(/^\s+(?:CC|CXX):/m);
+      expect(job).not.toContain("CARGO_PROFILE_RELEASE_");
+    }
   });
 
   it("probes the fixed runtime through the Win7-compatible loader", () => {

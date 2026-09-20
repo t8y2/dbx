@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   addSqlFileTask: vi.fn(),
+  beginManualTransaction: vi.fn(),
+  commitManualTransaction: vi.fn(),
+  rollbackManualTransaction: vi.fn(),
   cancelSqlFileExecution: vi.fn(),
   ensureConnected: vi.fn(),
   executeSqlFiles: vi.fn(),
@@ -14,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   previewSqlFile: vi.fn(),
   inspectSqlFileTables: vi.fn(),
   progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
+  changeDialogOpen: undefined as undefined | ((open: boolean) => void),
   refreshDatabaseTreeNode: vi.fn(),
   requestConfirmation: vi.fn(),
   toast: vi.fn(),
@@ -56,6 +60,9 @@ vi.mock("@/stores/connectionStore", () => ({
   }),
 }));
 vi.mock("@/lib/backend/api", () => ({
+  beginManualTransaction: mocks.beginManualTransaction,
+  commitManualTransaction: mocks.commitManualTransaction,
+  rollbackManualTransaction: mocks.rollbackManualTransaction,
   cancelSqlFileExecution: mocks.cancelSqlFileExecution,
   executeSqlFiles: mocks.executeSqlFiles,
   listenSqlFileProgress: mocks.listenSqlFileProgress,
@@ -67,7 +74,13 @@ vi.mock("@lucide/vue", () => {
   return { Check: Icon, CheckSquare: Icon, ChevronRight: Icon, FileCode: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Square: Icon, X: Icon };
 });
 vi.mock("@/components/ui/dialog", () => ({
-  Dialog: passthrough("div"),
+  Dialog: defineComponent({
+    emits: ["update:open"],
+    setup(_, { attrs, slots, emit }) {
+      mocks.changeDialogOpen = (open) => emit("update:open", open);
+      return () => h("div", attrs, slots.default?.());
+    },
+  }),
   DialogFooter: passthrough("div"),
   DialogHeader: passthrough("div"),
   DialogScrollContent: passthrough("div"),
@@ -124,10 +137,10 @@ function findButton(label: string): HTMLButtonElement {
   return button!;
 }
 
-async function mountReadyDialog() {
+async function mountReadyDialog(onOpenChange = vi.fn()) {
   root = document.createElement("div");
   document.body.append(root);
-  app = createApp(SqlFileExecutionDialog, { open: true });
+  app = createApp(SqlFileExecutionDialog, { open: true, "onUpdate:open": onOpenChange });
   app.mount(root);
 
   await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
@@ -190,6 +203,9 @@ beforeEach(() => {
       });
     }
   });
+  mocks.beginManualTransaction.mockReset().mockResolvedValue("txn-1");
+  mocks.commitManualTransaction.mockReset().mockResolvedValue(undefined);
+  mocks.rollbackManualTransaction.mockReset().mockResolvedValue(undefined);
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.inspectSqlFileTables.mockResolvedValue([
     { database: "app", name: "users" },
@@ -212,10 +228,12 @@ beforeEach(() => {
   mocks.cancelSqlFileExecution.mockResolvedValue(true);
   mocks.refreshDatabaseTreeNode.mockResolvedValue(undefined);
   mocks.requestConfirmation.mockResolvedValue(true);
-  mocks.uuid.mockReturnValueOnce("run-1").mockReturnValueOnce("run-2");
+  mocks.uuid.mockReset().mockReturnValueOnce("run-1").mockReturnValueOnce("run-2");
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   app?.unmount();
   root?.remove();
   app = undefined;
@@ -223,6 +241,209 @@ afterEach(() => {
 });
 
 describe("SqlFileExecutionDialog retries", () => {
+  it("allows an ordinary execution to continue in the background and close after completion", async () => {
+    const onOpenChange = vi.fn();
+    await mountReadyDialog(onOpenChange);
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledOnce());
+    findButton("sqlFile.runInBackground").click();
+    await nextTick();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(mocks.cancelSqlFileExecution).not.toHaveBeenCalled();
+    mocks.progressHandler?.(progress("run-1", "done"));
+    gate.resolve();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    onOpenChange.mockClear();
+    findButton("common.close").click();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("cancels the active ordinary run and allows a fresh retry", async () => {
+    await mountReadyDialog();
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(() => gate.promise);
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledOnce());
+    findButton("sqlFile.cancel").click();
+    await vi.waitFor(() => expect(mocks.cancelSqlFileExecution).toHaveBeenCalledWith("run-1"));
+    mocks.progressHandler?.(progress("run-1", "cancelled"));
+    gate.resolve();
+    await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.cancelled"));
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => mocks.progressHandler?.(progress(request.executionId, "done")));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledTimes(2));
+    expect(mocks.executeSqlFiles.mock.calls[1]![0].executionId).toBe("run-2");
+    await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.done"));
+  });
+
+  async function enableManualTransaction() {
+    await mountReadyDialog();
+    const label = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
+    expect(label).toBeDefined();
+    label!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await nextTick();
+  }
+
+  it("keeps successful files pending until an explicit commit and locks file selection", async () => {
+    await enableManualTransaction();
+    await completeFirstExecution();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    expect(mocks.beginManualTransaction).toHaveBeenCalledWith("mysql-1", "");
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).toMatchObject({ txnSessionId: "txn-1", continueOnError: false, skipRelationalConstraints: false });
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.refreshDatabaseTreeNode).not.toHaveBeenCalled();
+    expect(findButton("sqlFile.browse").disabled).toBe(true);
+    expect(mocks.updateSqlFileTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "running", statementSummary: "sqlFile.pendingTransaction" }), expect.anything());
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(mocks.commitManualTransaction).toHaveBeenCalledExactlyOnceWith("txn-1");
+    expect(mocks.updateSqlFileTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "done" }));
+  });
+
+  it("rolls back pending files without marking their task committed", async () => {
+    await enableManualTransaction();
+    await completeFirstExecution();
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+    const buttons = root!.querySelectorAll("button");
+    expect(buttons[buttons.length - 1]).toBe(findButton("toolbar.rollback"));
+    findButton("toolbar.rollback").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(mocks.rollbackManualTransaction).toHaveBeenCalledExactlyOnceWith("txn-1");
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.updateSqlFileTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "cancelled" }));
+  });
+
+  it("rolls back on execution failure without retrying the file", async () => {
+    await enableManualTransaction();
+    mocks.executeSqlFiles.mockRejectedValueOnce(new Error("statement failed"));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+    expect(mocks.executeSqlFiles).toHaveBeenCalledTimes(1);
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("statement failed", 5000);
+  });
+
+  it("waits for the active statement to finish before rolling back a cancellation", async () => {
+    await enableManualTransaction();
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      await gate.promise;
+      mocks.progressHandler?.(progress(request.executionId, "cancelled"));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+    findButton("sqlFile.cancel").click();
+    await vi.waitFor(() => expect(mocks.cancelSqlFileExecution).toHaveBeenCalledWith("run-1"));
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    gate.resolve();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("releases a transaction that begins after the dialog unmounts", async () => {
+    await enableManualTransaction();
+    const gate = deferred();
+    mocks.beginManualTransaction.mockImplementationOnce(async () => {
+      await gate.promise;
+      return "late-txn";
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.beginManualTransaction).toHaveBeenCalled());
+    app!.unmount();
+    app = undefined;
+    gate.resolve();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("late-txn"));
+    expect(mocks.executeSqlFiles).not.toHaveBeenCalled();
+    expect(mocks.updateSqlFileTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "cancelled" }));
+  });
+
+  it("rolls back before closing pending files and keeps them open when close is declined", async () => {
+    await enableManualTransaction();
+    await completeFirstExecution();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValueOnce(true);
+    vi.stubGlobal("confirm", confirm);
+    mocks.changeDialogOpen!(false);
+    await nextTick();
+    expect(confirm).toHaveBeenCalledWith("sqlFile.rollbackBeforeClose");
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    mocks.changeDialogOpen!(false);
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledExactlyOnceWith("txn-1"));
+  });
+
+  it("does not start file execution if cancelled while registering progress", async () => {
+    await enableManualTransaction();
+    const gate = deferred();
+    mocks.listenSqlFileProgress.mockImplementationOnce(async () => {
+      await gate.promise;
+      return mocks.unlisten;
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.listenSqlFileProgress).toHaveBeenCalled());
+    findButton("sqlFile.cancel").click();
+    gate.resolve();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+    expect(mocks.executeSqlFiles).not.toHaveBeenCalled();
+    expect(mocks.unlisten).toHaveBeenCalled();
+  });
+
+  it("does not allow committing a failed file when cleanup could not be confirmed", async () => {
+    await enableManualTransaction();
+    mocks.executeSqlFiles.mockRejectedValueOnce(new Error("file failed"));
+    mocks.rollbackManualTransaction.mockRejectedValueOnce(new Error("rollback connection lost"));
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+    expect(findButton("toolbar.commit").disabled).toBe(true);
+    expect(findButton("sqlFile.browse").disabled).toBe(true);
+    findButton("toolbar.rollback").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("retains pending controls when commit fails, allowing rollback", async () => {
+    await enableManualTransaction();
+    await completeFirstExecution();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    mocks.commitManualTransaction.mockRejectedValueOnce(new Error("connection lost"));
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("connection lost", 5000));
+    expect(findButton("sqlFile.browse").disabled).toBe(true);
+    expect(findButton("toolbar.rollback").disabled).toBe(false);
+    expect(findButton("toolbar.commit").disabled).toBe(true);
+    findButton("toolbar.rollback").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+  });
+
+  it("reports an expired transaction instead of claiming commit succeeded", async () => {
+    await enableManualTransaction();
+    await completeFirstExecution();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    mocks.commitManualTransaction.mockRejectedValueOnce(new Error("Transaction session not found"));
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(mocks.toast).toHaveBeenCalledWith("sqlFile.transactionEnded", 5000);
+    expect(mocks.updateSqlFileTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "cancelled" }));
+  });
+
+  it("reports an unknown commit outcome when the response was lost and rollback finds no session", async () => {
+    await enableManualTransaction();
+    await completeFirstExecution();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    mocks.commitManualTransaction.mockRejectedValueOnce(new Error("response lost"));
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(true));
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+    mocks.rollbackManualTransaction.mockRejectedValueOnce(new Error("Transaction session not found"));
+    findButton("toolbar.rollback").click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("toolbar.commitOutcomeUnknown", 5000));
+    expect(mocks.updateSqlFileTask).toHaveBeenLastCalledWith("run-1", expect.objectContaining({ status: "error" }));
+    expect(mocks.commitManualTransaction).toHaveBeenCalledTimes(1);
+  });
+
   it("shows byte-based progress while SQL executes and only completes on a terminal event", async () => {
     await mountReadyDialog();
     const executionGate = deferred();
@@ -414,5 +635,41 @@ describe("SqlFileExecutionDialog selected-table restore", () => {
     findButton("sqlFile.execute").click();
     await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
     expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("selectedTables");
+  });
+
+  it("loads previews from a pasted file path on Enter", async () => {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    mocks.previewSqlFile.mockClear();
+
+    const input = root.querySelector("input:not([type=file])") as HTMLInputElement;
+    input.value = ' "/tmp/pasted.sql" ';
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledWith("/tmp/pasted.sql"));
+    expect(mocks.previewSqlFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the typed path when the pasted file cannot be loaded", async () => {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    mocks.previewSqlFile.mockReset();
+    mocks.previewSqlFile.mockRejectedValueOnce(new Error("no such file"));
+
+    const input = root.querySelector("input:not([type=file])") as HTMLInputElement;
+    input.value = "/tmp/missing.sql";
+    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new Event("blur"));
+
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("no such file", 5000));
+    await nextTick();
+    expect(input.value).toBe("/tmp/missing.sql");
   });
 });

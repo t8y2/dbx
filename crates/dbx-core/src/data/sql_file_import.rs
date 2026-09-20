@@ -1210,26 +1210,19 @@ impl SqlFileByteReader {
     }
 }
 
-/// 按给定编码跳过匹配的字节序标记，与表导入 `matching_bom_len` 的规则一致：
-/// 只有文件开头确实是该编码的 BOM 时才跳过，编码不匹配时按原样解码。
-async fn detect_matching_charset_bom(
-    file_path: &Path,
-    encoding: &'static encoding_rs::Encoding,
-) -> Result<usize, String> {
+/// 嗅探文件开头的字节序标记，存在时返回 BOM 对应的编码与长度。
+///
+/// 表导入显式选择编码时也优先按 BOM 解码：与非流式 `Encoding::decode`
+/// 的行为保持一致，避免显式编码与 BOM 不匹配时把 BOM 字节解成
+/// 垃圾前缀黏在首条语句上。
+async fn detect_file_bom(file_path: &Path) -> Result<(&'static encoding_rs::Encoding, usize), String> {
     let mut reader = SqlFileByteReader::open(file_path).await?;
     let mut prefix = [0u8; 3];
     let prefix_len = reader.read(&mut prefix).await?;
-    let prefix = &prefix[..prefix_len];
-    if encoding == encoding_rs::UTF_8 && prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        return Ok(3);
+    match encoding_rs::Encoding::for_bom(&prefix[..prefix_len]) {
+        Some((encoding, bom_len)) => Ok((encoding, bom_len)),
+        None => Ok((encoding_rs::UTF_8, 0)),
     }
-    if encoding == encoding_rs::UTF_16LE && prefix.starts_with(&[0xFF, 0xFE]) {
-        return Ok(2);
-    }
-    if encoding == encoding_rs::UTF_16BE && prefix.starts_with(&[0xFE, 0xFF]) {
-        return Ok(2);
-    }
-    Ok(0)
 }
 
 fn is_gzip_sql_file_path(path: &Path) -> bool {
@@ -1268,7 +1261,8 @@ impl SqlFileStreamDecoder {
     /// 以调用方已经确定的编码打开解码器。
     ///
     /// 表导入会先解析用户的编码设置：显式选择了编码时不再自动探测，
-    /// 只按该编码跳过匹配的 BOM，否则与旧的非流式实现按同一规则解码。
+    /// 但文件带 BOM 时仍优先按 BOM 的编码解码并跳过，保持与旧的非流式
+    /// 实现一致的语义。
     pub(crate) async fn open_for_import(
         file_path: &Path,
         encoding: Option<&'static encoding_rs::Encoding>,
@@ -1278,7 +1272,8 @@ impl SqlFileStreamDecoder {
         let Some(encoding) = encoding else {
             return Self::open_with_options(file_path, None, normalize_mysql_binary_literals, bytes_read).await;
         };
-        let bom_len = detect_matching_charset_bom(file_path, encoding).await?;
+        let (bom_encoding, bom_len) = detect_file_bom(file_path).await?;
+        let (encoding, bom_len) = if bom_len > 0 { (bom_encoding, bom_len) } else { (encoding, 0) };
         Self::open_with_resolved_encoding(file_path, encoding, bom_len, normalize_mysql_binary_literals, bytes_read)
             .await
     }
@@ -3139,6 +3134,59 @@ mod tests {
         tokio::fs::remove_file(path).await.unwrap();
 
         assert_eq!(decoded, "SELECT '中文';");
+    }
+
+    #[tokio::test]
+    async fn streaming_import_prefers_utf8_bom_over_explicit_gbk() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("INSERT INTO t VALUES ('中文');".as_bytes());
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder =
+            SqlFileStreamDecoder::open_for_import(&path, Some(encoding_rs::GBK), false, None).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoder.encoding(), encoding_rs::UTF_8);
+        assert_eq!(decoded, "INSERT INTO t VALUES ('中文');");
+    }
+
+    #[tokio::test]
+    async fn streaming_import_prefers_utf16le_bom_over_explicit_utf8() {
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "SELECT '中文';".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let path = temporary_sql_file(&bytes).await;
+        let mut decoder =
+            SqlFileStreamDecoder::open_for_import(&path, Some(encoding_rs::UTF_8), false, None).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoder.encoding(), encoding_rs::UTF_16LE);
+        assert_eq!(decoded, "SELECT '中文';");
+    }
+
+    #[tokio::test]
+    async fn streaming_import_uses_explicit_encoding_without_bom() {
+        let sql = "INSERT INTO t VALUES ('中文');";
+        let (encoded, _, _) = encoding_rs::GBK.encode(sql);
+        let path = temporary_sql_file(encoded.as_ref()).await;
+        let mut decoder =
+            SqlFileStreamDecoder::open_for_import(&path, Some(encoding_rs::GBK), false, None).await.unwrap();
+        let mut decoded = String::new();
+        while let Some(chunk) = decoder.next_chunk().await.unwrap() {
+            decoded.push_str(&chunk);
+        }
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(decoder.encoding(), encoding_rs::GBK);
+        assert_eq!(decoded, sql);
     }
 
     #[tokio::test]

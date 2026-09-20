@@ -17,12 +17,39 @@ use futures::stream::Stream;
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 
 use crate::error::AppError;
 use crate::routes::export_download::{attachment_content_disposition, export_download_filename};
+use crate::sse::{TransferProgressChannel, TransferReplayEventKind};
 use crate::state::{WebExportFile, WebState};
 
 const MONGO_IMPORT_PROGRESS_TTL: Duration = Duration::from_secs(30);
+
+struct RemoveFileOnDrop(PathBuf);
+
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+struct ExportDownloadStream {
+    // Fields are dropped in declaration order, so Windows closes the file before deleting it.
+    chunks: ReaderStream<tokio::fs::File>,
+    _cleanup: RemoveFileOnDrop,
+}
+
+impl Stream for ExportDownloadStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.get_mut().chunks).poll_next(cx)
+    }
+}
 
 fn initial_import_progress(import_id: &str, started_at: Instant) -> MongoImportProgress {
     MongoImportProgress {
@@ -153,11 +180,11 @@ pub async fn preview_import(
 
     if let Some((source_ref, file_path)) = uploaded_file {
         let file_path_str = file_path.to_string_lossy().to_string();
-        let format = match format.or_else(|| mongodb_import_export::format_from_path(&file_path_str).ok()) {
+        let format = match format {
             Some(format) => format,
             None => {
                 cleanup_uploaded_import_path(&file_path).await;
-                return Err(AppError::from("Unsupported MongoDB import file type".to_string()));
+                return Err(AppError::from("MongoDB import format is required".to_string()));
             }
         };
         let preview = mongodb_import_export::preview_mongodb_import_file(&MongoImportPreviewRequest {
@@ -269,7 +296,7 @@ pub async fn execute_import(
     let state_clone = state.clone();
     tokio::spawn(async move {
         let tx_clone = tx.clone();
-        let _result = mongodb_import_export::import_mongodb_file_core(
+        let result = mongodb_import_export::import_mongodb_file_core(
             &app,
             &req,
             |id| {
@@ -279,6 +306,17 @@ pub async fn execute_import(
             |progress| send_import_progress(&tx_clone, &progress),
         )
         .await;
+        if let Err(error) = result {
+            let current = tx.borrow().clone();
+            if let Ok(mut progress) = serde_json::from_str::<MongoImportProgress>(&current) {
+                if progress.status == MongoImportStatus::Running {
+                    progress.phase = MongoImportPhase::Done;
+                    progress.status = MongoImportStatus::Error;
+                    progress.error_message = Some(error.display_message());
+                    send_import_progress(&tx, &progress);
+                }
+            }
+        }
         cleanup_uploaded_import_source(&req.file_path).await;
         schedule_import_progress_cleanup(state_clone, req.import_id.clone());
     });
@@ -402,26 +440,35 @@ pub async fn start_export(
     let ext = match req.format {
         MongoExportFormat::Csv => "csv",
         MongoExportFormat::Ndjson => "ndjson",
+        MongoExportFormat::Bson if req.gzip => "bson.gz",
+        MongoExportFormat::Bson => "bson",
     };
-    let tmp_file = tmp_dir.join(format!("mongo_export_{export_id}.{ext}"));
+    let tmp_file = tmp_dir.join(format!("mongo_export_{}.{ext}", uuid::Uuid::new_v4()));
     let file_path = tmp_file.to_string_lossy().to_string();
     let download_filename = export_download_filename(&req.file_path, &req.collection, ext);
     req.file_path = file_path.clone();
 
-    state
-        .export_files
-        .write()
-        .await
-        .insert(export_id.clone(), WebExportFile { file_path, download_filename, format: ext.to_string() });
-
+    let export_file = WebExportFile { file_path, download_filename, format: ext.to_string() };
+    let channel_key = format!("mongo-export:{export_id}");
     let tx = {
-        let mut channels = state.sse_channels.write().await;
-        channels.entry(export_id.clone()).or_insert_with(|| tokio::sync::broadcast::channel::<String>(256).0).clone()
+        let mut channels = state.transfer_progress_channels.write().await;
+        let channel = Arc::new(TransferProgressChannel::new());
+        channels.insert(channel_key.clone(), channel.clone());
+        channel
     };
 
     let app = state.app.clone();
     let state_clone = state.clone();
     dbx_core::export_runtime::spawn_export_task(async move {
+        let mut latest = MongoExportProgress {
+            export_id: req.export_id.clone(),
+            status: MongoExportStatus::Running,
+            documents_read: 0,
+            bytes_written: 0,
+            total_documents: None,
+            error_message: None,
+            elapsed_ms: 0,
+        };
         let result = mongodb_import_export::export_mongodb_query_core(
             &app,
             &req,
@@ -430,32 +477,38 @@ pub async fn start_export(
                 Box::pin(async move { transfer::is_cancelled(&id).await })
             },
             |progress| {
-                if let Ok(json) = serde_json::to_string(&progress) {
-                    let _ = tx.send(json);
+                latest = progress;
+                if latest.status == MongoExportStatus::Running {
+                    if let Ok(json) = serde_json::to_string(&latest) {
+                        tx.send(json, TransferReplayEventKind::Progress);
+                    }
                 }
             },
         )
         .await;
 
-        if let Err(error) = result {
-            let _ = tokio::fs::remove_file(&req.file_path).await;
-            state_clone.export_files.write().await.remove(&req.export_id);
-            let progress = MongoExportProgress {
-                export_id: req.export_id.clone(),
-                status: MongoExportStatus::Error,
-                documents_read: 0,
-                bytes_written: 0,
-                total_documents: None,
-                error_message: Some(error),
-                elapsed_ms: 0,
-            };
-            if let Ok(json) = serde_json::to_string(&progress) {
-                let _ = tx.send(json);
+        match result {
+            Ok(_) => {
+                // The download must exist before a terminal event can reach the browser.
+                state_clone.export_files.write().await.insert(req.export_id.clone(), export_file);
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&req.file_path).await;
+                if latest.status != MongoExportStatus::Cancelled {
+                    latest.status = MongoExportStatus::Error;
+                }
+                latest.error_message = Some(error);
             }
         }
+        if let Ok(json) = serde_json::to_string(&latest) {
+            tx.send(json, TransferReplayEventKind::Terminal);
+        }
+        transfer::clear_cancelled(&req.export_id).await;
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        state_clone.remove_sse_channel(&req.export_id).await;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            state_clone.transfer_progress_channels.write().await.remove(&channel_key);
+        });
     });
 
     Ok(Json(serde_json::json!({ "exportId": export_id })))
@@ -465,12 +518,14 @@ pub async fn export_progress(
     State(state): State<Arc<WebState>>,
     Path(export_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, AppError> {
-    let tx = {
-        let mut channels = state.sse_channels.write().await;
-        channels.entry(export_id).or_insert_with(|| tokio::sync::broadcast::channel::<String>(256).0).clone()
-    };
-    let rx = tx.subscribe();
-    Ok(crate::sse::sse_from_channel(rx))
+    let channel = state
+        .transfer_progress_channels
+        .read()
+        .await
+        .get(&format!("mongo-export:{export_id}"))
+        .cloned()
+        .ok_or_else(|| AppError::from("Export not found".to_string()))?;
+    Ok(crate::sse::sse_from_transfer_channel(channel))
 }
 
 pub async fn cancel_export(
@@ -491,23 +546,179 @@ pub async fn export_download(
         .await
         .remove(&export_id)
         .ok_or_else(|| AppError::from("Export file not found".to_string()))?;
-    let data = tokio::fs::read(&export_file.file_path).await.map_err(|e| AppError::from(e.to_string()))?;
-    let _ = tokio::fs::remove_file(&export_file.file_path).await;
+    export_file_response(export_file).await
+}
+
+pub(crate) async fn export_file_response(export_file: WebExportFile) -> Result<Response, AppError> {
+    let file = tokio::fs::File::open(&export_file.file_path).await.map_err(|e| AppError::from(e.to_string()))?;
     let content_type = match export_file.format.as_str() {
         "csv" => "text/csv; charset=utf-8",
-        _ => "application/x-ndjson; charset=utf-8",
+        "ndjson" => "application/x-ndjson; charset=utf-8",
+        "bson.gz" | "archive.gz" => "application/gzip",
+        "bson" => "application/bson",
+        _ => "application/octet-stream",
+    };
+    let download = ExportDownloadStream {
+        chunks: ReaderStream::new(file),
+        _cleanup: RemoveFileOnDrop(PathBuf::from(&export_file.file_path)),
     };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_DISPOSITION, attachment_content_disposition(&export_file.download_filename))
-        .body(Body::from(data))
+        .body(Body::from_stream(download))
         .map_err(|error| AppError::from(error.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_keeps_file_until_body_is_consumed_or_abandoned() {
+        for extension in ["bson", "bson.gz"] {
+            for consume in [true, false] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join(format!("records.{extension}"));
+                let bytes = vec![42u8; 100_000];
+                std::fs::write(&path, &bytes).unwrap();
+                let response = export_file_response(WebExportFile {
+                    file_path: path.to_str().unwrap().into(),
+                    download_filename: format!("records.{extension}"),
+                    format: extension.into(),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+                assert!(path.exists(), "download file was removed before streaming");
+                assert_eq!(
+                    response.headers()[header::CONTENT_TYPE],
+                    if extension == "bson" { "application/bson" } else { "application/gzip" }
+                );
+                assert!(response.headers()[header::CONTENT_DISPOSITION]
+                    .to_str()
+                    .unwrap()
+                    .contains(&format!("records.{extension}")));
+                if consume {
+                    assert_eq!(axum::body::to_bytes(response.into_body(), bytes.len()).await.unwrap(), bytes);
+                } else {
+                    let mut stream = response.into_body().into_data_stream();
+                    assert!(!stream.next().await.unwrap().unwrap().is_empty());
+                    drop(stream);
+                }
+                assert!(!path.exists(), "download file leaked after the response ended");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn export_failure_and_cancellation_are_replayed_to_late_subscribers() {
+        use axum::response::IntoResponse;
+        use dbx_core::{connection::AppState, storage::Storage};
+
+        for cancelled in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+            let state = Arc::new(WebState::for_tests(Arc::new(AppState::new(storage)), directory.path().into()));
+            let id = uuid::Uuid::new_v4().to_string();
+            let expected = if cancelled { MongoExportStatus::Cancelled } else { MongoExportStatus::Error };
+            if cancelled {
+                transfer::set_cancelled(&id).await;
+            }
+            let Json(started) = start_export(
+                State(state.clone()),
+                Json(StartExportRequest {
+                    request: MongoExportRequest {
+                        export_id: id.clone(),
+                        connection_id: "missing".into(),
+                        database: "test".into(),
+                        collection: "empty".into(),
+                        filter: None,
+                        projection: None,
+                        sort: None,
+                        collation: None,
+                        format: MongoExportFormat::Bson,
+                        gzip: false,
+                        include_header: false,
+                        file_path: "empty.bson".into(),
+                        execution_id: None,
+                    },
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.message));
+            assert_eq!(started["exportId"], id);
+            let key = format!("mongo-export:{id}");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let latest = state.transfer_progress_channels.read().await.get(&key).unwrap().latest();
+                    if latest.is_some_and(|json| {
+                        serde_json::from_str::<MongoExportProgress>(&json).unwrap().status == expected
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!state.export_files.read().await.contains_key(&id));
+            let response = export_progress(State(state.clone()), Path(id))
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.message));
+            let mut stream = response.into_response().into_body().into_data_stream();
+            let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
+            assert!(String::from_utf8_lossy(&chunk)
+                .contains(&format!("\"status\":{}", serde_json::to_string(&expected).unwrap())));
+        }
+    }
+
+    #[tokio::test]
+    async fn early_import_failure_finishes_progress_and_cleans_source() {
+        use dbx_core::{connection::AppState, storage::Storage};
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(WebState::for_tests(Arc::new(AppState::new(storage)), directory.path().into()));
+        let upload_dir = import_upload_dir(directory.path());
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let path = upload_dir.join("empty.bson");
+        std::fs::write(&path, []).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let Json(started) = execute_import(
+            State(state.clone()),
+            Json(ExecuteImportWrapper {
+                request: MongoImportRequest {
+                    import_id: id.clone(),
+                    connection_id: "missing".into(),
+                    database: "test".into(),
+                    collection: "empty".into(),
+                    file_path: path.to_str().unwrap().into(),
+                    source_ref: None,
+                    format: mongodb_import_export::MongoImportFormat::Bson,
+                    parse_options: Default::default(),
+                    batch_size: 1,
+                    execution_id: None,
+                },
+            }),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.message));
+        assert_eq!(started["importId"], id);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let progress = state.table_import_channels.read().await.get(&id).unwrap().borrow().clone();
+                let progress: MongoImportProgress = serde_json::from_str(&progress).unwrap();
+                if progress.status == MongoImportStatus::Error && !path.exists() {
+                    assert_eq!(progress.phase, MongoImportPhase::Done);
+                    assert!(progress.error_message.unwrap().contains("Batch size"));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn source_ref_rejects_path_traversal() {

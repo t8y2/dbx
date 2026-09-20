@@ -146,6 +146,47 @@ pub async fn mongo_find_documents(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
+pub async fn mongo_explain_find(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    skip: u64,
+    limit: i64,
+    filter: Option<String>,
+    projection: Option<String>,
+    sort: Option<String>,
+    collation: Option<String>,
+    verbosity: Option<String>,
+    execution_id: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let app = state.inner().clone();
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_read_allowed_by_id(&app, &connection_id, &database).await?;
+    }
+    run_cancellable(
+        &app,
+        execution_id,
+        dbx_core::mongo_ops::mongo_explain_find_core(
+            &app,
+            &connection_id,
+            &database,
+            &collection,
+            skip,
+            limit,
+            filter.as_deref(),
+            projection.as_deref(),
+            sort.as_deref(),
+            collation.as_deref(),
+            verbosity.as_deref().unwrap_or("queryPlanner"),
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn mongo_find_one(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -570,6 +611,37 @@ pub async fn mongo_replace_document(
         &collection,
         &filter_json,
         &replacement_json,
+        options_json.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mongo_bulk_write(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    collection: String,
+    operations_json: String,
+    options_json: Option<String>,
+    mcp_request: Option<bool>,
+) -> Result<dbx_core::db::mongo_driver::MongoBulkWriteResult, String> {
+    if mcp_request == Some(true) {
+        crate::commands::mcp_bridge::ensure_mcp_mongo_bulk_write_allowed_by_id(
+            state.inner(),
+            &connection_id,
+            &database,
+            &operations_json,
+        )
+        .await?;
+    }
+    ensure_connection_writable(&state, &connection_id, "BulkWrite").await?;
+    dbx_core::mongo_ops::mongo_bulk_write_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &operations_json,
         options_json.as_deref(),
     )
     .await

@@ -283,9 +283,11 @@ export function formatError(e: unknown): string {
     }
   }
 
-  // Fallback: attempt to stringify
+  // Fallback: prefer bounded nested text (message/reason/detail, .error/.backendError)
+  // over raw string coercion so object-shaped failures never degrade to "[object Object]".
+  const fallback = boundedFallbackText(e);
   try {
-    return sanitizeBackendErrorMessage(String(e));
+    return sanitizeBackendErrorMessage(fallback ?? String(e));
   } catch {
     return "Unknown error occurred";
   }

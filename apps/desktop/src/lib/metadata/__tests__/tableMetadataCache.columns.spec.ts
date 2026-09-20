@@ -55,6 +55,20 @@ describe("tableMetadataCache columns facet request counts", () => {
     mocks.listIndexes.mockResolvedValue([]);
   });
 
+  it("does not treat failed index discovery as a complete cacheable row identity", async () => {
+    mocks.getColumns.mockResolvedValue([{ ...column("id"), is_primary_key: false }]);
+    mocks.listIndexes.mockRejectedValueOnce(new Error("indexes unavailable"));
+    const failed = await loadTableMetadata(usersRequest);
+    expect(failed.metadata.rowIdentityResolved).toBe(false);
+    expect(failed.metadata.primaryKeys).toEqual([]);
+    expect(getCachedTableMetadata(usersRequest)).toBeUndefined();
+
+    const retried = await loadTableMetadata(usersRequest);
+    expect(retried.metadata.rowIdentityResolved).toBe(true);
+    expect(mocks.listIndexes).toHaveBeenCalledTimes(2);
+    expect(mocks.getColumns).toHaveBeenCalledOnce();
+  });
+
   it("R1 — cold single-source columns load: 1 getColumns, 0 listIndexes", async () => {
     const result = await loadTableColumns({ ...usersRequest });
     expect(result.columns[0]?.name).toBe("users");

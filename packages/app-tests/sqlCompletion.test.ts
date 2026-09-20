@@ -206,14 +206,8 @@ test("suggests database-specific data types and functions", () => {
   assert.ok(mysqlCurrentTimestampItems.some((item) => item.type === "function" && item.label === "CURRENT_TIME"));
   assert.ok(mysqlCurdateItems.some((item) => item.type === "function" && item.label === "CURDATE"));
   assert.ok(mysqlIfnullItems.some((item) => item.type === "function" && item.label === "IFNULL"));
-  assert.equal(
-    mysqlDateAddItems.find((item) => item.type === "function" && item.label === "DATE_ADD")?.apply,
-    "DATE_ADD(${date}, INTERVAL ${expr} ${unit})",
-  );
-  assert.equal(
-    mysqlDateSubItems.find((item) => item.type === "function" && item.label === "DATE_SUB")?.apply,
-    "DATE_SUB(${date}, INTERVAL ${expr} ${unit})",
-  );
+  assert.equal(mysqlDateAddItems.find((item) => item.type === "function" && item.label === "DATE_ADD")?.apply, "DATE_ADD(${date}, INTERVAL ${expr} ${unit})");
+  assert.equal(mysqlDateSubItems.find((item) => item.type === "function" && item.label === "DATE_SUB")?.apply, "DATE_SUB(${date}, INTERVAL ${expr} ${unit})");
   assert.ok(mysqlSubstringIndexItems.some((item) => item.type === "function" && item.label === "SUBSTRING_INDEX"));
   assert.ok(mysqlLeftItems.some((item) => item.type === "function" && item.label === "LEFT"));
   assert.ok(mysqlLeftItems.some((item) => item.type === "keyword" && item.label === "LEFT"));
@@ -233,9 +227,15 @@ test("suggests database-specific data types and functions", () => {
     databaseType: "mysql",
   });
   assert.equal(mysqlDateTypeItems[0]?.label, "DATE");
-  assert.equal(mysqlDateTypeItems.some((item) => item.type === "function" && item.label === "DATE"), false);
+  assert.equal(
+    mysqlDateTypeItems.some((item) => item.type === "function" && item.label === "DATE"),
+    false,
+  );
   assert.equal(mysqlTimeTypeItems[0]?.label, "TIME");
-  assert.equal(mysqlTimeTypeItems.some((item) => item.type === "function" && item.label === "TIME"), false);
+  assert.equal(
+    mysqlTimeTypeItems.some((item) => item.type === "function" && item.label === "TIME"),
+    false,
+  );
 
   const mysqlCreateViewItems = buildSqlCompletionItems("CREATE VIEW v AS SELECT dat", "CREATE VIEW v AS SELECT dat".length, {
     tables: [],
@@ -1397,7 +1397,10 @@ test("does not mix routines into an explicit table alias column completion", () 
   });
 
   assert.ok(items.some((item) => item.label === "name" && item.type === "column"));
-  assert.equal(items.some((item) => item.label === "name_formatter"), false);
+  assert.equal(
+    items.some((item) => item.label === "name_formatter"),
+    false,
+  );
 });
 
 test("suggests matching database functions alongside referenced columns", () => {
@@ -2194,15 +2197,7 @@ test("extracts JOIN tables without explicit aliases", () => {
 });
 
 test("extracts MySQL backtick-qualified tables across a JOIN", () => {
-  const sql = [
-    "select",
-    "  `jobdb`.`job_application_ats_process`.`process_id`,",
-    "  count(*)",
-    "from",
-    "  `jobdb`.`job_application`",
-    "join `jobdb`.`job_application_ats_process` on",
-    "  `jobdb`.`job_application`.`id` = `jobdb`.`job_application_ats_process`.`app_id`",
-  ].join("\n");
+  const sql = ["select", "  `jobdb`.`job_application_ats_process`.`process_id`,", "  count(*)", "from", "  `jobdb`.`job_application`", "join `jobdb`.`job_application_ats_process` on", "  `jobdb`.`job_application`.`id` = `jobdb`.`job_application_ats_process`.`app_id`"].join("\n");
   const context = getSqlCompletionContext(sql, sql.length);
 
   assert.deepEqual(
@@ -2302,10 +2297,7 @@ test("preserves an exact routine match before truncating candidates", () => {
   const sql = "select aaa";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables: [],
-    objects: [
-      ...Array.from({ length: 200 }, (_, index) => ({ name: `a_a_a_${index}`, type: "procedure" as const })),
-      { name: "aaa", type: "function" },
-    ],
+    objects: [...Array.from({ length: 200 }, (_, index) => ({ name: `a_a_a_${index}`, type: "procedure" as const })), { name: "aaa", type: "function" }],
     columnsByTable: new Map(),
   });
 
@@ -2776,6 +2768,7 @@ test("suggests package members after package qualifier", () => {
     objects: [
       { name: "PAYROLL", schema: "HR", type: "package" },
       { name: "calculate_bonus", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL" },
+      { name: "CALCULATE_TAX", schema: "HR", type: "function", parentSchema: "HR", parentName: "PAYROLL" },
     ],
     databaseType: "oracle",
   });
@@ -2783,7 +2776,12 @@ test("suggests package members after package qualifier", () => {
   const member = items.find((item) => item.label === "calculate_bonus");
   assert.ok(member);
   assert.equal(member.type, "function");
-  assert.equal(member.apply, "calculate_bonus()");
+  // The lowercase metadata name is the stored form, so it must stay quoted to survive Oracle folding (#9526).
+  assert.equal(member.apply, '"calculate_bonus"()');
+
+  const upperMember = items.find((item) => item.label === "CALCULATE_TAX");
+  assert.ok(upperMember);
+  assert.equal(upperMember.apply, "CALCULATE_TAX()");
 });
 
 test("keeps Oracle functions available in qualified expression routine context", () => {
@@ -3511,7 +3509,10 @@ test("uses row-source aliases for all columns across multiple tables", () => {
     columns.some((item) => item.label === "o.id" && item.apply === "o.id"),
     "should show o.id",
   );
-  assert.ok(columns.some((item) => item.label === "u.name" && item.apply === "u.name"), "unique name should use its row-source alias");
+  assert.ok(
+    columns.some((item) => item.label === "u.name" && item.apply === "u.name"),
+    "unique name should use its row-source alias",
+  );
   assert.ok(
     columns.some((item) => item.label === "o.user_id" && item.apply === "o.user_id"),
     "unique user_id should use its row-source alias",
@@ -3568,7 +3569,8 @@ test("suggests table alias after FROM table", () => {
   });
   const aliasItem = items.find((item) => item.type === "snippet" && item.detail?.includes("alias for"));
   assert.ok(aliasItem, "should suggest alias for table");
-  assert.ok(aliasItem!.apply!.includes("AS"), "alias apply should include AS");
+  assert.equal(aliasItem!.apply, "us ");
+  assert.ok(!aliasItem!.apply!.includes("AS"), "alias apply should use the implicit form");
 });
 
 test("applies the configured keyword case to generated table aliases", () => {
@@ -3579,7 +3581,7 @@ test("applies the configured keyword case to generated table aliases", () => {
     keywordCase: "lower",
   });
   const tableItem = tableItems.find((item) => item.type === "table" && item.label === "orders");
-  assert.equal(tableItem?.apply, "orders as ord");
+  assert.equal(tableItem?.apply, "orders ord");
 
   const aliasItems = buildSqlCompletionItems("select * from orders ", "select * from orders ".length, {
     tables,
@@ -3587,7 +3589,7 @@ test("applies the configured keyword case to generated table aliases", () => {
     keywordCase: "lower",
   });
   const aliasItem = aliasItems.find((item) => item.type === "snippet" && item.detail === "alias for orders");
-  assert.equal(aliasItem?.apply, "as ord ");
+  assert.equal(aliasItem?.apply, "ord ");
 });
 
 test("keeps generated table aliases uppercase when keyword case is preserved", () => {
@@ -3598,7 +3600,7 @@ test("keeps generated table aliases uppercase when keyword case is preserved", (
     keywordCase: "preserve",
   });
   const tableItem = items.find((item) => item.type === "table" && item.label === "orders");
-  assert.equal(tableItem?.apply, "orders AS ord");
+  assert.equal(tableItem?.apply, "orders ord");
 });
 
 test("prioritizes table acronym matches above alias snippets", () => {
@@ -3611,7 +3613,7 @@ test("prioritizes table acronym matches above alias snippets", () => {
   assert.equal(items[0]?.label, "user_basic_info");
   assert.equal(items[0]?.type, "table");
   assert.ok(
-    items.some((item) => item.type === "snippet" && item.apply === "AS ubi "),
+    items.some((item) => item.type === "snippet" && item.apply === "ubi "),
     "alias snippet should remain available",
   );
 });
@@ -3635,8 +3637,8 @@ test("table alias suggestions avoid reserved words", () => {
 
   const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for orders");
   assert.ok(aliasItem);
-  assert.notEqual(aliasItem!.apply, "AS or ");
-  assert.equal(aliasItem!.apply, "AS ord ");
+  assert.notEqual(aliasItem!.apply, "or ");
+  assert.equal(aliasItem!.apply, "ord ");
 });
 
 test("automatic table aliases avoid reserved words", () => {
@@ -3648,17 +3650,17 @@ test("automatic table aliases avoid reserved words", () => {
 
   const tableItem = items.find((item) => item.type === "table" && item.label === "orders");
   assert.ok(tableItem);
-  assert.notEqual(tableItem!.apply, "orders AS or");
-  assert.equal(tableItem!.apply, "orders AS ord");
+  assert.notEqual(tableItem!.apply, "orders or");
+  assert.equal(tableItem!.apply, "orders ord");
 });
 
 test("automatic table aliases respect text after the cursor", () => {
   const cases: Array<[string, number, string]> = [
     ["select * from ord AS o", "select * from ord".length, "orders"],
     ["select * from ord o", "select * from ord".length, "orders"],
-    ["select * from ord where id = 1", "select * from ord".length, "orders AS ord"],
-    ["select * from ord", "select * from ord".length, "orders AS ord"],
-    ["select * from ord, users", "select * from ord".length, "orders AS ord"],
+    ["select * from ord where id = 1", "select * from ord".length, "orders ord"],
+    ["select * from ord", "select * from ord".length, "orders ord"],
+    ["select * from ord, users", "select * from ord".length, "orders ord"],
     ["select * from orders AS o", "select * from or".length, "orders"],
     ["select * from ord单 AS o", "select * from ord".length, "orders"],
     ["select * from orde\u0301 AS o", "select * from ord".length, "orders"],
@@ -3670,7 +3672,7 @@ test("automatic table aliases respect text after the cursor", () => {
     ["select * from ord -- comment\n  o", "select * from ord".length, "orders"],
     ["select * from ord\n  o", "select * from ord".length, "orders"],
     ["select * from ord /* ; */ AS o", "select * from ord".length, "orders"],
-    ["select * from ord /* comment */ where id = 1", "select * from ord".length, "orders AS ord"],
+    ["select * from ord /* comment */ where id = 1", "select * from ord".length, "orders ord"],
   ];
 
   for (const [sql, cursor, expectedApply] of cases) {
@@ -3713,26 +3715,26 @@ test("table alias suggestions avoid SQL keywords", () => {
 
   const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for item_file");
   assert.ok(aliasItem);
-  assert.notEqual(aliasItem!.apply, "AS if ");
-  assert.equal(aliasItem!.apply, "AS it ");
+  assert.notEqual(aliasItem!.apply, "if ");
+  assert.equal(aliasItem!.apply, "it ");
 });
 
 test("automatic table aliases avoid SQL keywords", () => {
   const cases: Array<[string, string]> = [
-    ["account_store", "account_store AS ac"],
-    ["account_type", "account_type AS ac"],
-    ["data_order", "data_order AS da"],
-    ["invoice_note", "invoice_note AS inv"],
-    ["item_file", "item_file AS it"],
-    ["item_status", "item_status AS it"],
-    ["new_order", "new_order AS ne"],
-    ["no_config", "no_config AS nc"],
-    ["order_node", "order_node AS ord"],
-    ["order_flow", "order_flow AS ord"],
-    ["order_region", "order_region AS ord"],
-    ["row_value", "row_value AS rv"],
-    ["use_case", "use_case AS uc"],
-    ["user_role", "user_role AS ur"],
+    ["account_store", "account_store ac"],
+    ["account_type", "account_type ac"],
+    ["data_order", "data_order da"],
+    ["invoice_note", "invoice_note inv"],
+    ["item_file", "item_file it"],
+    ["item_status", "item_status it"],
+    ["new_order", "new_order ne"],
+    ["no_config", "no_config nc"],
+    ["order_node", "order_node ord"],
+    ["order_flow", "order_flow ord"],
+    ["order_region", "order_region ord"],
+    ["row_value", "row_value rv"],
+    ["use_case", "use_case uc"],
+    ["user_role", "user_role ur"],
   ];
 
   for (const [tableName, expectedApply] of cases) {
@@ -3770,8 +3772,8 @@ test("table alias suggestions avoid existing aliases", () => {
 
   const aliasItem = items.find((item) => item.type === "snippet" && item.detail === "alias for customer_orders");
   assert.ok(aliasItem);
-  assert.notEqual(aliasItem!.apply, "AS co ");
-  assert.equal(aliasItem!.apply, "AS cu ");
+  assert.notEqual(aliasItem!.apply, "co ");
+  assert.equal(aliasItem!.apply, "cu ");
 });
 
 // --- CASE snippet ---
@@ -3982,9 +3984,7 @@ test("boosts foreign-key related table candidates in JOIN table context", () => 
 });
 
 test("keeps automatic SQL Server aliases on foreign-key related JOIN candidates", () => {
-  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
-    ["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "dbo", ref_table: "customers", ref_column: "id" }]],
-  ]);
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "dbo", ref_table: "customers", ref_column: "id" }]]]);
   const sql = "select * from dbo.orders o join cus";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables: [
@@ -4000,13 +4000,11 @@ test("keeps automatic SQL Server aliases on foreign-key related JOIN candidates"
 
   assert.equal(items[0]?.label, "customers");
   assert.ok(items[0]?.detail?.includes("related by"));
-  assert.equal(items[0]?.apply, "customers AS cs");
+  assert.equal(items[0]?.apply, "customers cs");
 });
 
 test("does not add aliases to foreign-key related JOIN candidates when disabled", () => {
-  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
-    ["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "dbo", ref_table: "customers", ref_column: "id" }]],
-  ]);
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "dbo", ref_table: "customers", ref_column: "id" }]]]);
   const sql = "select * from dbo.orders o join cus";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables: [
@@ -4026,9 +4024,7 @@ test("does not add aliases to foreign-key related JOIN candidates when disabled"
 });
 
 test("schema-qualifies foreign-key related JOIN candidates when the target table name spans schemas", () => {
-  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([
-    ["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "sales", ref_table: "customers", ref_column: "id" }]],
-  ]);
+  const foreignKeysByTable = new Map<string, SqlCompletionForeignKey[]>([["dbo.orders", [{ name: "orders_customer_id_fkey", column: "customer_id", ref_schema: "sales", ref_table: "customers", ref_column: "id" }]]]);
   const sql = "select * from dbo.orders o join cus";
   const items = buildSqlCompletionItems(sql, sql.length, {
     tables: [
@@ -4047,14 +4043,11 @@ test("schema-qualifies foreign-key related JOIN candidates when the target table
   assert.ok(fkCandidate, "should surface the foreign-key related candidate");
   // customers exists in both dbo and sales, so the FK candidate must qualify with
   // the referenced schema (sales.customers) instead of a bare, ambiguous customers.
-  assert.equal(fkCandidate?.apply, "sales.customers AS cs");
+  assert.equal(fkCandidate?.apply, "sales.customers cs");
   assert.equal(fkCandidate?.dedupeKey, "sales.customers");
   // The FK candidate (higher boost) should win dedupe against the regular
-  // sales.customers candidate, leaving no bare `customers AS cs` entry.
-  assert.ok(
-    !items.some((item) => item.type === "table" && item.apply === "customers AS cs"),
-    "should not emit a bare unqualified customers candidate alongside the qualified FK candidate",
-  );
+  // sales.customers candidate, leaving no bare `customers cs` entry.
+  assert.ok(!items.some((item) => item.type === "table" && item.apply === "customers cs"), "should not emit a bare unqualified customers candidate alongside the qualified FK candidate");
 });
 
 test("boosts inbound foreign-key table candidates in JOIN table context", () => {

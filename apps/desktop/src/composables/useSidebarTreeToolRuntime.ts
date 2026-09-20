@@ -149,6 +149,12 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function openMongoDatabaseDump(mode: "dump" | "restore") {
+    const node = activeNode.value;
+    if (node.type !== "mongo-db" || !node.connectionId || !node.database) return;
+    connectionStore.mongoDatabaseDumpSource = { connectionId: node.connectionId, database: node.database, mode };
+  }
+
   function openStructureEditor() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
@@ -191,6 +197,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     openDocs,
     openFieldLineage,
     openMongoImport,
+    openMongoDatabaseDump,
     openScheduledBackups,
     openSchemaDiff,
     openSchemaDiffForRoutine,

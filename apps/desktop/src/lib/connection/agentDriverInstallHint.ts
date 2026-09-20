@@ -80,6 +80,31 @@ export type DriverStoreTab = "agent" | "jdbc" | "storage" | "runtime";
 
 export type DriverStoreFocus = { target: "driver"; driver?: string } | { target: "jre" } | { target: "tab"; tab: DriverStoreTab };
 
+export function driverStoreFocusElementKey(focus: DriverStoreFocus): string {
+  return focus.target === "driver" ? `driver:${focus.driver ?? ""}` : "jre";
+}
+
+/**
+ * Apply search/category/status reset + scroll only once per focus key, or when
+ * the parent hands us a new focus object (user re-triggered the same hint).
+ * Inventory refreshes must not clobber the status filter.
+ */
+export function shouldApplyDriverStoreFocus(lastAppliedKey: string | null, nextKey: string, focusChanged: boolean): boolean {
+  if (focusChanged) return true;
+  return lastAppliedKey !== nextKey;
+}
+
+/**
+ * Agent list `v-if="drivers.length === 0"` is a loading placeholder that hides
+ * every row, including managed JDBC rows already present in `builtinDriverRows`.
+ * Committing focus before that would mark the key applied and skip the later scroll.
+ */
+export function driverStoreFocusRowIsRenderable(focus: DriverStoreFocus, agentDriverCount: number, builtinRows: readonly { db_type: string }[]): boolean {
+  if (focus.target !== "driver") return true;
+  if (agentDriverCount === 0) return false;
+  return builtinRows.some((row) => row.db_type === focus.driver);
+}
+
 /** Maps a backend connect error to the Driver Store item that can fix it. */
 export function driverStoreFocusForInstallError(message: string, dbType?: DatabaseType, driverProfile?: string): DriverStoreFocus | null {
   if (message.includes("JRE") && message.includes("not installed")) return { target: "jre" };

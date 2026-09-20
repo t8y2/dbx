@@ -1624,6 +1624,30 @@ test("pins result runs independently and can unpin all runs", () => {
   );
 });
 
+test("renames result runs and persists the trimmed title", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useQueryStore();
+    const tabId = store.createTab("conn-1", "db");
+    const tab = store.tabs.find((item) => item.id === tabId);
+    assert.ok(tab);
+    tab.resultRuns = [{ id: "run-1", title: "Run 1", sequence: 1, sql: "select 1", createdAt: 1 }];
+
+    assert.equal(store.renameResultRun(tabId, "run-1", "  Revenue report  "), true);
+    assert.equal(tab.resultRuns[0]?.title, "Revenue report");
+    assert.equal(store.renameResultRun(tabId, "run-1", "   "), false);
+    assert.equal(tab.resultRuns[0]?.title, "Revenue report");
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("dbx-app-state:open_tabs") ?? "null");
+      return saved?.tabs?.[0]?.resultRuns?.[0]?.title === "Revenue report";
+    });
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("changing the pin state preserves an evicted result cache", () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
@@ -6697,6 +6721,59 @@ test("redis multi-command execution records source statements for each result", 
   }
 });
 
+test("redis execution skips comment lines and keeps results aligned with their source ranges", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const sentCommands: string[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("redis-1"),
+    db_type: "redis",
+    port: 6379,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/redis/execute-command") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      sentCommands.push(body.command);
+      return new Response(JSON.stringify({ command: body.command, safety: "allowed", value: "OK" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "# warm the cache\nGET user:1\n-- then check\n  PING  ";
+    const tabId = store.createTab("redis-1", "0", "Redis", "query", sql);
+    await store.executeTabSql(tabId, sql, { sourceOffset: 0 });
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    // A note is never sent to the server as a command.
+    assert.deepEqual(sentCommands, ["GET user:1", "PING"]);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      ["GET user:1", "PING"],
+    );
+    // Each result points at its own line, not the line of the comment above it.
+    assert.deepEqual(
+      tab?.results?.map((result) => [result.sourceFrom, result.sourceTo]),
+      [
+        [sql.indexOf("GET"), sql.indexOf("GET") + "GET user:1".length],
+        [sql.indexOf("PING"), sql.indexOf("PING") + "PING".length],
+      ],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo multi-command execution records source statements for error results", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -9058,6 +9135,51 @@ test("query results keep readable table source labels with active database conte
     assert.equal(tab?.results?.[0]?.sourceStatement, "update users set active = true");
     assert.equal(tab?.results?.[1]?.sourceLabel, "db.users");
     assert.equal(tab?.results?.[1]?.sourceStatement, "select * from users");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("cursor execution uses only the immediately preceding comment from the full query draft", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let currentSql = "";
+
+  connectionStore.addEphemeralConnection(conn("conn-1"));
+  const tabId = store.createTab("conn-1", "db", "Query");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  tab.sql = "-- Users report\nSELECT 1;\n\n-- Orders report\nSELECT 2;";
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      currentSql = body.options.sql;
+      return new Response(JSON.stringify({ sqlToExecute: currentSql, useAgentResultSession: false }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/execute-multi") {
+      return new Response(JSON.stringify([{ columns: ["two"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const selectedSql = "SELECT 2";
+    await store.executeTabSql(tabId, selectedSql, { sourceOffset: tab.sql.indexOf(selectedSql) });
+    assert.equal(currentSql, selectedSql);
+    assert.equal(tab.result?.sourceLabel, "Orders report");
+
+    tab.sql = "-- Users report\nSELECT 1;\n\n-- Orders report\n\nSELECT 2;";
+    await store.executeTabSql(tabId, selectedSql, { sourceOffset: tab.sql.indexOf(selectedSql) });
+    assert.equal(tab.result?.sourceLabel, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

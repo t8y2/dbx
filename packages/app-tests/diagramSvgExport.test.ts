@@ -378,3 +378,91 @@ test("buildTableDiagramSvg normalizes negative-origin content to viewBox 0 0", (
   assert.match(svg, new RegExp(`transform="translate\\(${-(canvas.originX ?? 0)} ${-(canvas.originY ?? 0)}\\)"`));
   assert.match(svg, /users/);
 });
+
+// Regression for #9445: in multi-schema mode positions are keyed by the schema-qualified
+// diagram id, while the exporter used to look them up by the bare table name. Every card then
+// fell back to { x: 0, y: 0 } and the exported PNG showed all tables stacked on the origin.
+const multiSchemaTables: DiagramTable[] = [
+  {
+    name: "aaa",
+    schema: "sales",
+    columns: [
+      { name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "name", data_type: "varchar(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      { name: "sex", data_type: "varchar(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      { name: "desc1", data_type: "varchar(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ],
+    foreignKeys: [],
+  },
+  {
+    name: "bbb",
+    schema: "ops",
+    columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+    foreignKeys: [],
+  },
+];
+
+const multiSchemaPositions = { "sales.aaa": { x: 40, y: 40 }, "ops.bbb": { x: 480, y: 40 } };
+
+test("multi-schema export positions cards by the schema-qualified diagram key", () => {
+  const exportTables = multiSchemaTables.map((table) => ({ ...table, diagramKey: `${table.schema}.${table.name}` }));
+  const canvas = computeTableDiagramCanvas(exportTables, multiSchemaPositions, {
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+    cardBottomPadding: CARD_BOTTOM_PADDING,
+  });
+  // Both cards sit on one row: 40 .. 840 plus MARGIN padding on each side.
+  assert.equal(canvas.width, 480 + CARD_WIDTH + 2 * MARGIN - 40);
+  assert.equal(canvas.originX, 0);
+  assert.equal(canvas.height, 40 + (CARD_HEADER_HEIGHT + 4 * COLUMN_ROW_HEIGHT + CARD_BOTTOM_PADDING) + MARGIN);
+
+  const svg = buildTableDiagramSvg({
+    tables: exportTables,
+    relationships: [],
+    positions: multiSchemaPositions,
+    relationshipPaths: {},
+    canvas,
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+    cardBottomPadding: CARD_BOTTOM_PADDING,
+  });
+
+  assert.match(svg, /<g transform="translate\(40 40\)">/);
+  assert.match(svg, /<g transform="translate\(480 40\)">/);
+  // Cards must not collapse onto the origin, and the schema badge must survive the export.
+  assert.doesNotMatch(svg, /<g transform="translate\(0 0\)"><rect width="360"/);
+  assert.match(svg, />sales</);
+  assert.match(svg, />ops</);
+});
+
+test("multi-schema relationship routing measures card heights by diagram key", () => {
+  const exportTables = multiSchemaTables.map((table) => ({ ...table, diagramKey: `${table.schema}.${table.name}` }));
+  const relationships = [
+    {
+      id: "fk:aaa:bbb",
+      name: "aaa_bbb_fk",
+      sourceTable: "sales.aaa",
+      sourceColumn: "id",
+      targetTable: "ops.bbb",
+      targetColumn: "id",
+    },
+  ] as unknown as Parameters<typeof buildTableRelationshipPaths>[0]["relationships"];
+
+  const paths = buildTableRelationshipPaths({
+    tables: exportTables,
+    relationships,
+    positions: multiSchemaPositions,
+    cardWidth: CARD_WIDTH,
+    cardHeaderHeight: CARD_HEADER_HEIGHT,
+    columnRowHeight: COLUMN_ROW_HEIGHT,
+    cardBottomPadding: CARD_BOTTOM_PADDING,
+  });
+
+  const path = paths[relationships[0].id];
+  assert.ok(path, "relationship path should be routed");
+  // The route must follow the source card's real vertical centre, not the 0-column height.
+  const sourceCenter = 40 + (CARD_HEADER_HEIGHT + 4 * COLUMN_ROW_HEIGHT + CARD_BOTTOM_PADDING) / 2;
+  assert.ok(path.includes(`${sourceCenter}`), `path ${path} should use the source card centre ${sourceCenter}`);
+});

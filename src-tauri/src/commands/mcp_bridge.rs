@@ -931,6 +931,25 @@ pub(crate) async fn ensure_mcp_mongo_filtered_write_allowed_by_id(
     }
 }
 
+/// A bulk write is as dangerous as its least-bounded operation.
+pub(crate) async fn ensure_mcp_mongo_bulk_write_allowed_by_id(
+    state: &Arc<AppState>,
+    connection_id: &str,
+    database: &str,
+    operations_json: &str,
+) -> Result<(), String> {
+    let command = dbx_core::mongo_shell::MongoCommand::BulkWrite {
+        collection: String::new(),
+        operations: operations_json.to_string(),
+        options: None,
+    };
+    if command.has_effectively_unbounded_filter() {
+        ensure_mcp_dangerous_write_allowed_by_id(state, connection_id, database, "BulkWrite").await
+    } else {
+        ensure_mcp_write_allowed_by_id(state, connection_id, database, "BulkWrite").await
+    }
+}
+
 pub(crate) async fn ensure_mcp_mongo_aggregate_allowed_by_id(
     state: &Arc<AppState>,
     connection_id: &str,

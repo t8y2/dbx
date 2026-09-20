@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onMounted, provide, ref, useAttrs, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, provide, ref, useAttrs, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -9,6 +9,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import { hasQueryOutput } from "@/lib/query/queryOutput";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 import { Button } from "@/components/ui/button";
 import EditorGroup from "./EditorGroup.vue";
 import QueryResultSurface from "./QueryResultSurface.vue";
@@ -198,6 +199,28 @@ function paneEnterClass(groupId: string): string | undefined {
   }
   return queryStore.orientation === "horizontal" ? "workspace-pane-enter workspace-pane-enter--from-top" : "workspace-pane-enter workspace-pane-enter--from-left";
 }
+let splitterDragging = false;
+const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "pointercancel"] as const;
+function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
+  const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
+  if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  splitterDragging = true;
+  beginPanelResize();
+  for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);
+  window.addEventListener("blur", onWorkspaceSplitterEnd);
+}
+
+function onWorkspaceSplitterEnd() {
+  if (!splitterDragging) return;
+  splitterDragging = false;
+  for (const eventName of splitterEndEvents) document.removeEventListener(eventName, onWorkspaceSplitterEnd, true);
+  window.removeEventListener("blur", onWorkspaceSplitterEnd);
+  endPanelResize();
+}
+
+onBeforeUnmount(onWorkspaceSplitterEnd);
+watch(() => props.contentSuppressed, onWorkspaceSplitterEnd);
+
 function onSharedResultResized(payload: { panes: { size: number }[] }) {
   const resultPane = payload.panes[1];
   if (resultPane?.size != null && resultPane.size >= SHARED_RESULT_PANE_MIN_SIZE && resultPane.size <= SHARED_RESULT_PANE_MAX_SIZE) {
@@ -302,7 +325,7 @@ function handleFocusErrorOffset(tabId: string, offset: number): boolean {
           @detach-tab="emit('detach-tab', $event)"
         />
       </template>
-      <Splitpanes v-else horizontal class="sql-editor-workspace-split flex-1 min-h-0" :class="{ 'result-pane-collapsed': resultPaneTargetSize === 0 }" @resized="onSharedResultResized">
+      <Splitpanes v-else horizontal class="sql-editor-workspace-split flex-1 min-h-0" :class="{ 'result-pane-collapsed': resultPaneTargetSize === 0 }" @mousedown.capture="onWorkspaceSplitterStart" @touchstart.capture="onWorkspaceSplitterStart" @resized="onSharedResultResized">
         <Pane class="min-h-0 min-w-0" :size="editorPaneSize" :min-size="100 - SHARED_RESULT_PANE_MAX_SIZE">
           <Splitpanes
             :horizontal="queryStore.orientation === 'horizontal'"

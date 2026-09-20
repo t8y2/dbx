@@ -358,6 +358,16 @@ pub async fn meilisearch_get_index_overview(
 }
 
 #[tauri::command]
+pub async fn meilisearch_create_index(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    input: dbx_core::db::meilisearch_driver::MeilisearchCreateIndexInput,
+) -> Result<(), String> {
+    ensure_connection_writable(&state, &connection_id, "Create index").await?;
+    dbx_core::document_ops::meilisearch_create_index_core(&state, &connection_id, &input).await
+}
+
+#[tauri::command]
 pub async fn meilisearch_delete_index(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

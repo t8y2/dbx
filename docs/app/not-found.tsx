@@ -20,7 +20,7 @@ export default function NotFound() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "#08080a",
+        background: "#161616",
         color: "#ededf0",
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
         textAlign: "center",
@@ -30,7 +30,7 @@ export default function NotFound() {
     >
       {/* No root layout on this route, so global.css may be absent (next dev):
           reset the default body margin/background inline instead. */}
-      <style dangerouslySetInnerHTML={{ __html: "html,body{margin:0;padding:0;background:#08080a}" }} />
+      <style dangerouslySetInnerHTML={{ __html: "html,body{margin:0;padding:0;background:#161616}" }} />
       <div>
         <p style={{ margin: 0, fontSize: "clamp(72px, 14vw, 140px)", fontWeight: 800, lineHeight: 1, letterSpacing: "-0.03em" }}>404</p>
         <h1 style={{ margin: "18px 0 8px", fontSize: 21, fontWeight: 720 }}>页面不存在</h1>

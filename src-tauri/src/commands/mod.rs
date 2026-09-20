@@ -21,6 +21,7 @@ pub mod etcd_cmd;
 pub mod external_db;
 pub mod external_sql;
 pub mod fs_open;
+pub mod global_search;
 pub mod hbase_cmd;
 pub mod history;
 pub mod keychain;
@@ -30,12 +31,15 @@ pub mod mcp;
 pub mod mcp_bridge;
 pub mod mcp_http_server;
 pub mod mongo_cmd;
+pub mod mongodb_dump;
 pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq_cmd;
 #[cfg(feature = "mq-admin")]
 pub mod mqtt_cmd;
 pub mod nacos_cmd;
+pub mod plugin_download;
+pub mod plugin_download_file;
 pub mod plugins;
 pub mod prompt_template;
 pub mod query;

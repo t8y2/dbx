@@ -1,0 +1,9280 @@
+use chrono::{Local, NaiveDateTime};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashSet;
+
+#[path = "data_grid_neo4j_sql.rs"]
+mod data_grid_neo4j_sql;
+use data_grid_neo4j_sql::{build_neo4j_data_grid_rollback_statements, build_neo4j_data_grid_save_statements};
+
+#[path = "data_grid_iotdb_sql.rs"]
+mod data_grid_iotdb_sql;
+use data_grid_iotdb_sql::{
+    build_iotdb_data_grid_rollback_statements, build_iotdb_data_grid_save_statements, uses_iotdb_table_model_save,
+    validate_iotdb_existing_rows,
+};
+
+#[path = "data_grid_tdengine_sql.rs"]
+mod data_grid_tdengine_sql;
+use data_grid_tdengine_sql::{
+    build_tdengine_data_grid_rollback_statements, build_tdengine_data_grid_save_statements,
+    validate_tdengine_existing_rows, validate_tdengine_inserted_rows,
+};
+
+use crate::models::connection::DatabaseType;
+use crate::sql_dialect::{
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
+    uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
+};
+use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
+
+const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
+pub const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
+pub const DBX_TDENGINE_TBNAME_COLUMN: &str = "tbname";
+const DATA_GRID_COLUMN_DISTINCT_VALUES_DEFAULT_LIMIT: usize = 1000;
+const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
+/// Alias for the single cell a keyless guard query returns.
+const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
+const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
+const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+
+const MYSQL_DATA_GRID_BATCH_MAX_ROWS: usize = 500;
+const MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES: usize = 256 * 1024;
+const ORACLE_SQL_LITERAL_MAX_BYTES: usize = 4000;
+const ORACLE_LOB_LITERAL_CHUNK_BYTES: usize = 3900;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridTableMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    /// Doris / StarRocks multi-catalog: the database under the external
+    /// catalog, used as the middle segment of the 3-part qualified name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default)]
+    pub primary_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<DataGridColumnInfo>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct DataGridColumnInfo {
+    pub name: String,
+    #[serde(default)]
+    pub data_type: String,
+    #[serde(default)]
+    pub is_nullable: bool,
+    #[serde(default)]
+    pub is_primary_key: bool,
+    #[serde(default)]
+    pub column_default: Option<String>,
+    #[serde(default)]
+    pub extra: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridSaveStatementOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub table_meta: DataGridTableMeta,
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_columns: Option<Vec<Option<String>>>,
+    #[serde(default)]
+    pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub dirty_rows: Vec<(usize, Vec<(usize, Value)>)>,
+    #[serde(default)]
+    pub deleted_rows: Vec<usize>,
+    #[serde(default)]
+    pub new_rows: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridCopyUpdateStatementOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub table_meta: DataGridTableMeta,
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_columns: Option<Vec<Option<String>>>,
+    #[serde(default)]
+    pub rows: Vec<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridCopyInsertStatementOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_meta: Option<DataGridTableMeta>,
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_types: Option<Vec<Option<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_columns: Option<Vec<Option<String>>>,
+    #[serde(default)]
+    pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub exclude_primary_keys: bool,
+    #[serde(default)]
+    pub include_computed_columns: bool,
+    #[serde(default = "default_include_database_name")]
+    pub include_database_name: bool,
+    #[serde(default)]
+    pub insert_mode: DataGridCopyInsertMode,
+}
+
+fn default_include_database_name() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridCopyInsertMode {
+    #[default]
+    Merged,
+    RowByRow,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridContextFilterMode {
+    Equals,
+    NotEquals,
+    IsNull,
+    IsNotNull,
+    IsBlank,
+    IsNotBlank,
+    Like,
+    NotLike,
+    BeginsWith,
+    EndsWith,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    In,
+    NotIn,
+    Between,
+    NotBetween,
+}
+
+fn supports_data_grid_context_filter_mode(
+    database_type: Option<DatabaseType>,
+    mode: DataGridContextFilterMode,
+) -> bool {
+    if database_type == Some(DatabaseType::VictoriaMetrics) {
+        return false;
+    }
+    !matches!(
+        (database_type, mode),
+        (
+            Some(DatabaseType::InfluxDb | DatabaseType::Cassandra | DatabaseType::Jdbc),
+            DataGridContextFilterMode::In
+                | DataGridContextFilterMode::NotIn
+                | DataGridContextFilterMode::Between
+                | DataGridContextFilterMode::NotBetween
+        )
+    )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridContextFilterConditionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub column_name: String,
+    pub mode: DataGridContextFilterMode,
+    pub value: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_value: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_info: Option<DataGridColumnInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridColumnValueFilterConditionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub column_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_info: Option<DataGridColumnInfo>,
+    pub raw_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridColumnValuesFilterConditionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub column_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_info: Option<DataGridColumnInfo>,
+    #[serde(default)]
+    pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridColumnDistinctValuesSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub column_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_info: Option<DataGridColumnInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_counts: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridCountSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    /// Doris / StarRocks multi-catalog: the database under the external
+    /// catalog, used as the middle segment of the 3-part qualified name when
+    /// `schema` is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_input: Option<String>,
+    /// Optional optimizer hint injected between SELECT and the select list.
+    /// Example: "/*+ set(query_dop 32) */" for GaussDB parallel COUNT(*).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridConditionalUpdateSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier_quote: Option<String>,
+    pub table_meta: DataGridTableMeta,
+    pub column_name: String,
+    pub value: Value,
+    pub where_input: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiveTablePropertiesSqlOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub property_name: String,
+}
+
+/// A server-side check that must pass before a keyless save may run.
+///
+/// Without a primary key a row is identified by matching every column value,
+/// so the same predicate can match physical rows the loaded page never saw.
+/// `sql` counts, on the server, how many rows one of the predicates this save
+/// actually sends to the database matches. The save must be refused with
+/// `message` unless the returned count is at most `max_matched_rows`, and also
+/// refused when the count cannot be obtained at all — an unverified keyless
+/// write is exactly the ambiguous write this guard exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridSaveGuard {
+    pub sql: String,
+    pub max_matched_rows: u32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataGridSavePreparation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_error: Option<String>,
+    pub statements: Vec<String>,
+    pub rollback_statements: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_schema: Option<String>,
+    /// Checks the caller must run — and pass — before executing `statements`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyless_guards: Vec<DataGridSaveGuard>,
+}
+
+pub fn prepare_data_grid_save(options: DataGridSaveStatementOptions) -> DataGridSavePreparation {
+    prepare_data_grid_save_for_driver_profile(options, None)
+}
+
+pub fn prepare_data_grid_save_for_driver_profile(
+    options: DataGridSaveStatementOptions,
+    driver_profile: Option<&str>,
+) -> DataGridSavePreparation {
+    let validation_error = validate_data_grid_save(&options);
+    if validation_error.is_some() {
+        return DataGridSavePreparation {
+            validation_error,
+            statements: Vec::new(),
+            rollback_statements: Vec::new(),
+            execution_schema: data_grid_save_execution_schema(
+                options.database_type,
+                driver_profile,
+                &options.table_meta,
+            ),
+            keyless_guards: Vec::new(),
+        };
+    }
+
+    let mut keyless_guards = Vec::new();
+    let statements = build_data_grid_save_statements(&options, driver_profile, &mut keyless_guards);
+    DataGridSavePreparation {
+        validation_error: None,
+        statements,
+        rollback_statements: build_data_grid_rollback_statements(&options, driver_profile),
+        execution_schema: data_grid_save_execution_schema(options.database_type, driver_profile, &options.table_meta),
+        keyless_guards,
+    }
+}
+
+/// Relational SQL UPDATE/WHERE predicates are not meaningful for graph,
+/// document, or time-series stores that don't speak relational SQL.
+pub fn supports_relational_copy_predicates(database_type: Option<DatabaseType>) -> bool {
+    !matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Tdengine | DatabaseType::MongoDb))
+}
+
+pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStatementOptions) -> Vec<String> {
+    if !supports_relational_copy_predicates(options.database_type) {
+        return Vec::new();
+    }
+    let primary_keys = &options.table_meta.primary_keys;
+    if primary_keys.is_empty() {
+        return Vec::new();
+    }
+
+    let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let primary_key_indexes: Vec<Option<usize>> = primary_keys
+        .iter()
+        .map(|primary_key| find_column_index(options.database_type, &save_columns, primary_key))
+        .collect();
+    if primary_key_indexes.iter().any(Option::is_none) {
+        return Vec::new();
+    }
+    let primary_key_indexes: Vec<usize> = primary_key_indexes.into_iter().flatten().collect();
+    let primary_key_set: Vec<String> =
+        primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
+    let writable_indexes: Vec<(&str, usize, Option<&DataGridColumnInfo>)> = save_columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| Some((column.as_deref()?, index)))
+        .filter(|(column, _)| !primary_key_set.contains(&normalize_column_name(column)))
+        .filter(|(column, _)| !is_synthetic_row_id(options.database_type, Some(column)))
+        .map(|(column, index)| (column, index, column_info_for(column_info, column)))
+        .collect();
+    let primary_key_info =
+        primary_keys.iter().map(|primary_key| column_info_for(column_info, primary_key)).collect::<Vec<_>>();
+
+    if writable_indexes.is_empty() {
+        return Vec::new();
+    }
+
+    let table = data_grid_qualified_table_name(
+        options.database_type,
+        options.table_meta.catalog.as_deref(),
+        options.table_meta.schema.as_deref(),
+        options.table_meta.database.as_deref(),
+        &options.table_meta.table_name,
+        options.identifier_quote.as_deref(),
+    );
+    let mut statements = Vec::new();
+    for row in &options.rows {
+        if primary_key_indexes.iter().any(|index| row.get(*index).unwrap_or(&Value::Null).is_null()) {
+            continue;
+        }
+        let sets = writable_indexes
+            .iter()
+            .map(|(column, index, info)| {
+                format!(
+                    "{} = {}",
+                    data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
+                    format_grid_assignment_sql_literal(
+                        row.get(*index).unwrap_or(&Value::Null),
+                        options.database_type,
+                        *info,
+                        options.identifier_quote.as_deref(),
+                    )
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if sets.is_empty() {
+            continue;
+        }
+        let where_clause = primary_keys
+            .iter()
+            .enumerate()
+            .map(|(index, primary_key)| {
+                build_column_predicate(
+                    options.database_type,
+                    primary_key,
+                    row.get(primary_key_indexes[index]).unwrap_or(&Value::Null),
+                    primary_key_info[index],
+                    false,
+                    options.identifier_quote.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        statements.push(data_grid_statement(
+            options.database_type,
+            data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
+        ));
+    }
+    statements
+}
+
+pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatementOptions) -> Option<String> {
+    let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
+    let column_info = options.table_meta.as_ref().and_then(|meta| meta.columns.as_deref()).unwrap_or(&[]);
+    let primary_key_set: Vec<String> = options
+        .table_meta
+        .as_ref()
+        .map(|meta| meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect())
+        .unwrap_or_default();
+    let insertable_columns: Vec<(&str, usize, Option<DataGridColumnInfo>)> = save_columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| Some((column.as_deref()?, index)))
+        .map(|(column, index)| {
+            let fallback_type =
+                options.column_types.as_deref().and_then(|types| types.get(index)).and_then(|value| value.as_deref());
+            (column, index, copy_column_info(column_info, column, fallback_type))
+        })
+        .filter(|(column, _, info)| {
+            !is_grid_insert_omitted_column(
+                options.database_type,
+                info.as_ref(),
+                Some(column),
+                options.include_computed_columns,
+            )
+        })
+        .collect();
+    // "Exclude primary keys" keeps manually-assigned key columns: dropping a
+    // non-auto-generated PK member loses data and yields an INSERT that cannot
+    // satisfy NOT NULL. Only auto-generated (auto_increment/identity) keys are
+    // excluded, matching DBeaver's SQLGeneratorInsert excludeAutoGeneratedColumn.
+    let insert_columns: Vec<(&str, usize, Option<DataGridColumnInfo>)> = insertable_columns
+        .iter()
+        .filter(|(column, _, info)| {
+            !options.exclude_primary_keys
+                || !primary_key_set.contains(&normalize_column_name(column))
+                || !info.as_ref().is_some_and(is_auto_generated_column)
+        })
+        .cloned()
+        .collect();
+
+    if insert_columns.is_empty() || options.rows.is_empty() {
+        return None;
+    }
+
+    let table = options.table_meta.as_ref().map_or_else(
+        || "table_name".to_string(),
+        |meta| {
+            // This copy option controls every namespace prefix, including
+            // SQLite's main schema and external catalogs.
+            if !options.include_database_name {
+                return data_grid_identifier(
+                    options.database_type,
+                    &meta.table_name,
+                    options.identifier_quote.as_deref(),
+                );
+            }
+            // MySQL-compatible engines can store the database in either field.
+            let use_database_fallback = match options.database_type {
+                Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::ClickHouse) => true,
+                Some(DatabaseType::Doris | DatabaseType::StarRocks) => meta
+                    .catalog
+                    .as_deref()
+                    .is_none_or(|catalog| catalog.trim().is_empty() || catalog.trim() == "internal"),
+                _ => false,
+            };
+            // MySQL table tabs store the namespace in `database` without a
+            // schema. Explicit schemas still take priority for cross-database
+            // sources; schema-based engines must not use this fallback.
+            let schema = if use_database_fallback {
+                meta.schema
+                    .as_deref()
+                    .filter(|schema| !schema.trim().is_empty())
+                    .or_else(|| meta.database.as_deref().filter(|database| !database.trim().is_empty()))
+            } else {
+                meta.schema.as_deref()
+            };
+            // ClickHouse uses a database qualifier rather than SQL schemas.
+            if options.database_type == Some(DatabaseType::ClickHouse) {
+                if let Some(database) = schema {
+                    return format!(
+                        "{}.{}",
+                        data_grid_identifier(options.database_type, database, options.identifier_quote.as_deref()),
+                        data_grid_identifier(
+                            options.database_type,
+                            &meta.table_name,
+                            options.identifier_quote.as_deref()
+                        ),
+                    );
+                }
+            }
+            data_grid_qualified_table_name(
+                options.database_type,
+                meta.catalog.as_deref(),
+                schema,
+                meta.database.as_deref(),
+                &meta.table_name,
+                options.identifier_quote.as_deref(),
+            )
+        },
+    );
+    let columns = insert_columns
+        .iter()
+        .map(|(_, index, _)| {
+            data_grid_identifier(options.database_type, &options.columns[*index], options.identifier_quote.as_deref())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value_rows = options
+        .rows
+        .iter()
+        .map(|row| {
+            format!(
+                "({})",
+                insert_columns
+                    .iter()
+                    .map(|(_, index, info)| {
+                        format_grid_copy_insert_sql_literal(
+                            row.get(*index).unwrap_or(&Value::Null),
+                            options.database_type,
+                            info.as_ref(),
+                            options.identifier_quote.as_deref(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>();
+    if options.insert_mode == DataGridCopyInsertMode::RowByRow
+        || options.database_type.is_some_and(uses_single_row_insert_statements)
+    {
+        return Some(
+            value_rows
+                .iter()
+                .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    Some(format!(
+        "INSERT INTO {table} ({columns}) VALUES{}{};",
+        if value_rows.len() == 1 { " " } else { "\n" },
+        value_rows.join(",\n")
+    ))
+}
+
+pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
+    if !supports_data_grid_context_filter_mode(options.database_type, options.mode) {
+        return None;
+    }
+
+    let column = column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
+    let like_column = column_like_filter_ref(
+        options.database_type,
+        &options.column_name,
+        options.column_info.as_ref(),
+        options.identifier_quote.as_deref(),
+    );
+    let value = &options.value;
+    match options.mode {
+        DataGridContextFilterMode::IsNull => Some(format!("{column} IS NULL")),
+        DataGridContextFilterMode::IsNotNull => Some(format!("{column} IS NOT NULL")),
+        DataGridContextFilterMode::IsBlank
+            if matches!(options.database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) =>
+        {
+            Some(format!("{column} IS NULL"))
+        }
+        DataGridContextFilterMode::IsNotBlank
+            if matches!(options.database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) =>
+        {
+            Some(format!("{column} IS NOT NULL"))
+        }
+        DataGridContextFilterMode::IsBlank => Some(format!("({column} IS NULL OR {column} = '')")),
+        DataGridContextFilterMode::IsNotBlank => Some(format!("({column} IS NOT NULL AND {column} <> '')")),
+        DataGridContextFilterMode::Equals if value.is_null() => Some(format!("{column} IS NULL")),
+        DataGridContextFilterMode::NotEquals if value.is_null() => Some(format!("{column} IS NOT NULL")),
+        DataGridContextFilterMode::Like => Some(format!(
+            "{like_column} LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("%{}%", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::NotLike => Some(format!(
+            "{like_column} NOT LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("%{}%", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::BeginsWith => Some(format!(
+            "{like_column} LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("{}%", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::EndsWith => Some(format!(
+            "{like_column} LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("%{}", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::LessThan => Some(format!(
+            "{column} < {}",
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref(),
+                options.identifier_quote.as_deref(),
+            )
+        )),
+        DataGridContextFilterMode::LessThanOrEqual => Some(format!(
+            "{column} <= {}",
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref(),
+                options.identifier_quote.as_deref(),
+            )
+        )),
+        DataGridContextFilterMode::GreaterThan => Some(format!(
+            "{column} > {}",
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref(),
+                options.identifier_quote.as_deref(),
+            )
+        )),
+        DataGridContextFilterMode::GreaterThanOrEqual => Some(format!(
+            "{column} >= {}",
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref(),
+                options.identifier_quote.as_deref(),
+            )
+        )),
+        DataGridContextFilterMode::In => build_data_grid_context_membership_filter_condition(
+            &column,
+            &options.values,
+            options.database_type,
+            &options.column_name,
+            options.column_info.as_ref(),
+            options.identifier_quote.as_deref(),
+            false,
+        ),
+        DataGridContextFilterMode::NotIn => build_data_grid_context_membership_filter_condition(
+            &column,
+            &options.values,
+            options.database_type,
+            &options.column_name,
+            options.column_info.as_ref(),
+            options.identifier_quote.as_deref(),
+            true,
+        ),
+        DataGridContextFilterMode::Between => build_data_grid_context_range_filter_condition(
+            &column,
+            value,
+            options.end_value.as_ref(),
+            options.database_type,
+            &options.column_name,
+            options.column_info.as_ref(),
+            options.identifier_quote.as_deref(),
+            false,
+        ),
+        DataGridContextFilterMode::NotBetween => build_data_grid_context_range_filter_condition(
+            &column,
+            value,
+            options.end_value.as_ref(),
+            options.database_type,
+            &options.column_name,
+            options.column_info.as_ref(),
+            options.identifier_quote.as_deref(),
+            true,
+        ),
+        DataGridContextFilterMode::Equals => Some(format!(
+            "{column} = {}",
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref(),
+                options.identifier_quote.as_deref(),
+            )
+        )),
+        DataGridContextFilterMode::NotEquals => Some(format!(
+            "{column} <> {}",
+            format_data_grid_context_filter_literal(
+                value,
+                options.database_type,
+                &options.column_name,
+                options.column_info.as_ref(),
+                options.identifier_quote.as_deref(),
+            )
+        )),
+    }
+}
+
+fn format_data_grid_context_filter_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_name: &str,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if database_type == Some(DatabaseType::Iotdb) && column_info.is_none() && column_name.eq_ignore_ascii_case("time") {
+        if let Some(value) = value.as_str().filter(|value| is_decimal_i64(value)) {
+            return value.to_string();
+        }
+    }
+    format_grid_sql_literal_with_identifier_quote(value, database_type, column_info, identifier_quote)
+}
+
+fn is_decimal_i64(value: &str) -> bool {
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<i64>().is_ok()
+}
+
+fn build_data_grid_context_membership_filter_condition(
+    column: &str,
+    values: &[Value],
+    database_type: Option<DatabaseType>,
+    column_name: &str,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    negated: bool,
+) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+
+    let mut has_null = false;
+    let mut literals = Vec::new();
+    let mut seen_literals = HashSet::new();
+    for value in values {
+        if value.is_null() {
+            has_null = true;
+            continue;
+        }
+        let literal =
+            format_data_grid_context_filter_literal(value, database_type, column_name, column_info, identifier_quote);
+        if seen_literals.insert(literal.clone()) {
+            literals.push(literal);
+        }
+    }
+
+    let membership = build_membership_predicate(column, &literals, database_type, negated);
+
+    if negated {
+        return match membership {
+            Some(membership) => Some(format!("({column} IS NOT NULL AND {membership})")),
+            None if has_null => Some(format!("{column} IS NOT NULL")),
+            None => None,
+        };
+    }
+
+    match membership {
+        Some(membership) if has_null => Some(format!("({column} IS NULL OR {membership})")),
+        Some(membership) => Some(membership),
+        None if has_null => Some(format!("{column} IS NULL")),
+        None => None,
+    }
+}
+
+fn build_membership_predicate(
+    column: &str,
+    literals: &[String],
+    database_type: Option<DatabaseType>,
+    negated: bool,
+) -> Option<String> {
+    if literals.is_empty() {
+        return None;
+    }
+    if database_type == Some(DatabaseType::Neo4j) {
+        let predicate = format!("{column} IN [{}]", literals.join(", "));
+        return Some(if negated { format!("NOT ({predicate})") } else { predicate });
+    }
+
+    let operator = if negated { "NOT IN" } else { "IN" };
+    if database_type != Some(DatabaseType::Oracle) || literals.len() <= 1000 {
+        return Some(format!("{column} {operator} ({})", literals.join(", ")));
+    }
+
+    // Oracle limits each IN expression to 1000 values; preserve NOT IN semantics
+    // by joining its chunks with AND instead of OR.
+    let joiner = if negated { " AND " } else { " OR " };
+    let chunks =
+        literals.chunks(1000).map(|chunk| format!("{column} {operator} ({})", chunk.join(", "))).collect::<Vec<_>>();
+    Some(format!("({})", chunks.join(joiner)))
+}
+
+fn build_data_grid_context_range_filter_condition(
+    column: &str,
+    start_value: &Value,
+    end_value: Option<&Value>,
+    database_type: Option<DatabaseType>,
+    column_name: &str,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    negated: bool,
+) -> Option<String> {
+    let end_value = end_value?;
+    if start_value.is_null() || end_value.is_null() {
+        return None;
+    }
+    let start =
+        format_data_grid_context_filter_literal(start_value, database_type, column_name, column_info, identifier_quote);
+    let end =
+        format_data_grid_context_filter_literal(end_value, database_type, column_name, column_info, identifier_quote);
+    if database_type == Some(DatabaseType::Neo4j) {
+        return if negated {
+            Some(format!("({column} < {start} OR {column} > {end})"))
+        } else {
+            Some(format!("({column} >= {start} AND {column} <= {end})"))
+        };
+    }
+    let operator = if negated { "NOT BETWEEN" } else { "BETWEEN" };
+    Some(format!("{column} {operator} {start} AND {end}"))
+}
+
+pub fn build_data_grid_column_value_filter_condition(
+    options: DataGridColumnValueFilterConditionOptions,
+) -> Option<String> {
+    let text = options.raw_value.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let column = column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
+    if text.eq_ignore_ascii_case("null") {
+        return Some(format!("{column} IS NULL"));
+    }
+    let value = parse_typed_filter_value(text, options.database_type, options.column_info.as_ref());
+    Some(format!("{column} = {}", format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())))
+}
+
+pub fn build_data_grid_column_values_filter_condition(
+    options: DataGridColumnValuesFilterConditionOptions,
+) -> Option<String> {
+    if options.values.is_empty() {
+        return None;
+    }
+
+    let column = column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
+    let mut has_null = false;
+    let mut literals = Vec::new();
+    let mut seen_literals = HashSet::new();
+    for value in &options.values {
+        if value.is_null() {
+            has_null = true;
+            continue;
+        }
+        let literal = format_grid_sql_literal(value, options.database_type, options.column_info.as_ref());
+        if seen_literals.insert(literal.clone()) {
+            literals.push(literal);
+        }
+    }
+
+    let mut predicates = Vec::new();
+    if has_null {
+        predicates.push(format!("{column} IS NULL"));
+    }
+    if literals.len() == 1 {
+        predicates.push(format!("{column} = {}", literals[0]));
+    } else if let Some(membership) = build_membership_predicate(&column, &literals, options.database_type, false) {
+        predicates.push(membership);
+    }
+
+    match predicates.len() {
+        0 => None,
+        1 => predicates.into_iter().next(),
+        _ => Some(format!("({})", predicates.join(" OR "))),
+    }
+}
+
+pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinctValuesSqlOptions) -> String {
+    if options.database_type == Some(DatabaseType::Neo4j) {
+        return build_neo4j_data_grid_column_distinct_values_sql(&options);
+    }
+
+    let limit = data_grid_column_distinct_values_limit(options.limit);
+    let table = data_grid_qualified_table_name(
+        options.database_type,
+        options.catalog.as_deref(),
+        options.schema.as_deref(),
+        options.database.as_deref(),
+        &options.table_name,
+        options.identifier_quote.as_deref(),
+    );
+    let column = column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
+    let mut predicates = Vec::new();
+    let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
+    if !predicate.is_empty() {
+        predicates.push(format!("({predicate})"));
+    }
+    if let Some(search_predicate) = data_grid_column_distinct_values_search_predicate(&options) {
+        predicates.push(search_predicate);
+    }
+    let where_clause =
+        if predicates.is_empty() { String::new() } else { format!(" WHERE {}", predicates.join(" AND ")) };
+    let select_list = if options.include_counts {
+        format!("{column} AS dbx_value, COUNT(*) AS dbx_count")
+    } else {
+        format!("{column} AS dbx_value")
+    };
+    let group_by = format!(" GROUP BY {column}");
+    let order_by = if options.include_counts { " ORDER BY dbx_count DESC, dbx_value" } else { " ORDER BY dbx_value" };
+    let from_clause = format!(" FROM {table}{where_clause}{group_by}{order_by}");
+
+    match table_pagination_strategy(options.database_type) {
+        TablePaginationStrategy::SqlServerTop if is_sqlserver_legacy_profile(options.driver_profile.as_deref()) => {
+            format!("SELECT {select_list}{from_clause}")
+        }
+        TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
+        TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
+        TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
+        TablePaginationStrategy::FirebirdRows => {
+            let rows = firebird_rows_clause(limit, 0);
+            format!("SELECT {select_list}{from_clause} {rows}")
+        }
+        TablePaginationStrategy::Db2FetchFirst | TablePaginationStrategy::FetchFirst => {
+            format!("SELECT {select_list}{from_clause} FETCH FIRST {limit} ROWS ONLY")
+        }
+        TablePaginationStrategy::Rownum => {
+            let inner = format!("SELECT {select_list}{from_clause}");
+            format!("SELECT * FROM ({inner}) WHERE ROWNUM <= {limit}")
+        }
+        TablePaginationStrategy::AgentMaxRows | TablePaginationStrategy::Unbounded => {
+            format!("SELECT {select_list}{from_clause}")
+        }
+        TablePaginationStrategy::QuestDbLimit | TablePaginationStrategy::LimitOffset => {
+            format!("SELECT {select_list}{from_clause} LIMIT {limit}")
+        }
+    }
+}
+
+fn is_sqlserver_legacy_profile(driver_profile: Option<&str>) -> bool {
+    driver_profile.is_some_and(|profile| profile.trim().eq_ignore_ascii_case("sqlserver-legacy"))
+}
+
+pub fn build_data_grid_count_sql(options: DataGridCountSqlOptions) -> String {
+    let table = if crate::sql_dialect::uses_connection_identifier_quote(
+        options.database_type,
+        options.identifier_quote.as_deref(),
+    ) {
+        crate::sql_dialect::table_data_qualified_table_name(
+            options.database_type,
+            options.schema.as_deref(),
+            &options.table_name,
+            options.identifier_quote.as_deref(),
+        )
+    } else {
+        crate::sql_dialect::qualified_table_name_with_catalog(
+            options.database_type,
+            options.catalog.as_deref(),
+            options.schema.as_deref(),
+            options.database.as_deref(),
+            &options.table_name,
+        )
+    };
+    let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
+    let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
+    let hint = options.count_hint.as_deref().unwrap_or("");
+    let hint_part = if hint.is_empty() { String::new() } else { format!(" {hint}") };
+    format!("SELECT{hint_part} COUNT(*) AS cnt FROM {table}{where_clause}")
+}
+
+pub fn build_data_grid_conditional_update_sql(options: DataGridConditionalUpdateSqlOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::Mysql) {
+        return None;
+    }
+    let predicate = crate::sql_dialect::normalize_where_input(Some(&options.where_input));
+    if predicate.is_empty() {
+        return None;
+    }
+
+    let columns = options.table_meta.columns.as_deref()?;
+    let column_info = column_info_for(columns, &options.column_name)?;
+    let primary_key_set: Vec<String> =
+        options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
+    if primary_key_set.contains(&normalize_column_name(&column_info.name))
+        || column_info.is_primary_key
+        || is_grid_update_omitted_column(
+            options.database_type,
+            Some(column_info),
+            Some(&column_info.name),
+            &primary_key_set,
+        )
+    {
+        return None;
+    }
+
+    let table = data_grid_qualified_table_name(
+        options.database_type,
+        options.table_meta.catalog.as_deref(),
+        options.table_meta.schema.as_deref(),
+        options.table_meta.database.as_deref(),
+        &options.table_meta.table_name,
+        options.identifier_quote.as_deref(),
+    );
+    let sets = format!(
+        "{} = {}",
+        data_grid_identifier(options.database_type, &column_info.name, options.identifier_quote.as_deref()),
+        format_grid_save_sql_literal(
+            &options.value,
+            options.database_type,
+            Some(column_info),
+            options.identifier_quote.as_deref(),
+        )
+    );
+    Some(data_grid_statement(
+        options.database_type,
+        data_grid_update_sql(options.database_type, &table, &sets, &format!("({predicate})")),
+    ))
+}
+
+pub fn build_hive_table_properties_sql(options: HiveTablePropertiesSqlOptions) -> String {
+    let table = qualified_table_name(Some(DatabaseType::Hive), options.schema.as_deref(), &options.table_name);
+    let property = options.property_name.replace('\'', "''");
+    format!("SHOW TBLPROPERTIES {table} ('{property}')")
+}
+
+fn data_grid_column_distinct_values_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DATA_GRID_COLUMN_DISTINCT_VALUES_DEFAULT_LIMIT).clamp(1, DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT)
+}
+
+fn data_grid_column_distinct_values_search_predicate(
+    options: &DataGridColumnDistinctValuesSqlOptions,
+) -> Option<String> {
+    let search = options.search_value.as_deref()?.trim();
+    if search.is_empty() {
+        return None;
+    }
+    if !options.column_info.as_ref().map(|column| is_textual_column_type(&column.data_type)).unwrap_or(true)
+        && !is_postgres_like_pattern_database(options.database_type)
+    {
+        let column =
+            column_filter_ref(options.database_type, &options.column_name, options.identifier_quote.as_deref());
+        let value = parse_typed_filter_value(search, options.database_type, options.column_info.as_ref());
+        return Some(format!(
+            "{column} = {}",
+            format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())
+        ));
+    }
+    let column = column_like_filter_ref(
+        options.database_type,
+        &options.column_name,
+        options.column_info.as_ref(),
+        options.identifier_quote.as_deref(),
+    );
+    let pattern = Value::String(format!("%{search}%"));
+    Some(format!("{column} LIKE {}", format_grid_sql_literal(&pattern, options.database_type, None)))
+}
+
+fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDistinctValuesSqlOptions) -> String {
+    let limit = data_grid_column_distinct_values_limit(options.limit);
+    let label = quote_ident(Some(DatabaseType::Neo4j), &options.table_name);
+    let column = column_filter_ref(Some(DatabaseType::Neo4j), &options.column_name, None);
+    let mut predicates = Vec::new();
+    let predicate = crate::sql_dialect::normalize_where_input(options.where_input.as_deref());
+    if !predicate.is_empty() {
+        predicates.push(predicate);
+    }
+    if let Some(search) = options.search_value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        predicates.push(format!(
+            "toString({column}) CONTAINS {}",
+            format_grid_sql_literal(&Value::String(search.to_string()), Some(DatabaseType::Neo4j), None)
+        ));
+    }
+    let where_clause =
+        if predicates.is_empty() { String::new() } else { format!(" WHERE {}", predicates.join(" AND ")) };
+    if options.include_counts {
+        format!(
+            "MATCH (n:{label}){where_clause} RETURN {column} AS dbx_value, count(*) AS dbx_count ORDER BY dbx_count DESC, dbx_value LIMIT {limit}"
+        )
+    } else {
+        format!(
+            "MATCH (n:{label}){where_clause} RETURN DISTINCT {column} AS dbx_value ORDER BY dbx_value LIMIT {limit}"
+        )
+    }
+}
+
+fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_iotdb_existing_rows(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_tdengine_inserted_rows(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_inserted_primary_keys(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_tdengine_existing_rows(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_existing_row_primary_keys(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_keyless_row_predicate(options) {
+        return Some(error);
+    }
+
+    let save_columns = effective_columns(options);
+    let not_null_columns: Vec<String> = options
+        .table_meta
+        .columns
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|column| {
+            !column.is_nullable
+                && column.column_default.is_none()
+                && !is_auto_generated_column(column)
+                && !is_non_identity_generated_column(Some(column))
+                && !is_synthetic_row_id(options.database_type, Some(&column.name))
+        })
+        .map(|column| normalize_column_name(&column.name))
+        .collect();
+    if let Some(error) = validate_clickhouse_mutable_updates(options) {
+        return Some(error);
+    }
+
+    if not_null_columns.is_empty() {
+        return None;
+    }
+
+    for (_, changes) in &options.dirty_rows {
+        for (column_index, value) in changes {
+            let source_column = save_columns.get(*column_index).and_then(|column| column.as_deref());
+            if is_null_write_to_not_null_column(options.database_type, &not_null_columns, source_column, value) {
+                return Some(null_write_error(source_column.unwrap_or_default()));
+            }
+        }
+    }
+
+    // MySQL BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
+    // omitted from the generated INSERT, so let MySQL apply triggers or report missing required fields.
+    if options.database_type != Some(DatabaseType::Mysql) {
+        for row in &options.new_rows {
+            for column_index in 0..options.columns.len() {
+                let source_column = save_columns.get(column_index).and_then(|column| column.as_deref());
+                if is_null_write_to_not_null_column(
+                    options.database_type,
+                    &not_null_columns,
+                    source_column,
+                    row.get(column_index).unwrap_or(&Value::Null),
+                ) {
+                    return Some(null_write_error(source_column.unwrap_or_default()));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) -> Option<String> {
+    let primary_keys = &options.table_meta.primary_keys;
+    if primary_keys.is_empty() || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty()) {
+        return None;
+    }
+
+    let save_columns = effective_columns(options);
+    let primary_key_indexes: Vec<Option<usize>> = primary_keys
+        .iter()
+        .map(|primary_key| find_column_index(options.database_type, &save_columns, primary_key))
+        .collect();
+    let missing_primary_keys = primary_keys
+        .iter()
+        .zip(&primary_key_indexes)
+        .filter_map(|(primary_key, index)| index.is_none().then_some(primary_key.as_str()))
+        .collect::<Vec<_>>();
+    if !missing_primary_keys.is_empty() {
+        return Some(format!(
+            "Cannot safely update or delete rows because the query result does not include every primary key column (missing: {}). Refresh or rerun the query before saving.",
+            missing_primary_keys.join(", ")
+        ));
+    }
+
+    let primary_key_indexes = primary_key_indexes.into_iter().flatten().collect::<Vec<_>>();
+    for row_index in
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied())
+    {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        if let Some((primary_key, _)) =
+            primary_keys.iter().zip(&primary_key_indexes).find(|(_, index)| row.get(**index).is_none_or(Value::is_null))
+        {
+            return Some(format!(
+                "Cannot safely update or delete rows because primary key column \"{primary_key}\" has no value in the query result. Refresh or rerun the query before saving."
+            ));
+        }
+    }
+
+    None
+}
+
+fn validate_oracle_keyless_lob_predicate(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !uses_oracle_row_id(options.database_type)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+    let has_lob_column =
+        options.table_meta.columns.as_deref().unwrap_or(&[]).iter().any(|column| is_oracle_lob_type(&column.data_type));
+    if !has_lob_column {
+        return None;
+    }
+
+    // LOB equality is unsupported in Oracle-compatible SQL. Refuse unsafe
+    // keyless writes instead of dropping LOB predicates and risking extra rows.
+    Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.".to_string())
+}
+
+/// Without a primary key a row can only be addressed by matching every column
+/// value, and `build_row_where` drops columns that have no source column of
+/// their own. When nothing is left, the generated predicate is empty and the
+/// UPDATE/DELETE would target the whole table, so there is neither a reliable
+/// row identifier nor anything a server-side check could count: refuse.
+///
+/// Whether a non-empty predicate really addresses a single physical row cannot
+/// be decided here — the loaded page is not the table. That decision belongs to
+/// the `keyless_guards` this preparation emits, which count the matches of the
+/// exact predicate on the server.
+fn validate_keyless_row_predicate(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !options.table_meta.primary_keys.is_empty() || !uses_keyless_row_predicate(options.database_type) {
+        return None;
+    }
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let touched_row_indexes =
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied());
+    for row_index in touched_row_indexes {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        let predicate = build_row_where(
+            options.database_type,
+            &save_columns,
+            row,
+            column_info,
+            options.identifier_quote.as_deref(),
+        );
+        if predicate.trim().is_empty() {
+            return Some(KEYLESS_UNIDENTIFIABLE_ROW_ERROR.to_string());
+        }
+    }
+    None
+}
+
+fn validate_clickhouse_mutable_updates(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::ClickHouse) || options.dirty_rows.is_empty() {
+        return None;
+    }
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let primary_key_set: Vec<String> =
+        options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
+    let has_clickhouse_key_metadata = !primary_key_set.is_empty()
+        || column_info.iter().any(|column| is_clickhouse_partition_key_column(options.database_type, Some(column)));
+    if !has_clickhouse_key_metadata {
+        return None;
+    }
+
+    for (_, changes) in &options.dirty_rows {
+        if changes.is_empty() {
+            continue;
+        }
+        let has_mutable_column = changes.iter().any(|(column_index, _)| {
+            let Some(column) = save_columns.get(*column_index).and_then(|column| column.as_deref()) else {
+                return false;
+            };
+            !is_grid_update_omitted_column(
+                options.database_type,
+                column_info_for(column_info, column),
+                Some(column),
+                &primary_key_set,
+            )
+        });
+        if !has_mutable_column {
+            return Some(clickhouse_no_mutable_columns_error());
+        }
+    }
+    None
+}
+
+fn validate_inserted_primary_keys(options: &DataGridSaveStatementOptions) -> Option<String> {
+    let primary_keys = &options.table_meta.primary_keys;
+    if primary_keys.is_empty() || options.new_rows.is_empty() {
+        return None;
+    }
+
+    let save_columns = effective_columns(options);
+    let primary_key_indexes: Vec<Option<usize>> = primary_keys
+        .iter()
+        .map(|primary_key| find_column_index(options.database_type, &save_columns, primary_key))
+        .collect();
+    if primary_key_indexes.iter().any(Option::is_none) {
+        return None;
+    }
+    let primary_key_indexes: Vec<usize> = primary_key_indexes.into_iter().flatten().collect();
+
+    let mut existing_keys: Vec<String> = Vec::new();
+    for row in &options.rows {
+        if let Some(key) = primary_key_value_key(&primary_key_indexes, row) {
+            existing_keys.push(key);
+        }
+    }
+
+    let mut new_keys: Vec<String> = Vec::new();
+    for row in &options.new_rows {
+        let Some(key) = primary_key_value_key(&primary_key_indexes, row) else {
+            continue;
+        };
+        if existing_keys.contains(&key) || new_keys.contains(&key) {
+            return Some(duplicate_primary_key_error(
+                primary_keys,
+                &primary_key_indexes,
+                row,
+                existing_keys.contains(&key),
+            ));
+        }
+        new_keys.push(key);
+    }
+
+    None
+}
+
+/// Builds the statements the save executes, and alongside them the server-side
+/// guards for every keyless predicate those statements actually send. The guard
+/// is derived from the same `where_clause` value the UPDATE/DELETE carries, so
+/// the safety decision can never be made against a different set of columns or
+/// values than the mutation itself uses.
+fn build_data_grid_save_statements(
+    options: &DataGridSaveStatementOptions,
+    driver_profile: Option<&str>,
+    keyless_guards: &mut Vec<DataGridSaveGuard>,
+) -> Vec<String> {
+    if options.database_type == Some(DatabaseType::Neo4j) {
+        return build_neo4j_data_grid_save_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::Tdengine) {
+        return build_tdengine_data_grid_save_statements(options);
+    }
+    if uses_iotdb_table_model_save(options) {
+        return build_iotdb_data_grid_save_statements(options);
+    }
+
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let schema = crate::sql_dialect::table_data_schema(
+        options.database_type,
+        driver_profile,
+        options.table_meta.schema.as_deref(),
+    );
+    let table = data_grid_qualified_table_name(
+        options.database_type,
+        options.table_meta.catalog.as_deref(),
+        schema,
+        options.table_meta.database.as_deref(),
+        &options.table_meta.table_name,
+        options.identifier_quote.as_deref(),
+    );
+    let mut statements = Vec::new();
+    let primary_key_set: Vec<String> =
+        options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
+
+    let guards_keyless_predicates = primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type);
+    let mut guarded_predicates: Vec<String> = Vec::new();
+    let guard_predicate = |predicate: &str, guarded: &mut Vec<String>| {
+        if !guards_keyless_predicates || predicate.trim().is_empty() {
+            return;
+        }
+        if !guarded.iter().any(|existing| existing == predicate) {
+            guarded.push(predicate.to_string());
+        }
+    };
+
+    let batch_mysql_writes = supports_mysql_data_grid_batch(options);
+    let mut update_sets: Option<String> = None;
+    let mut update_predicates = Vec::new();
+    for (row_index, changes) in &options.dirty_rows {
+        let Some(row) = options.rows.get(*row_index) else {
+            continue;
+        };
+        let sets = changes
+            .iter()
+            .filter_map(|(column_index, value)| {
+                let column = save_columns.get(*column_index)?.as_deref()?;
+                if is_grid_update_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                    &primary_key_set,
+                ) {
+                    return None;
+                }
+                Some(format!(
+                    "{} = {}",
+                    data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
+                    format_grid_save_sql_literal(
+                        value,
+                        options.database_type,
+                        column_info_for(column_info, column),
+                        options.identifier_quote.as_deref(),
+                    )
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if sets.is_empty() {
+            continue;
+        }
+        let where_clause = build_primary_key_where(
+            options.database_type,
+            &options.table_meta.primary_keys,
+            &save_columns,
+            row,
+            column_info,
+            options.identifier_quote.as_deref(),
+        );
+        guard_predicate(&where_clause, &mut guarded_predicates);
+        if batch_mysql_writes {
+            if update_sets.as_deref().is_some_and(|current| current != sets) {
+                let current_sets = update_sets.take().unwrap_or_default();
+                push_mysql_predicate_batches(
+                    &mut statements,
+                    &format!("UPDATE {table} SET {current_sets} WHERE "),
+                    std::mem::take(&mut update_predicates),
+                );
+            }
+            update_sets = Some(sets);
+            update_predicates.push(where_clause);
+        } else {
+            statements.push(data_grid_statement(
+                options.database_type,
+                data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
+            ));
+        }
+    }
+    if let Some(sets) = update_sets {
+        push_mysql_predicate_batches(&mut statements, &format!("UPDATE {table} SET {sets} WHERE "), update_predicates);
+    }
+
+    let mut delete_predicates = Vec::new();
+    for row_index in &options.deleted_rows {
+        let Some(row) = options.rows.get(*row_index) else {
+            continue;
+        };
+        let where_clause = build_primary_key_where(
+            options.database_type,
+            &options.table_meta.primary_keys,
+            &save_columns,
+            row,
+            column_info,
+            options.identifier_quote.as_deref(),
+        );
+        guard_predicate(&where_clause, &mut guarded_predicates);
+        if batch_mysql_writes {
+            delete_predicates.push(where_clause);
+        } else {
+            statements.push(data_grid_statement(
+                options.database_type,
+                data_grid_delete_sql(options.database_type, &table, &where_clause),
+            ));
+        }
+    }
+    if !delete_predicates.is_empty() {
+        push_mysql_delete_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
+    }
+
+    for row in &options.new_rows {
+        if options.database_type == Some(DatabaseType::Hive) {
+            if let Some(statement) = build_hive_values_insert(options, &table, &save_columns, row, true, true) {
+                statements.push(data_grid_statement(options.database_type, statement));
+            }
+            continue;
+        }
+        let insert_pairs: Vec<(&str, &Value)> = save_columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| Some((column.as_deref()?, row.get(index).unwrap_or(&Value::Null))))
+            .filter(|(column, value)| {
+                let column_info = column_info_for(column_info, column);
+                // Empty generated values must be omitted so the database can apply AUTO_INCREMENT/IDENTITY semantics.
+                !column_info.is_some_and(is_auto_generated_column) || !grid_value_is_empty(value)
+            })
+            .filter(|(column, _)| {
+                !is_grid_insert_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                    false,
+                )
+            })
+            .filter(|(_, value)| !value.is_null())
+            .collect();
+        if insert_pairs.is_empty() {
+            if options.database_type == Some(DatabaseType::Mysql) {
+                statements
+                    .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} () VALUES ()")));
+            }
+            continue;
+        }
+        let columns = insert_pairs
+            .iter()
+            .map(|(column, _)| data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = insert_pairs
+            .iter()
+            .map(|(column, value)| {
+                format_grid_save_sql_literal(
+                    value,
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    options.identifier_quote.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!("INSERT INTO {table} ({columns}) VALUES ({values})"),
+        ));
+    }
+
+    keyless_guards.extend(guarded_predicates.into_iter().map(|predicate| DataGridSaveGuard {
+        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({predicate})"),
+        max_matched_rows: 1,
+        message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+    }));
+
+    statements
+}
+
+fn build_data_grid_rollback_statements(
+    options: &DataGridSaveStatementOptions,
+    driver_profile: Option<&str>,
+) -> Vec<String> {
+    if options.database_type == Some(DatabaseType::Neo4j) {
+        return build_neo4j_data_grid_rollback_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::Tdengine) {
+        return build_tdengine_data_grid_rollback_statements(options);
+    }
+    if uses_iotdb_table_model_save(options) {
+        return build_iotdb_data_grid_rollback_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::ClickHouse) {
+        return Vec::new();
+    }
+
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let schema = crate::sql_dialect::table_data_schema(
+        options.database_type,
+        driver_profile,
+        options.table_meta.schema.as_deref(),
+    );
+    let table = data_grid_qualified_table_name(
+        options.database_type,
+        options.table_meta.catalog.as_deref(),
+        schema,
+        options.table_meta.database.as_deref(),
+        &options.table_meta.table_name,
+        options.identifier_quote.as_deref(),
+    );
+    let mut statements = Vec::new();
+
+    for row in &options.new_rows {
+        let where_clause = if options.database_type == Some(DatabaseType::Mysql) {
+            build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
+        } else {
+            let where_clause = build_save_row_where(
+                options.database_type,
+                &save_columns,
+                row,
+                column_info,
+                options.identifier_quote.as_deref(),
+            );
+            (!where_clause.is_empty()).then_some(where_clause)
+        };
+        if let Some(where_clause) = where_clause {
+            statements
+                .push(data_grid_statement(options.database_type, format!("DELETE FROM {table} WHERE {where_clause}")));
+        }
+    }
+
+    let batch_mysql_writes = supports_mysql_data_grid_batch(options);
+    let mut deleted_insert_columns: Option<String> = None;
+    let mut deleted_insert_values = Vec::new();
+    for row_index in &options.deleted_rows {
+        let Some(row) = options.rows.get(*row_index) else {
+            continue;
+        };
+        if options.database_type == Some(DatabaseType::Hive) {
+            if let Some(statement) = build_hive_values_insert(options, &table, &save_columns, row, false, false) {
+                statements.push(data_grid_statement(options.database_type, statement));
+            }
+            continue;
+        }
+        let insert_pairs: Vec<(&str, &Value)> = save_columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| Some((column.as_deref()?, row.get(index).unwrap_or(&Value::Null))))
+            .filter(|(column, _)| {
+                !is_grid_insert_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                    false,
+                )
+            })
+            .collect();
+        let columns = insert_pairs
+            .iter()
+            .map(|(column, _)| data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = insert_pairs
+            .iter()
+            .map(|(column, value)| {
+                format_grid_assignment_sql_literal(
+                    value,
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    options.identifier_quote.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if batch_mysql_writes {
+            if deleted_insert_columns.as_deref().is_some_and(|current| current != columns) {
+                let current_columns = deleted_insert_columns.take().unwrap_or_default();
+                push_mysql_values_insert_batches(
+                    &mut statements,
+                    &table,
+                    &current_columns,
+                    std::mem::take(&mut deleted_insert_values),
+                );
+            }
+            deleted_insert_columns = Some(columns);
+            deleted_insert_values.push(format!("({values})"));
+        } else {
+            statements.push(data_grid_statement(
+                options.database_type,
+                format!("INSERT INTO {table} ({columns}) VALUES ({values})"),
+            ));
+        }
+    }
+    if let Some(columns) = deleted_insert_columns {
+        push_mysql_values_insert_batches(&mut statements, &table, &columns, deleted_insert_values);
+    }
+
+    for (row_index, changes) in &options.dirty_rows {
+        let Some(row) = options.rows.get(*row_index) else {
+            continue;
+        };
+        let mut after_row = row.clone();
+        for (column_index, value) in changes {
+            if *column_index < after_row.len() {
+                after_row[*column_index] = value.clone();
+            }
+        }
+        let writable_changes: Vec<(&(usize, Value), &str)> = changes
+            .iter()
+            .filter_map(|change @ (column_index, _)| {
+                let column = save_columns.get(*column_index)?.as_deref()?;
+                if is_grid_update_omitted_column(
+                    options.database_type,
+                    column_info_for(column_info, column),
+                    Some(column),
+                    &[],
+                ) {
+                    return None;
+                }
+                Some((change, column))
+            })
+            .collect();
+        let sets = writable_changes
+            .iter()
+            .map(|((column_index, _), column)| {
+                format!(
+                    "{} = {}",
+                    data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
+                    format_grid_assignment_sql_literal(
+                        row.get(*column_index).unwrap_or(&Value::Null),
+                        options.database_type,
+                        column_info_for(column_info, column),
+                        options.identifier_quote.as_deref(),
+                    )
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if sets.is_empty() {
+            continue;
+        }
+        let mut predicates = vec![build_primary_key_where(
+            options.database_type,
+            &options.table_meta.primary_keys,
+            &save_columns,
+            &after_row,
+            column_info,
+            options.identifier_quote.as_deref(),
+        )];
+        predicates.extend(writable_changes.iter().map(|((_, value), column)| {
+            build_save_column_predicate(
+                options.database_type,
+                column,
+                value,
+                column_info_for(column_info, column),
+                true,
+                options.identifier_quote.as_deref(),
+            )
+        }));
+        statements.push(data_grid_statement(
+            options.database_type,
+            format!(
+                "UPDATE {table} SET {sets} WHERE {}",
+                predicates.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" AND ")
+            ),
+        ));
+    }
+
+    statements
+}
+
+fn supports_mysql_data_grid_batch(options: &DataGridSaveStatementOptions) -> bool {
+    // Keyless rows use full-row predicates, which are too wide and ambiguous to combine safely.
+    options.database_type == Some(DatabaseType::Mysql) && !options.table_meta.primary_keys.is_empty()
+}
+
+fn push_mysql_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
+    push_mysql_joined_batches(statements, prefix, predicates, " OR ", true);
+}
+
+/// Render a batch of delete predicates for MySQL. Rows deleted through the grid
+/// usually differ only in a single primary-key equality predicate, so equal-key
+/// runs collapse into `id IN (...)` instead of a chain of ORs (#8857). Anything
+/// that is not a plain `column = literal` equality (compound keys, NULL checks,
+/// BINARY comparisons, ...) falls back to the OR form, which stays correct for
+/// every predicate shape.
+fn push_mysql_delete_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
+    const IN_JOINER: &str = ", ";
+
+    struct InRun {
+        column: Option<String>,
+        values: Vec<String>,
+        bytes: usize,
+    }
+
+    fn flush_in(run: &mut InRun, batches: &mut Vec<String>) {
+        if let Some(column) = run.column.take() {
+            if run.values.len() == 1 {
+                batches.push(format!("{column} = {}", run.values[0]));
+            } else {
+                batches.push(format!("{column} IN ({})", run.values.join(IN_JOINER)));
+            }
+            run.values.clear();
+            run.bytes = 0;
+        }
+    }
+
+    let mut in_run = InRun { column: None, values: Vec::new(), bytes: 0 };
+    let mut in_batches: Vec<String> = Vec::new();
+    let mut pending_batches: Vec<String> = Vec::new();
+
+    for predicate in &predicates {
+        match parse_mysql_equality_predicate(predicate) {
+            Some((column, literal)) => {
+                let literal_bytes = literal.len() + IN_JOINER.len();
+                let column_switch = in_run.column.as_deref().is_some_and(|existing| existing != column);
+                let over_budget = in_run.bytes + literal_bytes > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES;
+                let over_rows = in_run.values.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS;
+                if column_switch || over_budget || over_rows {
+                    flush_in(&mut in_run, &mut in_batches);
+                }
+                if in_run.column.is_none() {
+                    in_run.column = Some(column);
+                }
+                in_run.bytes += literal_bytes;
+                in_run.values.push(literal);
+            }
+            None => {
+                flush_in(&mut in_run, &mut in_batches);
+                pending_batches.push(predicate.clone());
+            }
+        }
+    }
+    flush_in(&mut in_run, &mut in_batches);
+
+    let mut batches = pending_batches;
+    batches.extend(in_batches);
+    if batches.len() == 1 {
+        statements.push(format!("{prefix}{};", batches.remove(0)));
+    } else if !batches.is_empty() {
+        push_mysql_predicate_batches(statements, prefix, batches);
+    }
+}
+
+/// Recognize predicates shaped exactly like `` `column` = literal `` (with or
+/// without backticks) so they can merge into an IN list. Anything else —
+/// compound-key AND chains, IS NULL, BINARY comparisons — returns None.
+fn parse_mysql_equality_predicate(predicate: &str) -> Option<(String, String)> {
+    let mut trimmed = predicate;
+    while let Some(inner) = trimmed.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
+        trimmed = inner;
+    }
+    let separator = trimmed.find(" = ")?;
+    let column = trimmed.get(..separator)?.trim().to_string();
+    if !column.starts_with('`') || !column.ends_with('`') || column.len() < 3 {
+        return None;
+    }
+    let literal = trimmed.get(separator + 3..)?.trim().to_string();
+    if literal.is_empty() || literal.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    // Compound-key predicates contain further AND/OR/IS clauses after the first
+    // equality; merging those into an IN list would change the row targeting.
+    let upper = literal.to_ascii_uppercase();
+    if upper.contains(" AND ") || upper.contains(" OR ") || upper.starts_with("IS ") {
+        return None;
+    }
+    Some((column, literal))
+}
+
+fn push_mysql_values_insert_batches(
+    statements: &mut Vec<String>,
+    table: &str,
+    columns: &str,
+    value_tuples: Vec<String>,
+) {
+    push_mysql_joined_batches(
+        statements,
+        &format!("INSERT INTO {table} ({columns}) VALUES "),
+        value_tuples,
+        ", ",
+        false,
+    );
+}
+
+fn push_mysql_joined_batches(
+    statements: &mut Vec<String>,
+    prefix: &str,
+    parts: Vec<String>,
+    separator: &str,
+    wrap_multiple_parts: bool,
+) {
+    let mut batch = Vec::new();
+    for part in parts {
+        let next_len = joined_batch_sql_len(prefix, &batch, &part, separator, wrap_multiple_parts);
+        if !batch.is_empty()
+            && (batch.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS || next_len > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES)
+        {
+            push_mysql_joined_batch_statement(
+                statements,
+                prefix,
+                std::mem::take(&mut batch),
+                separator,
+                wrap_multiple_parts,
+            );
+        }
+        batch.push(part);
+    }
+    if !batch.is_empty() {
+        push_mysql_joined_batch_statement(statements, prefix, batch, separator, wrap_multiple_parts);
+    }
+}
+
+fn joined_batch_sql_len(
+    prefix: &str,
+    current: &[String],
+    next: &str,
+    separator: &str,
+    wrap_multiple_parts: bool,
+) -> usize {
+    let part_bytes = |part: &str| part.len() + usize::from(wrap_multiple_parts) * 2;
+    if current.is_empty() {
+        return prefix.len() + next.len() + 1;
+    }
+    let current_bytes = if current.len() == 1 && wrap_multiple_parts {
+        current[0].len()
+    } else {
+        current.iter().map(|part| part_bytes(part)).sum::<usize>() + separator.len() * current.len().saturating_sub(1)
+    };
+    let existing_adjustment = if current.len() == 1 && wrap_multiple_parts { 2 } else { 0 };
+    prefix.len() + current_bytes + existing_adjustment + separator.len() + part_bytes(next) + 1
+}
+
+fn push_mysql_joined_batch_statement(
+    statements: &mut Vec<String>,
+    prefix: &str,
+    parts: Vec<String>,
+    separator: &str,
+    wrap_multiple_parts: bool,
+) {
+    let body = if parts.len() == 1 || !wrap_multiple_parts {
+        parts.join(separator)
+    } else {
+        parts.into_iter().map(|part| format!("({part})")).collect::<Vec<_>>().join(separator)
+    };
+    statements.push(format!("{prefix}{body};"));
+}
+
+fn build_mysql_insert_rollback_where(
+    options: &DataGridSaveStatementOptions,
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+) -> Option<String> {
+    if options.table_meta.primary_keys.is_empty() {
+        return None;
+    }
+
+    for primary_key in &options.table_meta.primary_keys {
+        let index = columns.iter().position(|column| column.as_deref() == Some(primary_key.as_str()))?;
+        let value = row.get(index).unwrap_or(&Value::Null);
+        let info = column_info_for(column_info, primary_key);
+        if value.is_null()
+            || empty_string_saves_as_null(value, info)
+            || info.is_some_and(is_auto_generated_column)
+            || info.is_some_and(|column| is_non_identity_generated_column(Some(column)))
+        {
+            // Generated or trigger-populated keys are unknown until after INSERT.
+            // Do not emit a rollback predicate that cannot match the inserted row.
+            return None;
+        }
+    }
+
+    Some(build_primary_key_where(
+        options.database_type,
+        &options.table_meta.primary_keys,
+        columns,
+        row,
+        column_info,
+        options.identifier_quote.as_deref(),
+    ))
+}
+
+pub fn effective_columns(options: &DataGridSaveStatementOptions) -> Vec<Option<String>> {
+    let columns = match &options.source_columns {
+        Some(source_columns) if source_columns.len() == options.columns.len() => source_columns.clone(),
+        _ => options.columns.iter().map(|column| Some(column.clone())).collect(),
+    };
+    if options.database_type != Some(DatabaseType::Hive) {
+        return columns;
+    }
+    columns
+        .into_iter()
+        .map(|column| column.map(|column| resolve_hive_target_column(&options.table_meta, &column)))
+        .collect()
+}
+
+fn resolve_hive_target_column(table_meta: &DataGridTableMeta, result_column: &str) -> String {
+    let Some(columns) = table_meta.columns.as_deref() else {
+        return result_column.to_string();
+    };
+    if let Some(column) = unique_column_info_match(columns, result_column) {
+        return column.name.clone();
+    }
+    let Some(unqualified) = last_qualified_identifier_component(result_column) else {
+        return result_column.to_string();
+    };
+    // Hive JDBC may expose SELECT * labels as `table.column`. Resolve them through
+    // target metadata, while exact matching above preserves real dotted column names.
+    unique_column_info_match(columns, &unqualified)
+        .map_or_else(|| result_column.to_string(), |column| column.name.clone())
+}
+
+fn unique_column_info_match<'a>(columns: &'a [DataGridColumnInfo], name: &str) -> Option<&'a DataGridColumnInfo> {
+    if let Some(column) = columns.iter().find(|column| column.name == name) {
+        return Some(column);
+    }
+    let normalized = normalize_column_name(name);
+    let mut matches = columns.iter().filter(|column| normalize_column_name(&column.name) == normalized);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn last_qualified_identifier_component(name: &str) -> Option<String> {
+    let mut quote = None;
+    let mut component_start = 0;
+    let mut last_component = None;
+    let chars = name.char_indices().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let (byte_index, ch) = chars[index];
+        if let Some(end_quote) = quote {
+            if ch == end_quote {
+                if chars.get(index + 1).is_some_and(|(_, next)| *next == end_quote) {
+                    index += 2;
+                    continue;
+                }
+                quote = None;
+            }
+        } else {
+            match ch {
+                '`' | '"' => quote = Some(ch),
+                '[' => quote = Some(']'),
+                '.' => {
+                    let component = name[component_start..byte_index].trim();
+                    if component.is_empty() {
+                        return None;
+                    }
+                    last_component = Some(component);
+                    component_start = byte_index + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    if quote.is_some() || last_component.is_none() {
+        return None;
+    }
+    unquote_identifier_component(name[component_start..].trim())
+}
+
+fn unquote_identifier_component(component: &str) -> Option<String> {
+    if component.is_empty() {
+        return None;
+    }
+    for (open, close) in [('`', '`'), ('"', '"'), ('[', ']')] {
+        if component.starts_with(open) || component.ends_with(close) {
+            let inner = component.strip_prefix(open)?.strip_suffix(close)?;
+            let escaped = format!("{close}{close}");
+            return Some(inner.replace(&escaped, &close.to_string()));
+        }
+    }
+    Some(component.to_string())
+}
+
+fn build_hive_values_insert(
+    options: &DataGridSaveStatementOptions,
+    table: &str,
+    save_columns: &[Option<String>],
+    row: &[Value],
+    save_literals: bool,
+    skip_all_null: bool,
+) -> Option<String> {
+    let metadata_columns = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let target_columns = if metadata_columns.is_empty() {
+        save_columns.iter().filter_map(|column| column.as_deref()).collect::<Vec<_>>()
+    } else {
+        metadata_columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>()
+    };
+    if target_columns.is_empty() {
+        return None;
+    }
+    let values = target_columns
+        .iter()
+        .map(|column| {
+            let value = find_column_index(Some(DatabaseType::Hive), save_columns, column)
+                .and_then(|index| row.get(index))
+                .unwrap_or(&Value::Null);
+            (column, value)
+        })
+        .collect::<Vec<_>>();
+    if skip_all_null && values.iter().all(|(_, value)| value.is_null()) {
+        return None;
+    }
+    let values = values
+        .into_iter()
+        .map(|(column, value)| {
+            let info = column_info_for(metadata_columns, column);
+            if save_literals {
+                format_grid_save_sql_literal(value, options.database_type, info, options.identifier_quote.as_deref())
+            } else {
+                format_grid_assignment_sql_literal(
+                    value,
+                    options.database_type,
+                    info,
+                    options.identifier_quote.as_deref(),
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("INSERT INTO TABLE {table} VALUES ({values})"))
+}
+
+fn effective_copy_columns(source_columns: Option<&[Option<String>]>, columns: &[String]) -> Vec<Option<String>> {
+    match source_columns {
+        Some(source_columns) if source_columns.len() == columns.len() => source_columns.to_vec(),
+        _ => columns.iter().map(|column| Some(column.clone())).collect(),
+    }
+}
+
+fn copy_column_info(
+    column_info: &[DataGridColumnInfo],
+    column: &str,
+    fallback_type: Option<&str>,
+) -> Option<DataGridColumnInfo> {
+    if let Some(info) = column_info_for(column_info, column) {
+        return Some(info.clone());
+    }
+    fallback_type.map(|data_type| DataGridColumnInfo {
+        name: column.to_string(),
+        data_type: data_type.to_string(),
+        is_nullable: true,
+        is_primary_key: false,
+        column_default: None,
+        extra: None,
+    })
+}
+
+fn data_grid_save_execution_schema(
+    database_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    table_meta: &DataGridTableMeta,
+) -> Option<String> {
+    if matches!(database_type, Some(DatabaseType::Neo4j | DatabaseType::Oracle)) {
+        return None;
+    }
+    crate::sql_dialect::table_data_schema(database_type, driver_profile, table_meta.schema.as_deref())
+        .map(str::to_string)
+}
+
+pub fn normalize_data_grid_save_error(database_type: Option<DatabaseType>, error: &str) -> String {
+    if database_type == Some(DatabaseType::Hive)
+        && (error.contains("Attempt to do update or delete") || error.contains("Error 10294"))
+    {
+        return "Hive UPDATE/DELETE are not enabled for this table or server. Add rows with INSERT, or enable ACID transactional tables in Hive before editing/deleting existing rows.".to_string();
+    }
+    error.to_string()
+}
+
+fn format_grid_copy_insert_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if is_oracle_temporal_literal_database(database_type) {
+        if let Some(text) = value.as_str() {
+            if let Some(literal) =
+                format_oracle_temporal_literal(text, column_info.map(|column| column.data_type.as_str()))
+            {
+                return literal;
+            }
+        }
+    }
+    format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+}
+
+fn format_grid_assignment_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
+        if let Some(constructor) = column_info.and_then(|column| oracle_character_lob_constructor(&column.data_type)) {
+            if let Some(text) = value.as_str() {
+                return format_oracle_lob_assignment_literal(text, constructor);
+            }
+        }
+    }
+    if (value.is_array() || value.is_object()) && is_json_document_column(column_info) {
+        return format_grid_sql_literal_with_identifier_quote(
+            &Value::String(value.to_string()),
+            database_type,
+            column_info,
+            identifier_quote,
+        );
+    }
+    format_grid_sql_literal_with_identifier_quote(value, database_type, column_info, identifier_quote)
+}
+
+fn format_oracle_lob_assignment_literal(text: &str, constructor: &str) -> String {
+    // Keep each Oracle SQL literal below the parser limit while preserving a CLOB result.
+    let escaped_len = text.chars().map(oracle_sql_literal_char_len).sum::<usize>();
+    if escaped_len <= ORACLE_SQL_LITERAL_MAX_BYTES {
+        let mut escaped_text = String::with_capacity(escaped_len);
+        append_oracle_sql_literal_characters(&mut escaped_text, text);
+        return format!("'{escaped_text}'");
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::with_capacity(ORACLE_LOB_LITERAL_CHUNK_BYTES);
+    let mut current_len = 0;
+    for ch in text.chars() {
+        let char_len = oracle_sql_literal_char_len(ch);
+        if current_len > 0 && current_len + char_len > ORACLE_LOB_LITERAL_CHUNK_BYTES {
+            chunks.push(format!("{constructor}('{current}')"));
+            current = String::with_capacity(ORACLE_LOB_LITERAL_CHUNK_BYTES);
+            current_len = 0;
+        }
+        append_oracle_sql_literal_char(&mut current, ch);
+        current_len += char_len;
+    }
+    if current_len > 0 {
+        chunks.push(format!("{constructor}('{current}')"));
+    }
+    chunks.join(" || ")
+}
+
+fn oracle_sql_literal_char_len(ch: char) -> usize {
+    match ch {
+        '\\' | '\'' => 2,
+        _ => ch.len_utf8(),
+    }
+}
+
+fn append_oracle_sql_literal_characters(output: &mut String, text: &str) {
+    for ch in text.chars() {
+        append_oracle_sql_literal_char(output, ch);
+    }
+}
+
+fn append_oracle_sql_literal_char(output: &mut String, ch: char) {
+    match ch {
+        '\\' => output.push_str("\\\\"),
+        '\'' => output.push_str("''"),
+        _ => output.push(ch),
+    }
+}
+
+fn is_json_document_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    column_info.is_some_and(|column| {
+        let data_type = column.data_type.trim();
+        data_type.eq_ignore_ascii_case("json") || data_type.eq_ignore_ascii_case("jsonb")
+    })
+}
+
+pub fn format_grid_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    format_grid_sql_literal_with_identifier_quote(value, database_type, column_info, None)
+}
+
+pub fn format_grid_sql_literal_with_identifier_quote(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    // Boolean values on BIT columns use database-native boolean/bit literals.
+    // This covers MySQL, SQL Server, and any other database where BIT
+    // is a numeric/boolean type rather than a bit-string type like
+    // PostgreSQL's bit(n).
+    if let Some(value) = value.as_bool() {
+        if is_kingbase_bit_literal_column(database_type, column_info) {
+            return format!("b'{}'", if value { '1' } else { '0' });
+        }
+        // SQL Server has no TRUE/FALSE literals (its boolean type is BIT, which
+        // is_bit_literal_column already covers); any other column there still
+        // needs numeric 1/0 instead of a literal.
+        if is_bit_literal_column(database_type, column_info) || database_type == Some(DatabaseType::SqlServer) {
+            return if value { "1" } else { "0" }.to_string();
+        }
+        return if value { "TRUE" } else { "FALSE" }.to_string();
+    }
+    if is_kingbase_bit_literal_column(database_type, column_info) {
+        if let Some(number) = value.as_number() {
+            if let Some(literal) = format_kingbase_bit_literal_text(&number.to_string()) {
+                return literal;
+            }
+        }
+        if let Some(text) = value.as_str() {
+            if let Some(literal) = format_kingbase_bit_literal_text(text) {
+                return literal;
+            }
+        }
+    }
+    if is_mysql_bit_literal_column(database_type, column_info, identifier_quote) {
+        if let Some(number) = value.as_number() {
+            return number.to_string();
+        }
+        if let Some(text) = value.as_str().and_then(format_mysql_bit_literal_text) {
+            return text;
+        }
+    }
+    if let Some(number) = value.as_number() {
+        return number.to_string();
+    }
+    if let Some(arr) = value.as_array() {
+        if let Some(element_type) = postgres_json_array_element_type(database_type, column_info) {
+            return format_postgres_json_array_sql_literal(arr, element_type);
+        }
+        if matches!(database_type, Some(DatabaseType::ClickHouse) | Some(DatabaseType::Databend)) {
+            return format_ch_array_sql_literal(arr);
+        }
+        return format_pg_array_sql_literal(arr);
+    }
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    if database_type == Some(DatabaseType::Iotdb)
+        && column_info.is_some_and(|column| {
+            column.data_type.trim().split(['(', ' ']).next().is_some_and(|base| base.eq_ignore_ascii_case("timestamp"))
+        })
+    {
+        if let Ok(timestamp) = text.parse::<i64>() {
+            // IoTDB can use nanosecond epoch values that exceed JavaScript's
+            // safe integer range, so its Agent transports TIMESTAMP cells as
+            // decimal strings. Keep those strings as numeric SQL literals.
+            return timestamp.to_string();
+        }
+    }
+    if is_mysql_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_mysql_binary_literal_text(&text) {
+            // DBX result values expose binary columns as prefixed hex; keep them
+            // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
+    if is_postgres_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_postgres_binary_literal_text(&text) {
+            return literal;
+        }
+    }
+    if is_oracle_raw_literal_column(database_type, column_info) {
+        if let Some(literal) = format_oracle_raw_literal_text(&text) {
+            return literal;
+        }
+    }
+    if column_info.map(|column| is_numeric_type(&column.data_type)).unwrap_or(false) && is_numeric_literal(&text) {
+        // BigDecimal/BigInteger cells cross JSON-RPC as strings so browsers cannot round them.
+        return text;
+    }
+    if database_type == Some(DatabaseType::ManticoreSearch) {
+        if let Some(typed_value) = manticore_typed_attribute_value(&text, column_info) {
+            return format_grid_sql_literal_with_identifier_quote(
+                &typed_value,
+                database_type,
+                column_info,
+                identifier_quote,
+            );
+        }
+    }
+    if text.is_empty() {
+        return if database_type == Some(DatabaseType::SqlServer) { "N''" } else { "''" }.to_string();
+    }
+    // MySQL geometry columns: wrap WKT text with ST_GeomFromText()
+    if is_mysql_geometry_literal_database(database_type)
+        && column_info.map(|column| is_geometry_column_type(&column.data_type)).unwrap_or(false)
+    {
+        let escaped = text.replace('\\', "\\\\").replace('\'', "''");
+        return format!("ST_GeomFromText('{}')", escaped);
+    }
+    if is_oracle_temporal_literal_database(database_type) {
+        if let Some(literal) =
+            format_oracle_temporal_literal(&text, column_info.map(|column| column.data_type.as_str()))
+        {
+            return literal;
+        }
+    }
+    let literal_text = if database_type == Some(DatabaseType::Tdengine) {
+        format_tdengine_timestamp_literal_text(&text)
+    } else if database_type == Some(DatabaseType::SqlServer) {
+        crate::sqlserver_temporal::normalize_sqlserver_temporal_literal(
+            &text,
+            column_info.map(|column| column.data_type.as_str()),
+        )
+        .unwrap_or(text)
+    } else if is_mysql_datetime_literal_database(database_type)
+        && column_info.map(|column| is_temporal_column_type(&column.data_type)).unwrap_or(true)
+    {
+        format_mysql_temporal_literal_text(&text, column_info.map(|column| column.data_type.as_str()))
+    } else {
+        text
+    };
+    if database_type == Some(DatabaseType::Postgres) && literal_text.contains('\\') {
+        // Escape strings have stable backslash semantics regardless of the
+        // session's standard_conforming_strings setting.
+        let escaped_text = literal_text.replace('\\', "\\\\").replace('\'', "''");
+        return format!("E'{escaped_text}'");
+    }
+    if database_type == Some(DatabaseType::SqlServer) {
+        return format_sqlserver_unicode_literal(&literal_text);
+    }
+    let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
+        literal_text.replace('\\', "\\\\").replace('\'', "\\'")
+    } else if is_sqlite_literal_database(database_type) || database_type == Some(DatabaseType::Dameng) {
+        // These engines keep backslashes literal in ordinary string literals,
+        // so only the quote delimiter needs escaping.
+        literal_text.replace('\'', "''")
+    } else {
+        literal_text.replace('\\', "\\\\").replace('\'', "''")
+    };
+    let escaped = format!("'{escaped_text}'");
+    escaped
+}
+
+fn postgres_json_array_element_type(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Option<&'static str> {
+    if database_type != Some(DatabaseType::Postgres) {
+        return None;
+    }
+    match column_info?.data_type.trim().to_ascii_lowercase().as_str() {
+        "json[]" | "_json" => Some("json"),
+        "jsonb[]" | "_jsonb" => Some("jsonb"),
+        _ => None,
+    }
+}
+
+fn format_postgres_json_array_sql_literal(arr: &[Value], element_type: &str) -> String {
+    if arr.is_empty() {
+        return format!("ARRAY[]::{element_type}[]");
+    }
+    let elements = arr
+        .iter()
+        .map(|value| {
+            if value.is_null() {
+                return "NULL".to_string();
+            }
+            let json = match value {
+                Value::String(text) => serde_json::from_str::<Value>(text)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|_| Value::String(text.clone()).to_string()),
+                _ => value.to_string(),
+            };
+            let escaped = json.replace('\\', "\\\\").replace('\'', "''");
+            format!("E'{escaped}'::{element_type}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("ARRAY[{elements}]")
+}
+
+fn format_sqlserver_unicode_literal(text: &str) -> String {
+    let mut parts = Vec::new();
+    let mut segment = String::new();
+
+    for ch in text.chars() {
+        let line_break = match ch {
+            '\r' => Some(13),
+            '\n' => Some(10),
+            _ => None,
+        };
+        if let Some(codepoint) = line_break {
+            if !segment.is_empty() {
+                parts.push(format!("N'{}'", segment.replace('\'', "''")));
+                segment.clear();
+            }
+            // Keep physical newlines out of generated SQL so a preceding
+            // backslash cannot be consumed as a line-continuation marker.
+            parts.push(format!("NCHAR({codepoint})"));
+        } else {
+            segment.push(ch);
+        }
+    }
+
+    if !segment.is_empty() {
+        parts.push(format!("N'{}'", segment.replace('\'', "''")));
+    }
+    if parts.is_empty() {
+        "N''".to_string()
+    } else {
+        parts.join(" + ")
+    }
+}
+
+fn is_sqlite_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso | DatabaseType::CloudflareD1)
+    )
+}
+
+fn format_grid_save_sql_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> String {
+    if empty_string_saves_as_null(value, column_info) {
+        "NULL".to_string()
+    } else {
+        format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+    }
+}
+
+fn empty_string_saves_as_null(value: &Value, column_info: Option<&DataGridColumnInfo>) -> bool {
+    value.as_str() == Some("")
+        && column_info.is_some_and(|column| column.is_nullable && !is_textual_column_type(&column.data_type))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OracleTemporalKind {
+    Date,
+    Timestamp,
+    TimestampWithTimeZone,
+}
+
+fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+}
+
+fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
+    let kind = oracle_temporal_column_kind(data_type?)?;
+    let parts = regex_like_oracle_temporal(text)?;
+    let fraction = parts.fraction.as_deref().unwrap_or_default();
+    let datetime = format!("{} {}{}", parts.date, parts.time, fraction);
+    match kind {
+        OracleTemporalKind::Date if oracle_temporal_parts_are_midnight(&parts) => {
+            Some(format!("DATE '{}'", parts.date))
+        }
+        OracleTemporalKind::Date => Some(format!("TO_DATE('{} {}', 'YYYY-MM-DD HH24:MI:SS')", parts.date, parts.time)),
+        OracleTemporalKind::Timestamp => {
+            let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+            Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"))
+        }
+        OracleTemporalKind::TimestampWithTimeZone => {
+            if parts.zone.is_empty() {
+                let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+                return Some(format!("TO_TIMESTAMP('{datetime}', '{mask}')"));
+            }
+            let zone = oracle_timezone_suffix(&parts.zone);
+            let mask = oracle_timestamp_format_mask(datetime.contains('.'));
+            Some(format!("TO_TIMESTAMP_TZ('{datetime} {zone}', '{mask} TZH:TZM')"))
+        }
+    }
+}
+
+fn oracle_temporal_parts_are_midnight(parts: &Rfc3339Parts) -> bool {
+    parts.time == "00:00:00"
+        && parts
+            .fraction
+            .as_deref()
+            .map(|fraction| fraction.trim_start_matches('.').chars().all(|ch| ch == '0'))
+            .unwrap_or(true)
+}
+
+fn oracle_temporal_column_kind(data_type: &str) -> Option<OracleTemporalKind> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ' ']).next().unwrap_or("");
+    match base {
+        "date" => Some(OracleTemporalKind::Date),
+        "timestamp" if lower.contains("with time zone") || lower.contains("with local time zone") => {
+            Some(OracleTemporalKind::TimestampWithTimeZone)
+        }
+        "timestamp" => Some(OracleTemporalKind::Timestamp),
+        _ => None,
+    }
+}
+
+fn oracle_timestamp_format_mask(has_fraction: bool) -> &'static str {
+    if has_fraction {
+        "YYYY-MM-DD HH24:MI:SS.FF"
+    } else {
+        "YYYY-MM-DD HH24:MI:SS"
+    }
+}
+
+fn oracle_timezone_suffix(zone: &str) -> String {
+    if zone.eq_ignore_ascii_case("z") {
+        "+00:00".to_string()
+    } else {
+        zone.to_string()
+    }
+}
+
+fn regex_like_oracle_temporal(text: &str) -> Option<Rfc3339Parts> {
+    if let Some(parts) = regex_like_rfc3339(text) {
+        return Some(parts);
+    }
+    regex_like_local_datetime(text)
+}
+
+fn regex_like_local_datetime(text: &str) -> Option<Rfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let date = &text[0..10];
+    if bytes.len() == 10 {
+        return Some(Rfc3339Parts {
+            date: date.to_string(),
+            time: "00:00:00".to_string(),
+            fraction: None,
+            zone: String::new(),
+        });
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let time = &text[11..19];
+    let rest = &text[19..];
+    let fraction = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 || digit_count != rest.len() {
+            return None;
+        }
+        Some(format!(".{}", &rest[..digit_count]))
+    } else if rest.is_empty() {
+        None
+    } else {
+        return None;
+    };
+    Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: String::new() })
+}
+
+fn is_mysql_bit_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> bool {
+    (is_mysql_datetime_literal_database(database_type)
+        || (database_type == Some(DatabaseType::Kingbase) && identifier_quote == Some("`")))
+        && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_kingbase_bit_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::Kingbase)
+        && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_bit_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    database_type != Some(DatabaseType::Postgres)
+        && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_bit_column_type(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| {
+        // SQL Server/tiberius reports nullable BIT result columns as `bitn`.
+        // They still need numeric 0/1 literals in generated UPDATE SQL.
+        matches!(token, "bit" | "bitn")
+    })
+}
+
+fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::Goldendb
+                | DatabaseType::Sundb
+        )
+    )
+}
+
+fn is_mysql_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::Mysql)
+        && column_info.map(|column| is_mysql_binary_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_mysql_binary_column_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
+}
+
+fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x")?;
+    if hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(if hex.is_empty() { "X''".to_string() } else { trimmed.to_string() })
+    } else {
+        None
+    }
+}
+
+fn is_postgres_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("bytea"))
+}
+
+fn format_postgres_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.len() % 2 == 0 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(format!("decode('{hex}', 'hex')"))
+    } else {
+        None
+    }
+}
+
+fn is_oracle_raw_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    is_oracle_temporal_literal_database(database_type)
+        && column_info.map(|column| is_oracle_raw_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_oracle_raw_column_type(data_type: &str) -> bool {
+    data_type.trim().split(['(', ':', ' ']).next().is_some_and(|base| base.eq_ignore_ascii_case("raw"))
+}
+
+fn format_oracle_raw_literal_text(text: &str) -> Option<String> {
+    let hex = text.strip_prefix("0x")?;
+    if hex.len() % 2 == 0 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        Some(format!("HEXTORAW('{hex}')"))
+    } else {
+        None
+    }
+}
+
+fn is_geometry_column_type(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    let base = lower.split('(').next().unwrap_or(&lower).trim();
+    matches!(
+        base,
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geometrycollection"
+    )
+}
+
+fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {
+    let data_type = column_info?.data_type.to_ascii_lowercase();
+    if is_boolean_type(&data_type, None) && text.eq_ignore_ascii_case("true") {
+        return Some(Value::Bool(true));
+    }
+    if is_boolean_type(&data_type, None) && text.eq_ignore_ascii_case("false") {
+        return Some(Value::Bool(false));
+    }
+    if is_numeric_type(&data_type) && is_numeric_literal(text) {
+        return text.parse::<serde_json::Number>().ok().map(Value::Number);
+    }
+    None
+}
+
+fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Some("1".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Some("0".to_string());
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) && !trimmed.is_empty() {
+        return Some(if trimmed.len() == 1 {
+            trimmed.to_string()
+        } else if trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
+            format!("b'{trimmed}'")
+        } else {
+            trimmed.to_string()
+        });
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("b'") && trimmed.ends_with('\'') {
+        let bits = &trimmed[2..trimmed.len() - 1];
+        if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
+            return Some(format!("b'{bits}'"));
+        }
+    }
+    None
+}
+
+fn format_kingbase_bit_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Some("b'1'".to_string());
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Some("b'0'".to_string());
+    }
+    if !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
+        return Some(format!("b'{trimmed}'"));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("b'") && trimmed.ends_with('\'') {
+        let bits = &trimmed[2..trimmed.len() - 1];
+        if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
+            return Some(format!("b'{bits}'"));
+        }
+    }
+    None
+}
+
+fn is_mysql_datetime_literal_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::Goldendb
+                | DatabaseType::Sundb
+        )
+    )
+}
+
+fn format_mysql_temporal_literal_text(text: &str, data_type: Option<&str>) -> String {
+    let Some(captures) = regex_like_rfc3339(text) else {
+        return text.to_string();
+    };
+    match temporal_column_kind(data_type) {
+        Some("date") => captures.date,
+        Some("time") => {
+            format!("{}{}", captures.time, normalize_mysql_fractional_seconds(captures.fraction.as_deref()))
+        }
+        _ => format!(
+            "{} {}{}",
+            captures.date,
+            captures.time,
+            normalize_mysql_fractional_seconds(captures.fraction.as_deref())
+        ),
+    }
+}
+
+struct Rfc3339Parts {
+    date: String,
+    time: String,
+    fraction: Option<String>,
+    zone: String,
+}
+
+fn regex_like_rfc3339(text: &str) -> Option<Rfc3339Parts> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let separator = *bytes.get(10)?;
+    if separator != b'T' && separator != b' ' {
+        return None;
+    }
+    if bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let date = &text[0..10];
+    let time = &text[11..19];
+    let rest = &text[19..];
+    let (fraction, zone) = if let Some(rest) = rest.strip_prefix('.') {
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digit_count == 0 || digit_count > 9 {
+            return None;
+        }
+        (Some(format!(".{}", &rest[..digit_count])), &rest[digit_count..])
+    } else {
+        (None, rest)
+    };
+    if zone == "Z" || zone == "z" || is_timezone_offset(zone) {
+        Some(Rfc3339Parts { date: date.to_string(), time: time.to_string(), fraction, zone: zone.to_string() })
+    } else {
+        None
+    }
+}
+
+fn is_timezone_offset(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 6
+        && matches!(bytes[0], b'+' | b'-')
+        && bytes[3] == b':'
+        && bytes[1].is_ascii_digit()
+        && bytes[2].is_ascii_digit()
+        && bytes[4].is_ascii_digit()
+        && bytes[5].is_ascii_digit()
+}
+
+fn normalize_mysql_fractional_seconds(fraction: Option<&str>) -> String {
+    match fraction {
+        Some(fraction) if fraction.len() > 7 => fraction[..7].to_string(),
+        Some(fraction) => fraction.to_string(),
+        None => String::new(),
+    }
+}
+
+fn is_temporal_column_type(data_type: &str) -> bool {
+    temporal_column_kind(Some(data_type)).is_some()
+}
+
+fn temporal_column_kind(data_type: Option<&str>) -> Option<&'static str> {
+    let base =
+        data_type.unwrap_or("").trim().to_ascii_lowercase().split(['(', ':', ' ']).next().unwrap_or("").to_string();
+    match base.as_str() {
+        "date" => Some("date"),
+        "time" => Some("time"),
+        "datetime" | "timestamp" => Some("datetime"),
+        _ => None,
+    }
+}
+
+fn format_tdengine_timestamp_literal_text(text: &str) -> String {
+    let Some((date, time, fraction)) = parse_tdengine_timestamp(text) else {
+        return text.to_string();
+    };
+    format!(
+        "{date}T{time}{}{suffix}",
+        normalize_fractional_seconds(fraction.as_deref()),
+        suffix = local_timezone_offset_suffix(text)
+    )
+}
+
+fn parse_tdengine_timestamp(text: &str) -> Option<(String, String, Option<String>)> {
+    if text.len() < 19 {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    if bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') || bytes.get(10) != Some(&b' ') {
+        return None;
+    }
+    if bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
+        return None;
+    }
+    let date = text[0..10].to_string();
+    let time = text[11..19].to_string();
+    let rest = &text[19..];
+    if rest.is_empty() {
+        return Some((date, time, None));
+    }
+    let fraction = rest.strip_prefix('.')?;
+    if fraction.is_empty() || fraction.len() > 9 || !fraction.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some((date, time, Some(format!(".{fraction}"))))
+}
+
+fn normalize_fractional_seconds(fraction: Option<&str>) -> String {
+    match fraction {
+        Some(fraction) if fraction.len() >= 4 => fraction[..4].to_string(),
+        Some(fraction) => format!("{fraction:0<4}"),
+        None => ".000".to_string(),
+    }
+}
+
+fn local_timezone_offset_suffix(text: &str) -> String {
+    let naive = NaiveDateTime::parse_from_str(&text.replace(' ', "T"), "%Y-%m-%dT%H:%M:%S%.f").ok();
+    let offset_minutes = naive
+        .and_then(|dt| {
+            let local = dt.and_local_timezone(Local).earliest()?;
+            Some(local.offset().local_minus_utc() / -60)
+        })
+        .unwrap_or_else(|| Local::now().offset().local_minus_utc() / -60);
+    let sign = if offset_minutes <= 0 { "+" } else { "-" };
+    let abs = offset_minutes.abs();
+    format!("{sign}{:02}:{:02}", abs / 60, abs % 60)
+}
+
+fn build_primary_key_where(
+    database_type: Option<DatabaseType>,
+    primary_keys: &[String],
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+    identifier_quote: Option<&str>,
+) -> String {
+    if primary_keys.is_empty() && uses_keyless_row_predicate(database_type) {
+        return build_row_where(database_type, columns, row, column_info, identifier_quote);
+    }
+    primary_keys
+        .iter()
+        .map(|primary_key| {
+            let value = row
+                .get(find_column_index(database_type, columns, primary_key).unwrap_or(usize::MAX))
+                .unwrap_or(&Value::Null);
+            build_column_predicate(
+                database_type,
+                primary_key,
+                value,
+                column_info_for(column_info, primary_key),
+                false,
+                identifier_quote,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn build_row_where(
+    database_type: Option<DatabaseType>,
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+    identifier_quote: Option<&str>,
+) -> String {
+    columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let column = column.as_deref()?;
+            if is_synthetic_row_id(database_type, Some(column)) {
+                return None;
+            }
+            Some(build_column_predicate(
+                database_type,
+                column,
+                row.get(index).unwrap_or(&Value::Null),
+                column_info_for(column_info, column),
+                true,
+                identifier_quote,
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn build_save_row_where(
+    database_type: Option<DatabaseType>,
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+    identifier_quote: Option<&str>,
+) -> String {
+    columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            let column = column.as_deref()?;
+            if is_synthetic_row_id(database_type, Some(column)) {
+                return None;
+            }
+            Some(build_save_column_predicate(
+                database_type,
+                column,
+                row.get(index).unwrap_or(&Value::Null),
+                column_info_for(column_info, column),
+                true,
+                identifier_quote,
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+pub fn build_column_predicate(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+    identifier_quote: Option<&str>,
+) -> String {
+    let ident = predicate_ident(database_type, column, identifier_quote);
+    if value.is_null() {
+        format!("{ident} IS NULL")
+    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
+        format!(
+            "BINARY {ident} = {}",
+            format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+        )
+    } else {
+        let literal = format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote);
+        if use_binary_text_comparison {
+            if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
+                return predicate;
+            }
+        }
+        format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
+    }
+}
+
+fn build_save_column_predicate(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+    identifier_quote: Option<&str>,
+) -> String {
+    let ident = predicate_ident(database_type, column, identifier_quote);
+    if value.is_null() || empty_string_saves_as_null(value, column_info) {
+        format!("{ident} IS NULL")
+    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
+        format!(
+            "BINARY {ident} = {}",
+            format_grid_save_sql_literal(value, database_type, column_info, identifier_quote)
+        )
+    } else {
+        let literal = format_grid_save_sql_literal(value, database_type, column_info, identifier_quote);
+        if use_binary_text_comparison {
+            if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
+                return predicate;
+            }
+        }
+        format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
+    }
+}
+
+fn postgres_keyless_json_predicate(
+    database_type: Option<DatabaseType>,
+    ident: &str,
+    literal: &str,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Option<String> {
+    if !is_postgres_like_pattern_database(database_type) {
+        return None;
+    }
+    let normalized = column_info?.data_type.trim().to_ascii_lowercase();
+    let data_type = normalized.rsplit('.').next().unwrap_or(&normalized).trim_matches('"');
+    match data_type {
+        "json" => Some(format!("{ident}::text = {literal}::text")),
+        "jsonb" => Some(format!("{ident} = {literal}::jsonb")),
+        _ => None,
+    }
+}
+
+fn mysql_json_predicate_literal(
+    literal: String,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> String {
+    if database_type == Some(DatabaseType::Mysql)
+        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("json"))
+    {
+        format!("CAST({literal} AS JSON)")
+    } else {
+        literal
+    }
+}
+
+fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> String {
+    if database_type == Some(DatabaseType::ManticoreSearch) {
+        sql
+    } else {
+        format!("{sql};")
+    }
+}
+
+fn data_grid_update_sql(database_type: Option<DatabaseType>, table: &str, sets: &str, where_clause: &str) -> String {
+    if database_type == Some(DatabaseType::ClickHouse) {
+        format!("ALTER TABLE {table} UPDATE {sets} WHERE {where_clause}")
+    } else {
+        format!("UPDATE {table} SET {sets} WHERE {where_clause}")
+    }
+}
+
+fn data_grid_delete_sql(database_type: Option<DatabaseType>, table: &str, where_clause: &str) -> String {
+    if database_type == Some(DatabaseType::ClickHouse) {
+        format!("ALTER TABLE {table} DELETE WHERE {where_clause}")
+    } else {
+        format!("DELETE FROM {table} WHERE {where_clause}")
+    }
+}
+
+fn uses_mysql_binary_text_predicate(
+    database_type: Option<DatabaseType>,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::Mysql)
+        && value.is_string()
+        && column_info.map(|column| is_textual_column_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_textual_column_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(
+        base,
+        "char"
+            | "character"
+            | "varchar"
+            | "varchar2"
+            | "nvarchar"
+            | "nvarchar2"
+            | "nchar"
+            | "string"
+            | "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "ntext"
+            | "clob"
+            | "nclob"
+            | "enum"
+            | "set"
+    ) || lower.starts_with("character varying")
+        || lower.starts_with("national character varying")
+}
+
+fn is_oracle_lob_type(data_type: &str) -> bool {
+    let lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("");
+    matches!(base, "blob" | "clob" | "nclob" | "bfile" | "lob")
+        || lower.starts_with("binary large object")
+        || lower.starts_with("character large object")
+}
+
+fn oracle_character_lob_constructor(data_type: &str) -> Option<&'static str> {
+    let lower = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("");
+    match base {
+        "clob" => Some("TO_CLOB"),
+        "nclob" => Some("TO_NCLOB"),
+        _ if lower.starts_with("character large object") => Some("TO_CLOB"),
+        _ => None,
+    }
+}
+
+fn is_synthetic_row_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
+    uses_synthetic_row_id(database_type) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+}
+
+pub fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
+    database_type == Some(DatabaseType::Neo4j) && name == Some(DBX_NEO4J_ELEMENT_ID_COLUMN)
+}
+
+pub fn extra_is_auto_generated(extra: &str) -> bool {
+    extra.to_ascii_lowercase().split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|part| {
+        matches!(part, "auto_increment" | "autoincrement" | "identity" | "smallserial" | "serial" | "bigserial")
+    })
+}
+
+pub fn is_auto_generated_column(column: &DataGridColumnInfo) -> bool {
+    extra_is_auto_generated(column.extra.as_deref().unwrap_or(""))
+        || column.column_default.as_deref().is_some_and(|default| default.to_ascii_lowercase().contains("nextval("))
+}
+
+fn grid_value_is_empty(value: &Value) -> bool {
+    value.is_null() || value.as_str().is_some_and(str::is_empty)
+}
+
+pub fn is_grid_insert_omitted_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    name: Option<&str>,
+    include_computed_columns: bool,
+) -> bool {
+    is_synthetic_row_id(database_type, name)
+        || is_postgres_tsvector_column(database_type, column_info)
+        || (!include_computed_columns && is_non_identity_generated_column(column_info))
+}
+
+fn is_grid_update_omitted_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    name: Option<&str>,
+    primary_key_set: &[String],
+) -> bool {
+    is_synthetic_row_id(database_type, name)
+        || is_clickhouse_key_column(database_type, column_info, name, primary_key_set)
+        || is_non_identity_generated_column(column_info)
+}
+
+fn is_clickhouse_key_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    name: Option<&str>,
+    primary_key_set: &[String],
+) -> bool {
+    if database_type != Some(DatabaseType::ClickHouse) {
+        return false;
+    }
+    column_info.is_some_and(|column| column.is_primary_key)
+        || is_clickhouse_partition_key_column(database_type, column_info)
+        || name.is_some_and(|name| primary_key_set.contains(&normalize_column_name(name)))
+}
+
+fn is_clickhouse_partition_key_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::ClickHouse)
+        && column_info.and_then(|column| column.extra.as_deref()).is_some_and(|extra| {
+            extra.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|part| part == "partition_key")
+        })
+}
+
+fn is_postgres_tsvector_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    database_type == Some(DatabaseType::Postgres)
+        && column_info.map(|column| is_postgres_tsvector_type(&column.data_type)).unwrap_or(false)
+}
+
+fn is_postgres_tsvector_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().trim_matches('"').to_ascii_lowercase();
+    normalized == "tsvector" || normalized.ends_with(".tsvector")
+}
+
+pub fn is_non_identity_generated_column(column_info: Option<&DataGridColumnInfo>) -> bool {
+    let extra = column_info.and_then(|column| column.extra.as_deref()).unwrap_or("").to_ascii_lowercase();
+    (extra.contains("generated always as") || extra.contains("virtual generated") || extra.contains("stored generated"))
+        && !extra.contains("identity")
+}
+
+fn is_null_write_to_not_null_column(
+    database_type: Option<DatabaseType>,
+    not_null_columns: &[String],
+    column: Option<&str>,
+    value: &Value,
+) -> bool {
+    let Some(column) = column else {
+        return false;
+    };
+    if is_synthetic_row_id(database_type, Some(column)) || is_neo4j_element_id(database_type, Some(column)) {
+        return false;
+    }
+    value.is_null() && not_null_columns.iter().any(|not_null| not_null == &normalize_column_name(column))
+}
+
+fn find_column_index(database_type: Option<DatabaseType>, columns: &[Option<String>], target: &str) -> Option<usize> {
+    if let Some(index) = columns.iter().position(|column| column.as_deref() == Some(target)) {
+        return Some(index);
+    }
+    // PostgreSQL can have distinct `id` and quoted `"ID"` columns. Only
+    // dialects whose result metadata is known to drift in case may fall back,
+    // and even then a case-only match must be unique.
+    if !matches!(
+        database_type,
+        Some(DatabaseType::Goldendb | DatabaseType::Kingbase | DatabaseType::Tdengine | DatabaseType::Hive)
+    ) {
+        return None;
+    }
+    let normalized_target = normalize_column_name(target);
+    let mut matches = columns.iter().enumerate().filter_map(|(index, column)| {
+        (column.as_deref().map(normalize_column_name).unwrap_or_default() == normalized_target).then_some(index)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
+fn primary_key_value_key(primary_key_indexes: &[usize], row: &[Value]) -> Option<String> {
+    let values: Vec<Value> =
+        primary_key_indexes.iter().map(|index| row.get(*index).cloned().unwrap_or(Value::Null)).collect();
+    if values.iter().any(Value::is_null) {
+        return None;
+    }
+    serde_json::to_string(&values).ok()
+}
+
+fn duplicate_primary_key_error(
+    primary_keys: &[String],
+    primary_key_indexes: &[usize],
+    row: &[Value],
+    matches_existing_row: bool,
+) -> String {
+    let key_summary = primary_keys
+        .iter()
+        .enumerate()
+        .map(|(index, primary_key)| {
+            format!(
+                "{} = {}",
+                primary_key,
+                format_key_value_for_message(row.get(primary_key_indexes[index]).unwrap_or(&Value::Null))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = if matches_existing_row { "the existing primary key" } else { "another new row's primary key" };
+    format!("New row duplicates {source} ({key_summary}). Change the key before saving.")
+}
+
+fn format_key_value_for_message(value: &Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    if let Some(value) = value.as_str() {
+        return format!("\"{}\"", value.replace('"', "\\\""));
+    }
+    value.to_string()
+}
+
+fn normalize_column_name(name: &str) -> String {
+    name.to_ascii_uppercase()
+}
+
+fn null_write_error(column: &str) -> String {
+    format!("Column \"{column}\" does not allow NULL.")
+}
+
+fn clickhouse_no_mutable_columns_error() -> String {
+    "ClickHouse primary or partition key columns cannot be updated. Change a non-key column before saving.".to_string()
+}
+
+fn predicate_ident(database_type: Option<DatabaseType>, name: &str, identifier_quote: Option<&str>) -> String {
+    if is_synthetic_row_id(database_type, Some(name)) {
+        if uses_xugu_row_id(database_type) {
+            return "ROWID".to_string();
+        }
+        "ROWIDTOCHAR(ROWID)".to_string()
+    } else {
+        data_grid_identifier(database_type, name, identifier_quote)
+    }
+}
+
+pub fn quote_ident(database_type: Option<DatabaseType>, name: &str) -> String {
+    quote_table_identifier(database_type, name)
+}
+
+pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<&str>, table_name: &str) -> String {
+    crate::sql_dialect::qualified_table_name(database_type, schema, table_name)
+}
+
+fn data_grid_identifier(database_type: Option<DatabaseType>, name: &str, identifier_quote: Option<&str>) -> String {
+    if database_type == Some(DatabaseType::Iris) {
+        return crate::sql_dialect::quote_iris_identifier(name, identifier_quote);
+    }
+    crate::sql_dialect::quote_table_data_identifier(database_type, name, identifier_quote)
+}
+
+pub fn data_grid_qualified_table_name(
+    database_type: Option<DatabaseType>,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    database: Option<&str>,
+    table_name: &str,
+    identifier_quote: Option<&str>,
+) -> String {
+    if database_type == Some(DatabaseType::Iris) {
+        let table = crate::sql_dialect::quote_iris_identifier(table_name, identifier_quote);
+        return schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(|schema| format!("{}.{table}", crate::sql_dialect::quote_iris_identifier(schema, identifier_quote)))
+            .unwrap_or(table);
+    }
+    if crate::sql_dialect::uses_connection_identifier_quote(database_type, identifier_quote) {
+        crate::sql_dialect::table_data_qualified_table_name(database_type, schema, table_name, identifier_quote)
+    } else {
+        crate::sql_dialect::qualified_table_name_with_catalog(database_type, catalog, schema, database, table_name)
+    }
+}
+
+fn column_filter_ref(database_type: Option<DatabaseType>, column_name: &str, identifier_quote: Option<&str>) -> String {
+    let quoted = predicate_ident(database_type, column_name, identifier_quote);
+    if database_type == Some(DatabaseType::Neo4j) {
+        format!("n.{quoted}")
+    } else {
+        quoted
+    }
+}
+
+fn column_like_filter_ref(
+    database_type: Option<DatabaseType>,
+    column_name: &str,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+) -> String {
+    let column = column_filter_ref(database_type, column_name, identifier_quote);
+    if is_postgres_like_pattern_database(database_type)
+        && column_info.map(|column_info| !is_textual_column_type(&column_info.data_type)).unwrap_or(true)
+    {
+        format!("{column}::text")
+    } else {
+        column
+    }
+}
+
+fn is_postgres_like_pattern_database(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Postgres
+                | DatabaseType::Redshift
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::OpenGauss
+        )
+    )
+}
+
+fn value_to_filter_text(value: &Value) -> String {
+    if let Some(value) = value.as_str() {
+        value.to_string()
+    } else if value.is_null() {
+        String::new()
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_typed_filter_value(
+    text: &str,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Value {
+    let unquoted = unwrap_matching_quotes(text);
+    let data_type = column_info.map(|column| column.data_type.to_ascii_lowercase()).unwrap_or_default();
+    if is_boolean_type(&data_type, database_type) && unquoted.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if is_boolean_type(&data_type, database_type) && unquoted.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    if (is_numeric_type(&data_type) || data_type.is_empty()) && is_numeric_literal(&unquoted) {
+        if let Ok(number) = unquoted.parse::<serde_json::Number>() {
+            return Value::Number(number);
+        }
+    }
+    Value::String(unquoted)
+}
+
+fn unwrap_matching_quotes(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let Some(last) = text.chars().last() else {
+        return String::new();
+    };
+    if text.len() >= 2 && ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
+        text[1..text.len() - 1].to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn is_numeric_type(data_type: &str) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    const NUMERIC_TOKENS: &[&str] = &[
+        "int",
+        "integer",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "mediumint",
+        "serial",
+        "number",
+        "numeric",
+        "decimal",
+        "float",
+        "double",
+        "real",
+        "money",
+    ];
+    lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| NUMERIC_TOKENS.contains(&token) || is_sized_numeric_token(token))
+}
+
+// Databases like Cloud Spanner (GoogleSQL) and ClickHouse spell their numeric
+// types with an explicit bit width, e.g. INT64/FLOAT64/FLOAT32 or
+// Int8/UInt64/Float64. Recognizing `int`/`uint`/`float` followed by digits keeps
+// these as numeric SQL literals so filter values are not quoted as strings,
+// which strongly typed engines reject (INT64 = STRING has no matching operator).
+// `interval` and similar names stay excluded because they are not `int`+digits.
+fn is_sized_numeric_token(token: &str) -> bool {
+    for prefix in ["int", "uint", "float"] {
+        if let Some(width) = token.strip_prefix(prefix) {
+            if !width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_boolean_type(data_type: &str, database_type: Option<DatabaseType>) -> bool {
+    let lower = data_type.to_ascii_lowercase();
+    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| {
+        matches!(token, "bool" | "boolean")
+            || (matches!(token, "bit" | "bitn") && database_type != Some(DatabaseType::Postgres))
+    })
+}
+
+fn is_numeric_literal(text: &str) -> bool {
+    if text.trim() != text || text.is_empty() {
+        return false;
+    }
+    text.parse::<f64>().is_ok_and(f64::is_finite)
+        && text.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E'))
+        && text.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::ManticoreSearch
+                | DatabaseType::Postgres
+                | DatabaseType::Sqlite
+                | DatabaseType::Rqlite
+                | DatabaseType::Turso
+                | DatabaseType::CloudflareD1
+                | DatabaseType::DuckDb
+                | DatabaseType::SqlServer
+                | DatabaseType::Oracle
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks
+                | DatabaseType::Redshift
+                | DatabaseType::Dameng
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kwdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Highgo
+                | DatabaseType::Uxdb
+                | DatabaseType::Vastbase
+                | DatabaseType::Goldendb
+                | DatabaseType::Yashandb
+                | DatabaseType::Oscar
+                | DatabaseType::Databricks
+                | DatabaseType::SapHana
+                | DatabaseType::Teradata
+                | DatabaseType::Vertica
+                | DatabaseType::Firebird
+                | DatabaseType::Exasol
+                | DatabaseType::OpenGauss
+                | DatabaseType::Questdb
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::Gbase
+                | DatabaseType::Access
+                | DatabaseType::H2
+                | DatabaseType::Snowflake
+                | DatabaseType::Db2
+                | DatabaseType::Informix
+                | DatabaseType::Bigquery
+                | DatabaseType::Sundb
+                | DatabaseType::Databend
+                | DatabaseType::Hive
+                | DatabaseType::Iris
+        )
+    )
+}
+
+pub fn column_info_for<'a>(columns: &'a [DataGridColumnInfo], name: &str) -> Option<&'a DataGridColumnInfo> {
+    let normalized = normalize_column_name(name);
+    columns.iter().find(|column| normalize_column_name(&column.name) == normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn column(name: &str, data_type: &str, nullable: bool, extra: Option<&str>) -> DataGridColumnInfo {
+        DataGridColumnInfo {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            is_nullable: nullable,
+            is_primary_key: false,
+            column_default: None,
+            extra: extra.map(ToString::to_string),
+        }
+    }
+
+    fn mysql_people_save_options(row_count: usize) -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("status", "varchar(32)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "status".to_string()],
+            source_columns: None,
+            rows: (1..=row_count).map(|id| vec![json!(id), json!("active")]).collect(),
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        }
+    }
+
+    #[test]
+    fn iris_data_grid_count_queries_the_table_without_wrapping_top_sql() {
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Iris),
+                identifier_quote: Some("\"".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("SS".to_string()),
+                table_name: "SS_User".to_string(),
+                where_input: Some("SSUSR_IsActive = 'Y'".to_string()),
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"SS\".\"SS_User\" WHERE (SSUSR_IsActive = 'Y')"
+        );
+    }
+
+    #[test]
+    fn mysql_conditional_update_uses_typed_value_and_requires_a_writable_column_and_where() {
+        let options = DataGridConditionalUpdateSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("status", "varchar(32)", true, None)]),
+            },
+            column_name: "status".to_string(),
+            value: json!("O'Reilly"),
+            where_input: "WHERE tenant_id = 7;".to_string(),
+        };
+
+        assert_eq!(
+            build_data_grid_conditional_update_sql(options.clone()),
+            Some("UPDATE `app`.`people` SET `status` = 'O''Reilly' WHERE (tenant_id = 7);".to_string())
+        );
+
+        let mut condition_only = options.clone();
+        condition_only.where_input = "tenant_id = 7".to_string();
+        assert_eq!(
+            build_data_grid_conditional_update_sql(condition_only),
+            Some("UPDATE `app`.`people` SET `status` = 'O''Reilly' WHERE (tenant_id = 7);".to_string())
+        );
+
+        let mut empty_where = options.clone();
+        empty_where.where_input = " ".to_string();
+        assert_eq!(build_data_grid_conditional_update_sql(empty_where), None);
+
+        let mut primary_key = options;
+        primary_key.column_name = "id".to_string();
+        assert_eq!(build_data_grid_conditional_update_sql(primary_key), None);
+    }
+
+    #[test]
+    fn iris_cache_data_grid_save_uses_unquoted_ordinary_identifiers() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "PA_PatMas".to_string(),
+                primary_keys: vec!["PAPMI_RowId".to_string()],
+                columns: Some(vec![
+                    column("PAPMI_RowId", "integer", false, None),
+                    column("PAPMI_ID", "varchar(32)", true, None),
+                ]),
+            },
+            columns: vec!["PAPMI_RowId".to_string(), "PAPMI_ID".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(51), json!("before")]],
+            dirty_rows: vec![(0, vec![(1, json!("210101202201016555"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE SQLUser.PA_PatMas SET PAPMI_ID = '210101202201016555' WHERE PAPMI_RowId = 51;"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "UPDATE SQLUser.PA_PatMas SET PAPMI_ID = 'before' WHERE PAPMI_RowId = 51 AND PAPMI_ID = '210101202201016555';"
+            ]
+        );
+    }
+
+    #[test]
+    fn iris_data_grid_save_quotes_only_delimited_identifiers_across_mutations() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "Patient Record".to_string(),
+                primary_keys: vec!["Row ID".to_string()],
+                columns: Some(vec![
+                    column("Row ID", "integer", false, None),
+                    column("PAPMI_ID", "varchar(32)", true, None),
+                ]),
+            },
+            columns: vec!["Row ID".to_string(), "PAPMI_ID".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(51), json!("deleted")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![vec![json!(52), json!("inserted")]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"App Schema\".\"Patient Record\" WHERE \"Row ID\" = 51;",
+                "INSERT INTO \"App Schema\".\"Patient Record\" (\"Row ID\", PAPMI_ID) VALUES (52, 'inserted');",
+            ]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "DELETE FROM \"App Schema\".\"Patient Record\" WHERE \"Row ID\" = 52 AND PAPMI_ID = 'inserted';",
+                "INSERT INTO \"App Schema\".\"Patient Record\" (\"Row ID\", PAPMI_ID) VALUES (51, 'deleted');",
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_keyless_update_preserves_jsonb_array_elements() {
+        let endpoints =
+            json!([r#"{"port":10031,"type":"admin_web"}"#, r#""quoted""#, r#"[1,true,{"nested":null}]"#, null]);
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "services".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("id", "integer", false, None),
+                    column("name", "text", false, None),
+                    column("endpoints", "jsonb[]", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string(), "endpoints".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("before"), endpoints]],
+            dirty_rows: vec![(0, vec![(1, json!("after"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 1);
+        let statement = &result.statements[0];
+        assert!(statement.starts_with("UPDATE \"public\".\"services\" SET \"name\" = 'after' WHERE "));
+        assert!(statement.contains("\"endpoints\" = ARRAY["));
+        assert!(statement.contains("admin_web"));
+        assert!(statement.contains(r#"E'"quoted"'::jsonb"#), "{statement}");
+        assert!(statement.contains("NULL]"));
+        assert!(!statement.contains('\u{1}'));
+    }
+
+    #[test]
+    fn postgres_keyless_update_casts_json_predicates() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "profiles".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("user_id", "uuid", false, None),
+                    column("status", "text", false, None),
+                    column("photo", "json", true, None),
+                    column("extend_list", "jsonb", true, None),
+                ]),
+            },
+            columns: vec!["user_id".to_string(), "status".to_string(), "photo".to_string(), "extend_list".to_string()],
+            source_columns: None,
+            rows: vec![vec![
+                json!("d7910cef-4188-4309-99ce-8e7b64d64869"),
+                json!("0"),
+                json!("[]"),
+                json!(r#"[{"type":"combobox","key":"gender","value":"C017MALE"}]"#),
+            ]],
+            dirty_rows: vec![(0, vec![(1, json!("1"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 1);
+        let statement = &result.statements[0];
+        assert!(statement.contains(r#""photo"::text = '[]'::text"#), "{statement}");
+        assert!(
+            statement.contains(r#""extend_list" = '[{"type":"combobox","key":"gender","value":"C017MALE"}]'::jsonb"#),
+            "{statement}"
+        );
+    }
+
+    #[test]
+    fn postgres_json_array_literals_preserve_json_documents_and_nulls() {
+        let value = json!([r#"{"object":true}"#, r#""text""#, "[1,2]", "plain text", "null", null]);
+        let json_column = column("payload", "json[]", true, None);
+        let jsonb_column = column("payload", "jsonb[]", true, None);
+        let text_column = column("payload", "text[]", true, None);
+        let integer_column = column("payload", "integer[]", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), Some(&json_column)),
+            r#"ARRAY[E'{"object":true}'::json, E'"text"'::json, E'[1,2]'::json, E'"plain text"'::json, E'null'::json, NULL]"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), Some(&jsonb_column)),
+            r#"ARRAY[E'{"object":true}'::jsonb, E'"text"'::jsonb, E'[1,2]'::jsonb, E'"plain text"'::jsonb, E'null'::jsonb, NULL]"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!([]), Some(DatabaseType::Postgres), Some(&jsonb_column)),
+            "ARRAY[]::jsonb[]"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!(["first", null, "second"]),
+                Some(DatabaseType::Postgres),
+                Some(&text_column)
+            ),
+            r#"'{"first",NULL,"second"}'"#
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!([1, null, 2]), Some(DatabaseType::Postgres), Some(&integer_column)),
+            "'{1,NULL,2}'"
+        );
+    }
+
+    #[test]
+    fn builds_copy_update_statements() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["id".to_string(), "name".to_string(), "status".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada"), json!("active")]],
+        });
+        assert_eq!(
+            statements,
+            vec!["UPDATE \"public\".\"users\" SET \"name\" = 'Ada', \"status\" = 'active' WHERE \"id\" = 1;"]
+        );
+    }
+
+    #[test]
+    fn builds_copy_insert_statement_without_primary_keys() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "bigint".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: Some("auto_increment".to_string()),
+                    },
+                    DataGridColumnInfo {
+                        name: "login_name".to_string(),
+                        data_type: "varchar(64)".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "display_name".to_string(),
+                        data_type: "varchar(64)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["id".to_string(), "login_name".to_string(), "display_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES\n('ada', 'Ada'),\n('linus', 'Linus');")
+        );
+    }
+
+    #[test]
+    fn recognizes_postgres_serial_extras_as_auto_generated() {
+        for extra in ["serial", "smallserial", "bigserial"] {
+            assert!(extra_is_auto_generated(extra), "expected {extra} to be auto-generated");
+        }
+    }
+
+    #[test]
+    fn builds_postgres_copy_insert_without_serial_primary_key() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: Some("nextval('public.users_id_seq'::regclass)".to_string()),
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "name".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');"));
+    }
+
+    #[test]
+    fn copy_insert_uses_display_columns_but_source_columns_for_metadata() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "psn_basic_info".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "PSN_NO".to_string(),
+                        data_type: "varchar(32)".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "NAME".to_string(),
+                        data_type: "varchar(32)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["psn".to_string(), "psn_no".to_string(), "name".to_string()],
+            column_types: None,
+            source_columns: Some(vec![
+                Some("PSN_NO".to_string()),
+                Some("PSN_NO".to_string()),
+                Some("NAME".to_string()),
+            ]),
+            rows: vec![vec![json!("A-1"), json!("A-1"), json!("Ada")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `psn_basic_info` (`psn`, `psn_no`, `name`) VALUES ('A-1', 'A-1', 'Ada');")
+        );
+    }
+
+    #[test]
+    fn copy_insert_uses_source_columns_for_generated_column_exclusions() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "bigint".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: Some("auto_increment".to_string()),
+                    },
+                    DataGridColumnInfo {
+                        name: "display_name".to_string(),
+                        data_type: "varchar(64)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "display_name_upper".to_string(),
+                        data_type: "varchar(64)".to_string(),
+                        is_nullable: true,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: Some("virtual generated".to_string()),
+                    },
+                ]),
+            }),
+            columns: vec!["identifier".to_string(), "label".to_string(), "label_upper".to_string()],
+            column_types: None,
+            source_columns: Some(vec![
+                Some("id".to_string()),
+                Some("display_name".to_string()),
+                Some("display_name_upper".to_string()),
+            ]),
+            rows: vec![vec![json!(1), json!("Ada"), json!("ADA")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`label`) VALUES ('Ada');"));
+    }
+
+    #[test]
+    fn copy_update_keeps_source_columns_for_writeback() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["identifier".to_string(), "label".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("display_name".to_string())]),
+            rows: vec![vec![json!(1), json!("Ada")]],
+        });
+        assert_eq!(statements, vec!["UPDATE `users` SET `display_name` = 'Ada' WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn copy_insert_primary_key_exclusion_keeps_manual_composite_key_members() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "move_statistic_product_daily".to_string(),
+                primary_keys: vec!["id".to_string(), "stat_date".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "bigint unsigned".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: Some("auto_increment".to_string()),
+                    },
+                    DataGridColumnInfo {
+                        name: "stat_date".to_string(),
+                        data_type: "date".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "product_name".to_string(),
+                        data_type: "varchar(255)".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: Some("".to_string()),
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["id".to_string(), "stat_date".to_string(), "product_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2026-08-18"), json!("sweater")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `move_statistic_product_daily` (`stat_date`, `product_name`) VALUES ('2026-08-18', 'sweater');")
+        );
+    }
+
+    #[test]
+    fn copy_insert_primary_key_exclusion_keeps_manual_primary_keys() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "countries".to_string(),
+                primary_keys: vec!["code".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "code".to_string(),
+                        data_type: "varchar(2)".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "label".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["code".to_string(), "label".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!("AD"), json!("Andorra")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"public\".\"countries\" (\"code\", \"label\") VALUES ('AD', 'Andorra');")
+        );
+    }
+
+    #[test]
+    fn copy_insert_primary_key_exclusion_keeps_unknown_metadata_primary_keys() {
+        // Without column metadata we cannot prove the key is auto-generated;
+        // keep it rather than silently dropping NOT NULL data.
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            }),
+            columns: vec!["id".to_string(), "login_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("ada")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`id`, `login_name`) VALUES (1, 'ada');"));
+    }
+
+    #[test]
+    fn copy_insert_keeps_json_cells_as_single_json_literals() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Elasticsearch),
+            identifier_quote: None,
+            table_meta: None,
+            columns: vec!["id".to_string(), "active".to_string(), "profile".to_string()],
+            column_types: Some(vec![Some("number".to_string()), Some("boolean".to_string()), Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!(7), json!(true), json!(r#"{"name":"Ada","roles":["admin"]}"#)]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO table_name (\"id\", \"active\", \"profile\") VALUES (7, TRUE, '{\"name\":\"Ada\",\"roles\":[\"admin\"]}');")
+        );
+    }
+
+    #[test]
+    fn copy_insert_keeps_mysql_json_array_as_single_json_literal() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: None,
+            columns: vec!["data".to_string()],
+            column_types: Some(vec![Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!([1, 2, 3])]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[1,2,3]');"));
+    }
+
+    #[test]
+    fn copy_insert_keeps_mysql_json_empty_array_as_single_json_literal() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: None,
+            columns: vec!["data".to_string()],
+            column_types: Some(vec![Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!([])]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[]');"));
+    }
+
+    #[test]
+    fn copy_insert_keeps_mysql_json_object_as_single_json_literal() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: None,
+            columns: vec!["data".to_string()],
+            column_types: Some(vec![Some("json".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!({"a": 1})]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('{\"a\":1}');"));
+    }
+
+    #[test]
+    fn copy_update_formats_mysql_json_documents_as_compact_strings() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "documents".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("payload", "JSON", true, None)]),
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!(1), json!([111, 222, 333])],
+                vec![json!(2), json!({"nested": [1, 2]})],
+                vec![json!(3), json!([])],
+            ],
+        });
+
+        assert_eq!(
+            statements,
+            vec![
+                "UPDATE `documents` SET `payload` = '[111,222,333]' WHERE `id` = 1;",
+                "UPDATE `documents` SET `payload` = '{\"nested\":[1,2]}' WHERE `id` = 2;",
+                "UPDATE `documents` SET `payload` = '[]' WHERE `id` = 3;",
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_update_preserves_json_scalars_and_generic_arrays() {
+        let json_statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "documents".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("payload", "json", true, None)]),
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(r#"[1,2]"#)], vec![json!(2), json!(true)], vec![json!(3), Value::Null]],
+        });
+        assert_eq!(
+            json_statements,
+            vec![
+                "UPDATE `documents` SET `payload` = '[1,2]' WHERE `id` = 1;",
+                "UPDATE `documents` SET `payload` = TRUE WHERE `id` = 2;",
+                "UPDATE `documents` SET `payload` = NULL WHERE `id` = 3;",
+            ]
+        );
+
+        let generic_statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "arrays".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!([1, 2])]],
+        });
+        assert_eq!(generic_statements, vec!["UPDATE `arrays` SET `payload` = '{1,2}' WHERE `id` = 1;"]);
+
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!([1, 2]),
+                Some(DatabaseType::Postgres),
+                Some(&column("items", "integer[]", true, None)),
+            ),
+            "'{1,2}'"
+        );
+        for database_type in [DatabaseType::ClickHouse, DatabaseType::Databend] {
+            assert_eq!(format_grid_sql_literal(&json!([1, 2]), Some(database_type), None), "[1,2]");
+        }
+    }
+
+    #[test]
+    fn builds_copy_insert_without_primary_keys_when_primary_keys_are_hidden() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            }),
+            columns: vec!["login_name".to_string(), "display_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!("ada"), json!("Ada")]],
+            exclude_primary_keys: true,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `users` (`login_name`, `display_name`) VALUES ('ada', 'Ada');")
+        );
+    }
+
+    #[test]
+    fn builds_copy_insert_statement_row_by_row() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            }),
+            columns: vec!["id".to_string(), "login_name".to_string(), "display_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::RowByRow,
+        });
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "INSERT INTO `users` (`id`, `login_name`, `display_name`) VALUES (1, 'ada', 'Ada');\nINSERT INTO `users` (`id`, `login_name`, `display_name`) VALUES (2, 'linus', 'Linus');"
+            )
+        );
+    }
+
+    #[test]
+    fn oracle_copy_insert_statement_uses_one_statement_per_row() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "USERS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: None,
+            }),
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');\nINSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (2, 'Linus');")
+        );
+    }
+
+    #[test]
+    fn mysql_copy_statements_preserve_blob_hex_literals() {
+        let table_meta = DataGridTableMeta {
+            catalog: None,
+            database: None,
+            schema: None,
+            table_name: "reports".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![column("id", "int", false, None), column("payload", "MEDIUMBLOB", true, None)]),
+        };
+        let columns = vec!["id".to_string(), "payload".to_string()];
+        let rows = vec![vec![json!(1), json!("0x0001abff")], vec![json!(2), json!("0x")]];
+
+        let insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(table_meta.clone()),
+            columns: columns.clone(),
+            column_types: None,
+            source_columns: None,
+            rows: rows.clone(),
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            insert.as_deref(),
+            Some("INSERT INTO `reports` (`id`, `payload`) VALUES\n(1, 0x0001abff),\n(2, X'');")
+        );
+
+        let updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta,
+            columns,
+            source_columns: None,
+            rows,
+        });
+        assert_eq!(
+            updates,
+            vec![
+                "UPDATE `reports` SET `payload` = 0x0001abff WHERE `id` = 1;",
+                "UPDATE `reports` SET `payload` = X'' WHERE `id` = 2;"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_text_columns_keep_prefixed_hex_strings_quoted() {
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x0001abff"),
+                Some(DatabaseType::Mysql),
+                Some(&column("note", "varchar(64)", true, None)),
+            ),
+            "'0x0001abff'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0xnothex"),
+                Some(DatabaseType::Mysql),
+                Some(&column("payload", "blob", true, None)),
+            ),
+            "'0xnothex'"
+        );
+    }
+
+    #[test]
+    fn builds_copy_insert_statement_omits_postgres_tsvector_columns() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "articles".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "integer", false, None),
+                    column("title", "text", false, None),
+                    column("search_vector", "tsvector", true, None),
+                ]),
+            }),
+            columns: vec!["id".to_string(), "title".to_string(), "search_vector".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"public\".\"articles\" (\"id\", \"title\") VALUES (1, 'Hello');")
+        );
+    }
+
+    #[test]
+    fn oracle_copy_insert_uses_result_column_types_for_date_literals() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: None,
+            columns: vec!["ID".to_string(), "CREATED_ON".to_string(), "RAW_TEXT".to_string()],
+            column_types: Some(vec![
+                Some("NUMBER".to_string()),
+                Some("DATE".to_string()),
+                Some("VARCHAR2".to_string()),
+            ]),
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO table_name (\"ID\", \"CREATED_ON\", \"RAW_TEXT\") VALUES (1, TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'), '2022-08-25T09:58:43Z');")
+        );
+    }
+
+    #[test]
+    fn builds_filter_conditions() {
+        for (database_type, identifier_quote, column_name, expected) in [
+            (DatabaseType::Gaussdb, Some("\""), "column_01", "column_01 = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "MixedCase", "\"MixedCase\" = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "order", "\"order\" = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "order detail", "\"order detail\" = 1"),
+            (DatabaseType::Gaussdb, Some("\""), "\"AlreadyQuoted\"", "\"AlreadyQuoted\" = 1"),
+            (DatabaseType::Gaussdb, Some("`"), "MixedCase", "`MixedCase` = 1"),
+            (DatabaseType::Postgres, Some("`"), "order", "`order` = 1"),
+            (DatabaseType::OpenGauss, Some("`"), "order detail", "`order detail` = 1"),
+            (DatabaseType::Gaussdb, None, "column_01", "\"column_01\" = 1"),
+            (DatabaseType::OpenGauss, None, "column_01", "\"column_01\" = 1"),
+        ] {
+            assert_eq!(
+                build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                    database_type: Some(database_type),
+                    identifier_quote: identifier_quote.map(str::to_string),
+                    column_name: column_name.to_string(),
+                    mode: DataGridContextFilterMode::Equals,
+                    value: json!(1),
+                    values: Vec::new(),
+                    end_value: None,
+                    column_info: Some(column(column_name, "integer", false, None)),
+                })
+                .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Kingbase),
+                identifier_quote: Some("`".to_string()),
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::Equals,
+                value: json!("34-B-0048"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` = '34-B-0048'")
+        );
+        for (mode, expected) in [
+            (DataGridContextFilterMode::GreaterThanOrEqual, "`score` >= 80"),
+            (DataGridContextFilterMode::LessThanOrEqual, "`score` <= 80"),
+        ] {
+            assert_eq!(
+                build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                    database_type: Some(DatabaseType::Mysql),
+                    identifier_quote: None,
+                    column_name: "score".to_string(),
+                    mode,
+                    value: json!(80),
+                    values: Vec::new(),
+                    end_value: None,
+                    column_info: Some(column("score", "int", false, None)),
+                })
+                .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Kingbase),
+                identifier_quote: Some("`".to_string()),
+                column_name: "file_name".to_string(),
+                column_info: Some(column("file_name", "varchar", false, None)),
+                raw_value: "34-B-0048".to_string(),
+            })
+            .as_deref(),
+            Some("`file_name` = '34-B-0048'")
+        );
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "id".to_string(),
+                column_info: Some(column("id", "int", false, None)),
+                raw_value: "49436".to_string(),
+            })
+            .as_deref(),
+            Some("`id` = 49436")
+        );
+        // Cloud Spanner (GoogleSQL) spells integers as INT64; the value must stay
+        // an unquoted numeric literal or `INT64 = STRING` fails to compile.
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Spanner),
+                identifier_quote: Some("`".to_string()),
+                column_name: "slipnumber".to_string(),
+                column_info: Some(column("slipnumber", "INT64", false, None)),
+                raw_value: "1005".to_string(),
+            })
+            .as_deref(),
+            Some("`slipnumber` = 1005")
+        );
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Spanner),
+                identifier_quote: Some("`".to_string()),
+                column_name: "ratio".to_string(),
+                column_info: Some(column("ratio", "FLOAT64", false, None)),
+                raw_value: "1.5".to_string(),
+            })
+            .as_deref(),
+            Some("`ratio` = 1.5")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "status".to_string(),
+                mode: DataGridContextFilterMode::Like,
+                value: json!("active"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("status", "varchar", true, None)),
+            })
+            .as_deref(),
+            Some("\"status\" LIKE '%active%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "update_date".to_string(),
+                mode: DataGridContextFilterMode::Like,
+                value: json!("128"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("update_date", "bigint", false, None)),
+            })
+            .as_deref(),
+            Some("\"update_date\"::text LIKE '%128%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "created_at".to_string(),
+                mode: DataGridContextFilterMode::NotLike,
+                value: json!("2026"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("created_at", "timestamp without time zone", false, None)),
+            })
+            .as_deref(),
+            Some("\"created_at\"::text NOT LIKE '%2026%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::BeginsWith,
+                value: json!("FN"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` LIKE 'FN%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::EndsWith,
+                value: json!(".sql"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` LIKE '%.sql'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "update_date".to_string(),
+                mode: DataGridContextFilterMode::BeginsWith,
+                value: json!("128"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("update_date", "bigint", false, None)),
+            })
+            .as_deref(),
+            Some("\"update_date\"::text LIKE '128%'")
+        );
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                identifier_quote: None,
+                column_name: "active".to_string(),
+                column_info: Some(column("active", "bitn", false, None)),
+                raw_value: "false".to_string(),
+            })
+            .as_deref(),
+            Some("[active] = 0")
+        );
+    }
+
+    #[test]
+    fn builds_blank_and_nonblank_context_filter_conditions() {
+        let build = |database_type: DatabaseType,
+                     mode: DataGridContextFilterMode,
+                     identifier_quote: Option<&str>,
+                     column_name: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: identifier_quote.map(str::to_string),
+                column_name: column_name.to_string(),
+                mode,
+                value: Value::Null,
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column(column_name, "varchar", true, None)),
+            })
+        };
+
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsBlank, None, "status"),
+            Some("(`status` IS NULL OR `status` = '')".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsNotBlank, None, "status"),
+            Some("(`status` IS NOT NULL AND `status` <> '')".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsNull, None, "status"),
+            Some("`status` IS NULL".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Mysql, DataGridContextFilterMode::IsNotNull, None, "status"),
+            Some("`status` IS NOT NULL".to_string())
+        );
+        assert_eq!(
+            build(DatabaseType::Kingbase, DataGridContextFilterMode::IsBlank, Some("`"), "order detail"),
+            Some("(`order detail` IS NULL OR `order detail` = '')".to_string())
+        );
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(
+                build(database_type, DataGridContextFilterMode::IsBlank, None, "STATUS"),
+                Some("\"STATUS\" IS NULL".to_string())
+            );
+            assert_eq!(
+                build(database_type, DataGridContextFilterMode::IsNotBlank, None, "STATUS"),
+                Some("\"STATUS\" IS NOT NULL".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_context_filter_mode_serialization_stable() {
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsNull).unwrap(), "\"is-null\"");
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsNotNull).unwrap(), "\"is-not-null\"");
+        assert!(matches!(
+            serde_json::from_str::<DataGridContextFilterMode>("\"is-null\"").unwrap(),
+            DataGridContextFilterMode::IsNull
+        ));
+        assert!(matches!(
+            serde_json::from_str::<DataGridContextFilterMode>("\"is-not-null\"").unwrap(),
+            DataGridContextFilterMode::IsNotNull
+        ));
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsBlank).unwrap(), "\"is-blank\"");
+        assert_eq!(serde_json::to_string(&DataGridContextFilterMode::IsNotBlank).unwrap(), "\"is-not-blank\"");
+    }
+
+    #[test]
+    fn builds_oracle_synthetic_rowid_context_filter_conditions() {
+        let equals = |database_type, column_name: &str, value| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type,
+                identifier_quote: None,
+                column_name: column_name.to_string(),
+                mode: DataGridContextFilterMode::Equals,
+                value,
+                values: Vec::new(),
+                end_value: None,
+                column_info: None,
+            })
+        };
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(
+                equals(Some(database_type), DBX_ROWID_COLUMN, json!("AAAFd1AAFAAAABSAA/")),
+                Some("ROWIDTOCHAR(ROWID) = 'AAAFd1AAFAAAABSAA/'".to_string())
+            );
+        }
+        assert_eq!(equals(Some(DatabaseType::Oracle), "REPORT_ID", json!(7)), Some("\"REPORT_ID\" = 7".to_string()));
+        assert_eq!(equals(Some(DatabaseType::Neo4j), "score", json!(7)), Some("n.`score` = 7".to_string()));
+        assert_eq!(equals(None, DBX_ROWID_COLUMN, json!("row-id")), Some("\"__DBX_ROWID\" = 'row-id'".to_string()));
+        assert_eq!(equals(Some(DatabaseType::VictoriaMetrics), DBX_ROWID_COLUMN, json!("row-id")), None);
+    }
+
+    #[test]
+    fn keeps_iotdb_tree_time_epoch_filters_unquoted_without_column_metadata() {
+        let condition = |mode, value, values, end_value| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Iotdb),
+                identifier_quote: None,
+                column_name: "Time".to_string(),
+                mode,
+                value,
+                values,
+                end_value,
+                column_info: None,
+            })
+        };
+
+        assert_eq!(
+            condition(DataGridContextFilterMode::Equals, json!("1786954706123"), Vec::new(), None),
+            Some("Time = 1786954706123".to_string())
+        );
+        assert_eq!(
+            condition(
+                DataGridContextFilterMode::Between,
+                json!("1786954706123"),
+                Vec::new(),
+                Some(json!("1786958307123"))
+            ),
+            Some("Time BETWEEN 1786954706123 AND 1786958307123".to_string())
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::Equals, json!("not-an-epoch"), Vec::new(), None),
+            Some("Time = 'not-an-epoch'".to_string())
+        );
+    }
+
+    #[test]
+    fn builds_membership_and_range_context_filter_conditions() {
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "id".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![json!(42), json!(99)],
+                end_value: None,
+                column_info: Some(column("id", "int", false, None)),
+            })
+            .as_deref(),
+            Some("`id` IN (42, 99)")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "status".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![Value::Null, json!("active"), json!("pending"), json!("active")],
+                end_value: None,
+                column_info: Some(column("status", "varchar", true, None)),
+            })
+            .as_deref(),
+            Some("(\"status\" IS NULL OR \"status\" IN ('active', 'pending'))")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "status".to_string(),
+                mode: DataGridContextFilterMode::NotIn,
+                value: Value::Null,
+                values: vec![Value::Null, json!("active"), json!("pending")],
+                end_value: None,
+                column_info: Some(column("status", "varchar", true, None)),
+            })
+            .as_deref(),
+            Some("(\"status\" IS NOT NULL AND \"status\" NOT IN ('active', 'pending'))")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                identifier_quote: None,
+                column_name: "name".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![json!("O'Reilly"), json!(r"C:\temp")],
+                end_value: None,
+                column_info: Some(column("name", "string", false, None)),
+            })
+            .as_deref(),
+            Some(r#"n.`name` IN ['O\'Reilly', 'C:\\temp']"#)
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "int", false, None)),
+            })
+            .as_deref(),
+            Some("[score] BETWEEN 10 AND 20")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotBetween,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "int", false, None)),
+            })
+            .as_deref(),
+            Some("[score] NOT BETWEEN 10 AND 20")
+        );
+    }
+
+    #[test]
+    fn builds_neo4j_membership_and_range_context_filter_conditions() {
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![json!(10), json!(20)],
+                end_value: None,
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("n.`score` IN [10, 20]")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotIn,
+                value: Value::Null,
+                values: vec![json!(10), json!(20)],
+                end_value: None,
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("(n.`score` IS NOT NULL AND NOT (n.`score` IN [10, 20]))")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("(n.`score` >= 10 AND n.`score` <= 20)")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotBetween,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("(n.`score` < 10 OR n.`score` > 20)")
+        );
+    }
+
+    #[test]
+    fn does_not_emit_membership_or_range_filters_for_unsupported_dialects() {
+        for database_type in [DatabaseType::InfluxDb, DatabaseType::Cassandra, DatabaseType::Jdbc] {
+            for mode in [
+                DataGridContextFilterMode::In,
+                DataGridContextFilterMode::NotIn,
+                DataGridContextFilterMode::Between,
+                DataGridContextFilterMode::NotBetween,
+            ] {
+                let (value, values, end_value) = match mode {
+                    DataGridContextFilterMode::In | DataGridContextFilterMode::NotIn => {
+                        (Value::Null, vec![json!(10), json!(20)], None)
+                    }
+                    DataGridContextFilterMode::Between | DataGridContextFilterMode::NotBetween => {
+                        (json!(10), Vec::new(), Some(json!(20)))
+                    }
+                    _ => unreachable!("only membership and range modes are tested"),
+                };
+
+                assert_eq!(
+                    build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                        database_type: Some(database_type),
+                        identifier_quote: None,
+                        column_name: "score".to_string(),
+                        mode,
+                        value,
+                        values,
+                        end_value,
+                        column_info: Some(column("score", "int", false, None)),
+                    }),
+                    None,
+                    "{database_type:?} must not emit {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn does_not_emit_sql_filters_for_victoriametrics() {
+        for mode in [
+            DataGridContextFilterMode::Equals,
+            DataGridContextFilterMode::Like,
+            DataGridContextFilterMode::GreaterThan,
+            DataGridContextFilterMode::IsNull,
+            DataGridContextFilterMode::IsBlank,
+            DataGridContextFilterMode::IsNotBlank,
+            DataGridContextFilterMode::In,
+            DataGridContextFilterMode::Between,
+        ] {
+            assert_eq!(
+                build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                    database_type: Some(DatabaseType::VictoriaMetrics),
+                    identifier_quote: None,
+                    column_name: "value".to_string(),
+                    mode,
+                    value: json!(10),
+                    values: vec![json!(10), json!(20)],
+                    end_value: Some(json!(20)),
+                    column_info: Some(column("value", "double", false, None)),
+                }),
+                None,
+                "VictoriaMetrics must not emit SQL filter mode {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn context_membership_and_range_filters_require_complete_values() {
+        let column_info = Some(column("score", "int", false, None));
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: Vec::new(),
+                end_value: None,
+                column_info: column_info.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: None,
+                column_info: column_info.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: Value::Null,
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: column_info.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotBetween,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(Value::Null),
+                column_info,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn context_filter_options_default_new_fields_when_deserializing_old_requests() {
+        let options: DataGridContextFilterConditionOptions = serde_json::from_value(json!({
+            "databaseType": "mysql",
+            "columnName": "id",
+            "mode": "equals",
+            "value": 42,
+        }))
+        .unwrap();
+
+        assert!(options.values.is_empty());
+        assert_eq!(options.end_value, None);
+    }
+
+    #[test]
+    fn builds_multi_value_filter_conditions() {
+        assert_eq!(
+            build_data_grid_column_values_filter_condition(DataGridColumnValuesFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                values: vec![json!("active"), json!("pending"), Value::Null, json!("active")],
+            })
+            .as_deref(),
+            Some("(\"status\" IS NULL OR \"status\" IN ('active', 'pending'))")
+        );
+        assert_eq!(
+            build_data_grid_column_values_filter_condition(DataGridColumnValuesFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "id".to_string(),
+                column_info: Some(column("id", "int", false, None)),
+                values: vec![json!(42)],
+            })
+            .as_deref(),
+            Some("`id` = 42")
+        );
+    }
+
+    #[test]
+    fn chunks_large_oracle_membership_filters_with_correct_boolean_operator() {
+        let values = (0..=1000).map(|value| json!(value)).collect::<Vec<_>>();
+        let in_condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            column_name: "id".to_string(),
+            mode: DataGridContextFilterMode::In,
+            value: Value::Null,
+            values: values.clone(),
+            end_value: None,
+            column_info: Some(column("id", "number", false, None)),
+        })
+        .unwrap();
+        assert_eq!(in_condition.matches("\"id\" IN (").count(), 2);
+        assert!(in_condition.contains(") OR \"id\" IN ("));
+
+        let not_in_condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            column_name: "id".to_string(),
+            mode: DataGridContextFilterMode::NotIn,
+            value: Value::Null,
+            values,
+            end_value: None,
+            column_info: Some(column("id", "number", false, None)),
+        })
+        .unwrap();
+        assert_eq!(not_in_condition.matches("\"id\" NOT IN (").count(), 2);
+        assert!(not_in_condition.contains(") AND \"id\" NOT IN ("));
+    }
+
+    #[test]
+    fn keeps_postgres_bit_strings_out_of_boolean_literal_handling() {
+        let bit = column("flags", "bit(3)", false, None);
+        let varying = column("flags", "bit varying", false, None);
+
+        assert_eq!(parse_typed_filter_value("true", Some(DatabaseType::Postgres), Some(&bit)), json!("true"));
+        assert_eq!(parse_typed_filter_value("false", Some(DatabaseType::Postgres), Some(&varying)), json!("false"));
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "flags".to_string(),
+                column_info: Some(bit),
+                raw_value: "true".to_string(),
+            })
+            .as_deref(),
+            Some("\"flags\" = 'true'")
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!(true),
+                Some(DatabaseType::SqlServer),
+                Some(&column("flag", "bit", false, None))
+            ),
+            "1"
+        );
+    }
+
+    #[test]
+    fn builds_column_distinct_values_sql() {
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: Some("WHERE deleted_at IS NULL;".to_string()),
+                search_value: Some("act".to_string()),
+                limit: None,
+                include_counts: true,
+            }),
+            "SELECT \"status\" AS dbx_value, COUNT(*) AS dbx_count FROM \"public\".\"users\" WHERE (deleted_at IS NULL) AND \"status\" LIKE '%act%' GROUP BY \"status\" ORDER BY dbx_count DESC, dbx_value LIMIT 1000"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "nvarchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(25),
+                include_counts: false,
+            }),
+            "SELECT TOP (25) [status] AS dbx_value FROM [users] GROUP BY [status] ORDER BY dbx_value"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                column_name: "id".to_string(),
+                column_info: Some(column("id", "int", false, None)),
+                where_input: None,
+                search_value: Some("42".to_string()),
+                limit: Some(25),
+                include_counts: true,
+            }),
+            "SELECT TOP (25) [id] AS dbx_value, COUNT(*) AS dbx_count FROM [users] WHERE [id] = 42 GROUP BY [id] ORDER BY dbx_count DESC, dbx_value"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                driver_profile: Some(" SQLSERVER-LEGACY ".to_string()),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "nvarchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(25),
+                include_counts: true,
+            }),
+            "SELECT [status] AS dbx_value, COUNT(*) AS dbx_count FROM [users] GROUP BY [status] ORDER BY dbx_count DESC, dbx_value"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Oracle),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "EVENTS".to_string(),
+                column_name: "KIND".to_string(),
+                column_info: Some(column("KIND", "VARCHAR2", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: true,
+            }),
+            "SELECT * FROM (SELECT \"KIND\" AS dbx_value, COUNT(*) AS dbx_count FROM \"APP\".\"EVENTS\" GROUP BY \"KIND\" ORDER BY dbx_count DESC, dbx_value) WHERE ROWNUM <= 10"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Firebird),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "USERS".to_string(),
+                column_name: "STATUS".to_string(),
+                column_info: Some(column("STATUS", "varchar(32)", true, None)),
+                where_input: Some("WHERE DELETED_AT IS NULL".to_string()),
+                search_value: None,
+                limit: Some(25),
+                include_counts: false,
+            }),
+            "SELECT \"STATUS\" AS dbx_value FROM \"USERS\" WHERE (DELETED_AT IS NULL) GROUP BY \"STATUS\" ORDER BY dbx_value ROWS 25"
+        );
+        // Doris / StarRocks external-catalog tables are addressed with a 3-part name.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: Some("iceberg_catalog".to_string()),
+                database: None,
+                schema: Some("sales".to_string()),
+                table_name: "orders".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: false,
+            }),
+            "SELECT `status` AS dbx_value FROM `iceberg_catalog`.`sales`.`orders` GROUP BY `status` ORDER BY dbx_value LIMIT 10"
+        );
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: Some("hive_catalog".to_string()),
+                database: None,
+                schema: None,
+                table_name: "orders".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: true,
+            }),
+            "SELECT `status` AS dbx_value, COUNT(*) AS dbx_count FROM `hive_catalog`.`orders` GROUP BY `status` ORDER BY dbx_count DESC, dbx_value LIMIT 10"
+        );
+        // The built-in `internal` catalog is never prefixed.
+        assert_eq!(
+            build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                driver_profile: None,
+                identifier_quote: None,
+                catalog: Some("internal".to_string()),
+                database: None,
+                schema: None,
+                table_name: "orders".to_string(),
+                column_name: "status".to_string(),
+                column_info: Some(column("status", "varchar", true, None)),
+                where_input: None,
+                search_value: None,
+                limit: Some(10),
+                include_counts: false,
+            }),
+            "SELECT `status` AS dbx_value FROM `orders` GROUP BY `status` ORDER BY dbx_value LIMIT 10"
+        );
+    }
+
+    #[test]
+    fn builds_grid_count_sql() {
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                where_input: Some("WHERE active = true;".to_string()),
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"public\".\"users\" WHERE (active = true)"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Jdbc),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("DEMO".to_string()),
+                table_name: "STUDENT".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM DEMO.STUDENT"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                catalog: Some("iceberg_catalog".to_string()),
+                database: None,
+                schema: Some("sales".to_string()),
+                table_name: "orders".to_string(),
+                where_input: Some("WHERE active = true;".to_string()),
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `iceberg_catalog`.`sales`.`orders` WHERE (active = true)"
+        );
+        // catalog + database (schema absent) → 3-part `catalog.database.table`
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                catalog: Some("iceberg_catalog".to_string()),
+                database: Some("sales".to_string()),
+                schema: None,
+                table_name: "orders".to_string(),
+                where_input: Some("WHERE active = true;".to_string()),
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `iceberg_catalog`.`sales`.`orders` WHERE (active = true)"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                identifier_quote: None,
+                catalog: Some("hive_catalog".to_string()),
+                database: None,
+                schema: None,
+                table_name: "orders".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `hive_catalog`.`orders`"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Kingbase),
+                identifier_quote: Some("`".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("cqbq_ls".to_string()),
+                table_name: "ANALYZE".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `cqbq_ls`.`ANALYZE`"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: Some("\"".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM schema_01.table_01"
+        );
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: Some("`".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "order".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM `App Schema`.`order`"
+        );
+    }
+
+    #[test]
+    fn builds_grid_count_sql_with_optimizer_hint() {
+        // GaussDB with optimizer hint
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: Some("\"".to_string()),
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                where_input: None,
+                count_hint: Some("/*+ set(query_dop 32) */".to_string()),
+            }),
+            "SELECT /*+ set(query_dop 32) */ COUNT(*) AS cnt FROM schema_01.table_01"
+        );
+        // GaussDB with hint and WHERE clause
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("sec_acct".to_string()),
+                table_name: "main_sec_acct_info".to_string(),
+                where_input: Some("status = 'active'".to_string()),
+                count_hint: Some("/*+ set(query_dop 32) */".to_string()),
+            }),
+            "SELECT /*+ set(query_dop 32) */ COUNT(*) AS cnt FROM \"sec_acct\".\"main_sec_acct_info\" WHERE (status = 'active')"
+        );
+        // Non-GaussDB database with hint (should still work)
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "users".to_string(),
+                where_input: None,
+                count_hint: Some("/*+ set(query_dop 32) */".to_string()),
+            }),
+            "SELECT /*+ set(query_dop 32) */ COUNT(*) AS cnt FROM \"public\".\"users\""
+        );
+        // No hint (default) — unchanged behavior
+        assert_eq!(
+            build_data_grid_count_sql(DataGridCountSqlOptions {
+                database_type: Some(DatabaseType::Gaussdb),
+                identifier_quote: None,
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                where_input: None,
+                count_hint: None,
+            }),
+            "SELECT COUNT(*) AS cnt FROM \"schema_01\".\"table_01\""
+        );
+    }
+
+    #[test]
+    fn builds_hive_table_properties_sql() {
+        assert_eq!(
+            build_hive_table_properties_sql(HiveTablePropertiesSqlOptions {
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                property_name: "transactional".to_string(),
+            }),
+            "SHOW TBLPROPERTIES `default`.`events` ('transactional')"
+        );
+    }
+
+    #[test]
+    fn prepares_hive_insert_from_qualified_result_labels() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Hive),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ai_test".to_string()),
+                table_name: "t1".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("id", "int", false, None),
+                    column("name", "string", true, None),
+                    column("amount", "double", true, None),
+                    column("create_time", "string", true, None),
+                ]),
+            },
+            columns: vec![
+                "t1.id".to_string(),
+                "t1.name".to_string(),
+                "t1.amount".to_string(),
+                "t1.create_time".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(4), Value::Null, Value::Null, Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO TABLE `ai_test`.`t1` VALUES (4, NULL, NULL, NULL);"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["DELETE FROM `ai_test`.`t1` WHERE `id` = 4 AND `name` IS NULL AND `amount` IS NULL AND `create_time` IS NULL;"]
+        );
+    }
+
+    #[test]
+    fn resolves_quoted_hive_source_columns_for_updates_and_primary_keys() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Hive),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("name", "string", true, None)]),
+            },
+            columns: vec!["identifier".to_string(), "display_name".to_string()],
+            source_columns: Some(vec![Some("`u`.`id`".to_string()), Some("`u`.`name`".to_string())]),
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada Lovelace"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `default`.`users` SET `name` = 'Ada Lovelace' WHERE `ID` = 1;",
+                "DELETE FROM `default`.`users` WHERE `ID` = 2;",
+            ]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "INSERT INTO TABLE `default`.`users` VALUES (2, 'Grace');",
+                "UPDATE `default`.`users` SET `name` = 'Ada' WHERE `ID` = 1 AND `name` = 'Ada Lovelace';",
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_real_dotted_hive_columns_and_other_dialects() {
+        let hive_options = DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Hive),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("payload.id", "int", true, None), column("name", "string", true, None)]),
+            },
+            columns: vec!["payload.id".to_string(), "events.name".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(7), json!("created")]],
+        };
+        assert_eq!(effective_columns(&hive_options), vec![Some("payload.id".to_string()), Some("name".to_string())]);
+        assert!(prepare_data_grid_save(hive_options).rollback_statements[0].contains("`payload.id` = 7"));
+
+        let postgres_options = DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "integer", true, None)]),
+            },
+            columns: vec!["events.id".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        };
+        assert_eq!(effective_columns(&postgres_options), vec![Some("events.id".to_string())]);
+    }
+
+    #[test]
+    fn formats_temporal_copy_literals() {
+        assert_eq!(
+            format_grid_sql_literal(&json!("2026-05-12T00:00:00+00:00"), Some(DatabaseType::Mysql), None),
+            "'2026-05-12 00:00:00'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2026-05-12T00:00:00.123456Z"), Some(DatabaseType::Mysql), None),
+            "'2026-05-12 00:00:00.123456'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2026-05-12 00:00:00.123456"), Some(DatabaseType::Mysql), None),
+            "'2026-05-12 00:00:00.123456'"
+        );
+    }
+
+    #[test]
+    fn formats_sqlserver_datetime_copy_literals_with_supported_precision() {
+        let datetime = column("date1", "datetime", true, None);
+        let datetime2 = column("date2", "datetime2(7)", true, None);
+        let raw_text = column("note", "nvarchar(64)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime)
+            ),
+            "N'2026-06-29 10:11:12.897'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.8966666"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime2)
+            ),
+            "N'2026-06-29 10:11:12.8966666'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.123456"),
+                Some(DatabaseType::SqlServer),
+                Some(&datetime2)
+            ),
+            "N'2026-06-29 10:11:12.1234560'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-06-29 10:11:12.896666666"),
+                Some(DatabaseType::SqlServer),
+                Some(&raw_text)
+            ),
+            "N'2026-06-29 10:11:12.896666666'"
+        );
+    }
+
+    #[test]
+    fn formats_oracle_temporal_literals_without_nls_parsing() {
+        let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
+        let timestamp_tz = column("recorded_at", "TIMESTAMP(6) WITH TIME ZONE", true, None);
+        let timestamp_ltz = column("local_recorded_at", "TIMESTAMP(6) WITH LOCAL TIME ZONE", true, None);
+        let date = column("event_day", "DATE", true, None);
+        let text = column("raw_text", "VARCHAR2(64)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2022-08-25T09:58:43.123456+08:00"),
+                Some(DatabaseType::Oracle),
+                Some(&timestamp_tz)
+            ),
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43.123456 +08:00', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&timestamp_ltz)),
+            "TO_TIMESTAMP_TZ('2022-08-25 09:58:43 +00:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&date)),
+            "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T09:58:43Z"), Some(DatabaseType::Oracle), Some(&text)),
+            "'2022-08-25T09:58:43Z'"
+        );
+    }
+
+    #[test]
+    fn formats_oracle_temporal_literals_from_editor_values_without_nls_parsing() {
+        let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
+        let date = column("event_day", "DATE", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43.123456"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43.123456', 'YYYY-MM-DD HH24:MI:SS.FF')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43.654321"), Some(DatabaseType::Oracle), Some(&timestamp)),
+            "TO_TIMESTAMP('2022-08-25 09:58:43.654321', 'YYYY-MM-DD HH24:MI:SS.FF')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25 09:58:43"), Some(DatabaseType::Oracle), Some(&date)),
+            "TO_DATE('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25"), Some(DatabaseType::Oracle), Some(&date)),
+            "DATE '2022-08-25'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2022-08-25T00:00:00Z"), Some(DatabaseType::Oracle), Some(&date)),
+            "DATE '2022-08-25'"
+        );
+    }
+
+    #[test]
+    fn prepares_oracle_clob_update_without_oversized_string_literals() {
+        let clob = column("body", "CLOB", true, None);
+        let large_value = "x".repeat(4205);
+        let literal =
+            format_grid_assignment_sql_literal(&json!(large_value), Some(DatabaseType::Oracle), Some(&clob), None);
+        let chunks = literal
+            .split("TO_CLOB('")
+            .skip(1)
+            .map(|chunk| chunk.split("')").next().unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= ORACLE_LOB_LITERAL_CHUNK_BYTES));
+        assert_eq!(chunks[0].len(), ORACLE_LOB_LITERAL_CHUNK_BYTES);
+        assert_eq!(chunks[1].len(), 4205 - ORACLE_LOB_LITERAL_CHUNK_BYTES);
+        assert_eq!(
+            format_grid_assignment_sql_literal(&json!("short"), Some(DatabaseType::Oracle), Some(&clob), None),
+            "'short'"
+        );
+        let nclob = column("body", "NCLOB", true, None);
+        assert!(format_grid_assignment_sql_literal(
+            &json!(large_value),
+            Some(DatabaseType::Oracle),
+            Some(&nclob),
+            None
+        )
+        .starts_with("TO_NCLOB('"));
+        let special_value = format!("{}'\\", "x".repeat(3998));
+        let special_literal =
+            format_grid_assignment_sql_literal(&json!(special_value), Some(DatabaseType::Oracle), Some(&clob), None);
+        assert!(special_literal.starts_with("TO_CLOB('"));
+        assert!(special_literal.contains("''"));
+        assert!(special_literal.contains("\\\\"));
+        let varchar = column("body", "VARCHAR2(5000)", true, None);
+        let varchar_literal =
+            format_grid_assignment_sql_literal(&json!(large_value), Some(DatabaseType::Oracle), Some(&varchar), None);
+        assert!(varchar_literal.starts_with("'"));
+        assert!(!varchar_literal.contains("TO_CLOB("));
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), clob]),
+            },
+            columns: vec!["ID".to_string(), "BODY".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!(large_value))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 1);
+        assert!(result.statements[0].contains("\"BODY\" = TO_CLOB('"));
+        assert!(result.statements[0].contains("WHERE \"ID\" = 1;"));
+    }
+
+    #[test]
+    fn formats_numeric_string_literals_for_numeric_columns_without_quotes() {
+        let number = column("amount", "NUMBER(20,0)", true, None);
+        let text = column("code", "VARCHAR2(32)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("12345678901234567890"), Some(DatabaseType::Oracle), Some(&number)),
+            "12345678901234567890"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("12345678901234567890"), Some(DatabaseType::Oracle), Some(&text)),
+            "'12345678901234567890'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("123-not-a-number"), Some(DatabaseType::Oracle), Some(&number)),
+            "'123-not-a-number'"
+        );
+    }
+
+    #[test]
+    fn prepares_oracle_number28_updates_from_serialized_query_results() {
+        let identifiers = ["2026081810175800100000000000", "2026081810175800100000000001"];
+        let rows: Vec<Vec<Value>> = identifiers
+            .iter()
+            .map(|identifier| vec![serde_json::from_str(identifier).unwrap(), json!("old")])
+            .collect();
+        let query_result: crate::types::QueryResult = serde_json::from_value(json!({
+            "columns": ["ID", "NAME"],
+            "column_types": ["NUMBER(28)", "VARCHAR2(20)"],
+            "rows": rows,
+            "affected_rows": 0,
+            "execution_time_ms": 0,
+        }))
+        .unwrap();
+        let wire = serde_json::to_string(&query_result).unwrap();
+        let deserialized: crate::types::QueryResult = serde_json::from_str(&wire).unwrap();
+
+        for (row, identifier) in deserialized.rows.iter().zip(identifiers) {
+            assert_eq!(row[0], json!(identifier));
+        }
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "ITEMS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER(28)", false, None),
+                    column("NAME", "VARCHAR2(20)", true, None),
+                ]),
+            },
+            columns: deserialized.columns,
+            source_columns: None,
+            rows: deserialized.rows,
+            dirty_rows: vec![(0, vec![(1, json!("new"))]), (1, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            identifiers
+                .iter()
+                .map(|identifier| format!("UPDATE \"APP\".\"ITEMS\" SET \"NAME\" = 'new' WHERE \"ID\" = {identifier};"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn prepares_sqlserver_bigint_update_from_numeric_string() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbo".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["Id".to_string()],
+                columns: Some(vec![column("Id", "int", false, None), column("UserId", "bigint", true, None)]),
+            },
+            columns: vec!["Id".to_string(), "UserId".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(142189065666650_i64)]],
+            dirty_rows: vec![(0, vec![(1, json!("144847503924137986"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE [dbo].[users] SET [UserId] = 144847503924137986 WHERE [Id] = 1;"]);
+    }
+
+    #[test]
+    fn prepares_sqlserver_cross_database_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: Some("BarDB".to_string()),
+                database: Some("BarDB".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "TUser".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "int", false, None), column("UserId", "bigint", false, None)]),
+            },
+            columns: vec!["ID".to_string(), "UserId".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(10279)]],
+            dirty_rows: vec![(0, vec![(1, json!(10280))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE [BarDB].[dbo].[TUser] SET [UserId] = 10280 WHERE [ID] = 1;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE [BarDB].[dbo].[TUser] SET [UserId] = 10279 WHERE [ID] = 1 AND [UserId] = 10280;"]
+        );
+    }
+
+    #[test]
+    fn prepares_kingbase_update_when_source_primary_key_case_differs() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ltcins_qd_db".to_string()),
+                table_name: "KG07".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![
+                    column("CKG023", "varchar", false, None),
+                    column("CKG096", "character", true, None),
+                ]),
+            },
+            columns: vec!["ckg023".to_string(), "CKG096".to_string()],
+            source_columns: Some(vec![Some("ckg023".to_string()), Some("CKG096".to_string())]),
+            rows: vec![vec![json!("2026071511071859"), json!("03")]],
+            dirty_rows: vec![(0, vec![(1, json!("02"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"UPDATE "ltcins_qd_db"."KG07" SET "CKG096" = '02' WHERE "CKG023" = '2026071511071859';"#]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                r#"UPDATE "ltcins_qd_db"."KG07" SET "CKG096" = '03' WHERE "CKG023" = '2026071511071859' AND "CKG096" = '02';"#
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_existing_row_save_when_primary_key_is_missing() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ltcins_qd_db".to_string()),
+                table_name: "KG07".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![
+                    column("CKG023", "varchar", false, None),
+                    column("CKG096", "character", true, None),
+                ]),
+            },
+            columns: vec!["CKG096".to_string()],
+            source_columns: Some(vec![Some("CKG096".to_string())]),
+            rows: vec![vec![json!("03")]],
+            dirty_rows: vec![(0, vec![(0, json!("02"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some(
+                "Cannot safely update or delete rows because the query result does not include every primary key column (missing: CKG023). Refresh or rerun the query before saving."
+            )
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_existing_row_save_when_primary_key_value_is_null() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("ltcins_qd_db".to_string()),
+                table_name: "KG07".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![
+                    column("CKG023", "varchar", false, None),
+                    column("CKG096", "character", true, None),
+                ]),
+            },
+            columns: vec!["CKG023".to_string(), "CKG096".to_string()],
+            source_columns: None,
+            rows: vec![vec![Value::Null, json!("03")]],
+            dirty_rows: vec![(0, vec![(1, json!("02"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some(
+                "Cannot safely update or delete rows because primary key column \"CKG023\" has no value in the query result. Refresh or rerun the query before saving."
+            )
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn mysql_grouped_result_update_uses_physical_columns_and_primary_key() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "bigint", false, None), column("department", "varchar", false, None)]),
+            },
+            columns: vec!["用户ID".to_string(), "部门".to_string(), "订单数".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("department".to_string()), None]),
+            rows: vec![vec![json!(7), json!("sales"), json!(3)]],
+            dirty_rows: vec![(0, vec![(1, json!("support"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`users` SET `department` = 'support' WHERE `id` = 7;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `app`.`users` SET `department` = 'sales' WHERE `id` = 7 AND BINARY `department` = 'support';"]
+        );
+    }
+
+    #[test]
+    fn mysql_update_omits_virtual_and_stored_generated_columns() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "bigint", false, None),
+                    column("virtual_label", "varchar", true, Some("VIRTUAL GENERATED")),
+                    column("stored_label", "varchar", true, Some("STORED GENERATED")),
+                    column("department", "varchar", false, None),
+                ]),
+            },
+            columns: vec![
+                "id".to_string(),
+                "virtual_label".to_string(),
+                "stored_label".to_string(),
+                "department".to_string(),
+            ],
+            source_columns: Some(vec![
+                Some("id".to_string()),
+                Some("virtual_label".to_string()),
+                Some("stored_label".to_string()),
+                Some("department".to_string()),
+            ]),
+            rows: vec![vec![json!(7), json!("sales-7"), json!("SALES"), json!("sales")]],
+            dirty_rows: vec![(0, vec![(1, json!("support-7")), (2, json!("SUPPORT")), (3, json!("support"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`users` SET `department` = 'support' WHERE `id` = 7;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `app`.`users` SET `department` = 'sales' WHERE `id` = 7 AND BINARY `department` = 'support';"]
+        );
+    }
+
+    #[test]
+    fn kingbase_column_index_prefers_exact_case_and_rejects_ambiguous_fallback() {
+        let columns = vec![Some("ckg023".to_string()), Some("CKG023".to_string())];
+
+        assert_eq!(find_column_index(Some(DatabaseType::Kingbase), &columns, "CKG023"), Some(1));
+        assert_eq!(find_column_index(Some(DatabaseType::Kingbase), &columns[..1], "CKG023"), Some(0));
+        assert_eq!(
+            find_column_index(
+                Some(DatabaseType::Kingbase),
+                &[Some("ckg023".to_string()), Some("Ckg023".to_string())],
+                "CKG023"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn goldendb_column_index_prefers_exact_case_and_rejects_ambiguous_fallback() {
+        let columns = vec![Some("id".to_string()), Some("ID".to_string())];
+
+        assert_eq!(find_column_index(Some(DatabaseType::Goldendb), &columns, "ID"), Some(1));
+        assert_eq!(find_column_index(Some(DatabaseType::Goldendb), &columns[..1], "ID"), Some(0));
+        assert_eq!(
+            find_column_index(Some(DatabaseType::Goldendb), &[Some("id".to_string()), Some("Id".to_string())], "ID"),
+            None
+        );
+    }
+
+    #[test]
+    fn goldendb_save_uses_unique_case_insensitive_primary_key_for_update_and_delete() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Goldendb),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "bigint", false, None), column("name", "varchar", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("name".to_string())]),
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Grace")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada Lovelace"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`people` SET `name` = 'Ada Lovelace' WHERE `ID` = 1;",
+                "DELETE FROM `app`.`people` WHERE `ID` = 2;",
+            ]
+        );
+    }
+
+    #[test]
+    fn goldendb_save_supports_composite_primary_keys_with_unique_case_insensitive_matches() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Goldendb),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "members".to_string(),
+                primary_keys: vec!["TENANT_ID".to_string(), "USER_ID".to_string()],
+                columns: Some(vec![
+                    column("TENANT_ID", "bigint", false, None),
+                    column("USER_ID", "bigint", false, None),
+                    column("name", "varchar", true, None),
+                ]),
+            },
+            columns: vec!["tenant_id".to_string(), "user_id".to_string(), "name".to_string()],
+            source_columns: Some(vec![
+                Some("tenant_id".to_string()),
+                Some("user_id".to_string()),
+                Some("name".to_string()),
+            ]),
+            rows: vec![vec![json!(10), json!(1), json!("Ada")], vec![json!(10), json!(2), json!("Grace")]],
+            dirty_rows: vec![(0, vec![(2, json!("Ada Lovelace"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`members` SET `name` = 'Ada Lovelace' WHERE `TENANT_ID` = 10 AND `USER_ID` = 1;",
+                "DELETE FROM `app`.`members` WHERE `TENANT_ID` = 10 AND `USER_ID` = 2;",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_goldendb_save_when_case_insensitive_primary_key_match_is_ambiguous() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Goldendb),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "bigint", false, None), column("name", "varchar", true, None)]),
+            },
+            columns: vec!["id".to_string(), "Id".to_string(), "name".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("Id".to_string()), Some("name".to_string())]),
+            rows: vec![vec![json!(1), json!(2), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(2, json!("Grace"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: ID")));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_goldendb_save_when_primary_key_column_is_truly_missing() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Goldendb),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "bigint", false, None), column("name", "varchar", true, None)]),
+            },
+            columns: vec!["tenant_id".to_string(), "name".to_string()],
+            source_columns: Some(vec![Some("tenant_id".to_string()), Some("name".to_string())]),
+            rows: vec![vec![json!(10), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Grace"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: ID")));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_postgres_save_when_only_case_different_column_is_returned() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "case_keys".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("id", "integer", false, None),
+                    column("ID", "integer", false, None),
+                    column("name", "text", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("name".to_string())]),
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Grace"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some(
+                "Cannot safely update or delete rows because the query result does not include every primary key column (missing: ID). Refresh or rerun the query before saving."
+            )
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_kingbase_save_when_case_only_primary_key_match_is_ambiguous() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "case_keys".to_string(),
+                primary_keys: vec!["CKG023".to_string()],
+                columns: Some(vec![column("CKG023", "varchar", false, None), column("name", "varchar", true, None)]),
+            },
+            columns: vec!["ckg023".to_string(), "Ckg023".to_string(), "name".to_string()],
+            source_columns: Some(vec![
+                Some("ckg023".to_string()),
+                Some("Ckg023".to_string()),
+                Some("name".to_string()),
+            ]),
+            rows: vec![vec![json!("first"), json!("second"), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(2, json!("Grace"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: CKG023")));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn kingbase_mysql_compat_save_uses_connection_identifier_quote() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("gc".to_string()),
+                table_name: "docfileinfo".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "integer", false, None), column("file_name", "varchar", false, None)]),
+            },
+            columns: vec!["id".to_string(), "file_name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("34-B-0048"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `gc`.`docfileinfo` SET `file_name` = '34-B-0048' WHERE `id` = 1;"]);
+        assert!(result
+            .rollback_statements
+            .iter()
+            .all(|statement| statement.contains("`gc`.`docfileinfo`") && !statement.contains('"')));
+    }
+
+    /// Spanner's dialect is fixed at database creation time and only the connected agent
+    /// knows it: GoogleSQL quotes with backticks (and has an empty default schema),
+    /// the PostgreSQL dialect quotes with double quotes and defaults to `public`.
+    #[test]
+    fn spanner_save_uses_connection_identifier_quote_per_dialect() {
+        let googlesql = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Spanner),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some(String::new()),
+                table_name: "singers".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "INT64", false, None), column("name", "STRING(100)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(googlesql.validation_error, None);
+        // Single-segment table name: `` ``.`singers` `` would be `Invalid empty identifier`.
+        assert_eq!(googlesql.statements, vec!["UPDATE `singers` SET `name` = 'Ada' WHERE `id` = 1;"]);
+
+        let postgres_dialect = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Spanner),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "singers".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "bigint", false, None),
+                    column("name", "character varying", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(postgres_dialect.validation_error, None);
+        assert_eq!(
+            postgres_dialect.statements,
+            vec!["UPDATE \"public\".\"singers\" SET \"name\" = 'Ada' WHERE \"id\" = 1;"]
+        );
+
+        // No quote reported: fall back to the GoogleSQL default (backticks), never to the
+        // ANSI double quote, which GoogleSQL parses as a string literal.
+        let no_reported_quote = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Spanner),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some(String::new()),
+                table_name: "singers".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "INT64", false, None), column("name", "STRING(100)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(no_reported_quote.validation_error, None);
+        assert_eq!(no_reported_quote.statements, vec!["UPDATE `singers` SET `name` = 'Ada' WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn kingbase_mysql_compat_copy_insert_uses_backtick_identifiers() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("audit-schema".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            }),
+            columns: vec!["id".to_string(), "event_type".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("login")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO `audit-schema`.`events` (`id`, `event_type`) VALUES (1, 'login');")
+        );
+        assert!(!statement.as_deref().unwrap_or_default().contains('"'));
+    }
+
+    #[test]
+    fn kingbase_mysql_compat_copy_update_uses_backtick_identifiers() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("audit-schema".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["id".to_string(), "event_type".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("logout")]],
+        });
+
+        assert_eq!(statements, vec!["UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn vastbase_query_result_writes_use_resolved_search_path_schema() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Vastbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("smes_dev".to_string()),
+                schema: Some("tenant_b".to_string()),
+                table_name: "TBLCUSPOSTMATERIALLOG".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("MONO", "varchar", true, None), column("ID", "bigint", false, None)]),
+            },
+            columns: vec!["MONO".to_string(), "ID".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("mono"), json!(461936049002042_i64)]],
+            dirty_rows: vec![(0, vec![(0, json!("LY-SC01-260800002"))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!("dbx-insert-check"), json!(461936049002043_i64)]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.execution_schema.as_deref(), Some("tenant_b"));
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"tenant_b\".\"TBLCUSPOSTMATERIALLOG\" SET \"MONO\" = 'LY-SC01-260800002' WHERE \"MONO\" = 'mono' AND \"ID\" = 461936049002042;",
+                "INSERT INTO \"tenant_b\".\"TBLCUSPOSTMATERIALLOG\" (\"MONO\", \"ID\") VALUES ('dbx-insert-check', 461936049002043);",
+            ]
+        );
+    }
+
+    #[test]
+    fn gbase8s_save_omits_owner_for_insert_update_delete_and_rollback() {
+        let result = prepare_data_grid_save_for_driver_profile(
+            DataGridSaveStatementOptions {
+                database_type: Some(DatabaseType::Informix),
+                identifier_quote: Some(String::new()),
+                table_meta: DataGridTableMeta {
+                    catalog: None,
+                    database: Some("webcenter".to_string()),
+                    schema: Some("gbasedbt".to_string()),
+                    table_name: "user_device".to_string(),
+                    primary_keys: vec!["id".to_string()],
+                    columns: Some(vec![column("id", "integer", false, None), column("dev_id", "varchar", false, None)]),
+                },
+                columns: vec!["id".to_string(), "dev_id".to_string()],
+                source_columns: None,
+                rows: vec![vec![json!(1), json!("1")], vec![json!(2), json!("deleted")]],
+                dirty_rows: vec![(0, vec![(1, json!("2"))])],
+                deleted_rows: vec![1],
+                new_rows: vec![vec![json!(3), json!("new")]],
+            },
+            Some("GBASE8S"),
+        );
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.execution_schema, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE user_device SET dev_id = '2' WHERE id = 1;",
+                "DELETE FROM user_device WHERE id = 2;",
+                "INSERT INTO user_device (id, dev_id) VALUES (3, 'new');",
+            ]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "DELETE FROM user_device WHERE id = 3 AND dev_id = 'new';",
+                "INSERT INTO user_device (id, dev_id) VALUES (2, 'deleted');",
+                "UPDATE user_device SET dev_id = '1' WHERE id = 1 AND dev_id = '2';",
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_informix_save_preserves_owner_qualification_without_gbase8s_profile() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Informix),
+            identifier_quote: Some(String::new()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("dbx_test".to_string()),
+                schema: Some("gbasedbt".to_string()),
+                table_name: "connection_smoke".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "integer", false, None), column("product", "varchar", false, None)]),
+            },
+            columns: vec!["id".to_string(), "product".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("GBase 8s")]],
+            dirty_rows: vec![(0, vec![(1, json!("GBase 8s updated"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE gbasedbt.connection_smoke SET product = 'GBase 8s updated' WHERE id = 1;"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "UPDATE gbasedbt.connection_smoke SET product = 'GBase 8s' WHERE id = 1 AND product = 'GBase 8s updated';"
+            ]
+        );
+    }
+
+    #[test]
+    fn gaussdb_jdbc_save_selectively_quotes_identifiers() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Gaussdb),
+            identifier_quote: Some("\"".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("schema_01".to_string()),
+                table_name: "table_01".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "integer", false, None), column("name", "varchar", false, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE schema_01.table_01 SET name = 'new' WHERE id = 1;"]);
+    }
+
+    #[test]
+    fn postgres_driver_to_gaussdb_m_mode_save_uses_backticks() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("App Schema".to_string()),
+                table_name: "order".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "integer", false, None),
+                    column("display name", "varchar", false, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "display name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `App Schema`.`order` SET `display name` = 'new' WHERE `ID` = 1;"]);
+    }
+
+    #[test]
+    fn postgres_save_uses_exact_quoted_primary_key_for_update_delete_and_rollback() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "case_keys".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("id", "integer", false, None),
+                    column("ID", "integer", false, None),
+                    column("name", "text", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "ID".to_string(), "name".to_string()],
+            source_columns: Some(vec![Some("id".to_string()), Some("ID".to_string()), Some("name".to_string())]),
+            rows: vec![vec![json!(1), json!(101), json!("Ada")], vec![json!(2), json!(202), json!("Grace")]],
+            dirty_rows: vec![(0, vec![(2, json!("Ada Lovelace"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "public"."case_keys" SET "name" = 'Ada Lovelace' WHERE "ID" = 101;"#,
+                r#"DELETE FROM "public"."case_keys" WHERE "ID" = 202;"#,
+            ]
+        );
+        assert!(result.rollback_statements.iter().all(|statement| !statement.contains(r#"WHERE "ID" = 1 AND"#)));
+        assert!(result.rollback_statements.iter().any(|statement| statement.contains(r#"WHERE "ID" = 101"#)));
+    }
+
+    #[test]
+    fn mysql_join_result_delete_targets_only_the_resolved_source_primary_key() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("lims".to_string()),
+                table_name: "lims_batchs_simple".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "bigint", false, None),
+                    column("sno", "integer", true, None),
+                    column("batchs_id", "bigint", false, None),
+                    column("simple_id", "bigint", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "sno".to_string(), "batchs_id".to_string(), "simple_id".to_string()],
+            source_columns: Some(vec![
+                Some("id".to_string()),
+                Some("sno".to_string()),
+                Some("batchs_id".to_string()),
+                Some("simple_id".to_string()),
+            ]),
+            rows: vec![vec![json!(2658055), json!(4), json!(57485), json!(492045)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["DELETE FROM `lims`.`lims_batchs_simple` WHERE `id` = 2658055;"]);
+    }
+
+    #[test]
+    fn prepares_oracle_timestamp_insert_from_iso_grid_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "EVENTS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("CREATED_AT", "TIMESTAMP(6)", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "CREATED_AT".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "INSERT INTO \"APP\".\"EVENTS\" (\"ID\", \"CREATED_AT\") VALUES (1, TO_TIMESTAMP('2022-08-25 09:58:43', 'YYYY-MM-DD HH24:MI:SS'));"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oracle_raw_update_with_hex_literals() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "RAW_VALUES".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "RAW(16)", false, None), column("PAYLOAD", "RAW(16)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "PAYLOAD".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("0x00112233445566778899aabbccddeeff"), json!("0xaabb")]],
+            dirty_rows: vec![(0, vec![(1, json!("0xccdd"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"APP\".\"RAW_VALUES\" SET \"PAYLOAD\" = HEXTORAW('ccdd') WHERE \"ID\" = HEXTORAW('00112233445566778899aabbccddeeff');"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oracle_update_without_schema_when_the_frontend_resolved_the_current_schema() {
+        // A JDBC Oracle edit resolves the login user's schema on the frontend and
+        // sends the folded table name with an empty schema. The generated UPDATE
+        // must stay unqualified instead of reintroducing the service name.
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "IMP_T".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), column("NAME", "VARCHAR2(100)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(7), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE \"IMP_T\" SET \"NAME\" = 'new' WHERE \"ID\" = 7;"]);
+    }
+
+    #[test]
+    fn oracle_raw_literals_require_valid_even_length_hex() {
+        let raw = column("ID", "RAW(16)", false, None);
+        let text = column("ID", "VARCHAR2(64)", false, None);
+        let blob = column("ID", "BLOB", false, None);
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(format_grid_sql_literal(&json!("0x00aB"), Some(database_type), Some(&raw)), "HEXTORAW('00aB')");
+            assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(database_type), Some(&raw)), "'0xabc'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00gg"), Some(database_type), Some(&raw)), "'0x00gg'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&text)), "'0x00ab'");
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&blob)), "'0x00ab'");
+        }
+    }
+
+    #[test]
+    fn prepares_oceanbase_oracle_lob_deletes_with_synthetic_rowid() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DATA_REPORT_SUB_TASK".to_string(),
+                primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+                columns: Some(vec![
+                    column(DBX_ROWID_COLUMN, "VARCHAR2", false, None),
+                    column("ID", "VARCHAR2(100)", false, None),
+                    column("SMC_RESPONSE", "CLOB", true, None),
+                    column("RAW_PAYLOAD", "BLOB", true, None),
+                    column("ARCHIVE_VALUE", "LOB", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_ROWID_COLUMN.to_string(),
+                "ID".to_string(),
+                "SMC_RESPONSE".to_string(),
+                "RAW_PAYLOAD".to_string(),
+                "ARCHIVE_VALUE".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![
+                vec![json!("*AAABk1AAEAAAAAgAAA"), json!("task-1"), json!("response"), json!("0011"), json!("archive")],
+                vec![json!("*AAABk1AAEAAAAAgAAB"), json!("task-2"), Value::Null, Value::Null, Value::Null],
+            ],
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAA';",
+                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAB';",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oceanbase_oracle_lob_delete_with_declared_primary_key() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("TITLE", "VARCHAR2(100)", false, None),
+                    column("BODY", "CLOB", true, None),
+                    column("CONTENT", "BLOB", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "TITLE".to_string(), "BODY".to_string(), "CONTENT".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(42), json!("report"), json!("body"), Value::Null]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["DELETE FROM \"APP\".\"DOCUMENTS\" WHERE \"ID\" = 42;"]);
+    }
+
+    #[test]
+    fn rejects_oceanbase_oracle_keyless_lob_writes_without_rowid() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "DOCUMENTS".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("TITLE", "VARCHAR2(100)", false, None), column("BODY", "CLOB", true, None)]),
+            },
+            columns: vec!["TITLE".to_string(), "BODY".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("duplicate title"), json!("unique body")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error.as_deref(),
+            Some("Cannot safely update or delete this Oracle-compatible row because the table has LOB columns but no primary key or ROWID identifier.")
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    fn daily_stats_keyless_options() -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "daily_stats".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("stat_date", "TEXT", false, None), column("period", "TEXT", true, None)]),
+            },
+            columns: vec!["stat_date".to_string(), "period".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-09-07"), Value::Null], vec![json!("2026-09-07"), Value::Null]],
+            dirty_rows: vec![(0, vec![(1, json!("早上"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        }
+    }
+
+    /// The predicate a guard counts must be byte-identical to the one its
+    /// statement carries, otherwise the safety decision is made against a
+    /// different set of columns or values than the mutation actually uses.
+    fn assert_guards_cover_statement_predicates(preparation: &DataGridSavePreparation) {
+        for guard in &preparation.keyless_guards {
+            assert_eq!(guard.max_matched_rows, 1);
+            let predicate = guard
+                .sql
+                .split_once(" WHERE (")
+                .and_then(|(_, rest)| rest.strip_suffix(')'))
+                .unwrap_or_else(|| panic!("guard is not a counting query: {}", guard.sql));
+            assert!(
+                preparation.statements.iter().any(|statement| statement.contains(&format!("WHERE {predicate}"))),
+                "no statement carries the guarded predicate {predicate:?}"
+            );
+        }
+        for statement in &preparation.statements {
+            let Some((_, predicate)) = statement.split_once(" WHERE ") else {
+                continue;
+            };
+            let predicate = predicate.trim_end_matches(';');
+            assert!(
+                preparation.keyless_guards.iter().any(|guard| guard.sql.ends_with(&format!("WHERE ({predicate})"))),
+                "predicate {predicate:?} is sent to the database without a guard"
+            );
+        }
+    }
+
+    #[test]
+    fn guards_sqlite_keyless_update_with_a_server_side_row_count() {
+        // Regression test for https://github.com/t8y2/dbx/issues/8321: a SQLite
+        // table with no primary key, two rows inserted with only `stat_date`
+        // filled in. Editing row 0's `period` must not silently also rewrite
+        // row 1, which has identical values in every column. Whether a second
+        // matching row exists cannot be answered from the loaded page, so the
+        // save carries a guard that counts the matches on the server.
+        let result = prepare_data_grid_save(daily_stats_keyless_options());
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "daily_stats" SET "period" = '早上' WHERE "stat_date" = '2026-09-07' AND "period" IS NULL;"#
+            ]
+        );
+        assert_eq!(
+            result.keyless_guards,
+            vec![DataGridSaveGuard {
+                sql: r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "daily_stats" WHERE ("stat_date" = '2026-09-07' AND "period" IS NULL)"#
+                    .to_string(),
+                max_matched_rows: 1,
+                message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+            }]
+        );
+        assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn guards_sqlite_keyless_update_even_when_the_loaded_page_looks_unique() {
+        // The duplicate row may live outside the loaded/filtered page, so a
+        // page that shows only distinguishable rows proves nothing and must
+        // still be verified on the server.
+        let mut options = daily_stats_keyless_options();
+        options.rows = vec![vec![json!("2026-09-07"), json!("早上")], vec![json!("2026-09-07"), json!("中午")]];
+        options.dirty_rows = vec![(0, vec![(1, json!("上午"))])];
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "daily_stats" SET "period" = '上午' WHERE "stat_date" = '2026-09-07' AND "period" = '早上';"#
+            ]
+        );
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn guards_keyless_predicate_without_the_columns_the_predicate_omits() {
+        // `build_row_where` drops result columns that have no source column, so
+        // a guard built from the visible values would decide uniqueness using
+        // `total`, a value the mutation predicate never mentions.
+        let mut options = daily_stats_keyless_options();
+        options.table_meta.columns =
+            Some(vec![column("stat_date", "TEXT", false, None), column("period", "TEXT", true, None)]);
+        options.columns = vec!["stat_date".to_string(), "period".to_string(), "total".to_string()];
+        options.source_columns = Some(vec![Some("stat_date".to_string()), Some("period".to_string()), None]);
+        options.rows =
+            vec![vec![json!("2026-09-07"), Value::Null, json!(1)], vec![json!("2026-09-07"), Value::Null, json!(2)]];
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert!(!result.keyless_guards[0].sql.contains("total"));
+        assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn guards_keyless_delete_and_deduplicates_identical_predicates() {
+        let mut options = daily_stats_keyless_options();
+        options.dirty_rows = vec![];
+        options.deleted_rows = vec![0, 1];
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 2);
+        // Both rows produce the same predicate; one guard covers both.
+        assert_eq!(result.keyless_guards.len(), 1);
+        assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn omits_keyless_guards_when_the_table_has_a_primary_key() {
+        let mut options = daily_stats_keyless_options();
+        options.table_meta.primary_keys = vec!["stat_date".to_string()];
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert!(result.keyless_guards.is_empty());
+    }
+
+    #[test]
+    fn rejects_keyless_edit_when_no_column_can_address_the_row() {
+        // Every result column is computed, so `build_row_where` produces an
+        // empty predicate: there is neither a row identifier nor anything a
+        // server-side count could check, and the write must stay disabled.
+        let mut options = daily_stats_keyless_options();
+        options.source_columns = Some(vec![None, None]);
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error.as_deref(), Some(KEYLESS_UNIDENTIFIABLE_ROW_ERROR));
+        assert!(result.statements.is_empty());
+        assert!(result.keyless_guards.is_empty());
+    }
+
+    #[test]
+    fn preserves_oceanbase_oracle_keyless_predicates_for_comparable_columns() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "TASK_STATUS".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("TASK_NAME", "VARCHAR2(100)", false, None),
+                    column("STATUS", "VARCHAR2(16)", true, None),
+                ]),
+            },
+            columns: vec!["TASK_NAME".to_string(), "STATUS".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("task-1"), json!("RUNNING")], vec![json!("task-2"), Value::Null]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-1' AND \"STATUS\" = 'RUNNING';",
+                "DELETE FROM \"APP\".\"TASK_STATUS\" WHERE \"TASK_NAME\" = 'task-2' AND \"STATUS\" IS NULL;",
+            ]
+        );
+    }
+
+    #[test]
+    fn batches_mysql_updates_with_identical_values() {
+        let mut options = mysql_people_save_options(3);
+        options.dirty_rows =
+            vec![(0, vec![(1, Value::Null)]), (1, vec![(1, Value::Null)]), (2, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `app`.`people` SET `status` = NULL WHERE (`id` = 1) OR (`id` = 2) OR (`id` = 3);"]
+        );
+        assert_eq!(result.rollback_statements.len(), 3);
+    }
+
+    #[test]
+    fn preserves_mysql_update_order_across_different_values() {
+        let mut options = mysql_people_save_options(3);
+        options.dirty_rows =
+            vec![(0, vec![(1, Value::Null)]), (1, vec![(1, json!("archived"))]), (2, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`people` SET `status` = NULL WHERE `id` = 1;",
+                "UPDATE `app`.`people` SET `status` = 'archived' WHERE `id` = 2;",
+                "UPDATE `app`.`people` SET `status` = NULL WHERE `id` = 3;",
+            ]
+        );
+    }
+
+    #[test]
+    fn batches_mysql_deletes_and_deleted_row_rollbacks() {
+        let mut options = mysql_people_save_options(3);
+        options.deleted_rows = vec![0, 1, 2];
+
+        let result = prepare_data_grid_save(options);
+        for statement in &result.statements {
+            println!("statement: {statement}");
+        }
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["DELETE FROM `app`.`people` WHERE `id` IN (1, 2, 3);"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `app`.`people` (`id`, `status`) VALUES (1, 'active'), (2, 'active'), (3, 'active');"]
+        );
+    }
+
+    #[test]
+    fn batches_mysql_compound_key_deletes_keep_or_form() {
+        let mut options = mysql_people_save_options(3);
+        options.table_meta.primary_keys = vec!["id".to_string(), "status".to_string()];
+        options.deleted_rows = vec![0, 1];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "DELETE FROM `app`.`people` WHERE (`id` = 1 AND `status` = 'active') OR (`id` = 2 AND `status` = 'active');"
+            ]
+        );
+    }
+
+    #[test]
+    fn chunks_large_mysql_data_grid_batches() {
+        let mut options = mysql_people_save_options(MYSQL_DATA_GRID_BATCH_MAX_ROWS + 1);
+        options.deleted_rows = (0..options.rows.len()).collect();
+
+        let result = prepare_data_grid_save(options);
+
+        // IN lists are far more compact than OR chains, so the batch fits in a
+        // single statement up to the row limit.
+        assert_eq!(result.statements.len(), 1);
+        assert!(result.statements[0].contains("`id` IN ("));
+        assert!(result.statements[0].contains("501"));
+        assert_eq!(result.rollback_statements.len(), 2);
+        assert!(result.rollback_statements[0].contains("(500, 'active')"));
+        assert_eq!(
+            result.rollback_statements[1],
+            "INSERT INTO `app`.`people` (`id`, `status`) VALUES (501, 'active');"
+        );
+    }
+
+    #[test]
+    fn mysql_data_grid_batch_respects_target_sql_size() {
+        let mut options = mysql_people_save_options(2);
+        options.rows[0][0] = json!("a".repeat(MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES / 2));
+        options.rows[1][0] = json!("b".repeat(MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES / 2));
+        options.deleted_rows = vec![0, 1];
+
+        let result = prepare_data_grid_save(options);
+
+        // The IN list stays within the SQL byte budget, splitting into a
+        // second statement once the accumulated literals would exceed it.
+        assert_eq!(result.statements.len(), 2);
+        assert!(result.statements.iter().all(|statement| statement.len() <= MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES));
+    }
+
+    #[test]
+    fn keeps_keyless_mysql_writes_row_by_row() {
+        let mut options = mysql_people_save_options(2);
+        options.table_meta.primary_keys.clear();
+        options.deleted_rows = vec![0, 1];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.statements.len(), 2);
+        assert_eq!(result.rollback_statements.len(), 2);
+        assert!(result.statements.iter().all(|statement| !statement.contains(" OR ")));
+    }
+
+    #[test]
+    fn casts_keyless_mysql_json_row_predicates() {
+        let options = DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "documents".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("payload", "JSON", false, None), column("note", "varchar(32)", true, None)]),
+            },
+            columns: vec!["payload".to_string(), "note".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(r#"{"name":"before"}"#), json!("row-a")]],
+            dirty_rows: vec![(0, vec![(0, json!(r#"{"name":"after"}"#))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        };
+
+        let update = prepare_data_grid_save(options.clone());
+        assert_eq!(update.validation_error, None);
+        assert_eq!(
+            update.statements,
+            vec![
+                r#"UPDATE `app`.`documents` SET `payload` = '{"name":"after"}' WHERE `payload` = CAST('{"name":"before"}' AS JSON) AND BINARY `note` = 'row-a';"#
+            ]
+        );
+        assert_eq!(
+            update.rollback_statements,
+            vec![
+                r#"UPDATE `app`.`documents` SET `payload` = '{"name":"before"}' WHERE `payload` = CAST('{"name":"after"}' AS JSON) AND BINARY `note` = 'row-a' AND `payload` = CAST('{"name":"after"}' AS JSON);"#
+            ]
+        );
+
+        let delete = prepare_data_grid_save(DataGridSaveStatementOptions {
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            ..options
+        });
+        assert_eq!(delete.validation_error, None);
+        assert_eq!(
+            delete.statements,
+            vec![
+                r#"DELETE FROM `app`.`documents` WHERE `payload` = CAST('{"name":"before"}' AS JSON) AND BINARY `note` = 'row-a';"#
+            ]
+        );
+        assert_eq!(
+            delete.rollback_statements,
+            vec![r#"INSERT INTO `app`.`documents` (`payload`, `note`) VALUES ('{"name":"before"}', 'row-a');"#]
+        );
+    }
+
+    #[test]
+    fn mysql_json_save_assignments_are_compact_and_predicates_stay_cast() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "documents".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("payload", "JSON", true, None)]),
+            },
+            columns: vec!["id".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!({"before": true})]],
+            dirty_rows: vec![(0, vec![(1, json!([]))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(2), json!({"nested": [1, 2]})]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`documents` SET `payload` = '[]' WHERE `id` = 1;",
+                "INSERT INTO `app`.`documents` (`id`, `payload`) VALUES (2, '{\"nested\":[1,2]}');",
+            ]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "DELETE FROM `app`.`documents` WHERE `id` = 2;",
+                "UPDATE `app`.`documents` SET `payload` = '{\"before\":true}' WHERE `id` = 1 AND `payload` = CAST('[]' AS JSON);",
+            ]
+        );
+    }
+
+    #[test]
+    fn formats_mysql_bit_literals_without_string_quotes() {
+        let bit = column("flag", "bit(1)", true, None);
+        let bit_string = column("flags", "bit(8)", true, None);
+
+        assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Mysql), Some(&bit)), "0");
+        assert_eq!(format_grid_sql_literal(&json!("1"), Some(DatabaseType::Mysql), Some(&bit)), "1");
+        assert_eq!(format_grid_sql_literal(&json!(true), Some(DatabaseType::Mysql), Some(&bit)), "1");
+        assert_eq!(
+            format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Mysql), Some(&bit_string)),
+            "b'10101010'"
+        );
+        assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+    }
+
+    #[test]
+    fn formats_kingbase_bit_literals_for_both_compatibility_modes() {
+        let bit = column("flag", "pg_catalog.bit(1)", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal_with_identifier_quote(
+                &json!("0"),
+                Some(DatabaseType::Kingbase),
+                Some(&bit),
+                Some("`"),
+            ),
+            "b'0'"
+        );
+        assert_eq!(
+            format_grid_sql_literal_with_identifier_quote(
+                &json!("10101010"),
+                Some(DatabaseType::Kingbase),
+                Some(&column("flags", "pg_catalog.bit(8)", true, None)),
+                Some("`"),
+            ),
+            "b'10101010'"
+        );
+        assert_eq!(
+            format_grid_sql_literal_with_identifier_quote(
+                &json!("0"),
+                Some(DatabaseType::Kingbase),
+                Some(&bit),
+                Some("\""),
+            ),
+            "b'0'"
+        );
+        assert_eq!(
+            format_grid_sql_literal_with_identifier_quote(
+                &json!(1),
+                Some(DatabaseType::Kingbase),
+                Some(&bit),
+                Some("\""),
+            ),
+            "b'1'"
+        );
+    }
+
+    #[test]
+    fn kingbase_bit_save_uses_bit_string_literals() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: Some("`".to_string()),
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "flags".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("flag", "pg_catalog.bit(1)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "flag".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("1")]],
+            dirty_rows: vec![(0, vec![(1, json!("0"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.statements, vec!["UPDATE `public`.`flags` SET `flag` = b'0' WHERE `id` = 1;"],);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `public`.`flags` SET `flag` = b'1' WHERE `id` = 1 AND `flag` = b'0';"],
+        );
+    }
+
+    #[test]
+    fn postgres_literals_use_escape_strings_for_stable_backslash_semantics() {
+        let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
+        assert_eq!(
+            format_grid_sql_literal(&value, Some(DatabaseType::Postgres), None),
+            r#"E'{"json_raw":"{\\"foo\\":1,\\"bar\\":\\"sometext\\"}"}'"#
+        );
+        assert_eq!(format_grid_sql_literal(&json!("it's"), Some(DatabaseType::Postgres), None), "'it''s'");
+    }
+
+    #[test]
+    fn postgres_temporal_literals_preserve_session_formatted_values_for_grid_writes() {
+        let timestamp = column("created_at", "timestamp without time zone", false, None);
+        let timestamptz = column("created_at", "timestamp with time zone", false, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("2026-09-13 01:00:00"), Some(DatabaseType::Postgres), Some(&timestamp),),
+            "'2026-09-13 01:00:00'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-09-13T13:00:00+12:00"),
+                Some(DatabaseType::Postgres),
+                Some(&timestamptz),
+            ),
+            "'2026-09-13T13:00:00+12:00'"
+        );
+    }
+
+    #[test]
+    fn postgres_bytea_literals_decode_prefixed_hex_values() {
+        let bytea = column("payload", "bytea", true, None);
+        let text = column("label", "text", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&bytea)),
+            "decode('00aBff', 'hex')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x"), Some(DatabaseType::Postgres), Some(&bytea)),
+            "decode('', 'hex')"
+        );
+        assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(DatabaseType::Postgres), Some(&bytea)), "'0xabc'");
+        assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::Postgres), Some(&text)), "'0x00ab'");
+    }
+
+    #[test]
+    fn sqlite_family_literals_do_not_double_escape_backslashes() {
+        let value = json!(r#"{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}"#);
+        for database_type in
+            [DatabaseType::Sqlite, DatabaseType::Rqlite, DatabaseType::Turso, DatabaseType::CloudflareD1]
+        {
+            assert_eq!(
+                format_grid_sql_literal(&value, Some(database_type), None),
+                r#"'{"json_raw":"{\"foo\":1,\"bar\":\"sometext\"}"}'"#
+            );
+            assert_eq!(format_grid_sql_literal(&json!("it's"), Some(database_type), None), "'it''s'");
+        }
+    }
+
+    #[test]
+    fn dameng_data_grid_writes_do_not_double_escape_backslashes() {
+        assert_eq!(format_grid_sql_literal(&json!(r"\n"), Some(DatabaseType::Dameng), None), r"'\n'");
+        assert_eq!(format_grid_sql_literal(&json!(r"line\n's"), Some(DatabaseType::Dameng), None), r"'line\n''s'");
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("DBX_TEST".to_string()),
+                table_name: "DBX_NEWLINE_REPRO".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "INT", false, None), column("VAL", "VARCHAR(100)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "VAL".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!(r"line\n's"))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(2), json!(r"\n")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "DBX_TEST"."DBX_NEWLINE_REPRO" SET "VAL" = 'line\n''s' WHERE "ID" = 1;"#,
+                r#"INSERT INTO "DBX_TEST"."DBX_NEWLINE_REPRO" ("ID", "VAL") VALUES (2, '\n');"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_literals_do_not_double_escape_backslashes() {
+        assert_eq!(format_grid_sql_literal(&json!(r".\SQL2016"), Some(DatabaseType::SqlServer), None), r"N'.\SQL2016'");
+        assert_eq!(
+            format_grid_sql_literal(&json!(r".\SQL2016's"), Some(DatabaseType::SqlServer), None),
+            r"N'.\SQL2016''s'"
+        );
+    }
+
+    #[test]
+    fn sqlserver_literals_preserve_backslashes_before_line_breaks() {
+        assert_eq!(
+            format_grid_sql_literal(&json!("line1\\\nline2"), Some(DatabaseType::SqlServer), None),
+            r"N'line1\' + NCHAR(10) + N'line2'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("line1\\\r\nline2"), Some(DatabaseType::SqlServer), None),
+            r"N'line1\' + NCHAR(13) + NCHAR(10) + N'line2'"
+        );
+    }
+
+    #[test]
+    fn prepares_sqlserver_updates_without_doubling_backslashes() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbo".to_string()),
+                table_name: "dbx_issue_4181".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("value", "nvarchar(100)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "value".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("initial")]],
+            dirty_rows: vec![(0, vec![(1, json!(r".\SQL2016"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r"UPDATE [dbo].[dbx_issue_4181] SET [value] = N'.\SQL2016' WHERE [id] = 1;"]
+        );
+    }
+
+    #[test]
+    fn mysql_and_neo4j_literals_keep_doubling_backslashes() {
+        // MySQL (default sql_mode, without NO_BACKSLASH_ESCAPES) and Neo4j do treat
+        // backslash as an escape character, so this behavior must be preserved.
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Mysql), None), r"'a\\b'");
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Neo4j), None), r"'a\\b'");
+    }
+
+    #[test]
+    fn prepares_sqlserver_bitn_updates_with_numeric_literals() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbo".to_string()),
+                table_name: "flags".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "int", false, None), column("active", "bitn", false, None)]),
+            },
+            columns: vec!["id".to_string(), "active".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(false)]],
+            dirty_rows: vec![(0, vec![(1, json!(true))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE [dbo].[flags] SET [active] = 1 WHERE [id] = 1 AND [active] = 0;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE [dbo].[flags] SET [active] = 0 WHERE [id] = 1 AND [active] = 1 AND [active] = 1;"]
+        );
+        for sql in result.statements.iter().chain(result.rollback_statements.iter()) {
+            assert!(!sql.contains("TRUE"));
+            assert!(!sql.contains("FALSE"));
+        }
+    }
+
+    #[test]
+    fn saves_empty_nullable_mysql_numeric_cell_as_null() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "employees".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int(11)", false, None), column("age", "int(11)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "age".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(2), json!(36)]],
+            dirty_rows: vec![(0, vec![(1, json!(""))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `employees` SET `age` = NULL WHERE `id` = 2;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `employees` SET `age` = 36 WHERE `id` = 2 AND `age` IS NULL;"]
+        );
+    }
+
+    #[test]
+    fn keeps_empty_nullable_mysql_text_cell_as_empty_string() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "employees".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int(11)", false, None), column("name", "varchar(50)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(2), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!(""))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `employees` SET `name` = '' WHERE `id` = 2;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '';"]
+        );
+    }
+
+    #[test]
+    fn preserves_mysql_text_cell_line_breaks() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "employees".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int(11)", false, None), column("name", "varchar(50)", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(2), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("111\n222"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `employees` SET `name` = '111\n222' WHERE `id` = 2;"]);
+        assert_eq!(
+            result.rollback_statements,
+            vec!["UPDATE `employees` SET `name` = 'Ada' WHERE `id` = 2 AND BINARY `name` = '111\n222';"]
+        );
+    }
+
+    #[test]
+    fn prepares_sqlserver_save_statements() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("game".to_string()),
+                table_name: "player states".to_string(),
+                primary_keys: vec!["role id".to_string()],
+                columns: None,
+            },
+            columns: vec!["role id".to_string(), "state".to_string(), "updated at".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(42), json!("old"), json!("2026-05-03")]],
+            dirty_rows: vec![(0, vec![(1, json!("ready")), (2, json!("2026-05-04"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![vec![json!(43), json!("new"), json!("2026-05-05")]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE [game].[player states] SET [state] = N'ready', [updated at] = N'2026-05-04' WHERE [role id] = 42;",
+                "DELETE FROM [game].[player states] WHERE [role id] = 42;",
+                "INSERT INTO [game].[player states] ([role id], [state], [updated at]) VALUES (43, N'new', N'2026-05-05');",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_child_table_delete_from_stable_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("voltage", "FLOAT", true, None)]),
+            },
+            columns: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("codex_delete_verify"), json!("2026-07-10T13:59:00.456+08:00"), json!(221.5)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_delete_verify` WHERE `ts` = '2026-07-10T13:59:00.456+08:00';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `voltage`) VALUES ('codex_delete_verify', '2026-07-10T13:59:00.456+08:00', 221.5);"]
+        );
+    }
+
+    #[test]
+    fn rejects_tdengine_composite_key_delete_from_same_timestamp_stable_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "seq".to_string(),
+                "voltage".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![
+                vec![json!("device_a"), json!("2026-07-10T13:59:00.456+08:00"), json!(1), json!(221.5)],
+                vec![json!("device_a"), json!("2026-07-10T13:59:00.456+08:00"), json!(2), json!(222.5)],
+            ],
+            dirty_rows: vec![],
+            deleted_rows: vec![1],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine tables with composite keys do not support row deletion.".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepares_tdengine_delete_from_direct_child_table_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "codex_grid_accept_20260710".to_string(),
+                primary_keys: vec!["ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("voltage", "FLOAT", true, None)]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:00:00.111+08:00"), json!(220.1)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_grid_accept_20260710` WHERE `ts` = '2026-07-10T16:00:00.111+08:00';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_accept_20260710` (`ts`, `voltage`) VALUES ('2026-07-10T16:00:00.111+08:00', 220.1);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_overwrite_for_direct_child_table_row() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "codex_grid_update_verify_20260710".to_string(),
+                primary_keys: vec!["ts".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("voltage", "FLOAT", true, None),
+                    column("current", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string(), "current".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(220.0), json!(1.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_update_verify_20260710` (`ts`, `voltage`, `current`) VALUES ('2026-07-10T16:30:00.444+08:00', 229.9, 1.0);"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`codex_grid_update_verify_20260710` (`ts`, `voltage`, `current`) VALUES ('2026-07-10T16:30:00.444+08:00', 220.0, 1.0);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_composite_key_overwrite_and_rollback_for_same_timestamp_child_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "device_a".to_string(),
+                primary_keys: vec!["ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "seq".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!("2026-07-10T16:30:00.444+08:00"), json!(1), json!(220.0)],
+                vec![json!("2026-07-10T16:30:00.444+08:00"), json!(2), json!(221.0)],
+            ],
+            dirty_rows: vec![(1, vec![(2, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`device_a` (`ts`, `seq`, `voltage`) VALUES ('2026-07-10T16:30:00.444+08:00', 2, 229.9);"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`device_a` (`ts`, `seq`, `voltage`) VALUES ('2026-07-10T16:30:00.444+08:00', 2, 221.0);"]
+        );
+    }
+
+    #[test]
+    fn prepares_tdengine_stable_insert_with_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "issue_3121_devices".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("reading", "FLOAT", true, None),
+                    column("site", "VARCHAR", true, Some("TAG")),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "reading".to_string(),
+                "site".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![
+                json!("codex_issue3121_insert_verify"),
+                json!("2026-07-10T17:48:51.000+08:00"),
+                json!(1.0),
+                json!("codex-lab"),
+            ]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `dbx_tdengine_demo`.`issue_3121_devices` (`tbname`, `ts`, `reading`, `site`) VALUES ('codex_issue3121_insert_verify', '2026-07-10T17:48:51.000+08:00', 1.0, 'codex-lab');"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec!["DELETE FROM `dbx_tdengine_demo`.`codex_issue3121_insert_verify` WHERE `ts` = '2026-07-10T17:48:51.000+08:00';"]
+        );
+    }
+
+    #[test]
+    fn skips_tdengine_composite_key_insert_rollback_for_same_timestamp_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec![
+                DBX_TDENGINE_TBNAME_COLUMN.to_string(),
+                "ts".to_string(),
+                "seq".to_string(),
+                "voltage".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![
+                vec![json!("device_a"), json!("2026-07-10T17:48:51.000+08:00"), json!(1), json!(221.0)],
+                vec![json!("device_a"), json!("2026-07-10T17:48:51.000+08:00"), json!(2), json!(222.0)],
+            ],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `seq`, `voltage`) VALUES ('device_a', '2026-07-10T17:48:51.000+08:00', 1, 221.0);",
+                "INSERT INTO `dbx_tdengine_demo`.`meters` (`tbname`, `ts`, `seq`, `voltage`) VALUES ('device_a', '2026-07-10T17:48:51.000+08:00', 2, 222.0);",
+            ]
+        );
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_stable_insert_without_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "issue_3121_devices".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None), column("reading", "FLOAT", true, None)]),
+            },
+            columns: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string(), "reading".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("2026-07-10T17:48:51.000+08:00"), json!(1.0)]],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine STABLE inserts require a child table name (tbname).".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_delete_without_child_table_identity() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "meters".to_string(),
+                primary_keys: vec![DBX_TDENGINE_TBNAME_COLUMN.to_string(), "ts".to_string()],
+                columns: Some(vec![column("ts", "TIMESTAMP", false, None)]),
+            },
+            columns: vec!["ts".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T13:59:00.456+08:00")]],
+            dirty_rows: vec![],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine row editing requires all row identifier columns in the result.".to_string())
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_existing_row_edit_when_composite_key_is_missing() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "device_a".to_string(),
+                primary_keys: vec!["ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(220.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(229.9))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some("TDengine row editing requires all row identifier columns in the result.".to_string())
+        );
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_tdengine_existing_row_identity_changes() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Tdengine),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbx_tdengine_demo".to_string()),
+                table_name: "device_a".to_string(),
+                primary_keys: vec!["ts".to_string(), "seq".to_string()],
+                columns: Some(vec![
+                    column("ts", "TIMESTAMP", false, None),
+                    column("seq", "INT", false, Some("COMPOSITE KEY")),
+                    column("voltage", "FLOAT", true, None),
+                ]),
+            },
+            columns: vec!["ts".to_string(), "seq".to_string(), "voltage".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("2026-07-10T16:30:00.444+08:00"), json!(2), json!(220.0)]],
+            dirty_rows: vec![(0, vec![(1, json!(3))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, Some("TDengine row identifier columns cannot be edited.".to_string()));
+        assert!(result.statements.is_empty());
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepares_databend_save_statements() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Databend),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "int", false, None), column("name", "string", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![vec![json!(2), json!("Grace")]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `default`.`people` SET `name` = 'Linus' WHERE `id` = 1;",
+                "DELETE FROM `default`.`people` WHERE `id` = 1;",
+                "INSERT INTO `default`.`people` (`id`, `name`) VALUES (2, 'Grace');",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_clickhouse_mutation_save_statements() {
+        let mut id_column = column("id", "UInt64", false, None);
+        id_column.is_primary_key = true;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_column, column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![vec![json!(2), json!("Grace")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "ALTER TABLE `people` UPDATE `name` = 'Linus' WHERE `id` = 1;",
+                "ALTER TABLE `people` DELETE WHERE `id` = 1;",
+                "INSERT INTO `people` (`id`, `name`) VALUES (2, 'Grace');",
+            ]
+        );
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_clickhouse_key_only_update() {
+        let mut id_column = column("id", "UInt64", false, None);
+        id_column.is_primary_key = true;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_column, column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(0, json!(2))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some(
+                "ClickHouse primary or partition key columns cannot be updated. Change a non-key column before saving."
+                    .to_string()
+            )
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn omits_clickhouse_partition_key_update_assignments() {
+        let mut event_date_column = column("event_date", "Date", false, Some("partition_key"));
+        event_date_column.is_primary_key = false;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "UInt64", false, None),
+                    event_date_column,
+                    column("name", "String", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "event_date".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2026-06-24"), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("2026-06-25")), (2, json!("Linus"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["ALTER TABLE `events` UPDATE `name` = 'Linus' WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn rejects_clickhouse_partition_key_only_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "UInt64", false, None),
+                    column("event_date", "Date", false, Some("partition_key")),
+                    column("name", "String", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "event_date".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2026-06-24"), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("2026-06-25"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some(
+                "ClickHouse primary or partition key columns cannot be updated. Change a non-key column before saving."
+                    .to_string()
+            )
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn builds_clickhouse_copy_update_statements() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "UInt64", false, None), column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+        });
+
+        assert_eq!(statements, vec!["ALTER TABLE `people` UPDATE `name` = 'Ada' WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn doris_external_catalog_save_and_copy_statements_use_catalog_scope() {
+        let table_meta = DataGridTableMeta {
+            catalog: Some("iceberg_catalog".to_string()),
+            database: None,
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![column("id", "bigint", false, None), column("status", "varchar", true, None)]),
+        };
+
+        let copy_updates = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
+            table_meta: table_meta.clone(),
+            columns: vec!["id".to_string(), "status".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("paid")]],
+        });
+        assert_eq!(
+            copy_updates,
+            vec!["UPDATE `iceberg_catalog`.`sales`.`orders` SET `status` = 'paid' WHERE `id` = 1;"]
+        );
+
+        let copy_insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
+            table_meta: Some(table_meta.clone()),
+            columns: vec!["id".to_string(), "status".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(2), json!("new")]],
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+        assert_eq!(
+            copy_insert.as_deref(),
+            Some("INSERT INTO `iceberg_catalog`.`sales`.`orders` (`id`, `status`) VALUES (2, 'new');")
+        );
+
+        let save = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Doris),
+            identifier_quote: None,
+            table_meta,
+            columns: vec!["id".to_string(), "status".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("pending")], vec![json!(3), json!("cancelled")]],
+            dirty_rows: vec![(0, vec![(1, json!("paid"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![vec![json!(4), json!("new")]],
+        });
+        assert_eq!(
+            save.statements,
+            vec![
+                "UPDATE `iceberg_catalog`.`sales`.`orders` SET `status` = 'paid' WHERE `id` = 1;",
+                "DELETE FROM `iceberg_catalog`.`sales`.`orders` WHERE `id` = 3;",
+                "INSERT INTO `iceberg_catalog`.`sales`.`orders` (`id`, `status`) VALUES (4, 'new');",
+            ]
+        );
+        assert!(save.validation_error.is_none());
+    }
+
+    #[test]
+    fn prepares_databend_keyless_save_statements_with_row_predicate() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Databend),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "int", true, None), column("name", "string", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `default`.`people` SET `name` = 'Linus' WHERE `id` = 1 AND `name` = 'Ada';",
+                "DELETE FROM `default`.`people` WHERE `id` = 1 AND `name` = 'Ada';",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_oscar_keyless_save_statements_with_schema_qualified_row_predicate() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oscar),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SYSDBA".to_string()),
+                table_name: "PEOPLE".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("ID", "INTEGER", true, None), column("NAME", "VARCHAR", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"SYSDBA\".\"PEOPLE\" SET \"NAME\" = 'Linus' WHERE \"ID\" = 1 AND \"NAME\" = 'Ada';",
+                "DELETE FROM \"SYSDBA\".\"PEOPLE\" WHERE \"ID\" = 1 AND \"NAME\" = 'Ada';",
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_expression_only_source_columns() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "ihli_data".to_string(),
+                primary_keys: vec!["iso3".to_string(), "year".to_string()],
+                columns: None,
+            },
+            columns: vec!["iso3".to_string(), "year".to_string(), "country_name".to_string(), "score".to_string()],
+            source_columns: Some(vec![
+                Some("iso3".to_string()),
+                Some("year".to_string()),
+                Some("country_name".to_string()),
+                None,
+            ]),
+            rows: vec![vec![json!("LUX"), json!(2007), json!("Luxembourg"), json!(50242.1)]],
+            dirty_rows: vec![(0, vec![(2, json!("Luxembourg City")), (3, json!(999))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!("USA"), json!(2008), json!("United States"), json!(43000)]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "public"."ihli_data" SET "country_name" = 'Luxembourg City' WHERE "iso3" = 'LUX' AND "year" = 2007;"#,
+                r#"INSERT INTO "public"."ihli_data" ("iso3", "year", "country_name") VALUES ('USA', 2008, 'United States');"#,
+            ]
+        );
+    }
+
+    #[test]
+    fn formats_mysql_temporal_columns_by_target_type() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "policies".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "int", false, None),
+                    column("insurance_start_time", "datetime", true, None),
+                    column("raw_text", "varchar(64)", true, None),
+                    column("coverage_day", "date", true, None),
+                    column("start_clock", "time", true, None),
+                ]),
+            },
+            columns: vec![
+                "id".to_string(),
+                "insurance_start_time".to_string(),
+                "raw_text".to_string(),
+                "coverage_day".to_string(),
+                "start_clock".to_string(),
+            ],
+            source_columns: None,
+            rows: vec![vec![
+                json!(1),
+                json!("2026-05-12T00:00:00+00:00"),
+                json!("old"),
+                json!("2026-05-12T00:00:00+00:00"),
+                json!("2026-05-12T09:30:45+00:00"),
+            ]],
+            dirty_rows: vec![(
+                0,
+                vec![
+                    (1, json!("2026-05-12T00:00:00+00:00")),
+                    (2, json!("2026-05-12T00:00:00+00:00")),
+                    (3, json!("2026-05-12T00:00:00+00:00")),
+                    (4, json!("2026-05-12T09:30:45+00:00")),
+                ],
+            )],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `policies` SET `insurance_start_time` = '2026-05-12 00:00:00', `raw_text` = '2026-05-12T00:00:00+00:00', `coverage_day` = '2026-05-12', `start_clock` = '09:30:45' WHERE `id` = 1;"]
+        );
+    }
+
+    #[test]
+    fn mysql_primary_key_text_predicates_do_not_use_binary_comparison() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "school".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "varchar(32)", true, None), column("age", "varchar(8)", false, None)]),
+            },
+            columns: vec!["id".to_string(), "age".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("0001492305e412e88086bd582d2678e0"), json!("17")]],
+            dirty_rows: vec![(0, vec![(1, json!("18"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `school` SET `age` = '18' WHERE `id` = '0001492305e412e88086bd582d2678e0';"]
+        );
+    }
+
+    #[test]
+    fn mysql_row_text_predicates_use_binary_comparison_for_width_sensitive_edits() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "parts".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("code", "varchar(32)", true, None)]),
+            },
+            columns: vec!["code".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("S471355(0)")]],
+            dirty_rows: vec![(0, vec![(0, json!("S471355（0）"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE `parts` SET `code` = 'S471355（0）' WHERE BINARY `code` = 'S471355(0)';"]
+        );
+        assert_eq!(
+            result.rollback_statements,
+            vec![
+                "UPDATE `parts` SET `code` = 'S471355(0)' WHERE BINARY `code` = 'S471355（0）' AND BINARY `code` = 'S471355（0）';"
+            ]
+        );
+    }
+
+    #[test]
+    fn prepares_manticore_save_statements_without_trailing_semicolons() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ManticoreSearch),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "rt_products".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "bigint", false, None), column("title", "text", true, None)]),
+            },
+            columns: vec!["id".to_string(), "title".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("1"), json!("old")], vec![json!("2"), json!("deleted")]],
+            dirty_rows: vec![(0, vec![(1, json!("new"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![vec![json!("3"), json!("inserted")]],
+        });
+
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `rt_products` SET `title` = 'new' WHERE `id` = 1 AND `title` = 'old'",
+                "DELETE FROM `rt_products` WHERE `id` = 2 AND `title` = 'deleted'",
+                "INSERT INTO `rt_products` (`id`, `title`) VALUES (3, 'inserted')",
+            ]
+        );
+        assert!(result.rollback_statements.iter().all(|statement| !statement.ends_with(';')));
+    }
+
+    #[test]
+    fn validates_duplicate_inserted_primary_keys() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "education_data".to_string(),
+                primary_keys: vec!["country_code".to_string(), "year".to_string()],
+                columns: None,
+            },
+            columns: vec!["country_code".to_string(), "year".to_string(), "value".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("ALB"), json!(2021), json!(0.812)]],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!("ALB"), json!(2021), json!(0.913)]],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some(r#"New row duplicates the existing primary key (country_code = "ALB", year = 2021). Change the key before saving."#.to_string())
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    fn pk_column(name: &str, data_type: &str, nullable: bool, extra: Option<&str>) -> DataGridColumnInfo {
+        DataGridColumnInfo {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            is_nullable: nullable,
+            is_primary_key: true,
+            column_default: None,
+            extra: extra.map(ToString::to_string),
+        }
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_hidden_oracle_rowid_from_cloned_row_insert() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "TT_PLATFORM_CARS".to_string(),
+                primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("PLATFORM", "VARCHAR2(100)", true, None),
+                ]),
+            },
+            columns: vec!["ID".to_string(), "PLATFORM".to_string(), "__DBX_PK_0".to_string()],
+            source_columns: Some(vec![
+                Some("ID".to_string()),
+                Some("PLATFORM".to_string()),
+                Some(DBX_ROWID_COLUMN.to_string()),
+            ]),
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(72), json!("轻卡"), Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "APP"."TT_PLATFORM_CARS" ("ID", "PLATFORM") VALUES (72, '轻卡');"#]
+        );
+    }
+
+    #[test]
+    fn prepares_xugu_rowid_updates_deletes_and_inserts_without_writing_synthetic_key() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Xugu),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".to_string()),
+                table_name: "ROWID_TABLE".to_string(),
+                primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+                columns: Some(vec![
+                    column(DBX_ROWID_COLUMN, "ROWID", false, None),
+                    column("ID", "INTEGER", false, None),
+                    column("VALUE", "VARCHAR(40)", true, None),
+                ]),
+            },
+            columns: vec![DBX_ROWID_COLUMN.to_string(), "ID".to_string(), "VALUE".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!("AA-1"), json!(1), json!("old")], vec![json!("AA-2"), json!(2), json!("remove")]],
+            dirty_rows: vec![(0, vec![(2, json!("new"))])],
+            deleted_rows: vec![1],
+            new_rows: vec![vec![Value::Null, json!(3), json!("inserted")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE \"APP\".\"ROWID_TABLE\" SET \"VALUE\" = 'new' WHERE ROWID = 'AA-1';",
+                "DELETE FROM \"APP\".\"ROWID_TABLE\" WHERE ROWID = 'AA-2';",
+                "INSERT INTO \"APP\".\"ROWID_TABLE\" (\"ID\", \"VALUE\") VALUES (3, 'inserted');",
+            ]
+        );
+    }
+
+    #[test]
+    fn prepare_data_grid_save_skips_sqlite_autoincrement_pk_validation() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "OnlineLogs".to_string(),
+                primary_keys: vec!["OnlineLogId".to_string()],
+                columns: Some(vec![
+                    pk_column("OnlineLogId", "INTEGER", false, Some("autoincrement")),
+                    column("LogTime", "TEXT", false, None),
+                ]),
+            },
+            columns: vec!["OnlineLogId".to_string(), "LogTime".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("2026-06-12T00:00:00Z")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "OnlineLogs" ("LogTime") VALUES ('2026-06-12T00:00:00Z');"#]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_includes_explicit_sqlite_pk_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "OnlineLogs".to_string(),
+                primary_keys: vec!["OnlineLogId".to_string()],
+                columns: Some(vec![
+                    pk_column("OnlineLogId", "INTEGER", false, Some("autoincrement")),
+                    column("LogTime", "TEXT", false, None),
+                ]),
+            },
+            columns: vec!["OnlineLogId".to_string(), "LogTime".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(42), json!("2026-06-12T00:00:00Z")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "OnlineLogs" ("OnlineLogId", "LogTime") VALUES (42, '2026-06-12T00:00:00Z');"#]
+        );
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_empty_mysql_auto_increment_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "users".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("name", "VARCHAR", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(""), json!("Ada")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`users` (`name`) VALUES ('Ada');"]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_mysql_not_null_column_for_before_insert_trigger() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("trigger_value", "VARCHAR(64)", false, None),
+                    column("payload", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "trigger_value".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null, json!("created")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`events` (`payload`) VALUES ('created');"]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_mysql_default_row_insert_for_trigger_only_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "trigger_only".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("required_value", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "required_value".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`trigger_only` () VALUES ();"]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_known_mysql_primary_key_for_trigger_rollback() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, None),
+                    column("trigger_value", "VARCHAR(64)", false, None),
+                    column("payload", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "trigger_value".to_string(), "payload".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(7), Value::Null, json!("created")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO `app`.`events` (`id`, `payload`) VALUES (7, 'created');"]);
+        assert_eq!(result.rollback_statements, vec!["DELETE FROM `app`.`events` WHERE `id` = 7;"]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_rejects_mysql_null_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("app".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "BIGINT", false, Some("auto_increment")),
+                    column("trigger_value", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "trigger_value".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("existing")]],
+            dirty_rows: vec![(0, vec![(1, Value::Null)])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "trigger_value" does not allow NULL."#.to_string()));
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_omits_empty_kingbase_sqlserver_identity_value() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Kingbase),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("dbo".to_string()),
+                table_name: "orders".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    pk_column("id", "int", false, Some("identity(1,1)")),
+                    column("name", "varchar", false, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("Ada")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "dbo"."orders" ("name") VALUES ('Ada');"#]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_validates_other_not_null_columns_in_sqlite() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Sqlite),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "OnlineLogs".to_string(),
+                primary_keys: vec!["OnlineLogId".to_string()],
+                columns: Some(vec![
+                    pk_column("OnlineLogId", "INTEGER", false, Some("autoincrement")),
+                    column("LogTime", "TEXT", false, None),
+                ]),
+            },
+            columns: vec!["OnlineLogId".to_string(), "LogTime".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "LogTime" does not allow NULL."#.to_string()));
+        assert!(result.statements.is_empty());
+    }
+}

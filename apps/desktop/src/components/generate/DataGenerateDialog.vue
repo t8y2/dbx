@@ -32,6 +32,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Database, Table, Columns, Loader2, Save, Upload, Settings, ChevronRight, X, AlertCircle, ArrowUp, ArrowDown } from "@lucide/vue";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { uuid } from "@/lib/common/utils";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -752,7 +753,7 @@ async function startInsert() {
       execute: async () => {
         executing.value = true;
         insertCancelled.value = false;
-        const executionId = crypto.randomUUID();
+        const executionId = uuid();
         activeExecutionId = executionId;
         const startedAt = performance.now();
         const perTable: TableResult[] = [];

@@ -1,5 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { ddlFormatDialectFor, formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+
+describe("omitDdlDatabaseQualifier", () => {
+  it("drops the schema qualifier from Oracle table DDL without touching tablespace references", () => {
+    const ddl = 'CREATE TABLE "SYSTEM"."TEST" ("ABC" CLOB) TABLESPACE "SYSTEM";';
+    expect(omitDdlDatabaseQualifier(ddl, "oracle", "oracle", false)).toBe('CREATE TABLE "TEST" ("ABC" CLOB) TABLESPACE "SYSTEM";');
+  });
+
+  it("drops the qualifier from generated ALTER statements and keeps column references", () => {
+    const ddl = 'ALTER TABLE "SYSTEM"."TEST" ADD ("CDE" CLOB); COMMENT ON COLUMN "SYSTEM"."TEST"."CDE" IS \'note\';';
+    expect(omitDdlDatabaseQualifier(ddl, "oracle", "oracle", false)).toBe('ALTER TABLE "TEST" ADD ("CDE" CLOB); COMMENT ON COLUMN "TEST"."CDE" IS \'note\';');
+  });
+
+  it("drops the qualifier from PostgreSQL, MySQL, and Dameng table references", () => {
+    expect(omitDdlDatabaseQualifier('CREATE TABLE "public"."users" ("id" integer)', "postgres", "postgres", false)).toBe('CREATE TABLE "users" ("id" integer)');
+    expect(omitDdlDatabaseQualifier("CREATE TABLE `analytics`.`events` (`id` int)", "mysql", "mysql", false)).toBe("CREATE TABLE `events` (`id` int)");
+    expect(omitDdlDatabaseQualifier('ALTER TABLE "APP"."T1" ADD ("C1" INT);', "dameng", "dameng", false)).toBe('ALTER TABLE "T1" ADD ("C1" INT);');
+  });
+
+  it("drops both qualifiers of CREATE INDEX ... ON and DROP INDEX targets", () => {
+    const ddl = 'CREATE INDEX "SYSTEM"."IDX_T" ON "SYSTEM"."TEST" ("ABC"); DROP INDEX "SYSTEM"."IDX_T";';
+    expect(omitDdlDatabaseQualifier(ddl, "oracle", "oracle", false)).toBe('CREATE INDEX "IDX_T" ON "TEST" ("ABC"); DROP INDEX "IDX_T";');
+  });
+
+  it("handles comma-separated DROP TABLE lists and TRUNCATE", () => {
+    expect(omitDdlDatabaseQualifier('DROP TABLE "public"."a", "public"."b";', "postgres", "postgres", false)).toBe('DROP TABLE "a", "b";');
+    expect(omitDdlDatabaseQualifier('TRUNCATE TABLE "public"."a";', "postgres", "postgres", false)).toBe('TRUNCATE TABLE "a";');
+  });
+
+  it("keeps the qualifier when the preference is enabled, the dialect needs it, or the type is unknown", () => {
+    const ddl = 'ALTER TABLE "SYSTEM"."TEST" ADD ("CDE" CLOB);';
+    expect(omitDdlDatabaseQualifier(ddl, "oracle", "oracle", true)).toBe(ddl);
+    expect(omitDdlDatabaseQualifier("ALTER TABLE [dbo].[t] ADD [c] int;", "sqlserver", "sqlserver", false)).toBe("ALTER TABLE [dbo].[t] ADD [c] int;");
+    expect(omitDdlDatabaseQualifier(ddl, "oracle", undefined, false)).toBe(ddl);
+  });
+
+  it("keeps Doris and StarRocks external-catalog qualifiers", () => {
+    const dorisDdl = "ALTER TABLE `iceberg`.`analytics`.`events` ADD COLUMN `source` STRING;";
+    const starrocksDdl = "CREATE TABLE `hive`.`events` (`id` bigint);";
+
+    expect(omitDdlDatabaseQualifier(dorisDdl, "mysql", "doris", false, "iceberg")).toBe(dorisDdl);
+    expect(omitDdlDatabaseQualifier(starrocksDdl, "mysql", "starrocks", false, "hive")).toBe(starrocksDdl);
+  });
+
+  it("drops Doris and StarRocks internal-catalog database qualifiers", () => {
+    expect(omitDdlDatabaseQualifier("ALTER TABLE `analytics`.`events` ADD COLUMN `source` STRING;", "mysql", "doris", false, "internal")).toBe("ALTER TABLE `events` ADD COLUMN `source` STRING;");
+    expect(omitDdlDatabaseQualifier("CREATE TABLE `analytics`.`events` (`id` bigint);", "mysql", "starrocks", false, "internal")).toBe("CREATE TABLE `events` (`id` bigint);");
+  });
+
+  it("leaves statements it does not understand untouched", () => {
+    const ddl = "CREATE SEQUENCE SYSTEM.SEQ START WITH 1; SELECT SYSTEM.TEST.ID FROM SYSTEM.TEST;";
+    expect(omitDdlDatabaseQualifier(ddl, "oracle", "oracle", false)).toBe(ddl);
+  });
+});
 
 describe("omitDdlIdentifierQuotes", () => {
   it("removes safe MySQL identifier quotes without changing literals or comments", () => {
@@ -54,5 +107,31 @@ describe("omitDdlIdentifierQuotes", () => {
   it("preserves generated identifier quotes when the setting is enabled", () => {
     const ddl = 'ALTER TABLE "SYSTEM"."TEST" RENAME COLUMN "ABCD" TO "AbCd";';
     expect(formatGeneratedDdlIdentifierQuotes(ddl, "oracle", true)).toBe(ddl);
+  });
+});
+
+describe("ddlFormatDialectFor", () => {
+  it("prefers the effective database type over an Oracle-like connection's MySQL highlighting dialect", () => {
+    expect(ddlFormatDialectFor({ databaseType: "oracle", highlightDialect: "mysql" })).toBe("oracle");
+    expect(ddlFormatDialectFor({ databaseType: "dameng", highlightDialect: "mysql" })).toBe("dameng");
+    expect(ddlFormatDialectFor({ databaseType: "kingbase", highlightDialect: "mysql" })).toBe("postgres");
+  });
+
+  it("honors an explicit formatter dialect first", () => {
+    expect(ddlFormatDialectFor({ formatDialect: "sqlserver", databaseType: "oracle", highlightDialect: "mysql" })).toBe("sqlserver");
+  });
+
+  it("keeps the highlighting dialect when the database type has no dedicated formatter dialect", () => {
+    expect(ddlFormatDialectFor({ databaseType: "db2", highlightDialect: "mysql" })).toBe("mysql");
+    expect(ddlFormatDialectFor({ highlightDialect: "postgres" })).toBe("postgres");
+    expect(ddlFormatDialectFor({})).toBe("generic");
+  });
+
+  it("keeps case-sensitive quoted Oracle names quoted in the DDL view", () => {
+    const ddl = 'CREATE TABLE "SYSTEM"."TEST" ("id" VARCHAR2(32), "cName" VARCHAR2(100))';
+    const highlightDialect = "mysql";
+    const resolved = ddlFormatDialectFor({ databaseType: "oracle", highlightDialect });
+    expect(omitDdlIdentifierQuotes(ddl, highlightDialect)).toBe("CREATE TABLE SYSTEM.TEST (id VARCHAR2(32), cName VARCHAR2(100))");
+    expect(omitDdlIdentifierQuotes(ddl, resolved)).toBe('CREATE TABLE SYSTEM.TEST ("id" VARCHAR2(32), "cName" VARCHAR2(100))');
   });
 });

@@ -116,12 +116,15 @@ pub async fn fetch_plugin_marketplace_catalogs(
 #[tauri::command]
 pub async fn install_marketplace_plugin(
     state: State<'_, Arc<AppState>>,
+    app: AppHandle,
     request: PluginMarketplaceInstallRequest,
 ) -> Result<PluginInstallResponse, String> {
     let marketplace =
-        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?;
+        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?
+            .with_lifecycle(state.plugins.lifecycle());
     let result = marketplace.install(request).await?;
     stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
 
@@ -182,6 +185,7 @@ pub fn install_plugin_event_bridge(app: &tauri::AppHandle, state: Arc<AppState>)
 
 #[tauri::command]
 pub async fn install_plugin_package(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     path: String,
     allow_unsigned: bool,
@@ -190,12 +194,14 @@ pub async fn install_plugin_package(
     let app_version = state.plugins.app_version().to_string();
     let policy = if allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
     let path = std::path::PathBuf::from(path);
+    let lifecycle = state.plugins.lifecycle();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.install_file(&path, policy)
+        PluginPackageInstaller::new(root_dir, app_version)?.with_lifecycle(lifecycle).install_file(&path, policy)
     })
     .await
     .map_err(|error| error.to_string())??;
     stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
 
@@ -207,11 +213,13 @@ pub async fn install_plugin_package_from_url(
     app: AppHandle,
 ) -> Result<PluginInstallResponse, String> {
     let marketplace =
-        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?;
+        PluginMarketplace::new(state.plugins.root_dir().to_path_buf(), state.plugins.app_version().to_string())?
+            .with_lifecycle(state.plugins.lifecycle());
     let policy = if allow_unsigned { PluginInstallPolicy::LocalDevelopment } else { PluginInstallPolicy::LocalSigned };
+    let progress_app = app.clone();
     let result = marketplace
         .install_url_package(&url, policy, move |downloaded, total| {
-            let _ = app.emit(
+            let _ = progress_app.emit(
                 "plugin-url-download-progress",
                 serde_json::json!({
                     "downloaded": downloaded,
@@ -221,24 +229,26 @@ pub async fn install_plugin_package_from_url(
         })
         .await?;
     stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
 
 #[tauri::command]
 pub async fn rollback_plugin(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     plugin_id: String,
 ) -> Result<PluginRollbackResponse, String> {
-    state.remove_plugin_connection_pools(&plugin_id).await;
-    state.plugin_host.stop(&plugin_id).await;
     let root_dir = state.plugins.root_dir().to_path_buf();
     let app_version = state.plugins.app_version().to_string();
+    let lifecycle = state.plugins.lifecycle();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        PluginPackageInstaller::new(root_dir, app_version)?.rollback(&plugin_id)
+        PluginPackageInstaller::new(root_dir, app_version)?.with_lifecycle(lifecycle).rollback(&plugin_id)
     })
     .await
     .map_err(|error| error.to_string())??;
-    stop_external_driver_pools(&state, &result.plugin).await;
+    stop_replaced_plugin_runtime(&state, &result.plugin).await;
+    emit_plugin_runtime_replaced(&app, &result.plugin);
     Ok(result.response())
 }
 
@@ -496,6 +506,19 @@ fn asset_payload(asset: PluginUiAsset) -> PluginUiAssetPayload {
         data_base64: base64::engine::general_purpose::STANDARD.encode(asset.bytes),
         etag: asset.etag,
     }
+}
+
+/// Notifies the webview that a plugin's runtime was replaced by an
+/// install/rollback, so already-open workbench tabs can reload the new UI
+/// instead of showing the stale version until manually reopened.
+fn emit_plugin_runtime_replaced(app: &AppHandle, plugin: &InstalledPlugin) {
+    let _ = app.emit(
+        "plugin-runtime-replaced",
+        serde_json::json!({
+            "pluginId": plugin.manifest.id,
+            "version": plugin.manifest.version,
+        }),
+    );
 }
 
 async fn stop_replaced_plugin_runtime(state: &Arc<AppState>, plugin: &InstalledPlugin) {

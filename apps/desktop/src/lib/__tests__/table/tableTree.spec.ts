@@ -38,6 +38,40 @@ describe("case-sensitive database objects", () => {
     expect(new Set(viewGroup?.children?.map((node) => node.id) ?? []).size).toBe(2);
   });
 
+  it("preserves view validity in simple and grouped trees", () => {
+    const objects: ObjectInfo[] = [
+      { name: "VALID_VIEW", object_type: "VIEW", schema: "dbx_test", valid: true },
+      { name: "INVALID_VIEW", object_type: "VIEW", schema: "dbx_test", valid: false },
+    ];
+
+    const simple = buildSimpleObjectTreeNodes({ ...context, schema: "dbx_test", objects });
+    expect(simple.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({ ...context, schema: "dbx_test", objects });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
+  });
+
+  it("preserves view validity when building the table-like tree path", () => {
+    const tables: TableInfo[] = [
+      { name: "VALID_VIEW", table_type: "VIEW", valid: true },
+      { name: "INVALID_VIEW", table_type: "VIEW", valid: false },
+    ];
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      tables,
+    });
+
+    expect(nodes.map((node) => node.valid)).toEqual([false, true]);
+
+    const grouped = buildGroupedObjectTreeNodes({
+      ...context,
+      schema: "dbx_test",
+      objects: mergeTableInfosIntoObjects([], tables, "dbx_test"),
+    });
+    expect(grouped.find((node) => node.type === "group-views")?.children?.map((node) => node.valid)).toEqual([false, true]);
+  });
+
   it("keeps table nodes whose names differ only by case across pages", () => {
     const firstPage = buildTableTreeNodes({
       ...context,

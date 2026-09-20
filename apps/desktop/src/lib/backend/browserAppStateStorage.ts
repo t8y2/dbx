@@ -1,4 +1,4 @@
-import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 
 const DB_NAME = "dbx-app-state";
 const DB_VERSION = 1;
@@ -59,7 +59,12 @@ async function withStore<T>(mode: IDBTransactionMode, run: (store: IDBObjectStor
       return result;
     }
     return await request;
-  } catch {
+  } catch (error) {
+    // Never fully silent: a persistent failure here degrades every save to the
+    // localStorage fallback while loads keep preferring the stale IndexedDB
+    // snapshot — exactly the workspace-freeze regression this module guards
+    // against elsewhere.
+    console.warn("[DBX][browserAppStateStorage] IndexedDB operation failed; falling back to localStorage", error);
     return null;
   }
 }
@@ -77,9 +82,31 @@ export async function loadBrowserAppState(key: string): Promise<unknown | null> 
   }
 }
 
+/**
+ * Values handed to this module frequently come straight out of reactive stores
+ * (open tabs carry reactive editor selection/viewport objects, editor settings
+ * are store objects). IndexedDB's structured clone rejects Vue reactive
+ * proxies with a DataCloneError, which used to silently degrade every save to
+ * the localStorage fallback while loadBrowserAppState kept preferring the
+ * stale IndexedDB snapshot — freezing workspace persistence in web mode after
+ * the first cursor move. JSON round-tripping yields the exact plain
+ * representation the fallback already stores (proxies unwrapped, undefined
+ * fields dropped), keeping both copies equivalent.
+ */
+function toStorableValue(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value));
+}
+
 export async function saveBrowserAppState(key: string, value: unknown): Promise<void> {
-  const result = await withStore("readwrite", (store) => store.put(value, key));
-  if (result !== null) return;
-  if (safeLocalStorageSet(fallbackKey(key), JSON.stringify(value))) return;
+  const stored = toStorableValue(value);
+  const result = await withStore("readwrite", (store) => store.put(stored, key));
+  if (result !== null) {
+    // Drop any fallback copy left behind by an earlier failed save: it is now
+    // older than the IndexedDB value and must never be resurrected by a future
+    // load that cannot reach IndexedDB.
+    safeLocalStorageRemove(fallbackKey(key));
+    return;
+  }
+  if (safeLocalStorageSet(fallbackKey(key), JSON.stringify(stored))) return;
   throw new Error(`Failed to persist browser app state: ${key}`);
 }

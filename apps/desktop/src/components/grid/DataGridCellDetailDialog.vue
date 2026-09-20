@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import DataGridCellDetailTextPreview from "@/components/grid/DataGridCellDetailTextPreview.vue";
 import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
 import { computed, nextTick, ref, watch } from "vue";
 import { Code2, Copy, Download, Eye, FileUp, Info, Pencil } from "@lucide/vue";
@@ -150,8 +151,12 @@ watch(
           <div class="flex items-center justify-between gap-2">
             <div class="text-muted-foreground">{{ t("grid.cellValue") }}</div>
             <div class="flex items-center gap-1">
+              <!-- Binary cells keep `0x<hex>` as the canonical value; the transform kinds below
+                   (timestamp/JSON/radix…) have text semantics and would misread hex. Offer the
+                   explicit, read-only bytes decode instead. -->
+              <DataGridCellDetailTextPreview v-if="open && isBinaryCellColumnType(detail.type)" :identity="`${detail.rowId}:${detail.colIndex}`" :value="detail.value" :column-type="detail.type" :database-type="databaseType" :incomplete="detail.isSourceTruncated" />
               <DataGridValueTransform
-                v-if="open && !isBinaryCellColumnType(detail.type)"
+                v-else-if="open"
                 :source="(detail.isNull ?? detail.value === null) ? null : detail.rawValue"
                 :identity="`${detail.rowId}:${detail.colIndex}`"
                 :incomplete="detail.isSourceTruncated"

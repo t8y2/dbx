@@ -94,6 +94,61 @@ describe("failure detail copy text", () => {
   });
 });
 
+describe("SQL file byte progress", () => {
+  it("keeps legacy progress indeterminate instead of using successful statements as the total", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("legacy-sql-progress", "large.sql", "/tmp/large.sql");
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "running",
+      statementIndex: 772205,
+      successCount: 772205,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 1000,
+      statementSummary: "INSERT INTO users VALUES (1)",
+    });
+    await mountPopover();
+    expect(document.querySelector('[data-testid="sql-file-progress"] [role="progressbar"]')?.hasAttribute("aria-valuenow")).toBe(false);
+    expect(task.totalRows).toBeNull();
+  });
+
+  it.each(["done", "error", "cancelled"] as const)("shows byte progress and preserves it on %s", async (status) => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask(`byte-progress-${status}`, "large.sql", "/tmp/large.sql");
+    const progress = {
+      executionId: task.exportId,
+      status: "running" as const,
+      statementIndex: 772205,
+      successCount: 772205,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 1000,
+      statementSummary: "INSERT INTO users VALUES (1)",
+      bytesRead: 1024,
+      totalBytes: 4096,
+      phase: "executing" as const,
+    };
+    tracker.updateSqlFileTask(task.exportId, progress);
+    await mountPopover();
+    const indicator = document.querySelector('[data-testid="sql-file-progress"]')!;
+    expect(indicator.textContent).toContain("Executing SQL");
+    expect(indicator.textContent).toContain("Read 1.0 KB / 4.0 KB");
+    expect(indicator.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("25");
+
+    tracker.updateSqlFileTask(task.exportId, { ...progress, status: "statementDone", fileIndex: 1, statementIndex: 2, successCount: 2, bytesRead: 2048 });
+    await nextTick();
+    expect(indicator.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("50");
+
+    tracker.updateSqlFileTask(task.exportId, { ...progress, status, bytesRead: undefined, totalBytes: undefined, phase: undefined });
+    await nextTick();
+    expect(indicator.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe(status === "done" ? "100" : "50");
+    expect(task.bytesRead).toBe(2048);
+    expect(task.totalBytes).toBe(4096);
+    expect(task.elapsedMs).toBe(1000);
+  });
+});
+
 describe("ExportProgressPopover task duration", () => {
   it("distinguishes manual exports from scheduled backups and uses a compact failure dot", async () => {
     const tracker = useExportTracker();

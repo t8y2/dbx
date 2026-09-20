@@ -233,7 +233,11 @@ pub async fn import_agents_from_zip(
     dbx_core::jdbc::import_offline_jdbc_payload(state.plugins.root_dir(), &package_path)?;
     let count = result.drivers_installed.len() as u32;
     emit_agent_progress(&app, &operation_id, AgentProgressEvent::step("done"));
-    Ok(serde_json::json!({ "count": count, "jreCount": result.jre_installed.len() }))
+    Ok(serde_json::json!({
+        "count": count,
+        "jreCount": result.jre_installed.len(),
+        "failures": result.failures,
+    }))
 }
 
 #[tauri::command]

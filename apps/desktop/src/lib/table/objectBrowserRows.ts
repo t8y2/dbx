@@ -121,6 +121,7 @@ export function objectBrowserRowLegacyPinnedTreeNodeIds(row: ObjectBrowserRow, c
               {
                 name: row.name,
                 table_type: row.type,
+                valid: row.valid,
                 comment: row.comment,
                 parent_schema: row.partitionParentSchema,
                 parent_name: row.partitionParentName,

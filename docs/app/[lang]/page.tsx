@@ -22,6 +22,12 @@ import { ArrowRight, Bot, Database, FileCode, GitCompare, Network, Search, Shiel
 import { resolveLang, type DocsLang } from "@/lib/i18n";
 
 function formatStars(count: number) {
+  // 五位数起按整千四舍五入：19,754 → "20k+"。上万后一位小数没有意义，
+  // 卡片上显示 "19.8k+" 不如 "20k+" 直观。
+  if (count >= 10000) {
+    return `${Math.round(count / 1000)}k+`;
+  }
+
   if (count >= 1000) {
     return `${(Math.floor(count / 100) / 10).toFixed(1)}k+`;
   }
@@ -34,13 +40,13 @@ function metrics(starLabel: string) {
     en: [
       { value: "~25 MB", label: "desktop installer" },
       { value: "90+", label: "database engines" },
-      { value: "2 modes", label: "desktop and Docker" },
+      { value: "3 modes", label: "desktop, Docker and CLI" },
       { value: starLabel, label: "GitHub stars, fully open-source" },
     ],
     cn: [
       { value: "~25 MB", label: "桌面安装包" },
       { value: "90+", label: "数据库引擎" },
-      { value: "2 种模式", label: "桌面与 Docker" },
+      { value: "3 种模式", label: "桌面、Docker 与 CLI" },
       { value: starLabel, label: "GitHub Star，完全开源" },
     ],
   };
@@ -681,7 +687,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
 
       {/* Sponsor */}
       <RevealSection className="max-w-[1180px] mx-auto px-7 mt-10 max-[760px]:px-[18px]">
-        <p className="m-0 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorsLabel}</p>
+        <p className="m-0 text-center text-[15px] font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.sponsorsLabel}</p>
         <div className="landing-sponsor-grid mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
           {sponsorItems.map((sponsor) => (
             <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="landing-sponsor-card flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 transition-colors hover:border-landing-blue max-[560px]:block">
@@ -701,7 +707,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
             </Link>
           ))}
         </div>
-        <p className="m-0 mt-9 text-xs font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.partnersLabel}</p>
+        <p className="m-0 mt-9 text-center text-[15px] font-[720] uppercase tracking-[0.18em] text-landing-blue">{t.partnersLabel}</p>
         <div className="landing-sponsor-grid mt-3 grid grid-cols-2 gap-4 max-[900px]:grid-cols-1">
           {partnerItems.map((sponsor) => (
             <Link key={sponsor.name} href={sponsor.href} target="_blank" rel="noopener noreferrer" className="landing-sponsor-card flex min-h-[154px] items-center gap-5 rounded-[10px] border border-landing-line bg-landing-panel px-5 py-4 transition-colors hover:border-landing-blue max-[560px]:block">

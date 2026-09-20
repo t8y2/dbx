@@ -1035,6 +1035,28 @@ pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Opti
     state.storage.load_sidebar_layout().await
 }
 
+#[tauri::command]
+pub async fn save_table_vgroups(
+    state: State<'_, Arc<AppState>>,
+    scope_key: String,
+    layout: serde_json::Value,
+) -> Result<(), String> {
+    state.storage.save_table_vgroups(&scope_key, &layout).await
+}
+
+#[tauri::command]
+pub async fn load_table_vgroups(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    state.storage.load_table_vgroups().await
+}
+
+#[tauri::command]
+pub async fn delete_table_vgroups_for_connection(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<(), String> {
+    state.storage.delete_table_vgroups_for_connection(&connection_id).await
+}
+
 fn sqlite_extension_specs_from_config(config: &ConnectionConfig) -> Vec<db::sqlite::SqliteExtensionSpec> {
     db::sqlite::sqlite_extension_specs_from_url_params(config.url_params.as_deref())
         .into_iter()
@@ -1146,8 +1168,13 @@ async fn test_connection_with_info_inner(
     let tunnel_id = format!("{}:test", config.id);
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
-    let (host, port) = state.connection_host_port(connection_id, &config).await?;
-    let probe_result = probe_connection_endpoint(&config, &host, port).await;
+    let endpoint = state.plugin_connection_endpoint(connection_id, &config).await?;
+    let (host, port) = (endpoint.host.clone(), endpoint.port);
+    let runtime_proxy = endpoint.proxy;
+    // SOCKS-routed plugin tests dial through the route themselves; probing the
+    // logical endpoint (possibly empty host/port) would mislead.
+    let probe_result =
+        if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
     let url = connection_url_for_endpoint(&config, &host, port);
     let target = redacted_connection_url_for_endpoint(&config, &host, port);
     let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
@@ -1155,7 +1182,7 @@ async fn test_connection_with_info_inner(
     let gaussdb_m_jdbc_config = gaussdb_m_jdbc_command_config(&config, &host, port);
     log::info!("[test_connection] db_type={:?} target={}", config.db_type, target);
     if config.db_type == DatabaseType::Plugin {
-        let result = state.plugin_host.test_connection(&config, &host, port).await;
+        let result = state.plugin_host.test_connection(&config, &host, port, runtime_proxy).await;
         if has_transport_layers {
             state.reset_connection_transport_for_config(&tunnel_id, &config).await;
         }
@@ -1687,11 +1714,22 @@ pub async fn connect_db(
     let mut connected_config = config.clone();
     let mut connected_db_config = db_config.clone();
 
-    state.remove_connection_pools_detached(&id).await;
+    // Plugin 连接的 connection/connect 是幂等 upsert：连接路径（首连、重推、
+    // 重连）只替换池条目，完全跳过旧池拆除——close 会向 sidecar 发
+    // connection/disconnect，其语义是"删注册表 + 杀掉该连接全部会话"，会把
+    // 同连接其他 tab 的活跃终端一起杀死。用户显式断开仍走 disconnect_db 的
+    // 完整关闭路径（会发 disconnect）。其他类型维持 detached 关闭不变。
+    if db_config.db_type == DatabaseType::Plugin {
+        state.drop_connection_pools_without_close(&id).await;
+    } else {
+        state.remove_connection_pools_detached(&id).await;
+    }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     state.reset_connection_transport_for_config(&id, &db_config).await;
 
-    let (host, port) = state.connection_host_port(&id, &db_config).await?;
+    let endpoint = state.plugin_connection_endpoint(&id, &db_config).await?;
+    let (host, port) = (endpoint.host, endpoint.port);
+    let runtime_proxy = endpoint.proxy;
     if let Err(err) = state.ensure_current_connection_attempt(&id, Some(attempt)).await {
         state.reset_connection_transport_for_config(&id, &db_config).await;
         return Err(err);
@@ -2051,9 +2089,9 @@ pub async fn connect_db(
         DatabaseType::Mqtt => {
             return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
         }
-        DatabaseType::Plugin => {
-            PoolKind::PluginConnection(state.plugin_host.connect_connection(&db_config, &host, port).await?)
-        }
+        DatabaseType::Plugin => PoolKind::PluginConnection(
+            state.plugin_host.connect_connection(&db_config, &host, port, runtime_proxy).await?,
+        ),
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 

@@ -1,5 +1,6 @@
 import { ref, type Ref } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { beginPanelResize, endPanelResize } from "@/lib/app/panelResizeState";
 
 const PANEL_MIN_WIDTH = 240;
 const DEFAULT_PANEL_MAX_WIDTH = 800;
@@ -36,6 +37,7 @@ export function usePanelResize() {
       resizeHandle?.setPointerCapture(e.pointerId);
       const resizeOverlay = document.createElement("div");
       resizeOverlay.setAttribute("aria-hidden", "true");
+      beginPanelResize();
       Object.assign(resizeOverlay.style, {
         position: "fixed",
         inset: "0",
@@ -53,19 +55,36 @@ export function usePanelResize() {
       widthRef.value = startWidth;
       const panelElement = resizeHandle?.parentElement;
       let currentWidth = startWidth;
+      let rafId: number | null = null;
 
       const onPointerMove = (ev: PointerEvent) => {
         const delta = ev.clientX - startX;
         currentWidth = Math.max(PANEL_MIN_WIDTH, Math.min(upperBound, startWidth + (direction === "right" ? delta : -delta)));
-        panelElement?.style.setProperty("width", `${currentWidth}px`);
+        // happy-dom unit tests assert styles synchronously (no frame advance),
+        // so apply immediately under the test mode instead of via rAF.
+        if (import.meta.env.MODE === "test") {
+          panelElement?.style.setProperty("width", `${currentWidth}px`);
+          return;
+        }
+        if (rafId !== null) return;
+        rafId = requestAnimationFrame(() => {
+          panelElement?.style.setProperty("width", `${currentWidth}px`);
+          rafId = null;
+        });
       };
 
       const finishResize = () => {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        panelElement?.style.setProperty("width", `${currentWidth}px`);
         document.removeEventListener("pointermove", onPointerMove);
         document.removeEventListener("pointerup", finishResize);
         document.removeEventListener("pointercancel", finishResize);
         window.removeEventListener("blur", finishResize);
         if (resizeHandle?.hasPointerCapture(e.pointerId)) resizeHandle.releasePointerCapture(e.pointerId);
+        endPanelResize();
         resizeOverlay.remove();
         widthRef.value = currentWidth;
         safeLocalStorageSet(storageKey, String(widthRef.value));

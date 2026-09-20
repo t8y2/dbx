@@ -11,6 +11,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.net.SocketException;
 import java.security.Security;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -26,27 +27,35 @@ import java.util.Map;
 
 class SqlServerLegacyAgentTest {
     @Test
-    void onlySqlServer8UnsupportedErrorsTriggerTheOldDriverFallback() {
-        // Real mssql-jdbc prelogin rejection for SQL Server 2000
-        // (R_unsupportedServerVersion, English-only resources).
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+    void sqlServer2000PreloginFailuresTriggerTheOldDriverFallback() {
+        // Real mssql-jdbc prelogin rejection for SQL Server 2000.
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("SQL Server version 8 is not supported by this driver.")
         ));
         // Older driver wordings name the supported floor instead
         // (mssql-jdbc R_notSQLServer family).
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("This version of the driver can be used only with SQL Server 2005 or later.")
         ));
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("该驱动程序只能与 SQL Server 2005 或更高版本一起使用。")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("该驱动程序不支持 SQL Server 8 版")
         ));
-        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("The driver does not support SQL Server 8")
         ));
-        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(
+            new SQLException("Connection failed", new SocketException("Connection reset"))
+        ));
+        SQLException chained = new SQLException("Connection failed");
+        chained.setNextException(new SQLException("驱动程序收到意外的登录前响应。"));
+        Assertions.assertTrue(SqlServerLegacyAgent.shouldFallbackToJtds(chained));
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("TLS handshake failed")
         ));
-        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+        Assertions.assertFalse(SqlServerLegacyAgent.shouldFallbackToJtds(
             new SQLException("Login failed for user 'sa'")
         ));
     }

@@ -1,4 +1,4 @@
-import type { Text } from "@codemirror/state";
+import type { ChangeSet, Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
@@ -12,6 +12,36 @@ export interface ExecutableStatementRangeCache {
   byStart: Map<number, SqlTextRange>;
   byExecutableLineStart: Map<number, SqlTextRange>;
   ranges: SqlTextRange[];
+}
+
+/**
+ * Membership-only view of the statement-start positions a run-statement gutter
+ * needs (`byStart` keys plus `byExecutableLineStart` keys). Kept separate from
+ * the full cache so it can be cheaply shifted through a ChangeSet on every
+ * keystroke and fully rebuilt only after typing pauses, instead of re-parsing
+ * the whole document synchronously per keystroke.
+ */
+export interface StatementGutterStartIndex {
+  starts: ReadonlySet<number>;
+  executableLineStarts: ReadonlySet<number>;
+}
+
+export function statementGutterStartIndexForCache(cache: ExecutableStatementRangeCache): StatementGutterStartIndex {
+  return { starts: new Set(cache.byStart.keys()), executableLineStarts: new Set(cache.byExecutableLineStart.keys()) };
+}
+
+export function mapStatementGutterStartIndex(index: StatementGutterStartIndex, changes: ChangeSet): StatementGutterStartIndex {
+  return { starts: mapStartPositions(index.starts, changes), executableLineStarts: mapStartPositions(index.executableLineStarts, changes) };
+}
+
+function mapStartPositions(positions: ReadonlySet<number>, changes: ChangeSet): Set<number> {
+  const mapped = new Set<number>();
+  for (const position of positions) mapped.add(changes.mapPos(position, 1));
+  return mapped;
+}
+
+export function statementGutterStartIndexHasStartAt(index: StatementGutterStartIndex, lineFrom: number): boolean {
+  return index.starts.has(lineFrom) || index.executableLineStarts.has(lineFrom);
 }
 
 export type ExecutableStatementRangeParser = (sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions) => SqlTextRange[];

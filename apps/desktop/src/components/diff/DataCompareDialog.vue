@@ -3,7 +3,6 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
@@ -13,14 +12,13 @@ import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import type { DataCompareCellValue, DataCompareSyncPlan } from "@/lib/dataGrid/dataCompare";
-import { inferCompareKeyColumns } from "@/lib/dataGrid/dataCompare";
+import { inferCompareKeyColumns, normalizeKeyColumns, sameKeyColumns, type CompareKeyColumnOption, type DataCompareCellValue, type DataCompareSyncPlan } from "@/lib/dataGrid/dataCompare";
 import {
   buildDataCompareSyncPlanTables,
   emptyDataCompareSyncPlan,
   getDataCompareSession,
+  normalizeKeyColumnOverrides,
   startDataCompareSession,
-  type CompareColumn,
   type DataCompareSession,
   type DataCompareTableResult,
   type DataCompareTableStatus,
@@ -29,8 +27,11 @@ import {
   type SelectableDataCompareModifiedRow,
   type SelectableDataCompareRow,
 } from "@/composables/useDataCompareSession";
+import CompareKeyColumnsSelect from "@/components/diff/CompareKeyColumnsSelect.vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, RotateCcw, Square } from "@lucide/vue";
 
@@ -67,7 +68,6 @@ const targetDatabases = ref<string[]>([]);
 const targetSchemas = ref<string[]>([]);
 const targetTables = ref<string[]>([]);
 
-const keyColumnsText = ref("");
 const detailPreviewLimit = ref(String(PREVIEW_LIMIT_OPTIONS[1]));
 const batchResults = ref<DataCompareTableResult[]>([]);
 const syncPlan = ref<DataCompareSyncPlan>(emptyDataCompareSyncPlan());
@@ -77,12 +77,35 @@ const compareProgressCurrent = ref(0);
 const compareProgressTotal = ref(0);
 const compareProgressTable = ref("");
 const executing = ref(false);
+const manualTransaction = ref(false);
+const txnSessionId = ref<string>();
+let commitUncertain = false;
+const resolvingTransaction = ref(false);
+const transactionFailed = ref(false);
+let executionInterrupted = false;
+const executionLocked = computed(() => executing.value || resolvingTransaction.value || !!txnSessionId.value);
+const canUseManualTransaction = computed(() => supportsTransaction(store.getConfig(targetConnectionId.value)?.db_type));
 const executedCount = ref(0);
 const executeTotal = ref(0);
 const syncErrors = ref<{ sql: string; error: string }[]>([]);
 const showAdded = ref(true);
 const showRemoved = ref(true);
 const showModified = ref(true);
+
+/**
+ * Explicit match columns per source table. An absent entry means "auto": the
+ * primary key of that table is inferred, so a batch compare never shares one
+ * global key column list across different tables.
+ */
+const keyColumnOverrides = ref<Record<string, string[]>>({});
+/** Column metadata per source table, keyed by table name; cleared with the source endpoint. */
+const tableColumns = ref<Record<string, CompareKeyColumnOption[]>>({});
+const tableColumnErrors = ref<Record<string, string>>({});
+const loadingColumnTables = ref<string[]>([]);
+const expandedKeyColumnTable = ref("");
+let columnRequests = new Map<string, Promise<CompareKeyColumnOption[]>>();
+/** Invalidates in-flight metadata responses after a source endpoint change. */
+let columnMetadataGeneration = 0;
 
 const activeSessionId = ref<string | null>(props.sessionId ?? null);
 let syncPlanRequestId = 0;
@@ -112,13 +135,52 @@ const compareTasksPreview = computed(() =>
 );
 const matchedTaskCount = computed(() => compareTasksPreview.value.filter((task) => task.matched).length);
 const missingTargetTables = computed(() => compareTasksPreview.value.filter((task) => !task.matched).map((task) => task.targetTable || task.sourceTable));
-const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && selectedSourceTableNames.value.length > 0 && targetConnectionId.value && targetDatabase.value && targetSchema.value);
-const keyColumns = computed(() =>
-  keyColumnsText.value
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean),
+
+interface KeyColumnRow {
+  table: string;
+  matched: boolean;
+  manual: boolean;
+  columns: string[];
+  loading: boolean;
+  hint: string;
+  /** Set when the column metadata of this table could not be loaded. */
+  error?: string;
+  /** `missing` means neither a primary key nor a manual selection is available yet. */
+  status: "auto" | "manual" | "missing";
+}
+
+const keyColumnRows = computed<KeyColumnRow[]>(() =>
+  selectedSourceTableNames.value.map((table) => {
+    const matched = !!compareTasksPreview.value.find((task) => task.sourceTable === table)?.matched;
+    const manual = hasKeyColumnOverride(table);
+    const columns = effectiveKeyColumns(table);
+    const error = tableColumnErrors.value[table];
+    return {
+      table,
+      matched,
+      manual,
+      columns,
+      loading: isTableColumnsLoading(table),
+      hint: error || keyColumnHint(table, { matched, manual, columns }),
+      error,
+      status: manual ? "manual" : columns.length > 0 ? "auto" : "missing",
+    };
+  }),
 );
+const singleKeyColumnRow = computed(() => (selectedSourceTableNames.value.length === 1 ? keyColumnRows.value[0] : undefined));
+/**
+ * A single-table compare whose target table exists but whose match columns are
+ * unknown: primary key inference found nothing and the user has not picked
+ * columns yet. Blocking here is safe because no other table depends on it.
+ * Unloaded metadata is deliberately not treated as "no primary key".
+ */
+const singleTableNeedsKeyColumns = computed(() => {
+  const row = singleKeyColumnRow.value;
+  if (!row || !row.matched) return false;
+  if (!isTableColumnsKnown(row.table)) return false;
+  return row.columns.length === 0;
+});
+const canCompare = computed(() => sourceConnectionId.value && sourceDatabase.value && sourceSchema.value && selectedSourceTableNames.value.length > 0 && targetConnectionId.value && targetDatabase.value && targetSchema.value && !singleTableNeedsKeyColumns.value);
 const detailPreviewLimitNumber = computed(() => Number(detailPreviewLimit.value) || PREVIEW_LIMIT_OPTIONS[1]);
 
 const sameTableCount = computed(() => batchResults.value.filter((item) => item.status === "same").length);
@@ -172,6 +234,157 @@ function resetSelectedSourceTables(nextTables: Iterable<string>) {
   selectedSourceTables.value = new Set(nextTables);
 }
 
+// --- Match columns (key columns) -------------------------------------------------
+//
+// Every selected source table owns its match columns: the primary key is the
+// default, and a manual picker selection is stored as a per-table override in
+// `keyColumnOverrides`. The session receives the same per-table shape, so a
+// batch compare is never forced to share one global key column list.
+
+function resetTableColumnMetadata() {
+  columnMetadataGeneration += 1;
+  columnRequests = new Map();
+  tableColumns.value = {};
+  tableColumnErrors.value = {};
+  loadingColumnTables.value = [];
+  expandedKeyColumnTable.value = "";
+}
+
+function columnsForTable(table: string): CompareKeyColumnOption[] {
+  return tableColumns.value[table] ?? [];
+}
+
+function isTableColumnsKnown(table: string): boolean {
+  return tableColumns.value[table] !== undefined;
+}
+
+function isTableColumnsLoading(table: string): boolean {
+  return loadingColumnTables.value.includes(table);
+}
+
+function hasKeyColumnOverride(table: string): boolean {
+  return keyColumnOverrides.value[table] !== undefined;
+}
+
+function inferredKeyColumns(table: string): string[] {
+  return inferCompareKeyColumns(columnsForTable(table));
+}
+
+/** Effective match columns of a table: the manual override, otherwise the inferred primary key. */
+function effectiveKeyColumns(table: string): string[] {
+  const override = keyColumnOverrides.value[table];
+  return override === undefined ? inferredKeyColumns(table) : override;
+}
+
+async function fetchTableColumns(table: string): Promise<CompareKeyColumnOption[]> {
+  const connectionId = sourceConnectionId.value;
+  const database = sourceDatabase.value;
+  const schema = sourceSchema.value;
+  if (!connectionId || !database || !schema || !table) return [];
+  const generation = columnMetadataGeneration;
+  loadingColumnTables.value = [...loadingColumnTables.value, table];
+  try {
+    const columns = (await api.getColumns(connectionId, database, schema, table)) as CompareKeyColumnOption[];
+    if (generation !== columnMetadataGeneration) return [];
+    tableColumns.value = { ...tableColumns.value, [table]: columns };
+    delete tableColumnErrors.value[table];
+    return columns;
+  } catch (error: any) {
+    if (generation === columnMetadataGeneration) tableColumnErrors.value = { ...tableColumnErrors.value, [table]: error?.message || String(error) };
+    return [];
+  } finally {
+    if (generation === columnMetadataGeneration) loadingColumnTables.value = loadingColumnTables.value.filter((item) => item !== table);
+  }
+}
+
+function loadTableColumns(table: string): Promise<CompareKeyColumnOption[]> {
+  const cached = tableColumns.value[table];
+  if (cached) return Promise.resolve(cached);
+  const pending = columnRequests.get(table);
+  if (pending) return pending;
+  const request = fetchTableColumns(table).finally(() => columnRequests.delete(table));
+  columnRequests.set(table, request);
+  return request;
+}
+
+/** Loads metadata for the selected tables with bounded concurrency, so a wide selection cannot flood the backend. */
+async function prefetchSelectedTableColumns(tables: string[]): Promise<void> {
+  const pending = tables.filter((table) => !tableColumns.value[table]);
+  if (pending.length === 0) return;
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(4, pending.length) }, async () => {
+    while (cursor < pending.length) await loadTableColumns(pending[cursor++]);
+  });
+  await Promise.all(workers);
+}
+
+function setTableKeyColumns(table: string, columns: string[]) {
+  const normalized = normalizeKeyColumns(columns);
+  const next = { ...keyColumnOverrides.value };
+  if (sameKeyColumns(normalized, inferredKeyColumns(table))) delete next[table];
+  else next[table] = normalized;
+  keyColumnOverrides.value = next;
+}
+
+function clearTableKeyColumnsOverride(table: string) {
+  if (keyColumnOverrides.value[table] === undefined) return;
+  const next = { ...keyColumnOverrides.value };
+  delete next[table];
+  keyColumnOverrides.value = next;
+}
+
+/** Drops overrides and metadata of tables that are no longer selected. */
+function pruneKeyColumnState(tables: string[]) {
+  const keep = new Set(tables);
+  const nextOverrides: Record<string, string[]> = {};
+  let overridesChanged = false;
+  for (const [table, columns] of Object.entries(keyColumnOverrides.value)) {
+    if (keep.has(table)) nextOverrides[table] = columns;
+    else overridesChanged = true;
+  }
+  if (overridesChanged) keyColumnOverrides.value = nextOverrides;
+
+  const nextColumns: Record<string, CompareKeyColumnOption[]> = {};
+  const nextErrors: Record<string, string> = {};
+  let columnsChanged = false;
+  for (const [table, columns] of Object.entries(tableColumns.value)) {
+    if (keep.has(table)) {
+      nextColumns[table] = columns;
+      if (tableColumnErrors.value[table]) nextErrors[table] = tableColumnErrors.value[table];
+    } else {
+      columnsChanged = true;
+    }
+  }
+  if (columnsChanged) {
+    tableColumns.value = nextColumns;
+    tableColumnErrors.value = nextErrors;
+  }
+  if (expandedKeyColumnTable.value && !keep.has(expandedKeyColumnTable.value)) expandedKeyColumnTable.value = "";
+}
+
+function toggleKeyColumnTable(table: string) {
+  expandedKeyColumnTable.value = expandedKeyColumnTable.value === table ? "" : table;
+  if (expandedKeyColumnTable.value) void loadTableColumns(table);
+}
+
+function keyColumnHint(table: string, state: { matched: boolean; manual: boolean; columns: string[] }): string {
+  if (!state.matched) return t("dataCompare.keyColumnsTargetMissingHint");
+  if (state.manual) return t("dataCompare.keyColumnsManualHint", { columns: state.columns.length > 0 ? state.columns.join(", ") : t("dataCompare.keyColumnsNoneSelected") });
+  if (state.columns.length > 0) return t("dataCompare.keyColumnsAutoSummary", { columns: state.columns.join(", ") });
+  if (!isTableColumnsKnown(table)) return t("dataCompare.keyColumnsStatusAuto");
+  return t("dataCompare.keyColumnsNoPrimaryKey");
+}
+
+/** Only the selected tables are sent, so a deselected table can never leak a stale override. */
+function buildSessionKeyColumnsByTable(): Record<string, string[]> {
+  const overrides: Record<string, string[]> = {};
+  for (const table of selectedSourceTableNames.value) {
+    const override = keyColumnOverrides.value[table];
+    if (override !== undefined) overrides[table] = [...override];
+  }
+  return overrides;
+}
+
 function buildCompareTasks(): DataCompareTableTask[] {
   if (!selectedSourceTableNames.value.length) return [];
   if (!isBatchCompare.value) {
@@ -222,7 +435,10 @@ async function restoreDataCompareSession(session: DataCompareSession): Promise<v
     targetSchemas.value = [...config.targetSchemas];
     targetTables.value = [...config.targetTables];
     targetTable.value = config.targetTable;
-    keyColumnsText.value = config.keyColumns.join(", ");
+    // Restore the per-table match columns so a reopened session keeps every
+    // table's own selection instead of collapsing back to one global list.
+    keyColumnOverrides.value = normalizeKeyColumnOverrides(config.keyColumnsByTable);
+    resetTableColumnMetadata();
     batchResults.value = session.batchResults;
     syncPlan.value = session.syncPlan;
     syncErrors.value = [];
@@ -230,6 +446,7 @@ async function restoreDataCompareSession(session: DataCompareSession): Promise<v
     compareProgressTotal.value = session.progress?.total ?? 0;
     compareProgressTable.value = session.progress?.table ?? "";
     comparing.value = session.status === "running";
+    void prefetchSelectedTableColumns(selectedSourceTableNames.value);
   } finally {
     await nextTick();
     if (generation === initializingPrefillGeneration) initializingPrefill = false;
@@ -258,6 +475,7 @@ function applyDataCompareSession(session: DataCompareSession | undefined): void 
 }
 
 function swapSourceTarget() {
+  if (executionLocked.value) return;
   const previousSelectedTables = [...selectedSourceTableNames.value];
   const nextSingleTarget = previousSelectedTables.length === 1 ? (previousSelectedTables[0] ?? "") : "";
   const nextSourceSelection = previousSelectedTables.length <= 1 ? [targetTable.value].filter(Boolean) : previousSelectedTables;
@@ -377,28 +595,6 @@ async function loadTables(side: "source" | "target") {
   }
 }
 
-async function loadColumnsWithCache(cache: Map<string, CompareColumn[]>, connectionId: string, database: string, schema: string, table: string): Promise<CompareColumn[]> {
-  const key = `${connectionId}:${database}:${schema}:${table}`;
-  const cached = cache.get(key);
-  if (cached) return cached;
-  const columns = (await api.getColumns(connectionId, database, schema, table)) as CompareColumn[];
-  cache.set(key, columns);
-  return columns;
-}
-
-async function inferKeyColumnsForTable(table: string, sourceColumnCache?: Map<string, CompareColumn[]>): Promise<string[]> {
-  if (!sourceConnectionId.value || !sourceDatabase.value || !sourceSchema.value || !table) return [];
-  const columns = sourceColumnCache ? await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table) : (((await api.getColumns(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, table)) as CompareColumn[]) ?? []);
-  return inferCompareKeyColumns(columns);
-}
-
-async function inferKeyColumns() {
-  const table = selectedSourceTableNames.value.length === 1 ? selectedSourceTableNames.value[0] : "";
-  if (!table) return;
-  const inferred = await inferKeyColumnsForTable(table);
-  keyColumnsText.value = inferred.join(", ");
-}
-
 function resultStatusLabel(status: DataCompareTableStatus): string {
   if (status === "different") return t("dataCompare.statusDifferent");
   if (status === "same") return t("dataCompare.statusSame");
@@ -437,6 +633,7 @@ function toggleShowAll(table: DataCompareTableResult, kind: DiffKind) {
 }
 
 function setDiffSelection(kind: DiffKind, selected: boolean) {
+  if (executionLocked.value) return;
   batchResults.value.forEach((table) => {
     table.diff[kind].forEach((row) => {
       row.selected = selected;
@@ -446,6 +643,7 @@ function setDiffSelection(kind: DiffKind, selected: boolean) {
 }
 
 function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, selected: boolean) {
+  if (executionLocked.value) return;
   table.diff[kind].forEach((row) => {
     row.selected = selected;
   });
@@ -453,6 +651,7 @@ function setTableDiffSelection(table: DataCompareTableResult, kind: DiffKind, se
 }
 
 function clearAllSelections() {
+  if (executionLocked.value) return;
   (["added", "removed", "modified"] as DiffKind[]).forEach((kind) => {
     batchResults.value.forEach((table) => {
       table.diff[kind].forEach((row) => {
@@ -464,6 +663,7 @@ function clearAllSelections() {
 }
 
 function toggleRowSelection(row: SelectableDataCompareRow | SelectableDataCompareModifiedRow) {
+  if (executionLocked.value) return;
   row.selected = !row.selected;
   rebuildSyncPlan().catch((e) => toast(String(e), 5000));
 }
@@ -510,7 +710,7 @@ async function rebuildSyncPlan() {
 }
 
 function startCompare(): void {
-  if (!canCompare.value || comparing.value || executing.value) return;
+  if (!canCompare.value || comparing.value || executionLocked.value) return;
   const tasks = buildCompareTasks();
   if (tasks.length === 0) {
     toast(t("dataCompare.noComparableTables"), 5000);
@@ -535,7 +735,7 @@ function startCompare(): void {
       targetSchemas: [...targetSchemas.value],
       targetTables: [...targetTables.value],
       targetTable: targetTable.value,
-      keyColumns: [...keyColumns.value],
+      keyColumnsByTable: buildSessionKeyColumnsByTable(),
       label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
     },
     tasks,
@@ -562,30 +762,46 @@ async function copySql() {
 }
 
 async function executeSql() {
-  if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || executing.value) return;
-  const targetConnection = store.getConfig(targetConnectionId.value);
+  if (!syncPlan.value.syncSql.trim() || syncPlan.value.syncStatements.length === 0 || planningSync.value || comparing.value || executionLocked.value) return;
+  const connectionId = targetConnectionId.value;
+  const database = targetDatabase.value;
+  const schema = targetSchema.value;
+  const statements = [...syncPlan.value.syncStatements];
+  const useTransaction = manualTransaction.value && canUseManualTransaction.value;
+  const targetConnection = store.getConfig(connectionId);
+  executing.value = true;
+  executionInterrupted = false;
+  transactionFailed.value = false;
   try {
     const failed = await executeWithProductionSqlGuard({
       connection: targetConnection,
-      database: targetDatabase.value,
+      database,
       sql: syncPlan.value.syncSql,
       source: t("production.sourceDataCompare"),
       execute: async () => {
-        executing.value = true;
         syncErrors.value = [];
-        executeTotal.value = syncPlan.value.syncStatements.length;
+        executeTotal.value = statements.length;
         executedCount.value = 0;
-        await store.ensureConnected(targetConnectionId.value);
-        const statements = syncPlan.value.syncStatements;
+        await store.ensureConnected(connectionId);
+        if (useTransaction && (componentUnmounted || executionInterrupted)) return undefined;
+        if (useTransaction) {
+          txnSessionId.value = await api.beginManualTransaction(connectionId, database, schema);
+          commitUncertain = false;
+        }
         for (let index = 0; index < statements.length; index += SYNC_EXECUTE_BATCH_SIZE) {
+          if (useTransaction && (componentUnmounted || executionInterrupted)) return undefined;
           const batch = statements.slice(index, index + SYNC_EXECUTE_BATCH_SIZE);
           try {
-            await api.executeBatch(targetConnectionId.value, targetDatabase.value, batch, targetSchema.value);
+            if (useTransaction) await api.executeInManualTransaction(txnSessionId.value!, batch.join(";\n"), database, schema);
+            else await api.executeBatch(connectionId, database, batch, schema);
             executedCount.value += batch.length;
           } catch (e: any) {
+            // A failed manual transaction is rolled back by the backend. Never
+            // replay its statements on an ordinary connection.
+            if (useTransaction) throw e;
             for (const stmt of batch) {
               try {
-                await api.executeBatch(targetConnectionId.value, targetDatabase.value, [stmt], targetSchema.value);
+                await api.executeBatch(connectionId, database, [stmt], schema);
               } catch (singleError: any) {
                 syncErrors.value.push({ sql: stmt, error: singleError?.message || String(singleError) });
               }
@@ -597,17 +813,75 @@ async function executeSql() {
       },
     });
     if (failed === undefined) return;
-    if (failed === 0) {
+    if (failed === 0 && !txnSessionId.value) {
       toast(t("dataCompare.syncSuccess"), 2000);
-    } else {
-      toast(t("diff.syncSummary", { success: syncPlan.value.syncStatements.length - failed, failed }), 5000);
+    } else if (failed > 0) {
+      toast(t("diff.syncSummary", { success: statements.length - failed, failed }), 5000);
     }
   } catch (e: any) {
+    transactionFailed.value = true;
     toast(e?.message || String(e), 5000);
   } finally {
+    if (txnSessionId.value && (transactionFailed.value || componentUnmounted || executionInterrupted)) await finishTransaction(false);
     executing.value = false;
   }
 }
+
+async function finishTransaction(commit: boolean): Promise<boolean> {
+  const sessionId = txnSessionId.value;
+  if (!sessionId || resolvingTransaction.value || (commit && (executing.value || transactionFailed.value))) return false;
+  resolvingTransaction.value = true;
+  try {
+    let committed = false;
+    let outcomeUnknown = false;
+    try {
+      if (commit) {
+        await api.commitManualTransaction(sessionId);
+        committed = true;
+      } else await api.rollbackManualTransaction(sessionId);
+    } catch (error) {
+      if (!isManualTransactionSessionExpired(error) && formatError(error) !== "Transaction session not found") {
+        if (commit) {
+          commitUncertain = true;
+          transactionFailed.value = true;
+        }
+        throw error;
+      }
+      outcomeUnknown = commitUncertain;
+      if (outcomeUnknown) toast(t("toolbar.commitOutcomeUnknown"), 5000);
+      else if (commit) toast(t("dataCompare.transactionEnded"), 5000);
+    }
+    txnSessionId.value = undefined;
+    if (committed || outcomeUnknown) {
+      const session = getDataCompareSession(activeSessionId.value);
+      if (session) {
+        session.batchResults = [];
+        session.syncPlan = emptyDataCompareSyncPlan();
+        session.version++;
+      }
+      clearResult();
+      if (committed) toast(t("dataCompare.syncSuccess"), 2000);
+    }
+    return true;
+  } catch (error) {
+    toast(formatError(error), 5000);
+    return false;
+  } finally {
+    resolvingTransaction.value = false;
+  }
+}
+
+async function handleOpenChange(value: boolean) {
+  if (!value && ((executing.value && manualTransaction.value) || resolvingTransaction.value)) return;
+  if (!value && txnSessionId.value) {
+    if (!window.confirm(t("dataCompare.rollbackBeforeClose")) || !(await finishTransaction(false))) return;
+  }
+  open.value = value;
+}
+
+watch(canUseManualTransaction, (supported) => {
+  if (!supported && !executionLocked.value) manualTransaction.value = false;
+});
 
 function formatValue(value: DataCompareCellValue): string {
   if (value == null) return "NULL";
@@ -651,6 +925,8 @@ watch(sourceConnectionId, (id) => {
   sourceTables.value = [];
   sourceTable.value = "";
   resetSelectedSourceTables([]);
+  // Column metadata and match columns belong to the previous source endpoint.
+  resetTableColumnMetadata();
   loadDatabases(id, "source").catch((e) => toast(String(e), 5000));
 });
 watch(targetConnectionId, (id) => {
@@ -671,6 +947,7 @@ watch(sourceDatabase, () => {
   sourceTables.value = [];
   sourceTable.value = "";
   resetSelectedSourceTables([]);
+  resetTableColumnMetadata();
   loadSchemas("source", props.prefillSchema).catch((e) => toast(String(e), 5000));
 });
 watch(targetDatabase, () => {
@@ -688,6 +965,7 @@ watch(sourceSchema, () => {
   sourceTables.value = [];
   sourceTable.value = "";
   resetSelectedSourceTables([]);
+  resetTableColumnMetadata();
   if (sourceSchema.value) loadTables("source").catch((e) => toast(String(e), 5000));
 });
 watch(targetSchema, () => {
@@ -700,9 +978,12 @@ watch(targetSchema, () => {
 watch(selectedSourceTableNames, (tables, previous) => {
   if (initializingPrefill) return;
   clearResult();
+  // Drop the match columns and metadata of tables that are no longer compared,
+  // so a table that is selected again starts from its own primary key.
+  pruneKeyColumnState(tables);
   sourceTable.value = tables.length === 1 ? tables[0] : "";
   if (tables.length !== 1) {
-    keyColumnsText.value = "";
+    void prefetchSelectedTableColumns(tables);
     return;
   }
   const table = tables[0];
@@ -711,10 +992,7 @@ watch(selectedSourceTableNames, (tables, previous) => {
   } else if (previous?.length === 1 && targetTable.value === previous[0]) {
     targetTable.value = "";
   }
-  if (table !== previous?.[0]) {
-    keyColumnsText.value = "";
-  }
-  inferKeyColumns().catch(() => {});
+  void prefetchSelectedTableColumns(tables);
 });
 watch(targetTable, () => {
   if (initializingPrefill) return;
@@ -723,7 +1001,12 @@ watch(targetTable, () => {
 watch(
   [() => open.value, () => props.sessionId],
   async ([value, sessionId]) => {
-    if (!value) return;
+    if (!value) {
+      executionInterrupted = true;
+      if (!executing.value && txnSessionId.value) void finishTransaction(false);
+      return;
+    }
+    if (executionLocked.value) return;
     clearResult();
     shownSessionError = "";
     const session = getDataCompareSession(sessionId);
@@ -748,6 +1031,7 @@ watch(
           if (sourceTables.value.includes(props.prefillTable)) {
             resetSelectedSourceTables([props.prefillTable]);
             sourceTable.value = props.prefillTable;
+            await loadTableColumns(props.prefillTable);
           }
         }
       } finally {
@@ -770,11 +1054,12 @@ watch(
 );
 onBeforeUnmount(() => {
   componentUnmounted = true;
+  if (!executing.value && txnSessionId.value) void finishTransaction(false);
 });
 </script>
 
 <template>
-  <Dialog v-model:open="open">
+  <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent class="sm:max-w-5xl max-h-[85vh] flex flex-col overflow-hidden" @interact-outside.prevent>
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
@@ -783,7 +1068,7 @@ onBeforeUnmount(() => {
         </DialogTitle>
       </DialogHeader>
 
-      <div class="flex-1 min-h-0 overflow-auto space-y-4 py-2">
+      <fieldset :disabled="executionLocked" class="flex-1 min-h-0 min-w-0 overflow-auto space-y-4 py-2">
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
           <div class="space-y-2 rounded-lg border border-blue-500/35 bg-blue-500/5 p-3">
             <div class="flex items-center gap-2 text-sm font-medium text-blue-600 dark:text-blue-400">
@@ -792,7 +1077,7 @@ onBeforeUnmount(() => {
             </div>
             <ConnectionTreeSelect
               v-model="sourceConnectionId"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :connections="sqlConnections"
               :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
@@ -807,7 +1092,7 @@ onBeforeUnmount(() => {
               :placeholder="t('diff.selectDatabase')"
               :search-placeholder="t('diff.searchDatabase')"
               :empty-text="t('common.noResults')"
-              :disabled="comparing || !sourceDatabases.length"
+              :disabled="comparing || executionLocked || !sourceDatabases.length"
               trigger-variant="outline"
               trigger-class="h-8 w-full justify-between text-xs"
               content-class="w-[var(--reka-popover-trigger-width)]"
@@ -816,7 +1101,7 @@ onBeforeUnmount(() => {
               v-if="sourceSchemas.length"
               v-model="sourceSchema"
               :options="sourceSchemas"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :placeholder="t('diff.selectSchema')"
               :search-placeholder="t('diff.searchSchema')"
               :empty-text="t('common.noResults')"
@@ -831,12 +1116,12 @@ onBeforeUnmount(() => {
               :tables="sourceTables"
               :title="t('dataCompare.sourceTables')"
               :empty-text="!sourceConnectionId || !sourceDatabase ? t('dataCompare.selectSourceTables') : t('dataCompare.noTables')"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
             />
           </div>
 
           <div class="flex items-center pt-6">
-            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing" @click="swapSourceTarget">
+            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing || executionLocked" @click="swapSourceTarget">
               <ArrowLeftRight class="w-3.5 h-3.5" />
             </Button>
           </div>
@@ -848,7 +1133,7 @@ onBeforeUnmount(() => {
             </div>
             <ConnectionTreeSelect
               v-model="targetConnectionId"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :connections="sqlConnections"
               :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
@@ -863,7 +1148,7 @@ onBeforeUnmount(() => {
               :placeholder="t('diff.selectDatabase')"
               :search-placeholder="t('diff.searchDatabase')"
               :empty-text="t('common.noResults')"
-              :disabled="comparing || !targetDatabases.length"
+              :disabled="comparing || executionLocked || !targetDatabases.length"
               trigger-variant="outline"
               trigger-class="h-8 w-full justify-between text-xs"
               content-class="w-[var(--reka-popover-trigger-width)]"
@@ -872,7 +1157,7 @@ onBeforeUnmount(() => {
               v-if="targetSchemas.length"
               v-model="targetSchema"
               :options="targetSchemas"
-              :disabled="comparing"
+              :disabled="comparing || executionLocked"
               :placeholder="t('diff.selectSchema')"
               :search-placeholder="t('diff.searchSchema')"
               :empty-text="t('common.noResults')"
@@ -889,7 +1174,7 @@ onBeforeUnmount(() => {
                 :placeholder="t('dataCompare.selectTable')"
                 :search-placeholder="t('dataCompare.searchTable')"
                 :empty-text="t('common.noResults')"
-                :disabled="comparing"
+                :disabled="comparing || executionLocked"
                 trigger-variant="outline"
                 trigger-class="h-8 w-full justify-between text-xs"
                 content-class="w-[var(--reka-popover-trigger-width)]"
@@ -917,10 +1202,65 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="space-y-1">
-          <Label class="text-xs font-medium">{{ t("dataCompare.keyColumns") }}</Label>
-          <Input v-model="keyColumnsText" class="h-8 text-xs" :placeholder="t('dataCompare.keyColumnsPlaceholder')" :disabled="comparing" />
-          <div class="text-[11px] text-muted-foreground">
-            {{ t("dataCompare.keyColumnsAutoHint") }}
+          <div class="flex flex-wrap items-center gap-2">
+            <Label class="text-xs font-medium">{{ t("dataCompare.keyColumns") }}</Label>
+            <span v-if="singleKeyColumnRow" class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium" :class="singleKeyColumnRow.manual ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'">
+              {{ singleKeyColumnRow.manual ? t("dataCompare.keyColumnsStatusManual") : t("dataCompare.keyColumnsStatusAuto") }}
+            </span>
+            <Button v-if="singleKeyColumnRow?.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing || executionLocked" @click="clearTableKeyColumnsOverride(singleKeyColumnRow.table)">
+              {{ t("dataCompare.keyColumnsResetAuto") }}
+            </Button>
+          </div>
+
+          <div v-if="!selectedSourceTableNames.length" class="text-[11px] text-muted-foreground">
+            {{ t("dataCompare.keyColumnsSelectTableHint") }}
+          </div>
+
+          <!-- Single table: pick match columns straight from the real database columns. -->
+          <div v-else-if="singleKeyColumnRow" class="space-y-1">
+            <CompareKeyColumnsSelect
+              :model-value="singleKeyColumnRow.columns"
+              :columns="columnsForTable(singleKeyColumnRow.table)"
+              :loading="singleKeyColumnRow.loading"
+              :disabled="comparing || executionLocked"
+              @update:model-value="(columns) => setTableKeyColumns(singleKeyColumnRow!.table, columns)"
+            />
+            <div class="text-[11px]" data-key-column-hint :class="singleKeyColumnRow.error || singleKeyColumnRow.status === 'missing' ? 'text-destructive' : 'text-muted-foreground'">
+              {{ singleKeyColumnRow.hint }}
+            </div>
+          </div>
+
+          <!-- Batch compare: every table keeps its own match columns. -->
+          <div v-else class="space-y-1">
+            <div class="rounded-lg border">
+              <div class="border-b bg-muted/20 px-2 py-1 text-[11px] text-muted-foreground">
+                {{ t("dataCompare.keyColumnsPerTableHint") }}
+              </div>
+              <div class="max-h-56 divide-y overflow-auto">
+                <div v-for="row in keyColumnRows" :key="row.table">
+                  <button type="button" class="dbx-compare-key-table-row flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-muted/40" :data-key-column-table="row.table" @click="toggleKeyColumnTable(row.table)">
+                    <ChevronDown v-if="expandedKeyColumnTable === row.table" class="h-3.5 w-3.5 shrink-0" />
+                    <ChevronRight v-else class="h-3.5 w-3.5 shrink-0" />
+                    <span class="min-w-0 flex-1 truncate font-mono">{{ row.table }}</span>
+                    <span class="min-w-0 max-w-[45%] shrink-0 truncate font-mono" :class="row.columns.length > 0 ? (row.manual ? 'text-foreground' : 'text-muted-foreground') : 'text-destructive'">
+                      {{ row.loading ? t("dataCompare.keyColumnsLoading") : row.columns.length > 0 ? row.columns.join(", ") : t("dataCompare.keyColumnsNeedsSelection") }}
+                    </span>
+                    <span class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium" :class="row.status === 'manual' ? 'bg-primary/15 text-primary' : row.status === 'auto' ? 'bg-muted text-muted-foreground' : 'bg-destructive/15 text-destructive'">
+                      {{ row.status === "manual" ? t("dataCompare.keyColumnsStatusManual") : row.status === "auto" ? t("dataCompare.keyColumnsStatusAuto") : t("dataCompare.keyColumnsNeedsSelection") }}
+                    </span>
+                  </button>
+                  <div v-if="expandedKeyColumnTable === row.table" class="space-y-1 border-t bg-muted/10 px-2 py-2">
+                    <CompareKeyColumnsSelect :model-value="row.columns" :columns="columnsForTable(row.table)" :loading="row.loading" :disabled="comparing || executionLocked" @update:model-value="(columns) => setTableKeyColumns(row.table, columns)" />
+                    <div class="flex flex-wrap items-center gap-2 text-[11px]">
+                      <span data-key-column-hint :class="row.error || (row.status === 'missing' && row.matched) ? 'text-destructive' : 'text-muted-foreground'">{{ row.hint }}</span>
+                      <Button v-if="row.manual" size="sm" variant="ghost" class="h-6 px-1.5 text-[11px]" :disabled="comparing || executionLocked" @click="clearTableKeyColumnsOverride(row.table)">
+                        {{ t("dataCompare.keyColumnsResetAuto") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1102,10 +1442,10 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-      </div>
+      </fieldset>
 
       <DialogFooter v-if="!hasResults">
-        <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
+        <Button variant="outline" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
         <span v-if="compareProgressLabel" class="text-xs text-muted-foreground self-center">{{ compareProgressLabel }}</span>
         <Button size="sm" :disabled="!canCompare || comparing" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3.5 h-3.5 animate-spin mr-1" />
@@ -1115,8 +1455,8 @@ onBeforeUnmount(() => {
       </DialogFooter>
 
       <DialogFooter v-else class="flex items-center gap-2">
-        <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
-        <Button variant="outline" size="sm" :disabled="comparing || executing || !canCompare" @click="startCompare">
+        <Button variant="outline" :disabled="(executing && manualTransaction) || resolvingTransaction" @click="handleOpenChange(false)">{{ t("common.close") }}</Button>
+        <Button variant="outline" size="sm" :disabled="comparing || executionLocked || !canCompare" @click="startCompare">
           <Loader2 v-if="comparing" class="w-3 h-3 animate-spin mr-1" />
           <RotateCcw v-else class="w-3 h-3 mr-1" />
           {{ t("dataCompare.recompare") }}
@@ -1139,7 +1479,16 @@ onBeforeUnmount(() => {
           }}
         </span>
         <Button variant="outline" size="sm" :disabled="!syncPlan.syncSql.trim()" @click="copySql"> <Copy class="w-3 h-3 mr-1" /> {{ t("diff.copySql") }} </Button>
-        <Button size="sm" :disabled="planningSync || executing || syncPlan.statementCount === 0" @click="executeSql">
+        <template v-if="txnSessionId && !executing">
+          <span class="text-xs text-muted-foreground">{{ t("dataCompare.pendingTransaction") }}</span>
+          <Button variant="outline" size="sm" :disabled="resolvingTransaction" @click="finishTransaction(false)">{{ t("toolbar.rollback") }}</Button>
+          <Button size="sm" :disabled="resolvingTransaction || transactionFailed" @click="finishTransaction(true)">{{ t("toolbar.commit") }}</Button>
+        </template>
+        <label v-else-if="canUseManualTransaction" class="flex items-center gap-2 text-xs" :title="t('dataCompare.manualTransactionHint')">
+          <input v-model="manualTransaction" type="checkbox" :disabled="executionLocked" />
+          {{ t("toolbar.manualTransaction") }}
+        </label>
+        <Button v-if="!txnSessionId" size="sm" :disabled="planningSync || comparing || executionLocked || syncPlan.statementCount === 0" @click="executeSql">
           <Loader2 v-if="executing" class="w-3 h-3 animate-spin mr-1" />
           <Play v-else class="w-3 h-3 mr-1" />
           {{ t("diff.executeSync") }}

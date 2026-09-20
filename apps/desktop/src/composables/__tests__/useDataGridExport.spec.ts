@@ -75,6 +75,8 @@ function createMongoExportState(options: {
   contextColumn?: number;
   syntheticContext?: boolean;
   fullExportResult?: UseDataGridExportOptions["fullExportResult"];
+  hasCompleteLocalResult?: UseDataGridExportOptions["hasCompleteLocalResult"];
+  completeLocalResult?: UseDataGridExportOptions["completeLocalResult"];
   externalCellValue?: UseDataGridExportOptions["externalCellValue"];
 }) {
   const items = options.items ?? [options.item];
@@ -106,6 +108,8 @@ function createMongoExportState(options: {
     selectedRowIds: ref(selectedRowIds),
     hasRowSelection: computed(() => selectedRowIds.size > 0),
     fullExportResult: options.fullExportResult,
+    hasCompleteLocalResult: options.hasCompleteLocalResult,
+    completeLocalResult: options.completeLocalResult,
     externalCellValue: options.externalCellValue,
   };
   return useDataGridExport(state);
@@ -965,6 +969,32 @@ describe("useDataGridExport prepared row statements", () => {
     expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
   });
 
+  it("recognizes PostgreSQL serial primary keys when excluding primary keys", () => {
+    const serialTable: DataGridTableMeta = {
+      tableName: "users",
+      primaryKeys: ["id"],
+      columns: [
+        {
+          name: "id",
+          data_type: "integer",
+          is_nullable: false,
+          is_primary_key: true,
+          extra: "serial",
+        },
+        { name: "name", data_type: "text", is_nullable: false },
+      ],
+    };
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [0], columns: ["id"], rows: [[1]] };
+    const excludePrimaryKeys = {
+      ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, excludePrimaryKeysFromInsert: true },
+    };
+
+    const state = createExportState(serialTable, ["id"], matrix, [1], undefined, undefined, [], excludePrimaryKeys);
+
+    expect(state.canCopyWithExtractor("sql-inserts")).toBe(false);
+  });
+
   it("keeps a manually-assigned primary key insertable under primary-key exclusion", () => {
     const compositeKeyTable: DataGridTableMeta = {
       tableName: "daily_stats",
@@ -1562,6 +1592,58 @@ describe("useDataGridExport prepared row statements", () => {
 
     await fullExportState.exportCsv();
     expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything());
+  });
+
+  it("exports only visible Mongo columns from the full result set", async () => {
+    setActivePinia(createPinia());
+    const state = createMongoExportState({
+      columns: ["name"],
+      item: { ...row(["Visible"]), sourceIndex: 0 },
+      mongoDocuments: [{ _id: "1", name: "Visible", secret: "hidden" }],
+      fullExportResult: async () => ({
+        columns: ["_id", "name", "secret"],
+        column_types: ["", "varchar", "varchar"],
+        rows: [
+          ["1", "Visible", "hidden"],
+          ["2", "Other", "hidden-too"],
+        ],
+        affected_rows: 2,
+        execution_time_ms: 1,
+      }),
+    });
+
+    await state.exportCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything());
+  });
+
+  it("applies visible Mongo columns when the complete result is already local", async () => {
+    setActivePinia(createPinia());
+    const completeLocalResult = {
+      columns: ["_id", "name", "secret"],
+      column_types: ["", "varchar", "varchar"],
+      rows: [
+        ["1", "Visible", "hidden"],
+        ["2", "Other", "hidden-too"],
+      ],
+      mongo_copy_documents: [
+        { _id: "1", name: "Visible", secret: "hidden" },
+        { _id: "2", name: "Other", secret: "hidden-too" },
+      ],
+      affected_rows: 2,
+      execution_time_ms: 1,
+    };
+    const state = createMongoExportState({
+      columns: ["name"],
+      item: { ...row(["Visible"]), sourceIndex: 0 },
+      mongoDocuments: [completeLocalResult.mongo_copy_documents[0]],
+      hasCompleteLocalResult: computed(() => true),
+      completeLocalResult: computed(() => completeLocalResult),
+    });
+
+    await state.exportCsv();
+
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything());
   });
 
   it("exports missing Mongo fields as null while retaining explicit empty strings", async () => {

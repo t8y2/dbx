@@ -56,7 +56,7 @@ public interface DatabaseAgent {
     default List<ObjectInfo> listObjects(String schema) {
         List<ObjectInfo> result = new ArrayList<>();
         for (TableInfo table : listTables(schema)) {
-            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment()));
+            result.add(new ObjectInfo(table.getName(), table.getTable_type(), schema, table.getComment(), table.getValid()));
         }
         return result;
     }
@@ -146,6 +146,14 @@ public interface DatabaseAgent {
     List<ForeignKeyInfo> listForeignKeys(String schema, String table);
 
     List<TriggerInfo> listTriggers(String schema, String table);
+
+    default List<PartitionInfo> listPartitions(String schema, String table) {
+        return Collections.emptyList();
+    }
+
+    default List<PartitionInfo> listSubpartitions(String schema, String table) {
+        return Collections.emptyList();
+    }
 
     default QueryResult executeQuery(String sql, String schema) {
         return executeQuery(sql, schema, new ExecuteQueryOptions());

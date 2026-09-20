@@ -152,6 +152,34 @@ describe("queryStore multi-source result column comments", () => {
     ]);
   });
 
+  it("loads display comments for a joined bare-star result without enabling edits", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "XE", query_timeout_secs: 30 });
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "complex-source" });
+    const oracleOrdersColumns = ordersColumns.map((item) => ({ ...item, name: item.name.toUpperCase() }));
+    const oracleUsersColumns = usersColumns.map((item) => ({ ...item, name: item.name.toUpperCase() }));
+    getColumns.mockImplementation(async (_connectionId: string, _database: string, _schema: string, table: string) => (table === "ORDERS_10K" ? oracleOrdersColumns : oracleUsersColumns));
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["ID", "ORDER_NO", "ID", "NAME"],
+        rows: [[1, "O1", 7, "Alice"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "XE", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM ORDERS_10K a JOIN USERS b ON a.ID = b.ID");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    expect(tab.resultColumnComments).toEqual(["订单ID", "下单用户", "订单金额", "用户ID"]);
+    expect(tab.queryAnalysis).toBeUndefined();
+    expect(tab.queryEditabilityReason).toBe("complex-source");
+  });
+
   it("resolves a uniquely qualified unqualified alias back to its physical column", async () => {
     analyzeEditableQueryEditability.mockResolvedValue({
       editable: true,

@@ -2,20 +2,13 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Check, Copy } from "lucide-react";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { LandingFooter } from "@/components/landing/LandingFooter";
 import type { DocsLang } from "@/lib/i18n";
-import { detectPlatformId, type DownloadPlatformId } from "@/lib/platformDetection";
 import {
   DBX_STORE_CONTRIBUTING_URL,
-  copyText,
   fetchPluginCatalog,
-  formatPluginDate,
-  formatPluginSize,
-  formatRelativePluginTime,
   latestPluginVersion,
-  preferredArtifactFor,
   pluginDisplayDescription,
   pluginDisplayName,
   type MarketplacePlugin,
@@ -25,8 +18,6 @@ const i18n = {
   en: {
     title: "Plugin Center",
     viewPlugin: "View plugin",
-    permissionsCount: (count: number) => `${count} permission${count === 1 ? "" : "s"}`,
-    licenseUnknown: "Unlicensed",
     refreshError: "Could not refresh the catalog; showing the last snapshot.",
     submitTitle: "Built a plugin for DBX?",
     submitDesc: "Package it as a .dbxp, submit a PR to dbx-store, and it will appear here and in the in-app plugin center after review.",
@@ -34,17 +25,10 @@ const i18n = {
     submitDocs: "Plugin development docs",
     emptyTitle: "No plugins yet",
     emptyDesc: "The marketplace catalog is empty or unreachable right now. Try again in a moment.",
-    latest: "Latest",
-    updatedAgo: (time: string) => `updated ${time}`,
-    updatedOn: (time: string) => `updated ${time}`,
-    copyInstallUrl: "Copy install URL",
-    copied: "Copied",
   },
   cn: {
     title: "插件中心",
     viewPlugin: "查看插件",
-    permissionsCount: (count: number) => `${count} 项权限`,
-    licenseUnknown: "未声明许可证",
     refreshError: "目录刷新失败，当前展示构建时的快照。",
     submitTitle: "为 DBX 开发了插件？",
     submitDesc: "打包为 .dbxp，向 dbx-store 提交 PR，审核通过后会同时出现在本页面和客户端插件中心。",
@@ -52,11 +36,6 @@ const i18n = {
     submitDocs: "插件开发文档",
     emptyTitle: "暂无插件",
     emptyDesc: "商店目录暂时为空或无法访问，请稍后再试。",
-    latest: "最新",
-    updatedAgo: (time: string) => `${time}更新`,
-    updatedOn: (time: string) => `更新于 ${time}`,
-    copyInstallUrl: "复制安装 URL",
-    copied: "已复制",
   },
 };
 
@@ -70,25 +49,7 @@ function mergePlugins(snapshot: MarketplacePlugin[], live: MarketplacePlugin[]):
 export function PluginsClient({ lang, initialPlugins }: { lang: DocsLang; initialPlugins: MarketplacePlugin[] }) {
   const [plugins, setPlugins] = useState(initialPlugins);
   const [refreshFailed, setRefreshFailed] = useState(false);
-  const [mounted, setMounted] = useState(false);
-  const [platformId, setPlatformId] = useState<DownloadPlatformId>("unknown");
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   const t = i18n[lang];
-
-  useEffect(() => {
-    setMounted(true);
-    detectPlatformId().then(setPlatformId);
-  }, []);
-
-  async function handleCopyInstall(plugin: MarketplacePlugin) {
-    const latest = latestPluginVersion(plugin);
-    const artifact = latest ? preferredArtifactFor(latest.artifacts, platformId) : null;
-    if (!artifact) return;
-    if (await copyText(artifact.url)) {
-      setCopiedId(plugin.id);
-      window.setTimeout(() => setCopiedId((current) => (current === plugin.id ? null : current)), 2000);
-    }
-  }
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +68,7 @@ export function PluginsClient({ lang, initialPlugins }: { lang: DocsLang; initia
   }, []);
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={lang} active="plugins" />
 
       <section className="max-w-[1180px] mx-auto px-6 pt-32 pb-24">
@@ -121,11 +82,9 @@ export function PluginsClient({ lang, initialPlugins }: { lang: DocsLang; initia
             <p className="mt-2 text-sm text-landing-muted">{t.emptyDesc}</p>
           </div>
         ) : (
-          <div className="mt-8 grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
+          <div className="mt-8 grid grid-cols-3 gap-5 max-[1040px]:grid-cols-2 max-[720px]:grid-cols-1">
             {plugins.map((plugin) => {
               const latest = latestPluginVersion(plugin);
-              const permissions = plugin.permissions ?? [];
-              const copied = copiedId === plugin.id;
               return (
                 <div
                   key={plugin.id}
@@ -157,43 +116,12 @@ export function PluginsClient({ lang, initialPlugins }: { lang: DocsLang; initia
                     </div>
                   </div>
                   <p className="mt-3.5 line-clamp-2 text-sm leading-[1.7] text-landing-muted">{pluginDisplayDescription(plugin, lang)}</p>
-                  <div className="mt-auto pt-4">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {(plugin.tags ?? []).slice(0, 5).map((tag) => (
-                        <span key={tag} className="rounded-md bg-landing-soft px-2 py-0.5 text-[11px] font-medium text-landing-muted">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-[12px] text-landing-muted">
-                      <span className="min-w-0 truncate">
-                        {latest
-                          ? mounted
-                            ? t.updatedAgo(formatRelativePluginTime(latest.releasedAt, lang))
-                            : t.updatedOn(formatPluginDate(latest.releasedAt, lang))
-                          : ""}
-                        {permissions.length > 0 ? ` · ${t.permissionsCount(permissions.length)}` : ""}
-                        {latest ? ` · ${formatPluginSize(latest.artifacts[0]?.size ?? 0)}` : ""}
+                  <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-4">
+                    {(plugin.tags ?? []).slice(0, 5).map((tag) => (
+                      <span key={tag} className="rounded-md bg-landing-soft px-2 py-0.5 text-[11px] font-medium text-landing-muted">
+                        {tag}
                       </span>
-                      <span className="relative z-[2] inline-flex shrink-0 items-center gap-2.5">
-                        <button
-                          type="button"
-                          onClick={() => handleCopyInstall(plugin)}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-landing-line px-2.5 text-[12px] font-[650] text-landing-muted transition-colors hover:border-landing-blue hover:text-landing-ink"
-                        >
-                          {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
-                          {copied ? t.copied : t.copyInstallUrl}
-                        </button>
-                        <Link
-                          href={`/${lang}/plugins/${plugin.id}`}
-                          prefetch={false}
-                          className="landing-inline-link inline-flex items-center gap-[7px] text-sm font-[650]"
-                        >
-                          {t.viewPlugin}
-                          <span aria-hidden="true">→</span>
-                        </Link>
-                      </span>
-                    </div>
+                    ))}
                   </div>
                 </div>
               );

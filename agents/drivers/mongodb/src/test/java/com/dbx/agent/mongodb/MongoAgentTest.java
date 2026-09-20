@@ -32,6 +32,13 @@ import com.mongodb.client.model.CollationStrength;
 import com.mongodb.client.model.CountOptions;
 import com.mongodb.client.model.InsertManyOptions;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.model.DeleteManyModel;
+import com.mongodb.client.model.DeleteOneModel;
+import com.mongodb.client.model.InsertOneModel;
+import com.mongodb.client.model.ReplaceOneModel;
+import com.mongodb.client.model.UpdateManyModel;
+import com.mongodb.client.model.UpdateOneModel;
+import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.UpdateResult;
 import java.io.FileInputStream;
 import java.lang.reflect.Proxy;
@@ -1327,6 +1334,96 @@ class MongoAgentTest {
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT));
         assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_REPLACE_DOCUMENT));
+    }
+
+    @Test
+    void bulkWriteMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"bulk_write\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\","
+                + "\"operations_json\":\"[{\\\"insertOne\\\":{\\\"document\\\":{\\\"a\\\":1}}}]\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(12, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_BULK_WRITE));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_BULK_WRITE));
+    }
+
+    @Test
+    void buildsBulkWriteModelsForEveryOperationKind() {
+        List<WriteModel<Document>> models = MongoAgent.bulkWriteModelsForWrite(
+            "[{\"insertOne\":{\"document\":{\"sku\":\"A1\"}}},"
+                + "{\"updateOne\":{\"filter\":{\"sku\":\"A1\"},\"update\":{\"$inc\":{\"stock\":1}},\"upsert\":true}},"
+                + "{\"updateMany\":{\"filter\":{},\"update\":[{\"$set\":{\"stock\":0}}]}},"
+                + "{\"replaceOne\":{\"filter\":{\"sku\":\"B2\"},\"replacement\":{\"sku\":\"B2\"}}},"
+                + "{\"deleteOne\":{\"filter\":{\"sku\":\"C3\"}}},"
+                + "{\"deleteMany\":{\"filter\":{\"stock\":{\"$lt\":0}}}}]");
+
+        assertEquals(6, models.size());
+        assertTrue(models.get(0) instanceof InsertOneModel);
+        assertTrue(models.get(1) instanceof UpdateOneModel);
+        assertTrue(((UpdateOneModel<Document>) models.get(1)).getOptions().isUpsert());
+        assertTrue(models.get(2) instanceof UpdateManyModel);
+        assertNotNull(((UpdateManyModel<Document>) models.get(2)).getUpdatePipeline());
+        assertTrue(models.get(3) instanceof ReplaceOneModel);
+        assertTrue(models.get(4) instanceof DeleteOneModel);
+        assertTrue(models.get(5) instanceof DeleteManyModel);
+    }
+
+    @Test
+    void rejectsMalformedBulkWriteOperations() {
+        for (String[] item : new String[][] {
+            {"[]", "non-empty array"},
+            {"[{\"insertOne\":{},\"deleteOne\":{}}]", "exactly one operation key"},
+            {"[{\"upsertOne\":{\"document\":{}}}]", "unsupported operation upsertOne"},
+            {"[{\"insertOne\":{}}]", "requires a document document"},
+            {"[{\"updateOne\":{\"filter\":{},\"update\":{\"a\":1}}}]", "update operators such as $set"},
+            {"[{\"updateOne\":{\"filter\":{},\"update\":{\"$set\":{\"a\":1}},\"upsert\":1}}]", "upsert must be a boolean"},
+            {"[{\"replaceOne\":{\"filter\":{},\"replacement\":{\"$set\":{\"a\":1}}}}]", "must not contain update operators"},
+        }) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteModelsForWrite(item[0]), item[0]);
+            assertTrue(error.getMessage().contains(item[1]), item[0] + " -> " + error.getMessage());
+        }
+    }
+
+    @Test
+    void renameCollectionMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"rename_collection\","
+                + "\"params\":{\"database\":\"app\",\"collection\":\"orders\",\"new_name\":\"orders_2024\"}}");
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(13, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_RENAME_COLLECTION));
+        assertTrue(AgentProtocol.MONGO_LEGACY_CAPABILITIES.contains(AgentProtocol.CAPABILITY_MONGO_RENAME_COLLECTION));
+    }
+
+    @Test
+    void rejectsUnrenameableCollectionNames() {
+        MongoAgent.requireRenameableCollectionNames("orders", "orders_2024");
+        for (String[] item : new String[][] {
+            {"", "x", "Collection name is required"},
+            {"orders", "", "New collection name is required"},
+            {"orders", "orders", "must differ"},
+            {"system.users", "x", "System collections cannot be renamed"},
+            {"orders", "system.x", "System collections cannot be renamed"},
+        }) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> MongoAgent.requireRenameableCollectionNames(item[0], item[1]));
+            assertTrue(error.getMessage().contains(item[2]), error.getMessage());
+        }
+    }
+
+    @Test
+    void parsesBulkWriteOptions() {
+        assertTrue(MongoAgent.bulkWriteOptionsForWrite(null).isOrdered());
+        assertTrue(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":true}").isOrdered());
+        assertFalse(MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":false}").isOrdered());
+        IllegalArgumentException unsupported = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteOptionsForWrite("{\"writeConcern\":{}}"));
+        assertEquals("Unsupported bulkWrite option: writeConcern", unsupported.getMessage());
+        IllegalArgumentException notBoolean = assertThrows(IllegalArgumentException.class, () -> MongoAgent.bulkWriteOptionsForWrite("{\"ordered\":\"yes\"}"));
+        assertEquals("ordered must be a boolean", notBoolean.getMessage());
     }
 
     @Test

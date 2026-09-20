@@ -10,6 +10,18 @@ export interface CreateDatabaseCharsetMetadata {
 
 export const CREATE_DATABASE_CHARSET_OPTIONS = ["utf8mb4", "utf8", "gbk", "latin1", "ascii", "big5", "gb2312", "utf16", "utf32"] as const;
 
+// Common GBase 8s / Informix database locales (language_territory.codeset). The default is a
+// UTF-8 locale so newly created databases can store Chinese; en_US.819 is a typical Informix
+// instance default and cannot hold CJK characters.
+export const GBASE8S_DATABASE_LOCALES = ["zh_CN.utf8", "en_US.utf8", "ja_JP.utf8", "ko_KR.utf8", "zh_CN.gbk", "zh_CN.gb18030", "en_US.819"] as const;
+export const DEFAULT_GBASE8S_DATABASE_LOCALE = "zh_CN.utf8";
+
+// Informix-family instances report dbs_collate with the numeric code set (57372 = UTF-8,
+// 819 = ISO-8859-1) instead of the "utf8" mnemonic, so both spellings must seed the default.
+export function defaultGbase8sDatabaseLocale(locales: string[]): string {
+  return locales.find((locale) => /(?:utf8|57372)/i.test(locale)) ?? locales[0] ?? DEFAULT_GBASE8S_DATABASE_LOCALE;
+}
+
 const FALLBACK_COLLATION_OPTIONS: Record<string, string[]> = {
   ascii: ["ascii_general_ci", "ascii_bin"],
   big5: ["big5_chinese_ci", "big5_bin"],

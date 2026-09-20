@@ -12,6 +12,7 @@ import type {
   PluginFormFieldLocalization,
   PluginFormFieldValue,
   PluginManifestLocalization,
+  PluginUiContribution,
   PluginWorkbenchContribution,
 } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
@@ -71,6 +72,17 @@ export class FrontendPluginRegistry {
     return this.listWorkbenches().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
   }
 
+  /**
+   * Resolve any contribution the plugin UI entrypoint can render, whichever host
+   * surface opened the tab — a `workbench` opened from the sidebar or a
+   * `result-view` opened from the query-result toolbar. Lookups stay scoped to
+   * the renderable contribution types, so an id owned by a native context menu
+   * or a filesystem provider is not a plugin UI surface.
+   */
+  findUiContribution(pluginId: string, contributionId: string): PluginContributionEntry<PluginUiContribution> | undefined {
+    return [...this.listWorkbenches(), ...this.listResultViews()].find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
+  }
+
   private listContributions<T extends PluginContribution["type"]>(type: T): Array<PluginContributionEntry<Extract<PluginContribution, { type: T }>>> {
     return this.definitions
       .filter((definition) => definition.plugin.compatibility.compatible)
@@ -105,6 +117,22 @@ export function pluginConnectionProviderIcon(entry: PluginContributionEntry<Plug
   return entry.contribution.icon || entry.plugin.manifest.icon;
 }
 
+/**
+ * Well-known provider field key whose declared default seeds the typed
+ * `ConnectionConfig.connect_timeout_secs`. A plugin knows its own transport
+ * (SSH handshakes on slow links need far more than the generic 10s), so a
+ * declared default wins over the global timeout unless the user explicitly
+ * picks a per-connection value in the dialog's Advanced tab.
+ */
+export const PLUGIN_CONNECT_TIMEOUT_FIELD_KEY = "connect_timeout_secs";
+
+export function pluginConnectionConnectTimeoutDefault(contribution: PluginConnectionProviderContribution): number | undefined {
+  const field = contribution.fields.find((candidate) => candidate.key === PLUGIN_CONNECT_TIMEOUT_FIELD_KEY && effectiveFieldBinding(candidate) === "config");
+  const value = field?.default;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(300, Math.max(1, Math.trunc(value)));
+}
+
 export function pluginConnectionActionsForDialog(contribution: PluginConnectionProviderContribution, editing: boolean): PluginConnectionAction[] {
   const actions: PluginConnectionAction[] = [
     ...(contribution.actions || []).map((action) => ({ ...action, kind: "custom" as const })),
@@ -115,7 +143,9 @@ export function pluginConnectionActionsForDialog(contribution: PluginConnectionP
 }
 
 export function initialPluginFormValues(contribution: PluginConnectionProviderContribution): Record<string, PluginFormFieldValue> {
-  return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
+  // `null` means "no default" (older hosts serialized the absent case that way),
+  // so it must not seed the form with a value the user never typed.
+  return Object.fromEntries(contribution.fields.filter((field) => field.default !== undefined && field.default !== null).map((field) => [field.key, field.default])) as Record<string, PluginFormFieldValue>;
 }
 
 export function pluginConnectionFormValues(contribution: PluginConnectionProviderContribution, config?: ConnectionConfig): Record<string, PluginFormFieldValue> {
@@ -125,22 +155,9 @@ export function pluginConnectionFormValues(contribution: PluginConnectionProvide
   const secrets = config.connection_secrets || {};
   for (const field of contribution.fields) {
     const binding = effectiveFieldBinding(field);
+    const secret = secrets[field.key] ?? externalConfig[field.key];
     const value =
-      binding === "name"
-        ? config.name
-        : binding === "host"
-          ? config.host
-          : binding === "port"
-            ? config.port
-            : binding === "username"
-              ? config.username
-              : binding === "password"
-                ? config.password
-                : binding === "database"
-                  ? config.database
-                  : binding === "secret"
-                    ? (secrets[field.key] ?? externalConfig[field.key])
-                    : externalConfig[field.key];
+      binding === "name" ? config.name : binding === "host" ? config.host : binding === "port" ? config.port : binding === "username" ? config.username : binding === "password" ? config.password : binding === "database" ? config.database : binding === "secret" ? secret : externalConfig[field.key];
     // Port 0 is the stored representation of an optional, automatic port.
     // Keep that input empty on reopen so its protocol-default hint remains visible.
     if (binding === "port" && value === 0 && field.default === undefined) delete values[field.key];
@@ -170,7 +187,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     plugin_connection_type: contribution.database_type,
     connection_secrets: connectionSecrets,
     transport_layers: existing?.transport_layers || [],
-    connect_timeout_secs: existing?.connect_timeout_secs || 10,
+    connect_timeout_secs: existing?.connect_timeout_secs || pluginConnectionConnectTimeoutDefault(contribution) || 10,
     query_timeout_secs: existing?.query_timeout_secs || 60,
     idle_timeout_secs: existing?.idle_timeout_secs || 60,
     keepalive_interval_secs: existing?.keepalive_interval_secs || 30,
@@ -180,7 +197,11 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     production_databases: existing?.production_databases || [],
   };
   for (const field of contribution.fields) {
-    const value = values[field.key] ?? field.default;
+    // A `null` coming from the form (or from a host that hydrated absent
+    // defaults as `null`) means "unset": fall back to the declared default and
+    // otherwise clear the stored value instead of persisting a null.
+    const raw = values[field.key];
+    const value = raw === null ? undefined : (raw ?? field.default ?? undefined);
     const binding = effectiveFieldBinding(field);
     if (binding === "config") {
       if (value === undefined) delete externalConfig[field.key];
@@ -203,6 +224,17 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
       config.password = String(value || "");
     } else if (binding === "database") {
       config.database = value === undefined || value === "" ? undefined : String(value);
+    }
+  }
+  // A config-bound connect_timeout_secs field is the plugin's own handshake
+  // timeout (the SSH plugin lets advanced users tune it). Mirror the resolved
+  // value into the typed field so the host RPC deadline never fires before the
+  // plugin's own timeout. Only applies while the provider declares the field —
+  // a stale external_config key from an older manifest must not leak through.
+  if (pluginConnectionConnectTimeoutDefault(contribution) !== undefined) {
+    const pluginConnectTimeout = externalConfig[PLUGIN_CONNECT_TIMEOUT_FIELD_KEY];
+    if (typeof pluginConnectTimeout === "number" && Number.isFinite(pluginConnectTimeout) && pluginConnectTimeout > 0) {
+      config.connect_timeout_secs = Math.min(300, Math.max(1, Math.trunc(pluginConnectTimeout)));
     }
   }
   return config;
@@ -258,7 +290,9 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
       label: localizedRequiredText(action.label, localization?.actions?.[action.id]?.label),
       description: localizedOptionalText(action.description, localization?.actions?.[action.id]?.description),
     }));
-  } else if (localized.type === "workbench") {
+  } else if (localized.type === "workbench" || localized.type === "result-view") {
+    // Both render through the plugin UI entrypoint, so both resolve their icon
+    // asset path the same way.
     localized.icon = optionalPluginAssetPath(localized.icon);
   }
   return localized;
@@ -304,6 +338,6 @@ function isPluginFormFieldValue(value: unknown): value is PluginFormFieldValue {
   return value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

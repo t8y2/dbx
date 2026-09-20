@@ -96,7 +96,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             return connection;
         } catch (SQLException error) {
             logConnectionEvent("mssql-jdbc failed", params, error);
-            if (isSqlServer2000Unsupported(error)) {
+            if (shouldFallbackToJtds(error)) {
                 logConnectionEvent("switching to jTDS 1.3.1 fallback", params, null);
                 try {
                     super.loadDriver(jtdsDriverParams());
@@ -203,7 +203,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             .replace('\n', ' ');
     }
 
-    static boolean isSqlServer2000Unsupported(Throwable error) {
+    static boolean shouldFallbackToJtds(Throwable error) {
         Throwable current = error;
         while (current != null) {
             String message = current.getMessage();
@@ -215,16 +215,29 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                 // "sql server 8" substring match, so accept both shapes.
                 boolean version8Rejection = (normalized.contains("sql server 8") || normalized.contains("sql server version 8"))
                     && (normalized.contains("not support") || normalized.contains("不支持"));
-                // Other driver wordings name the supported floor instead.
-                boolean floor2005Rejection = normalized.contains("sql server 2005 or later");
-                if (version8Rejection || floor2005Rejection) {
+                // Other driver wordings name the supported floor instead. The
+                // localized mssql-jdbc resource keeps "SQL Server 2005" in
+                // English while translating the "or later" suffix.
+                boolean floor2005Rejection = normalized.contains("sql server 2005 or later")
+                    || (normalized.contains("sql server 2005") && normalized.contains("更高版本"));
+                // Some SQL Server 2000 installations close the TDS 7.4
+                // prelogin socket before mssql-jdbc can report the server
+                // version. In legacy mode, retry that handshake once with
+                // jTDS, which speaks the older protocol.
+                boolean preloginRejection = normalized.contains("connection reset")
+                    || normalized.contains("connection was reset")
+                    || normalized.contains("forcibly closed")
+                    || normalized.contains("意外的登录前响应")
+                    || (normalized.contains("unexpected")
+                        && (normalized.contains("prelogin") || normalized.contains("pre-login")));
+                if (version8Rejection || floor2005Rejection || preloginRejection) {
                     return true;
                 }
             }
             if (current instanceof SQLException) {
                 SQLException next = ((SQLException) current).getNextException();
                 if (next != null && next != current.getCause()) {
-                    if (isSqlServer2000Unsupported(next)) {
+                    if (shouldFallbackToJtds(next)) {
                         return true;
                     }
                 }

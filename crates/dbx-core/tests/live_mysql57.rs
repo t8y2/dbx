@@ -484,6 +484,8 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -575,6 +577,8 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
 
@@ -690,6 +694,8 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
+        exclude_primary_keys: false,
+        primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);
@@ -1279,6 +1285,7 @@ INSERT INTO install_check (id) VALUES (1), (2);
 "#
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
@@ -1367,6 +1374,7 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
 "#
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),
@@ -1442,6 +1450,7 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
     script.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
     script.extend_from_slice(b"');\n");
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("exec-{suffix}"),
         connection_id: config.id.clone(),
         database: String::new(),

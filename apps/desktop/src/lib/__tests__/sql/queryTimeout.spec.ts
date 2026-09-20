@@ -29,17 +29,18 @@ describe("queryTimeout", () => {
     const packageSpec = `CREATE OR REPLACE PACKAGE pkg_utils AS
   FUNCTION get_version RETURN VARCHAR2;
 END pkg_utils;`;
-    expect(frontendQueryTimeoutSecsForSql(`${packageSpec}\n/\nSELECT 1;`, "opengauss", 30)).toBe(120);
+    expect(frontendQueryTimeoutSecsForSql(`${packageSpec}\n/\nSELECT 1;`, "opengauss", 30)).toBe(60);
   });
 
   it("keeps the frontend guard for non-row PostgreSQL statements", () => {
-    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(60);
-    expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(60);
-    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET note = 'ready' /* RETURNING */", "postgres", 30)).toBe(60);
+    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET state = 'ready'", "postgres", 30)).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("INSERT INTO sample_records(note) VALUES ('RETURNING is text')", "postgres", 30)).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("UPDATE sample_records SET note = 'ready' /* RETURNING */", "postgres", 30)).toBe(30);
   });
 
   it("keeps the existing frontend guard for other database types", () => {
-    expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(60);
+    expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(30);
+    expect(frontendQueryTimeoutSecsForSql("SELECT SLEEP(30)", "mysql", 10)).toBe(10);
     expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(60);
   });
 

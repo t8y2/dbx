@@ -1128,6 +1128,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
 dependencies = [
  "memchr",
+ "regex-automata",
  "serde_core",
 ]
 
@@ -1702,6 +1703,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
+dependencies = [
+ "crc-catalog",
+]
+
+[[package]]
+name = "crc-catalog"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
+
+[[package]]
 name = "crc16"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2003,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.14"
+version = "0.6.17"
 dependencies = [
  "anyhow",
  "axum",
@@ -2016,6 +2032,8 @@ dependencies = [
  "deadpool-postgres",
  "font-kit",
  "futures",
+ "grep",
+ "ignore",
  "libloading 0.8.9",
  "log",
  "minisign-verify",
@@ -2062,8 +2080,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-ai-provider"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "dbx-platform",
+ "futures",
+ "httpdate",
+ "log",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "dbx-cli"
-version = "0.4.88"
+version = "0.4.91"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2081,42 +2117,37 @@ version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
- "anyhow",
  "arc-swap",
  "argon2",
  "async-trait",
- "aws-sdk-dynamodb",
  "base64 0.22.1",
  "bytes",
  "calamine",
  "cbc 0.1.2",
  "chrono",
+ "crc",
  "csv",
- "dbx-sqlite-worker",
+ "dbx-ai-provider",
+ "dbx-drivers",
+ "dbx-formats",
+ "dbx-platform",
+ "dbx-plugin-runtime",
+ "dbx-sql",
+ "dbx-types",
  "deadpool-postgres",
- "ed25519-dalek 2.2.0",
  "encoding_rs",
  "flate2",
  "font-kit",
- "fs2",
  "futures",
- "httpdate",
- "insta",
- "json5",
  "jsonwebtoken",
- "libsqlite3-hotbundle",
  "log",
  "minijinja",
  "mongodb",
  "mysql_async",
- "mysql_common",
  "nix",
  "notify",
- "openssl",
- "pageant",
  "percent-encoding",
  "portpicker",
- "postgres-openssl",
  "prometheus-parse",
  "quick-xml 0.37.5",
  "rayon",
@@ -2125,19 +2156,69 @@ dependencies = [
  "reqwest 0.12.28",
  "rumqttc",
  "rusqlite",
- "russh",
- "rust_decimal",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
- "semver",
  "serde",
  "serde_json",
- "serde_yaml",
  "serde_yaml_ng",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "sqlparser",
  "ssfmt",
  "sysinfo",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tokio-util",
+ "uuid",
+ "webpki-roots 0.26.11",
+ "windows-sys 0.61.2",
+ "zip",
+ "zstd",
+]
+
+[[package]]
+name = "dbx-drivers"
+version = "0.1.0"
+dependencies = [
+ "aws-sdk-dynamodb",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "crc",
+ "csv",
+ "dbx-platform",
+ "dbx-sql",
+ "dbx-sqlite-worker",
+ "dbx-types",
+ "deadpool-postgres",
+ "flate2",
+ "futures",
+ "json5",
+ "libsqlite3-hotbundle",
+ "log",
+ "mongodb",
+ "mysql_async",
+ "mysql_common",
+ "nix",
+ "openssl",
+ "pageant",
+ "percent-encoding",
+ "portpicker",
+ "postgres-openssl",
+ "redis",
+ "regex",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "russh",
+ "rust_decimal",
+ "rustls 0.23.43",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlparser",
  "tar",
  "tempfile",
  "tiberius",
@@ -2148,26 +2229,37 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "unicode-ident",
- "unicode-width",
- "utoipa",
  "uuid",
  "webpki-roots 0.26.11",
  "windows-sys 0.61.2",
- "winnow 1.0.4",
  "zip",
  "zstd",
 ]
 
 [[package]]
+name = "dbx-formats"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "dbx-mcp"
-version = "0.4.88"
+version = "0.4.91"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "dbx-core",
  "dirs",
  "log",
+ "mysql_async",
  "reqwest 0.12.28",
  "rmcp",
  "rustls 0.23.43",
@@ -2175,6 +2267,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sqlparser",
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -2182,6 +2275,68 @@ dependencies = [
  "tower-http",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "dbx-platform"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "nix",
+ "reqwest 0.12.28",
+ "serde",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "dbx-plugin-runtime"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dbx-platform",
+ "dbx-types",
+ "ed25519-dalek 2.2.0",
+ "fs2",
+ "futures",
+ "log",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "dbx-sql"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dbx-types",
+ "encoding_rs",
+ "insta",
+ "log",
+ "notify",
+ "percent-encoding",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sqlparser",
+ "tempfile",
+ "tokio",
+ "unicode-ident",
+ "unicode-width",
+ "utoipa",
+ "winnow 1.0.4",
 ]
 
 [[package]]
@@ -2195,8 +2350,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbx-types"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "dbx-web"
-version = "0.6.14"
+version = "0.6.17"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -2215,6 +2382,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tower-http",
@@ -2708,6 +2876,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "encoding_rs_io"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
+dependencies = [
+ "encoding_rs",
 ]
 
 [[package]]
@@ -3486,6 +3663,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "grep"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "308ae749734e28d749a86f33212c7b756748568ce332f970ac1d9cd8531f32e6"
+dependencies = [
+ "grep-cli",
+ "grep-matcher",
+ "grep-printer",
+ "grep-regex",
+ "grep-searcher",
+]
+
+[[package]]
+name = "grep-cli"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf32d263c5d5cc2a23ce587097f5ddafdb188492ba2e6fb638eaccdc22453631"
+dependencies = [
+ "bstr",
+ "globset",
+ "libc",
+ "log",
+ "termcolor",
+ "winapi-util",
+]
+
+[[package]]
+name = "grep-matcher"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9417543f4870fc8f1c8e1af870afae2431007626d9e703fce6471c468d33847"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "grep-printer"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c112110ae4a891aa4d83ab82ecf734b307497d066f437686175e83fbd4e013fe"
+dependencies = [
+ "bstr",
+ "grep-matcher",
+ "grep-searcher",
+ "log",
+ "serde",
+ "serde_json",
+ "termcolor",
+]
+
+[[package]]
+name = "grep-regex"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce0c256c3ad82bcc07b812c15a45ec1d398122e8e15124f96695234db7112ef"
+dependencies = [
+ "bstr",
+ "grep-matcher",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "grep-searcher"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72348823a0eafc4bc2e9051064f28b5b42cc100b571b3a35d67918d711efcbc6"
+dependencies = [
+ "bstr",
+ "encoding_rs",
+ "encoding_rs_io",
+ "grep-matcher",
+ "log",
+ "memchr",
+ "memmap2",
+]
+
+[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4126,6 +4382,22 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b17771570a2b94107741a7b033f19132c2eee21d59d21b24d2ced26500bd66e"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
 ]
 
 [[package]]
@@ -4865,6 +5137,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "memo-map"
@@ -6899,6 +7180,7 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
+ "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
@@ -7063,6 +7345,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rmcp-macros",
  "schemars 1.2.2",
  "serde",
@@ -9054,7 +9337,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -10373,9 +10656,8 @@ dependencies = [
 [[package]]
 name = "webview2-com-sys"
 version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381336cfffd772377d291702245447a5251a2ffa5bad679c99e61bc48bacbf9c"
 dependencies = [
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "windows 0.61.3",
  "windows-core 0.61.2",

@@ -127,6 +127,30 @@ describe("MQTT 控制台消息暂停自动滚动 (issue #5615)", () => {
   });
 });
 
+describe("MQTT 消息列表刷新后自动回到最新消息 (issue #9373)", () => {
+  it("刷新消息列表后，消息容器的 scrollTop 被重置为 0", async () => {
+    const container = await mountConsole();
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    const messageList = container.querySelector('[data-testid="mqtt-message-list"]') as HTMLElement | null;
+    expect(messageList).toBeTruthy();
+    messageList!.scrollTop = 120;
+    expect(messageList!.scrollTop).toBe(120);
+
+    mqttGetMessagesMock.mockResolvedValueOnce([messageAt(1)]);
+    const refreshButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("刷新"));
+    expect(refreshButton).toBeTruthy();
+    refreshButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(messageList!.scrollTop).toBe(0);
+  });
+});
+
 describe("MQTT 控制台暂停后选择消息 (issue #8353)", () => {
   it("点击暂停后的消息内容时不会重新获取并替换消息", async () => {
     mqttGetMessagesMock.mockResolvedValue([messageAt(0, "device/other")]);

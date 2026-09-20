@@ -1,6 +1,5 @@
+import { buildSelectSnippetBody, DEFAULT_SELECT_ROW_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
-
-const DEFAULT_SELECT_ROW_LIMIT = 100;
 
 /**
  * Built-in SQL snippets shared by database types.
@@ -129,47 +128,8 @@ interface BuiltinSqlSnippetRule {
   buildBody: BuiltinSqlSnippetBodyBuilder;
 }
 
-type SelectSnippetLimitStyle = "limit" | "top" | "first" | "fetch-first" | "rows" | "rownum" | "unbounded";
-
-const SELECT_SNIPPET_LIMIT_STYLE_BY_DATABASE: Partial<Record<DatabaseType, SelectSnippetLimitStyle>> = {
-  oracle: "rownum",
-  "oceanbase-oracle": "rownum",
-  oscar: "rownum",
-  dameng: "rownum",
-  db2: "fetch-first",
-  sqlserver: "top",
-  access: "top",
-  iris: "top",
-  teradata: "top",
-  informix: "first",
-  firebird: "rows",
-  // An unknown JDBC driver may expose any SQL dialect. Known JDBC profiles are
-  // converted to their effective database type before reaching the editor.
-  jdbc: "unbounded",
-};
-
 const PARENTHESIZED_ADD_COLUMN_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "xugu", "dameng", "iris", "informix"]);
 const ADD_COLUMN_WITHOUT_COLUMN_KEYWORD_DATABASES = new Set<DatabaseType>(["sqlserver", "kingbase", "cassandra", "teradata"]);
-
-function buildSelectSnippetBody(databaseType?: DatabaseType): string {
-  const style = databaseType ? (SELECT_SNIPPET_LIMIT_STYLE_BY_DATABASE[databaseType] ?? "limit") : "limit";
-  switch (style) {
-    case "top":
-      return `SELECT TOP ${DEFAULT_SELECT_ROW_LIMIT} *\nFROM table;`;
-    case "first":
-      return `SELECT FIRST ${DEFAULT_SELECT_ROW_LIMIT} *\nFROM table;`;
-    case "fetch-first":
-      return `SELECT *\nFROM table\nFETCH FIRST ${DEFAULT_SELECT_ROW_LIMIT} ROWS ONLY;`;
-    case "rows":
-      return `SELECT *\nFROM table\nROWS ${DEFAULT_SELECT_ROW_LIMIT};`;
-    case "rownum":
-      return `SELECT *\nFROM table\nWHERE ROWNUM <= ${DEFAULT_SELECT_ROW_LIMIT};`;
-    case "unbounded":
-      return "SELECT *\nFROM table;";
-    case "limit":
-      return `SELECT *\nFROM table\nLIMIT ${DEFAULT_SELECT_ROW_LIMIT};`;
-  }
-}
 
 function buildUpdateSnippetBody(databaseType?: DatabaseType): string {
   if (databaseType === "clickhouse") {

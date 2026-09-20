@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { quoteIdentifier } from "@/lib/editor/hoverTableSql";
+import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import {
   extractIdentifierAt,
   extractIdentifierDetailsAt,
@@ -93,6 +94,22 @@ describe("extractQualifiedIdentifierAt", () => {
     const requoted = located!.parts.map((part) => quoteIdentifier(part.value)).join(".");
 
     expect(splitQualifiedIdentifier(requoted)).toEqual(["log", "public-rate_kingdee"]);
+  });
+
+  it("extracts unquoted Unicode identifiers (e.g. CJK CTE names and columns)", () => {
+    const sql = "WITH 窗口函数 AS (SELECT * FROM TABLENAME) SELECT 字段 FROM 窗口函数";
+
+    expect(extractIdentifierAt(sql, sql.indexOf("窗口函数", sql.indexOf("SELECT")))).toBe("窗口函数");
+    const outerReference = extractQualifiedIdentifierAt(sql, sql.lastIndexOf("窗口函数"));
+    expect(outerReference?.parts.map((part) => part.value)).toEqual(["窗口函数"]);
+
+    const mixed = "SELECT t.中文名 FROM orders t";
+    expect(extractQualifiedIdentifierAt(mixed, mixed.indexOf("中文名"))?.parts.map((part) => part.value)).toEqual(["t", "中文名"]);
+  });
+
+  it("keeps digits as continuation characters of Unicode identifiers", () => {
+    const sql = "select 字段1 from t";
+    expect(extractIdentifierAt(sql, sql.indexOf("1"))).toBe("字段1");
   });
 });
 
@@ -294,6 +311,13 @@ describe("call-site navigation helpers", () => {
     });
   });
 
+  it("folds unquoted Oracle schema and table navigation targets", () => {
+    expect(normalizeOracleNavigationTarget({ name: "emp", schema: "hr" })).toEqual({
+      name: "EMP",
+      schema: "HR",
+    });
+  });
+
   it("preserves quoted package.member mixed-case identities", () => {
     const sql = 'BEGIN\n  "Pkg"."Member"();\nEND;';
     const identity = resolveSqlObjectNavigationIdentity(sql, sql.indexOf("Member"));
@@ -319,5 +343,42 @@ describe("call-site navigation helpers", () => {
       schema: "APP",
       type: "procedure",
     });
+  });
+});
+
+describe("标识符提取的字符边界", () => {
+  it("支持 @ / # / $ 作为标识符首字符", () => {
+    const sql = "select @var, #tmp, $col from t";
+
+    expect(extractIdentifierAt(sql, sql.indexOf("@var"))).toBe("@var");
+    expect(extractIdentifierAt(sql, sql.indexOf("#tmp"))).toBe("#tmp");
+    expect(extractIdentifierAt(sql, sql.indexOf("$col"))).toBe("$col");
+  });
+
+  it("数字开头的片段不被当作标识符（只识别其后的字母段）", () => {
+    const sql = "select 1abc from t";
+
+    expect(extractIdentifierAt(sql, sql.indexOf("1abc"))).toBeNull();
+    expect(extractIdentifierAt(sql, sql.indexOf("abc"))).toBe("abc");
+  });
+
+  it("引号包裹的中文标识符去掉引号并标记 quoted", () => {
+    const sql = 'select "中文列" from "订单表"';
+    const details = extractIdentifierDetailsAt(sql, sql.indexOf("中文列"));
+
+    expect(details?.identifier).toBe("中文列");
+    expect(details?.quoted).toBe(true);
+    expect(extractQualifiedIdentifierAt(sql, sql.indexOf("订单表"))?.parts).toEqual([{ value: "订单表", quoted: true }]);
+  });
+
+  it("对含中文/变量前缀的 SQL，逐 token 还原结果与语义分词器一致", () => {
+    const sql = "with 汇总 as (select 字段1, @变量 from t1) select 字段1 from 汇总";
+    const tokens = tokenizeSqlSemantic(sql);
+
+    const identifiers = tokens.filter((token) => tokenIsIdentifier(token));
+    expect(identifiers.map((token) => token.text)).toEqual(expect.arrayContaining(["汇总", "字段1", "@变量"]));
+    for (const token of identifiers) {
+      expect(extractIdentifierAt(sql, token.span.start)).toBe(unquoteSqlSemanticIdentifier(token));
+    }
   });
 });

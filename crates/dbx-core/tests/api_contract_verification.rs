@@ -23,6 +23,7 @@ fn prepare_schema_diff_function_signature() {
         source_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -30,6 +31,7 @@ fn prepare_schema_diff_function_signature() {
         target_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -122,6 +124,7 @@ fn schema_diff_preparation_field_names() {
         source_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -129,6 +132,7 @@ fn schema_diff_preparation_field_names() {
         target_tables: vec![TableInfo {
             name: "t".to_string(),
             table_type: "TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -237,6 +241,7 @@ fn core_types_serialization_roundtrip() {
     let table = TableInfo {
         name: "users".to_string(),
         table_type: "BASE TABLE".to_string(),
+        valid: None,
         comment: Some("user table".to_string()),
         parent_schema: Some("public".to_string()),
         parent_name: None,
@@ -245,6 +250,28 @@ fn core_types_serialization_roundtrip() {
     let deserialized: TableInfo = serde_json::from_value(json).unwrap();
     assert_eq!(table.name, deserialized.name);
     assert_eq!(table.comment, deserialized.comment);
+    assert_eq!(deserialized.valid, None);
+
+    let valid_view: TableInfo = serde_json::from_value(serde_json::json!({
+        "name": "valid_view",
+        "table_type": "VIEW",
+        "valid": true,
+        "comment": null,
+        "parent_schema": null,
+        "parent_name": null
+    }))
+    .unwrap();
+    assert_eq!(valid_view.valid, Some(true));
+
+    let legacy_view: TableInfo = serde_json::from_value(serde_json::json!({
+        "name": "legacy_view",
+        "table_type": "VIEW",
+        "comment": null,
+        "parent_schema": null,
+        "parent_name": null
+    }))
+    .unwrap();
+    assert_eq!(legacy_view.valid, None);
 }
 
 /// ColumnInfo must serialize/deserialize consistently

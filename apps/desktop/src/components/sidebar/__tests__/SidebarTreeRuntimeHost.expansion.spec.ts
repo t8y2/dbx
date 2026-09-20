@@ -6,6 +6,7 @@ import i18n from "@/i18n";
 import type { TreeNode } from "@/types/database";
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { OBJECT_BROWSER_SEARCH_FOCUS_EVENT } from "@/lib/tabs/objectBrowserSearchFocus";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 
 const connectionStore = {
@@ -36,6 +37,15 @@ const queryStore = {
   updateSql: vi.fn(),
   setTableMeta: vi.fn(),
   openNacosAdmin: vi.fn(),
+  openObjectBrowser: vi.fn(() => "object-browser-tab"),
+};
+
+const settingsStore = {
+  editorSettings: {
+    sidebarActivation: "single" as "single" | "double",
+    sidebarBrowseObjectsOnDatabaseActivation: false,
+    shortcuts: { openDataInNewTab: "" },
+  },
 };
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -44,7 +54,7 @@ vi.mock("@/stores/connectionStore", () => ({
 }));
 
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => queryStore }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { sidebarActivation: "single" } }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => settingsStore }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({}) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: vi.fn() }) }));
@@ -66,6 +76,8 @@ afterEach(() => {
   connectionStore.activeConnectionId = null;
   connectionStore.connectedIds.clear();
   queryStore.tabs = [];
+  settingsStore.editorSettings.sidebarActivation = "single";
+  settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = false;
   vi.clearAllMocks();
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
@@ -73,6 +85,42 @@ afterEach(() => {
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it.each(["single", "double"] as const)("focuses object search when %s-click activation opens a database", async (activation) => {
+    const database: TreeNode = {
+      id: "mysql:dbx_test",
+      label: "dbx_test",
+      type: "database",
+      connectionId: "mysql",
+      database: "dbx_test",
+      isExpanded: true,
+      children: [],
+    };
+    settingsStore.editorSettings.sidebarActivation = activation;
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    const focusRequested = vi.fn();
+    window.addEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequested);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    if (activation === "single") {
+      host.value?.handleRowClick(database, 1);
+    } else {
+      host.value?.handleRowDoubleClick(database, new MouseEvent("dblclick"));
+    }
+
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "dbx_test", undefined, undefined, undefined, false, undefined, undefined));
+    await vi.waitFor(() => expect(focusRequested).toHaveBeenCalledOnce());
+    expect((focusRequested.mock.calls[0]?.[0] as CustomEvent<{ tabId: string }>).detail.tabId).toBe("object-browser-tab");
+
+    window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequested);
+  });
+
   it("reuses a Mongo collection tab by identity without replacing its state", async () => {
     const collection: TreeNode = {
       id: "mongo:app:orders",

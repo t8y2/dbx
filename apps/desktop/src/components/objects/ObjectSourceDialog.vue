@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Clipboard, Loader2, PencilLine, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
@@ -61,21 +61,27 @@ const routineMetadata = ref<XuguRoutineMetadata | null>(null);
 /** May differ from props.objectType after PROCEDURE/FUNCTION/PACKAGE fallback resolution. */
 const resolvedObjectType = ref<ObjectSourceKind>(props.objectType);
 let loadSerial = 0;
+onBeforeUnmount(() => {
+  ++loadSerial;
+});
 
-const canEdit = computed(() => sourceEditable.value && props.objectType !== "SEQUENCE");
+const canEdit = computed(() => sourceEditable.value && (props.objectType !== "SEQUENCE" || props.databaseType === "oceanbase-oracle"));
 const title = computed(() => `${editing.value ? t("contextMenu.editView") : t("contextMenu.viewSource")} - ${props.name}`);
 const hasRoutineMetadata = computed(() => !!routineMetadata.value && (routineMetadata.value.parameters.length > 0 || !!routineMetadata.value.returnType));
 
 watch(
-  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.relationName, props.signature, props.objectType, props.initialEditing] as const,
+  () => [props.open, props.connectionId, props.database, props.schema, props.name, props.relationName, props.signature, props.objectType, props.databaseType, props.initialEditing] as const,
   () => {
     if (props.open) void loadSource();
+    else ++loadSerial;
   },
-  { immediate: true },
+  { immediate: true, flush: "sync" },
 );
 
 async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   const serial = ++loadSerial;
+  const target = { ...props };
+  saving.value = false;
   content.value = "";
   editableText.value = "";
   draft.value = "";
@@ -86,26 +92,30 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value) {
   editing.value = false;
   loading.value = true;
   try {
-    if (!props.databaseType) throw new Error("Connection type is unavailable.");
+    if (!target.databaseType) throw new Error("Connection type is unavailable.");
     // issue #9035：连接建立也纳入弹窗的加载态。调用方不再先 await ensureConnected
     // 才打开弹窗，否则弹窗挂载前会有一段没有任何反馈的等待。
-    await connectionStore.ensureConnected(props.connectionId);
-    connectionStore.activeConnectionId = props.connectionId;
-    const schema = props.schema || props.database;
-    const { source: result, objectType: resolvedType } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, props.connectionId, props.database, schema, props.name, props.objectType, props.signature, props.relationName);
+    await connectionStore.ensureConnected(target.connectionId);
+    if (serial !== loadSerial) return;
+    connectionStore.activeConnectionId = target.connectionId;
+    const schema = target.schema || target.database;
+    const { source: result, objectType: resolvedType } = await loadObjectSourceWithRoutineFallback(api.getObjectSource, target.connectionId, target.database, schema, target.name, target.objectType, target.signature, target.relationName);
+    if (serial !== loadSerial) return;
     const editableAllowed = result.editable !== false;
     const editable = await buildEditableObjectSource({
-      databaseType: props.databaseType,
+      databaseType: target.databaseType,
       objectType: resolvedType,
       schema,
-      name: props.name,
+      name: target.name,
       source: result.source,
     });
     if (serial !== loadSerial) return;
     resolvedObjectType.value = resolvedType;
     routineMetadata.value = props.databaseType === "xugu" && (resolvedType === "PROCEDURE" || resolvedType === "FUNCTION") ? xuguRoutineMetadataFromDefinition(result.source) : null;
     sourceEditable.value = editableAllowed;
-    const formatted = await formatSqlForDisplay(editable, props.formatDialect ?? props.dialect, settingsStore.editorSettings.sqlFormatter);
+    const displaySource = resolvedType === "SEQUENCE" ? result.source : editable;
+    const formatted = await formatSqlForDisplay(displaySource, target.formatDialect ?? target.dialect, settingsStore.editorSettings.sqlFormatter);
+    if (serial !== loadSerial) return;
     editableText.value = editable;
     content.value = formatted;
     draft.value = nextEditing && canEdit.value ? resolveObjectSourceEditDraft(props.databaseType, resolvedType, formatted, editable) : "";
@@ -147,46 +157,55 @@ function cancelEditSource() {
 }
 
 async function saveSource() {
+  if (saving.value || loading.value || !props.open) return;
   if (!canEdit.value) {
     toast(t("objects.sourceReadOnly"), 3000);
     return;
   }
   if (!draft.value.trim() || !props.databaseType) return;
   const databaseType = props.databaseType;
+  const connectionId = props.connectionId,
+    database = props.database,
+    name = props.name;
+  const objectType = resolvedObjectType.value,
+    serial = loadSerial;
   const schema = props.schema || props.database;
   saving.value = true;
   saveError.value = "";
   try {
     const statements = await buildExecutableObjectSourceStatements({
       databaseType,
-      objectType: resolvedObjectType.value,
+      objectType,
       schema,
-      name: props.name,
+      name,
       source: draft.value,
     });
+    if (serial !== loadSerial) return;
     const executableSql = statements.filter((sql) => sql.trim()).join(";\n");
     if (executableSql.trim()) {
       const saved = await executeWithProductionSqlGuard({
-        connection: connectionStore.getConfig(props.connectionId),
-        database: props.database,
+        connection: connectionStore.getConfig(connectionId),
+        database,
         sql: executableSql,
         source: t("production.sourceObjectSource"),
         execute: async () => {
-          await executeObjectSourceSave(props.connectionId, props.database, databaseType, statements, schema);
+          if (serial !== loadSerial || !props.open) return false;
+          await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
           return true;
         },
       });
       if (!saved) return;
     } else {
-      await executeObjectSourceSave(props.connectionId, props.database, databaseType, statements, schema);
+      await executeObjectSourceSave(connectionId, database, databaseType, statements, schema);
     }
+    if (serial !== loadSerial) return;
     toast(t("objects.sourceSaved"));
     emit("saved");
     await loadSource(false);
   } catch (e: unknown) {
-    saveError.value = formatObjectSourceSaveError(e, databaseType, props.objectType, t("objects.postgresViewColumnChangeHint"));
+    if (serial === loadSerial) saveError.value = formatObjectSourceSaveError(e, databaseType, objectType, t("objects.postgresViewColumnChangeHint"));
   } finally {
-    saving.value = false;
+    if (serial === loadSerial) saving.value = false;
   }
 }
 

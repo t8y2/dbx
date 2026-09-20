@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   getConnectionConfig: vi.fn(),
   mongoFindDocuments: vi.fn(),
+  mongoExplainFind: vi.fn(),
+  cancelQuery: vi.fn(),
   mongoParseShellCommand: vi.fn(),
 }));
 
@@ -14,6 +16,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   return {
     ...actual,
     mongoFindDocuments: mocks.mongoFindDocuments,
+    mongoExplainFind: mocks.mongoExplainFind,
+    cancelQuery: mocks.cancelQuery,
     mongoParseShellCommand: mocks.mongoParseShellCommand,
   };
 });
@@ -117,5 +121,57 @@ describe("queryStore MongoDB execution summary", () => {
         { status: "success", statementIndex: 1 },
       ],
     });
+  });
+
+  it("executes the authoritative inDatabase wrapper against the sibling database and restores the session database", async () => {
+    mocks.mongoFindDocuments.mockResolvedValue({ documents: [{ _id: "1" }], extended_documents: [], total: 1, total_is_exact: true });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mongo-1", "app", "Query");
+
+    await store.executeTabSql(tabId, 'db.getSiblingDB("reports").events.find();\ndb.users.find()');
+
+    expect(mocks.mongoFindDocuments).toHaveBeenNthCalledWith(1, "mongo-1", "reports", "events", expect.any(Number), expect.any(Number), "{}", undefined, undefined, undefined, expect.any(String));
+    expect(mocks.mongoFindDocuments).toHaveBeenNthCalledWith(2, "mongo-1", "app", "users", expect.any(Number), expect.any(Number), "{}", undefined, undefined, undefined, expect.any(String));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.batchSqlExecution).toMatchObject({
+      total: 2,
+      completed: 2,
+      items: [
+        { status: "success", statementIndex: 0 },
+        { status: "success", statementIndex: 1 },
+      ],
+    });
+  });
+
+  it("forwards the active execution ID to a pending explain and its cancellation", async () => {
+    let rejectExplain!: (reason: Error) => void;
+    mocks.mongoExplainFind.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectExplain = reject;
+        }),
+    );
+    mocks.cancelQuery.mockImplementation(async () => {
+      rejectExplain(new Error("Query canceled"));
+      return true;
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mongo-1", "app", "Query");
+    const execution = store.executeTabSql(tabId, 'db.users.find({}).explain("executionStats")');
+
+    await vi.waitFor(() => expect(mocks.mongoExplainFind).toHaveBeenCalledOnce());
+    const executionId = store.tabs.find((tab) => tab.id === tabId)!.executionId;
+    try {
+      expect(executionId).toEqual(expect.any(String));
+      expect(mocks.mongoExplainFind).toHaveBeenCalledWith("mongo-1", "app", "users", expect.objectContaining({ verbosity: "executionStats" }), executionId);
+      await expect(store.cancelTabExecution(tabId)).resolves.toBe(true);
+      expect(mocks.cancelQuery).toHaveBeenCalledWith(executionId);
+    } finally {
+      rejectExplain(new Error("Query canceled"));
+      await execution;
+    }
+    expect(store.tabs.find((tab) => tab.id === tabId)).toMatchObject({ isExecuting: false, executionId: undefined });
   });
 });

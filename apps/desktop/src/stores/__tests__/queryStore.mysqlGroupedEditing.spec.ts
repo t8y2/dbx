@@ -106,6 +106,14 @@ describe("queryStore MySQL grouped-result editing", () => {
     expect(listIndexes).not.toHaveBeenCalled();
   });
 
+  it("strips the MySQL CLI vertical-output suffix only from the submitted SQL", async () => {
+    const sourceSql = "SHOW CREATE FUNCTION fun_grade \\G;";
+    const tab = await executeGrouped(sourceSql, ["Create Function"]);
+
+    expect(executeMulti.mock.calls[0]?.[2]).toBe("SHOW CREATE FUNCTION fun_grade;");
+    expect(tab.lastExecutedSql).toBe(sourceSql);
+  });
+
   it("identifies the FROM root independently of metadata completion order", async () => {
     getColumns.mockImplementation(async (_connectionId: string, _database: string, _schema: string, table: string) => {
       if (table === "users") await new Promise((resolve) => setTimeout(resolve, 10));

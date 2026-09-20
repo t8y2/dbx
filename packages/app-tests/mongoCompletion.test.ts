@@ -137,7 +137,7 @@ test("prioritizes common read helpers and keeps destructive helpers last", () =>
   assert.deepEqual(methodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(getCollectionMethodLabels.slice(0, 6), ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct"]);
   assert.deepEqual(methodLabels.slice(-3), ["dropIndex", "dropIndexes", "drop"]);
-  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count"]);
+  assert.deepEqual(labels("db.users.find({})."), ["limit", "sort", "skip", "count", "explain"]);
 });
 
 test("keeps dotted collection names ahead of methods until the collection is resolved", () => {
@@ -162,7 +162,7 @@ test("suggests cursor methods after find result chains", () => {
 
   assert.deepEqual(
     allItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count"],
+    ["limit", "sort", "skip", "count", "explain"],
   );
   assert.deepEqual(
     prefixedItems.map((item) => item.label),
@@ -170,7 +170,7 @@ test("suggests cursor methods after find result chains", () => {
   );
   assert.deepEqual(
     formattedChainItems.map((item) => item.label),
-    ["limit", "sort", "skip", "count"],
+    ["limit", "sort", "skip", "count", "explain"],
   );
   assert.deepEqual(
     formattedPrefixedItems.map((item) => item.label),
@@ -253,6 +253,8 @@ test("offers the newly supported count and database commands", () => {
   const dbLevel = labels("db.");
   assert.ok(dbLevel.includes("stats"));
   assert.ok(dbLevel.includes("serverStatus"));
+  assert.ok(dbLevel.includes("createCollection"));
+  assert.ok(dbLevel.includes("dropDatabase"));
   assert.ok(labels("").includes("db.stats"));
 });
 
@@ -501,8 +503,10 @@ test("suggests only helpers the shell parser accepts", () => {
   assert.ok(methodLabels.includes("distinct"));
   assert.ok(methodLabels.includes("estimatedDocumentCount"));
   assert.ok(methodLabels.includes("replaceOne"));
+  assert.ok(methodLabels.includes("bulkWrite"));
+  assert.ok(methodLabels.includes("renameCollection"));
   // Suggesting a helper DBX cannot run just hands the user a command that fails.
-  for (const unsupported of ["bulkWrite", "renameCollection", "mapReduce"]) {
+  for (const unsupported of ["mapReduce", "watch", "validate"]) {
     assert.equal(methodLabels.includes(unsupported), false, `${unsupported} is not executable`);
   }
   // Cursor methods are not collection methods.

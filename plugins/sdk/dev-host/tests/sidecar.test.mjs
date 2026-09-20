@@ -92,13 +92,16 @@ test("handshake rejects wrong identity and missing executables terminate promptl
 });
 
 test("handshake adopts a manifest.json rewritten on disk when the in-memory copy is stale", async (t) => {
+  let sidecar;
   const project = await mkdtemp(join(tmpdir(), "dbx-sidecar-manifest-"));
-  t.after(() => rm(project, { recursive: true, force: true }));
+  t.after(async () => {
+    await sidecar?.stop();
+    await rm(project, { recursive: true, force: true });
+  });
   // Simulates a version bump made while the dev host was already running:
   // the sidecar binary reports 1.0.0, the in-memory manifest is behind.
   await writeFile(join(project, "manifest.json"), JSON.stringify({ id: "example.echo", version: "1.0.0" }));
-  const sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
-  t.after(() => sidecar.stop());
+  sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
   const info = await sidecar.start();
   assert.equal(sidecar.state, "ready");
   assert.equal(sidecar.manifest.version, "1.0.0");
@@ -106,10 +109,14 @@ test("handshake adopts a manifest.json rewritten on disk when the in-memory copy
 });
 
 test("handshake still rejects when the on-disk manifest also disagrees with the sidecar", async (t) => {
+  let sidecar;
   const project = await mkdtemp(join(tmpdir(), "dbx-sidecar-manifest-"));
-  t.after(() => rm(project, { recursive: true, force: true }));
+  t.after(async () => {
+    await sidecar?.stop();
+    await rm(project, { recursive: true, force: true });
+  });
   await writeFile(join(project, "manifest.json"), JSON.stringify({ id: "example.echo", version: "0.9.0" }));
-  const sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
+  sidecar = new Sidecar({ ...config, cwd: project, manifest: { id: "example.echo", version: "0.9.0" } });
   await assert.rejects(sidecar.start(), /identity/);
 });
 
@@ -129,4 +136,17 @@ test("JSONL supports split lines, concurrent RPC, events and rejects binary chan
   await sidecar.notify("emit", { ok: true });
   assert.equal((await event)[0].params.ok, true);
   await assert.rejects(sidecar.sendBinary("bytes", Buffer.from("data")), /framed/);
+});
+
+test("answers plugin-initiated host requests instead of leaving them pending", async (t) => {
+  // Host API 1.1 lets a plugin ask the user through `host/requestUserInput`
+  // (string ids). The dev host has no dialog, so it must fail that call fast
+  // rather than let the plugin block until its own timeout.
+  const sidecar = new Sidecar(config);
+  t.after(() => sidecar.stop());
+  await sidecar.start();
+  const answer = await sidecar.request("ask-user");
+  assert.equal(answer.id, "plugin-1");
+  assert.equal(answer.error.code, -32001);
+  assert.match(answer.error.message, /host\/requestUserInput/);
 });

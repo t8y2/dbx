@@ -37,7 +37,7 @@ export default async function ContributorsPage({ params }: { params: Promise<{ l
   const data = contributorSnapshot as ContributorActivityData;
 
   return (
-    <main className="landing min-h-screen bg-[#08080a]">
+    <main className="landing min-h-screen bg-landing-bg">
       <LandingNav lang={locale} active="contributors" />
       <ContributorsExperience data={data} lang={locale} />
       <LandingFooter lang={locale} />

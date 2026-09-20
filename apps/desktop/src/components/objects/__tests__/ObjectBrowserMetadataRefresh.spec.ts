@@ -30,7 +30,7 @@ describe("ObjectBrowser table metadata refresh", () => {
 
     expect(refreshTableInfo).toContain('sidePanelMode.value !== "table-info" || !sidePanelRow.value');
     expect(refreshTableInfo).toContain("sidePanelGuard.bump();");
-    expect(refreshTableInfo).toMatch(/tableInfoTab\.value === "ddl"[\s\S]*?tableDdlContent\.value = "";[\s\S]*?await fetchTableDdl\(true\);/);
+    expect(refreshTableInfo).toMatch(/tableInfoTab\.value === "ddl"[\s\S]*?rawTableDdlContent\.value = "";[\s\S]*?await fetchTableDdl\(true\);/);
     expect(refreshTableInfo).toMatch(/tableInfoTab\.value === "columns"[\s\S]*?tableColumns\.value = \[\];[\s\S]*?await fetchTableColumns\(true\);/);
     expect(refreshTableInfo).toMatch(/tableInfoTab\.value === "indexes"[\s\S]*?tableIndexes\.value = \[\];[\s\S]*?await fetchTableIndexes\(true\);/);
     expect(refreshTableInfo).toMatch(/tableInfoTab\.value === "foreignKeys"[\s\S]*?tableForeignKeys\.value = \[\];[\s\S]*?await fetchTableForeignKeys\(true\);/);

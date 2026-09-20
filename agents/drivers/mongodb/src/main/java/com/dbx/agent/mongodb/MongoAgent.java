@@ -11,6 +11,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoBulkWriteException;
+import com.mongodb.MongoNamespace;
 import com.mongodb.MongoCredential;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ServerAddress;
@@ -28,10 +29,21 @@ import com.mongodb.client.model.CollationAlternate;
 import com.mongodb.client.model.CollationCaseFirst;
 import com.mongodb.client.model.CollationMaxVariable;
 import com.mongodb.client.model.CollationStrength;
+import com.mongodb.MongoBulkWriteException;
+import com.mongodb.bulk.BulkWriteError;
+import com.mongodb.bulk.BulkWriteResult;
+import com.mongodb.client.model.BulkWriteOptions;
 import com.mongodb.client.model.CountOptions;
+import com.mongodb.client.model.DeleteManyModel;
+import com.mongodb.client.model.DeleteOneModel;
+import com.mongodb.client.model.InsertOneModel;
 import com.mongodb.client.model.InsertManyOptions;
+import com.mongodb.client.model.ReplaceOneModel;
 import com.mongodb.client.model.ReplaceOptions;
+import com.mongodb.client.model.UpdateManyModel;
+import com.mongodb.client.model.UpdateOneModel;
 import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.model.WriteModel;
 import com.mongodb.client.result.UpdateResult;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
@@ -1155,6 +1167,32 @@ public final class MongoAgent {
         return result;
     }
 
+    private static Object renameCollection(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String newName = params.get("new_name").getAsString();
+        requireRenameableCollectionNames(collection, newName);
+        c.getDatabase(database).getCollection(collection).renameCollection(new MongoNamespace(database, newName));
+        return Collections.singletonMap("ok", true);
+    }
+
+    /** Mirrors the native driver's checks so both paths reject the same names before asking the server. */
+    static void requireRenameableCollectionNames(String collection, String newName) {
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("Collection name is required");
+        }
+        if (newName == null || newName.isBlank()) {
+            throw new IllegalArgumentException("New collection name is required");
+        }
+        if (collection.equals(newName)) {
+            throw new IllegalArgumentException("New collection name must differ from the current name");
+        }
+        if (collection.startsWith("system.") || newName.startsWith("system.")) {
+            throw new IllegalArgumentException("System collections cannot be renamed");
+        }
+    }
+
     private static Object dropCollection(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -1884,6 +1922,168 @@ public final class MongoAgent {
         return Collections.singletonMap("modified_count", result.getModifiedCount());
     }
 
+    private static Object bulkWrite(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        String collection = params.get("collection").getAsString();
+        String operationsJson = params.get("operations_json").getAsString();
+        String optionsJson = params.has("options_json") && !params.get("options_json").isJsonNull()
+            ? params.get("options_json").getAsString()
+            : null;
+
+        var col = c.getDatabase(database).getCollection(collection);
+        List<WriteModel<Document>> models = bulkWriteModelsForWrite(operationsJson);
+        BulkWriteOptions options = bulkWriteOptionsForWrite(optionsJson);
+        try {
+            return bulkWriteCounts(col.bulkWrite(models, options));
+        } catch (MongoBulkWriteException error) {
+            // Report what did complete alongside the failures, as the native driver does.
+            StringBuilder failures = new StringBuilder();
+            for (BulkWriteError writeError : error.getWriteErrors()) {
+                if (failures.length() > 0) {
+                    failures.append("; ");
+                }
+                failures.append("operation ").append(writeError.getIndex() + 1).append(": ").append(writeError.getMessage());
+            }
+            Map<String, Object> completed = bulkWriteCounts(error.getWriteResult());
+            throw new IllegalArgumentException(
+                "bulkWrite " + (options.isOrdered() ? "stopped at " : "finished with failed ")
+                    + failures + ". Completed: inserted " + completed.get("inserted_count")
+                    + ", matched " + completed.get("matched_count") + ", modified " + completed.get("modified_count")
+                    + ", deleted " + completed.get("deleted_count") + ", upserted " + completed.get("upserted_count"));
+        }
+    }
+
+    private static Map<String, Object> bulkWriteCounts(BulkWriteResult result) {
+        Map<String, Object> counts = new LinkedHashMap<>();
+        counts.put("inserted_count", result.getInsertedCount());
+        counts.put("matched_count", result.getMatchedCount());
+        counts.put("modified_count", result.getModifiedCount());
+        counts.put("deleted_count", result.getDeletedCount());
+        counts.put("upserted_count", result.getUpserts().size());
+        return counts;
+    }
+
+    /** The shell's `bulkWrite([...])` entries, each `{ <op>: { ... } }`, as driver write models. */
+    static List<WriteModel<Document>> bulkWriteModelsForWrite(String operationsJson) {
+        JsonElement parsed = JsonParser.parseString(operationsJson);
+        if (!parsed.isJsonArray() || parsed.getAsJsonArray().isEmpty()) {
+            throw new IllegalArgumentException("bulkWrite requires a non-empty array of operations");
+        }
+        List<WriteModel<Document>> models = new ArrayList<>();
+        int position = 0;
+        for (JsonElement entry : parsed.getAsJsonArray()) {
+            position++;
+            if (!entry.isJsonObject() || entry.getAsJsonObject().size() != 1) {
+                throw new IllegalArgumentException("bulkWrite operation " + position + " must have exactly one operation key");
+            }
+            String kind = entry.getAsJsonObject().keySet().iterator().next();
+            JsonElement rawSpec = entry.getAsJsonObject().get(kind);
+            if (!rawSpec.isJsonObject()) {
+                throw new IllegalArgumentException("bulkWrite operation " + position + " (" + kind + ") must be a document");
+            }
+            Document spec = documentForWrite(rawSpec.toString());
+            models.add(bulkWriteModel(position, kind, spec));
+        }
+        return models;
+    }
+
+    private static WriteModel<Document> bulkWriteModel(int position, String kind, Document spec) {
+        switch (kind) {
+            case "insertOne":
+                return new InsertOneModel<>(requireBulkField(position, kind, spec, "document"));
+            case "updateOne":
+            case "updateMany": {
+                Document filter = requireBulkField(position, kind, spec, "filter");
+                Object rawUpdate = spec.get("update");
+                UpdateOptions options = new UpdateOptions();
+                if (spec.containsKey("upsert")) {
+                    options.upsert(requireBulkBoolean(position, kind, spec, "upsert"));
+                }
+                if (spec.get("arrayFilters") instanceof List<?> filters) {
+                    List<Document> arrayFilters = new ArrayList<>();
+                    for (Object filterEntry : filters) {
+                        if (!(filterEntry instanceof Document)) {
+                            throw new IllegalArgumentException("bulkWrite operation " + position + " arrayFilters entries must be documents");
+                        }
+                        arrayFilters.add((Document) filterEntry);
+                    }
+                    options.arrayFilters(arrayFilters);
+                }
+                if (rawUpdate instanceof List<?> stages) {
+                    List<Document> pipeline = new ArrayList<>();
+                    for (Object stage : stages) {
+                        if (!(stage instanceof Document)) {
+                            throw new IllegalArgumentException("bulkWrite operation " + position + " (" + kind + ") pipeline stages must be documents");
+                        }
+                        pipeline.add((Document) stage);
+                    }
+                    if (pipeline.isEmpty()) {
+                        throw new IllegalArgumentException("bulkWrite operation " + position + " (" + kind + ") update pipeline must not be empty");
+                    }
+                    return kind.equals("updateOne") ? new UpdateOneModel<>(filter, pipeline, options) : new UpdateManyModel<>(filter, pipeline, options);
+                }
+                if (!(rawUpdate instanceof Document update)) {
+                    throw new IllegalArgumentException("bulkWrite operation " + position + " (" + kind + ") requires an update document or pipeline");
+                }
+                requireBulkUpdateOperatorDocument(update);
+                return kind.equals("updateOne") ? new UpdateOneModel<>(filter, update, options) : new UpdateManyModel<>(filter, update, options);
+            }
+            case "replaceOne": {
+                Document replacement = requireBulkField(position, kind, spec, "replacement");
+                requireReplacementDocument(replacement);
+                ReplaceOptions options = new ReplaceOptions();
+                if (spec.containsKey("upsert")) {
+                    options.upsert(requireBulkBoolean(position, kind, spec, "upsert"));
+                }
+                return new ReplaceOneModel<>(requireBulkField(position, kind, spec, "filter"), replacement, options);
+            }
+            case "deleteOne":
+                return new DeleteOneModel<>(requireBulkField(position, kind, spec, "filter"));
+            case "deleteMany":
+                return new DeleteManyModel<>(requireBulkField(position, kind, spec, "filter"));
+            default:
+                throw new IllegalArgumentException("bulkWrite operation " + position + " uses unsupported operation " + kind);
+        }
+    }
+
+    private static Document requireBulkField(int position, String kind, Document spec, String field) {
+        Object value = spec.get(field);
+        if (!(value instanceof Document)) {
+            throw new IllegalArgumentException("bulkWrite operation " + position + " (" + kind + ") requires a " + field + " document");
+        }
+        return (Document) value;
+    }
+
+    private static boolean requireBulkBoolean(int position, String kind, Document spec, String field) {
+        Object value = spec.get(field);
+        if (!(value instanceof Boolean)) {
+            throw new IllegalArgumentException("bulkWrite operation " + position + " (" + kind + ") " + field + " must be a boolean");
+        }
+        return (Boolean) value;
+    }
+
+    static BulkWriteOptions bulkWriteOptionsForWrite(String optionsJson) {
+        BulkWriteOptions result = new BulkWriteOptions();
+        if (optionsJson == null || optionsJson.trim().isEmpty()) {
+            return result;
+        }
+        Document options = Document.parse(optionsJson);
+        for (String key : options.keySet()) {
+            if (!"ordered".equals(key)) {
+                throw new IllegalArgumentException("Unsupported bulkWrite option: " + key);
+            }
+        }
+        Object ordered = options.get("ordered");
+        if (ordered != null) {
+            if (!(ordered instanceof Boolean)) {
+                throw new IllegalArgumentException("ordered must be a boolean");
+            }
+            result.ordered((Boolean) ordered);
+        }
+        return result;
+    }
+
     /** replaceOne swaps the whole document; update operators here mean updateOne was intended. */
     static void requireReplacementDocument(Document doc) {
         for (String key : doc.keySet()) {
@@ -2106,6 +2306,8 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);
             case AgentProtocol.MONGO_METHOD_REPLACE_DOCUMENT -> replaceDocument(params);
+            case AgentProtocol.MONGO_METHOD_BULK_WRITE -> bulkWrite(params);
+            case AgentProtocol.MONGO_METHOD_RENAME_COLLECTION -> renameCollection(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
             case AgentProtocol.MONGO_METHOD_RUN_COMMAND -> runCommand(params);

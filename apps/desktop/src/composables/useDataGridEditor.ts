@@ -109,6 +109,7 @@ export interface UseDataGridEditorOptions {
   onExecuteSql: ComputedRef<((sql: string) => Promise<void>) | undefined>;
   customSaveHandler?: ComputedRef<CustomSaveHandler | undefined>;
   manualTransactionSessionId?: ComputedRef<string | undefined>;
+  ensureManualTransactionSession?: ComputedRef<(() => Promise<string>) | undefined>;
   onManualTransactionMutation?: () => void;
   sql: ComputedRef<string | undefined>;
   searchText: Ref<string>;
@@ -136,6 +137,7 @@ export interface UseDataGridEditorOptions {
 }
 
 interface PendingChangesSnapshot {
+  manualSaveRequired?: boolean;
   newRows: CellValue[][];
   newRowMeta: GridNewRowMeta[];
   quickEntryDraftRow?: CellValue[];
@@ -173,7 +175,7 @@ interface QueuedAutoSaveChange {
   value: CellValue;
 }
 
-type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive">;
+type PendingChangesHistorySnapshot = Pick<PendingChangesSnapshot, "newRows" | "newRowMeta" | "quickEntryDraftRow" | "dirtyRows" | "deletedRows" | "transactionActive" | "manualSaveRequired">;
 
 const pendingChangesCache = new Map<string, PendingChangesSnapshot>();
 const closingPendingSnapshotTabs = new Set<string>();
@@ -312,6 +314,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   const undoStack = ref<PendingChangesHistorySnapshot[]>([]);
   const redoStack = ref<PendingChangesHistorySnapshot[]>([]);
   const pendingChangesVersion = ref(0);
+  const manualSaveRequired = ref(false);
   let restoredEditingCell = false;
   let restoredTransactionActive = false;
   let suppressNextBlurCommit = false;
@@ -336,6 +339,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       quickEntryDraftRow.value = cached.quickEntryDraftRow ? [...cached.quickEntryDraftRow] : [];
       dirtyRows.value = cached.dirtyRows;
       deletedRows.value = cached.deletedRows;
+      manualSaveRequired.value = cached.manualSaveRequired === true;
       editingCell.value = cached.editingCell ?? null;
       editValue.value = cached.editValue ?? "";
       restoredEditingCell = !!cached.editingCell;
@@ -439,6 +443,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function pendingChangesSnapshot(): PendingChangesHistorySnapshot {
     return {
+      manualSaveRequired: manualSaveRequired.value,
       newRows: newRows.value.map((row) => [...row]),
       newRowMeta: cloneNewRowMeta(newRowMeta.value),
       quickEntryDraftRow: quickEntryDraftRow.value.length > 0 ? [...quickEntryDraftRow.value] : undefined,
@@ -455,6 +460,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     restoreNewRowMeta(snapshot.newRowMeta ?? []);
     quickEntryDraftRow.value = snapshot.quickEntryDraftRow ? [...snapshot.quickEntryDraftRow] : emptyDraftRow();
     dirtyRows.value = restoredDirtyRows;
+    manualSaveRequired.value = snapshot.manualSaveRequired === true;
     deletedRows.value = new Set(snapshot.deletedRows);
     transactionActive.value = snapshot.transactionActive === true && useTransaction.value === true;
     queuedAutoSaveChanges.clear();
@@ -957,8 +963,12 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function applyCellValue(rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
-    if (!canEditColumn(col)) return;
     const item = getRowItem(rowId);
+    applyCellValueToItem(item, rowId, col, value, options);
+  }
+
+  function applyCellValueToItem(item: RowItem | undefined, rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
+    if (!canEditColumn(col)) return;
     if (!item || item.isDeleted) return;
 
     if (item.isDraft) {
@@ -1054,6 +1064,34 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       touchPendingChanges();
     }
     onCellValueChanged?.(rowId, col);
+  }
+
+  function stageCellReplacements(changes: readonly import("@/lib/dataGrid/dataGridReplace").DataGridCellReplacement[]): number {
+    if (!editable.value || !canEditExistingRows.value || isSaving.value || isConditionalUpdateActive.value) return 0;
+    let changed = 0;
+    beginBatch();
+    try {
+      for (const change of changes) {
+        const { rowId, col, previousValue, sourceValue = previousValue, value } = change;
+        if (!Number.isInteger(rowId) || rowId < 0 || !Number.isInteger(col) || col < 0 || col >= result.value.columns.length || !canEditColumn(col) || deletedRows.value.has(rowId)) continue;
+        const row = result.value.rows[rowId];
+        if (!row) continue;
+        const data = rowDataWithChanges(row, rowId);
+        if (typeof data[col] !== "string" || data[col] !== sourceValue || value === previousValue) continue;
+        const item: RowItem = { id: rowId, sourceIndex: rowId, data, isNew: false, isDeleted: false, isDirtyCol: [], status: "clean" };
+        applyCellValueToItem(item, rowId, col, value, { preserveEmptyString: true });
+        const currentValue = rowDataWithChanges(row, rowId)[col];
+        if (currentValue !== previousValue) {
+          changed++;
+          // Set after the first undo snapshot, so undo restores the prior policy.
+          manualSaveRequired.value = true;
+        }
+      }
+      return changed;
+    } finally {
+      commitBatch();
+      if (!hasPendingChanges.value) manualSaveRequired.value = false;
+    }
   }
 
   function restoreCellValue(rowId: number, col: number) {
@@ -1501,6 +1539,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   async function finishSaveChanges(savedSnapshot?: PendingSaveSnapshot) {
     isSaving.value = false;
+    if (!hasPendingChanges.value) manualSaveRequired.value = false;
     if (pendingAutoSaveRequested && dataGridQuickEntryEnabled.value) {
       applyQueuedAutoSaveChanges(savedSnapshot);
     } else {
@@ -1560,9 +1599,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   // A keyless save can only be trusted once the server confirms that each
   // predicate it sends addresses a single physical row; the loaded page cannot
   // see rows outside it. Returns the error to fail with, or undefined to allow.
-  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string) {
+  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string, txnSessionId = manualTransactionSessionId.value) {
     if (!guards.length) return undefined;
-    const txnSessionId = manualTransactionSessionId.value;
     // Without a connection to count against there is no way to verify the
     // predicate, and an unverified keyless write is exactly what must not run.
     if (!hasBackendSaveTarget.value) return KEYLESS_GUARD_UNVERIFIED_ERROR;
@@ -1811,6 +1849,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   async function saveChanges(saveOptions: SaveChangesOptions = {}) {
+    if (!editable.value) return;
+    if (saveOptions.autoSave && manualSaveRequired.value) return;
     if (isSaving.value) {
       if (saveOptions.autoSave) pendingAutoSaveRequested = true;
       return;
@@ -1842,6 +1882,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       });
       if (!confirmed) return;
     }
+    if (!editable.value) return;
     if (customHandler && snapshot.newRows.length > 0 && customHandler.supportsInsert !== true && customHandler.canInsert !== true) {
       saveError.value = i18n.global.t("grid.insertRowsNotSupported");
       return;
@@ -1907,8 +1948,19 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    let txnSessionId = manualTransactionSessionId.value;
+    if (options.ensureManualTransactionSession?.value && hasBackendSaveTarget.value) {
+      try {
+        txnSessionId = await options.ensureManualTransactionSession.value();
+        if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+      } catch (error) {
+        saveError.value = normalizeDataGridSaveError(databaseType.value, error);
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
     try {
-      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema);
+      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema, txnSessionId);
       if (guardError) {
         saveError.value = guardError;
         await finishInterruptedSaveChanges(snapshot);
@@ -1938,6 +1990,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         return;
       }
     }
+    if (!editable.value || stmtOptions?.tableMeta !== tableMeta.value) {
+      await finishInterruptedSaveChanges(snapshot);
+      return;
+    }
     const start = Date.now();
     let apiResult: { affected_rows?: number } | undefined;
     console.info("[DBX][dataGrid:save-statements]", {
@@ -1946,10 +2002,10 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       statements: stmts,
       rollbackStatements: rollbackStmts,
     });
-    if (manualTransactionSessionId.value && hasBackendSaveTarget.value) {
+    if (txnSessionId && hasBackendSaveTarget.value) {
       options.onManualTransactionMutation?.();
       try {
-        const results = await api.executeInManualTransaction(manualTransactionSessionId.value, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
+        const results = await api.executeInManualTransaction(txnSessionId, stmts.join(";\n"), database.value ?? "", preparedSave?.executionSchema);
         apiResult = {
           affected_rows: results.reduce((total, result) => total + (result.affected_rows ?? 0), 0),
         };
@@ -1993,7 +2049,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     applyDirtyRowsToResult(snapshot);
     options.onResultPayloadMutated?.();
     let savedRowsRefreshed = false;
-    if (!joinedWriteTargets.value?.length && !manualTransactionSessionId.value && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
+    if (!joinedWriteTargets.value?.length && !txnSessionId && !shouldReloadAfterSave && snapshot.dirtyRows.size > 0 && options.refreshSavedRows) {
       try {
         savedRowsRefreshed = await options.refreshSavedRows({
           dirtyRows: snapshot.dirtyRows,
@@ -2016,6 +2072,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function discardChanges() {
     if (isConditionalUpdateActive.value) return;
+    manualSaveRequired.value = false;
     dirtyRows.value = new Map();
     newRows.value = [];
     newRowMeta.value = [];
@@ -2060,6 +2117,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     pendingChangesCache.set(k, {
+      manualSaveRequired: manualSaveRequired.value,
       newRows: newRows.value.map((r) => [...r]),
       newRowMeta: cloneNewRowMeta(newRowMeta.value),
       quickEntryDraftRow: quickEntryDraftRowSnapshot,
@@ -2168,6 +2226,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     newRowCount,
     deletedRowCount,
     pendingChangesVersion,
+    manualSaveRequired,
+    stageCellReplacements,
     pendingChangeCount,
     hasPendingChanges,
     transactionActive,

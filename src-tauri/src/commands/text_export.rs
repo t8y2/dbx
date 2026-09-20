@@ -1,4 +1,4 @@
-use dbx_core::text_export::{format_json, format_markdown, QueryResultTextExportData};
+use dbx_core::text_export::{format_html, format_json, format_markdown, QueryResultTextExportData};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -6,13 +6,15 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub struct QueryResultTextExportRequest {
     pub file_path: String,
+    #[serde(default)]
+    pub title: Option<String>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
 }
 
 impl QueryResultTextExportRequest {
     fn into_data(self) -> QueryResultTextExportData {
-        QueryResultTextExportData { columns: self.columns, rows: self.rows }
+        QueryResultTextExportData { title: self.title, columns: self.columns, rows: self.rows }
     }
 }
 
@@ -40,6 +42,17 @@ pub async fn export_query_result_markdown(request: QueryResultTextExportRequest)
     .map_err(|err| err.to_string())?
 }
 
+#[tauri::command]
+pub async fn export_query_result_html(request: QueryResultTextExportRequest) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_path = request.file_path.clone();
+        let content = format_html(&request.into_data());
+        std::fs::write(file_path, content).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -51,6 +64,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-json-export-{}.json", uuid::Uuid::new_v4()));
         write_query_result_json(QueryResultTextExportRequest {
             file_path: path.to_string_lossy().into_owned(),
+            title: None,
             columns: vec!["id".to_string(), "name".to_string()],
             rows: vec![vec![json!(1), json!("Ada")]],
         })

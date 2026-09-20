@@ -1,9 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/dbx-core", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli", "crates/dbx-sqlite-worker"]
-exclude = ["vendor/tauri-plugin-updater", "vendor/ctor", "vendor/dirs-sys", "vendor/pageant", "vendor/rumqttc", "vendor/tiberius", "vendor/wry"]
+members = ["src-tauri", "crates/dbx-core", "crates/dbx-drivers", "crates/dbx-sql", "crates/dbx-plugin-runtime", "crates/dbx-formats", "crates/dbx-types", "crates/dbx-platform", "crates/dbx-ai-provider", "crates/dbx-web", "crates/dbx-mcp", "crates/dbx-cli", "crates/dbx-sqlite-worker"]
+exclude = ["vendor/tauri-plugin-updater", "vendor/ctor", "vendor/dirs-sys", "vendor/pageant", "vendor/rumqttc", "vendor/tiberius", "vendor/webview2-com-sys", "vendor/wry"]
 
 [patch.crates-io]
+# The offline Win7 / Server 2012 R2 bundle links the WebView2 SDK 1.0.902.49
+# loader. Loaders >= 1.0.1054.31 import EventSetInformation, which Win7 and
+# Server 2012 R2 do not provide. Keep that loader in the source tree instead of
+# swapping a file inside the cargo registry, because a registry swap bypasses
+# compile caches and once shipped a binary linked against the wrong loader.
+webview2-com-sys = { path = "vendor/webview2-com-sys" }
 # Offline signed update restoration and checked Windows installer launch.
 tauri-plugin-updater = { path = "vendor/tauri-plugin-updater" }
 # Tauri 2.11 uses ctor 0.8, which excludes Rust's win7 vendor. This vendors
@@ -41,6 +47,11 @@ mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "4a9e60a6
 # collation (replaced with U+FFFD, no BOM sniffing). Remove after the behavior
 # is available in upstream tiberius.
 tiberius = { path = "vendor/tiberius" }
+
+[profile.dev.package."*"]
+# Dependencies are never breakpoint-inspected in dev; line tables keep
+# backtraces resolvable while shrinking dev/test build time and artifacts.
+debug = "line-tables-only"
 
 [profile.release]
 panic = "abort"

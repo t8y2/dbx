@@ -45,8 +45,7 @@ interface SavedSqlNameScope {
 }
 
 interface PendingSavedSqlName {
-  ownerId: string;
-  count: number;
+  owners: Map<string, number>;
 }
 
 export class SavedSqlNameConflictError extends Error {
@@ -106,9 +105,8 @@ function savedSqlNameKey(name: string): string {
   return ensureSqlExtension(name).toLocaleLowerCase();
 }
 
-function savedSqlNameScopeKey(file: Pick<SavedSqlNameScope, "connectionId" | "folderId">): string {
-  // Execution targets do not change the SQL library's folder-scoped names.
-  return JSON.stringify(["library-folder", file.connectionId, file.folderId || null]);
+function savedSqlNameScopeKey(file: Pick<SavedSqlNameScope, "connectionId" | "catalog" | "database" | "folderId">): string {
+  return JSON.stringify(["library-folder", savedSqlDatabaseScopeKey(file), file.folderId || null]);
 }
 
 function savedSqlNameIdentity(file: SavedSqlNameScope): string {
@@ -156,6 +154,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
   const fileTargetRevisions = new Map<string, number>();
   const pendingFileTargetSaves = new Map<string, Promise<SavedSqlFile | undefined>>();
   const persistedFileTargets = new Map<string, SavedSqlExecutionTargetInput & { updatedAt: string }>();
+  const persistedFileTargetNameReleases = new Map<string, () => void>();
   const pendingNamesByScope = new Map<string, Map<string, PendingSavedSqlName>>();
 
   const version = ref(0);
@@ -218,11 +217,13 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     return files.value.find((file) => file.id === id);
   }
 
-  function reserveFileName(file: SavedSqlNameScope): () => void {
+  function reserveFileName(file: SavedSqlNameScope, options: { allowExisting?: boolean } = {}): () => void {
     const scopeKey = savedSqlNameScopeKey(file);
     const nameKey = savedSqlNameKey(file.name);
-    const persistedConflict = files.value.some((candidate) => candidate.id !== file.id && savedSqlNameScopeKey(candidate) === scopeKey && savedSqlNameKey(candidate.name) === nameKey);
-    if (persistedConflict) throw new SavedSqlNameConflictError(file.name);
+    if (!options.allowExisting) {
+      const persistedConflict = files.value.some((candidate) => candidate.id !== file.id && savedSqlNameScopeKey(candidate) === scopeKey && savedSqlNameKey(candidate.name) === nameKey);
+      if (persistedConflict) throw new SavedSqlNameConflictError(file.name);
+    }
 
     let pendingNames = pendingNamesByScope.get(scopeKey);
     if (!pendingNames) {
@@ -230,9 +231,9 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       pendingNamesByScope.set(scopeKey, pendingNames);
     }
     const pending = pendingNames.get(nameKey);
-    if (pending && pending.ownerId !== file.id) throw new SavedSqlNameConflictError(file.name);
-    if (pending) pending.count++;
-    else pendingNames.set(nameKey, { ownerId: file.id, count: 1 });
+    if (!options.allowExisting && pending && [...pending.owners.keys()].some((ownerId) => ownerId !== file.id)) throw new SavedSqlNameConflictError(file.name);
+    if (pending) pending.owners.set(file.id, (pending.owners.get(file.id) ?? 0) + 1);
+    else pendingNames.set(nameKey, { owners: new Map([[file.id, 1]]) });
 
     let released = false;
     return () => {
@@ -240,9 +241,11 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       released = true;
       const currentNames = pendingNamesByScope.get(scopeKey);
       const current = currentNames?.get(nameKey);
-      if (!current || current.ownerId !== file.id) return;
-      current.count--;
-      if (current.count <= 0) currentNames?.delete(nameKey);
+      const count = current?.owners.get(file.id);
+      if (!current || count === undefined) return;
+      if (count > 1) current.owners.set(file.id, count - 1);
+      else current.owners.delete(file.id);
+      if (current.owners.size === 0) currentNames?.delete(nameKey);
       if (currentNames?.size === 0) pendingNamesByScope.delete(scopeKey);
     };
   }
@@ -363,6 +366,19 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     }
   }
 
+  function setPersistedFileTarget(file: SavedSqlFile) {
+    const releaseName = reserveFileName(file, { allowExisting: true });
+    persistedFileTargetNameReleases.get(file.id)?.();
+    persistedFileTargetNameReleases.set(file.id, releaseName);
+    persistedFileTargets.set(file.id, {
+      connectionId: file.connectionId,
+      catalog: normalizedCatalog(file.catalog),
+      database: file.database,
+      schema: file.schema,
+      updatedAt: file.updatedAt,
+    });
+  }
+
   function updateFileExecutionTarget(id: string, target: SavedSqlExecutionTargetInput): Promise<SavedSqlFile | undefined> {
     const existing = getFile(id);
     if (!existing) return Promise.resolve(undefined);
@@ -372,13 +388,7 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
     }
 
     if (!persistedFileTargets.has(id)) {
-      persistedFileTargets.set(id, {
-        connectionId: existing.connectionId,
-        catalog: normalizedCatalog(existing.catalog),
-        database: existing.database,
-        schema: existing.schema,
-        updatedAt: existing.updatedAt,
-      });
+      setPersistedFileTarget(existing);
     }
     const revision = (fileTargetRevisions.get(id) ?? 0) + 1;
     fileTargetRevisions.set(id, revision);
@@ -391,38 +401,32 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       .then(async () => {
         if (fileTargetRevisions.get(id) !== revision) return getFile(id);
 
-        const loaded = await ensureFileContent(id);
-        if (!loaded || fileTargetRevisions.get(id) !== revision) return getFile(id);
-
-        const candidate: SavedSqlFile = {
-          ...loaded,
-          ...normalizedTarget,
-          sqlLoaded: true,
-          updatedAt: nowIso(),
-        };
-        files.value = files.value.map((file) => (file.id === id ? candidate : file));
-        bumpVersion();
-
-        const persistedTarget = persistedFileTargets.get(id);
-        const persistedNameIdentity = persistedTarget
-          ? savedSqlNameIdentity({
-              ...candidate,
-              connectionId: persistedTarget.connectionId,
-              catalog: persistedTarget.catalog,
-              database: persistedTarget.database,
-            })
-          : savedSqlNameIdentity(candidate);
         let releaseName: (() => void) | undefined;
         try {
+          const loaded = await ensureFileContent(id);
+          if (!loaded || fileTargetRevisions.get(id) !== revision) return getFile(id);
+
+          const candidate: SavedSqlFile = {
+            ...loaded,
+            ...normalizedTarget,
+            sqlLoaded: true,
+            updatedAt: nowIso(),
+          };
+          files.value = files.value.map((file) => (file.id === id ? candidate : file));
+          bumpVersion();
+
+          const persistedTarget = persistedFileTargets.get(id);
+          const persistedNameIdentity = persistedTarget
+            ? savedSqlNameIdentity({
+                ...candidate,
+                connectionId: persistedTarget.connectionId,
+                catalog: persistedTarget.catalog,
+                database: persistedTarget.database,
+              })
+            : savedSqlNameIdentity(candidate);
           if (persistedNameIdentity !== savedSqlNameIdentity(candidate)) releaseName = reserveFileName(candidate);
           const saved = normalizeSavedSqlFile(await api.saveSavedSqlFile(candidate));
-          persistedFileTargets.set(id, {
-            connectionId: saved.connectionId,
-            catalog: normalizedCatalog(saved.catalog),
-            database: saved.database,
-            schema: saved.schema,
-            updatedAt: saved.updatedAt,
-          });
+          setPersistedFileTarget(saved);
           if (fileTargetRevisions.get(id) !== revision) return getFile(id);
           const current = getFile(id);
           const persisted = { ...saved, sql: current?.sql ?? saved.sql, sqlLoaded: current?.sqlLoaded ?? true };
@@ -447,6 +451,8 @@ export const useSavedSqlStore = defineStore("savedSql", () => {
       if (pendingFileTargetSaves.get(id) !== save) return;
       pendingFileTargetSaves.delete(id);
       persistedFileTargets.delete(id);
+      persistedFileTargetNameReleases.get(id)?.();
+      persistedFileTargetNameReleases.delete(id);
     };
     void save.then(cleanup, cleanup);
     return save;

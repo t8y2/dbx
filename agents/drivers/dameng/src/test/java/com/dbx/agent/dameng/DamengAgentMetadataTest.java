@@ -24,6 +24,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 class DamengAgentMetadataTest {
@@ -244,8 +245,10 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals(List.of("MV_C", "TABLE_A", "VIEW_B"), tables.stream().map(TableInfo::getName).toList());
         Assertions.assertEquals(List.of("MATERIALIZED_VIEW", "TABLE", "VIEW"), tables.stream().map(TableInfo::getTable_type).toList());
         Assertions.assertEquals(List.of("mv comment", "table comment", "view comment"), tables.stream().map(TableInfo::getComment).toList());
-        Assertions.assertEquals(4, sqls.size(), String.join("\n", sqls));
-        Assertions.assertTrue(sqls.stream().allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
+        Assertions.assertEquals(5, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream()
+            .filter(sql -> !sql.contains("FROM DBA_OBJECTS"))
+            .allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
         Assertions.assertEquals(List.of("catalog=null,schema=APP\\_DATA\\%2026,table=%,types=null"), jdbcMetadataCalls);
     }
 
@@ -338,6 +341,292 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void mapsDamengViewValidityFromDbaObjectsAndBindsSchema() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> validityParams = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityConnection(
+            sqls,
+            validityParams,
+            List.of(
+                List.of("APP", "VALID_VIEW", "VIEW", "VALID"),
+                List.of("APP", "INVALID_VIEW", "VIEW", "INVALID")
+            ),
+            null
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertEquals(Boolean.TRUE, objects.stream()
+            .filter(object -> "VALID_VIEW".equals(object.getName()))
+            .findFirst().orElseThrow().getValid());
+        Assertions.assertEquals(Boolean.FALSE, objects.stream()
+            .filter(object -> "INVALID_VIEW".equals(object.getName()))
+            .findFirst().orElseThrow().getValid());
+        String validitySql = sqls.stream()
+            .filter(sql -> sql.contains("FROM DBA_OBJECTS"))
+            .findFirst()
+            .orElseThrow();
+        Assertions.assertTrue(validitySql.contains("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, STATUS"), validitySql);
+        Assertions.assertTrue(validitySql.contains("OBJECT_TYPE = 'VIEW'"), validitySql);
+        Assertions.assertTrue(validitySql.contains("OWNER = ?"), validitySql);
+        Assertions.assertEquals(List.of("APP", "VALID_VIEW", "INVALID_VIEW"), validityParams);
+    }
+
+    @Test
+    void mapsDamengViewValidityThroughPagedListTablesResults() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> validityParams = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityConnection(
+            sqls,
+            validityParams,
+            List.of(
+                List.of("APP", "VALID_VIEW", "VIEW", "VALID"),
+                List.of("APP", "INVALID_VIEW", "VIEW", "INVALID")
+            ),
+            null,
+            List.of(List.of("INVALID_VIEW", "VIEW", "invalid view"))
+        ));
+
+        List<TableInfo> tables = agent.listTables("APP", new MetadataListConstraints(null, 1, 1, List.of("VIEW")));
+
+        Assertions.assertEquals(1, tables.size());
+        Assertions.assertEquals("INVALID_VIEW", tables.get(0).getName());
+        Assertions.assertEquals(Boolean.FALSE, tables.get(0).getValid());
+        Assertions.assertEquals(List.of("APP", "INVALID_VIEW"), validityParams);
+    }
+
+    @Test
+    void mapsDamengViewValidityThroughJdbcListTablesFallback() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        List<String> validityParams = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityJdbcFallbackConnection(
+            sqls,
+            validityParams,
+            List.of(List.of("APP", "VIEW_B", "VIEW", "INVALID"))
+        ));
+        setLegacyJdbcMetadata(agent, true);
+
+        List<TableInfo> tables = agent.listTables("APP");
+
+        Assertions.assertEquals(List.of("TABLE_A", "VIEW_B"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(Boolean.FALSE, tables.stream()
+            .filter(table -> "VIEW_B".equals(table.getName()))
+            .findFirst().orElseThrow().getValid());
+        Assertions.assertNull(tables.stream()
+            .filter(table -> "TABLE_A".equals(table.getName()))
+            .findFirst().orElseThrow().getValid());
+        Assertions.assertEquals(List.of("APP", "VIEW_B"), validityParams);
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM DBA_OBJECTS")), sqls.toString());
+    }
+
+    @Test
+    void doesNotQueryOrAttachValidityToNonViewObjects() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, metadataConnection("id comment", null, true, List.of(), sqls));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertTrue(objects.stream().allMatch(object -> object.getValid() == null), objects.toString());
+        Assertions.assertTrue(sqls.stream().noneMatch(sql -> sql.contains("FROM DBA_OBJECTS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void keepsViewObjectsWithUnknownValidityWhenStatusQueryFails() {
+        DamengAgent agent = new DamengAgent();
+        List<String> sqls = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityConnection(
+            sqls,
+            new ArrayList<>(),
+            List.of(),
+            new SQLException("DBA_OBJECTS permission denied")
+        ));
+
+        List<ObjectInfo> objects = agent.listObjects("APP");
+
+        Assertions.assertEquals(2, objects.size());
+        Assertions.assertTrue(objects.stream().allMatch(object -> object.getValid() == null), objects.toString());
+        List<TableInfo> tables = agent.listTables("APP");
+        Assertions.assertEquals(2, tables.size());
+        Assertions.assertTrue(tables.stream().allMatch(table -> table.getValid() == null));
+        Assertions.assertTrue(sqls.stream().anyMatch(sql -> sql.contains("FROM DBA_OBJECTS")), String.join("\n", sqls));
+    }
+
+    @Test
+    void scopesTableViewValidityToSuccessivePagesAndSearches() {
+        assertViewValidityPageAndSearchIsolation(true);
+    }
+
+    @Test
+    void scopesObjectViewValidityToSuccessivePagesAndSearches() {
+        assertViewValidityPageAndSearchIsolation(false);
+    }
+
+    private void assertViewValidityPageAndSearchIsolation(boolean listTables) {
+        ScopedViewValidityFixture fixture = new ScopedViewValidityFixture();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, fixture.connection());
+        String owner = "App'Owner";
+        List<String> names = List.of("PAGE_A", "PAGE_B", "Mixed'View");
+        for (int page = 0; page < names.size(); page++) {
+            String name = names.get(page);
+            fixture.rows.clear();
+            fixture.rows.add(List.of(name, "VIEW", "view comment"));
+            fixture.statusRows.add(List.of(owner, name, "VIEW", "INVALID"));
+            String search = page == 2 ? "Mixed'" : null;
+            if (search != null) {
+                fixture.rows.add(List.of("UNMATCHED_VIEW", "VIEW", "not requested"));
+                fixture.rows.add(List.of("Mixed'Table", "TABLE", "not a view"));
+            }
+            MetadataListConstraints constraints = new MetadataListConstraints(search, 1, search == null ? page : 0, List.of("VIEW"));
+            if (listTables) {
+                List<TableInfo> tables = agent.listTables(owner, constraints);
+                Assertions.assertEquals(List.of(name), tables.stream().map(TableInfo::getName).toList());
+                Assertions.assertEquals(Boolean.FALSE, tables.get(0).getValid());
+            } else {
+                List<ObjectInfo> objects = agent.listObjects(owner, constraints);
+                Assertions.assertEquals(List.of(name), objects.stream().map(ObjectInfo::getName).toList());
+                Assertions.assertEquals(Boolean.FALSE, objects.get(0).getValid());
+            }
+            Assertions.assertEquals(List.of(owner, name), fixture.requests.get(page));
+        }
+        Assertions.assertEquals(3, fixture.requests.size());
+    }
+
+    @Test
+    void scopesRawFallbackViewValidityAfterPaging() {
+        ScopedViewValidityFixture fixture = new ScopedViewValidityFixture();
+        fixture.rawFallback = true;
+        fixture.rows.addAll(List.of(
+            List.of("VIEW_A", "VIEW", "first"),
+            List.of("VIEW_B", "VIEW", "second"),
+            List.of("VIEW_C", "VIEW", "third")
+        ));
+        fixture.statusRows.add(List.of("APP", "VIEW_B", "VIEW", "VALID"));
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, fixture.connection());
+
+        List<ObjectInfo> objects = agent.listObjects("APP", new MetadataListConstraints(null, 1, 1, List.of("VIEW")));
+
+        Assertions.assertEquals(List.of("VIEW_B"), objects.stream().map(ObjectInfo::getName).toList());
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
+        Assertions.assertEquals(List.of(List.of("APP", "VIEW_B")), fixture.requests);
+        List<TableInfo> tables = agent.listTables("APP", new MetadataListConstraints(null, 1, 1, List.of("VIEW")));
+        Assertions.assertEquals(List.of("VIEW_B"), tables.stream().map(TableInfo::getName).toList());
+        Assertions.assertEquals(Boolean.TRUE, tables.get(0).getValid());
+        Assertions.assertEquals(List.of(List.of("APP", "VIEW_B"), List.of("APP", "VIEW_B")), fixture.requests);
+    }
+
+    @Test
+    void scopesJdbcFallbackObjectValidityAfterFilteringAndPaging() {
+        DamengAgent agent = new DamengAgent();
+        List<String> params = new ArrayList<>();
+        TestSupport.setPrivateConnection(agent, viewValidityJdbcFallbackConnection(
+            new ArrayList<>(), params, List.of(List.of("APP", "VIEW_B", "VIEW", "VALID"))
+        ));
+        setLegacyJdbcMetadata(agent, true);
+
+        List<ObjectInfo> objects = agent.listObjects("APP", new MetadataListConstraints("VIEW", 1, 0, List.of("VIEW")));
+
+        Assertions.assertEquals(List.of("VIEW_B"), objects.stream().map(ObjectInfo::getName).toList());
+        Assertions.assertEquals(Boolean.TRUE, objects.get(0).getValid());
+        Assertions.assertTrue(agent.listObjects("APP", new MetadataListConstraints("VIEW", 1, 1, List.of("VIEW"))).isEmpty());
+        Assertions.assertEquals(List.of("APP", "VIEW_B"), params);
+    }
+
+    @Test
+    void skipsValidityQueriesForEmptyPagesAndNonViewResults() {
+        ScopedViewValidityFixture fixture = new ScopedViewValidityFixture();
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, fixture.connection());
+
+        Assertions.assertTrue(agent.listTables("APP").isEmpty());
+        Assertions.assertTrue(agent.listObjects("APP").isEmpty());
+        fixture.rows.addAll(List.of(
+            List.of("TABLE_A", "TABLE", "table"),
+            List.of("MV_A", "MATERIALIZED_VIEW", "materialized view")
+        ));
+        Assertions.assertEquals(2, agent.listTables("APP").size());
+        Assertions.assertTrue(agent.listObjects("APP").stream().allMatch(object -> object.getValid() == null));
+        Assertions.assertTrue(fixture.requests.isEmpty());
+    }
+
+    @Test
+    void preservesUnknownStatusesAndExactViewNames() {
+        ScopedViewValidityFixture fixture = new ScopedViewValidityFixture();
+        for (String name : List.of("MixedView", "MIXEDVIEW", "NULL_STATUS", "UNKNOWN_STATUS", "MISSING_STATUS")) {
+            fixture.rows.add(List.of(name, "VIEW", "view"));
+        }
+        fixture.statusRows.addAll(List.of(
+            List.of("APP", "MixedView", "VIEW", " valid "),
+            List.of("APP", "MIXEDVIEW", "VIEW", "invalid"),
+            Arrays.asList("APP", "NULL_STATUS", "VIEW", null),
+            List.of("APP", "UNKNOWN_STATUS", "VIEW", "UNRECOGNIZED")
+        ));
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, fixture.connection());
+
+        Assertions.assertEquals(Arrays.asList(true, false, null, null, null),
+            agent.listTables("APP").stream().map(TableInfo::getValid).toList());
+        Assertions.assertEquals(Arrays.asList(true, false, null, null, null),
+            agent.listObjects("APP").stream().map(ObjectInfo::getValid).toList());
+    }
+
+    @Test
+    void deduplicatesAndBatchesViewValidityNames() {
+        assertBatchedViewValidity(-1);
+    }
+
+    @Test
+    void keepsFailedBatchUnknownAndContinuesOtherValidityBatches() {
+        assertBatchedViewValidity(1);
+    }
+
+    private void assertBatchedViewValidity(int failedBatch) {
+        ScopedViewValidityFixture fixture = new ScopedViewValidityFixture();
+        fixture.failedBatch = failedBatch;
+        List<String> names = new ArrayList<>();
+        for (int index = 0; index < 1001; index++) {
+            String name = "VIEW_" + index;
+            names.add(name);
+            fixture.rows.add(List.of(name, "VIEW", "view"));
+            fixture.statusRows.add(List.of("APP", name, "VIEW", "VALID"));
+        }
+        fixture.rows.add(fixture.rows.get(0));
+        fixture.rows.add(List.of("TABLE_A", "TABLE", "table"));
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, fixture.connection());
+
+        List<TableInfo> tables = agent.listTables("APP");
+
+        Assertions.assertEquals(1003, tables.size());
+        Assertions.assertEquals(List.of(501, 501, 2), fixture.requests.stream().map(List::size).toList());
+        Assertions.assertEquals(names, fixture.requests.stream().flatMap(params -> params.stream().skip(1)).toList());
+        for (int index = 0; index < 1001; index++) {
+            Assertions.assertEquals(index / 500 == failedBatch ? null : Boolean.TRUE, tables.get(index).getValid());
+        }
+        Assertions.assertEquals(Boolean.TRUE, tables.get(1001).getValid());
+        Assertions.assertNull(tables.get(1002).getValid());
+    }
+
+    @Test
+    void reloadsValidityAfterStatusChangesInsteadOfCaching() {
+        ScopedViewValidityFixture fixture = new ScopedViewValidityFixture();
+        fixture.rows.add(List.of("VIEW_A", "VIEW", "view"));
+        fixture.statusRows.add(List.of("APP", "VIEW_A", "VIEW", "INVALID"));
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, fixture.connection());
+
+        Assertions.assertEquals(Boolean.FALSE, agent.listObjects("APP").get(0).getValid());
+        fixture.statusRows.set(0, List.of("APP", "VIEW_A", "VIEW", "VALID"));
+        Assertions.assertEquals(Boolean.TRUE, agent.listObjects("APP").get(0).getValid());
+        Assertions.assertEquals(List.of(List.of("APP", "VIEW_A"), List.of("APP", "VIEW_A")), fixture.requests);
+    }
+
+    @Test
     void queriesSequencesAndPackagesWhenRequested() {
         DamengAgent agent = new DamengAgent();
         TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
@@ -383,8 +672,10 @@ class DamengAgentMetadataTest {
         Assertions.assertEquals(List.of("MATERIALIZED_VIEW", "TABLE", "VIEW"), objects.stream().map(ObjectInfo::getObject_type).toList());
         Assertions.assertEquals(List.of("APP_DATA%2026", "APP_DATA%2026", "APP_DATA%2026"), objects.stream().map(ObjectInfo::getSchema).toList());
         Assertions.assertEquals(List.of("mv comment", "table comment", "view comment"), objects.stream().map(ObjectInfo::getComment).toList());
-        Assertions.assertEquals(4, sqls.size(), String.join("\n", sqls));
-        Assertions.assertTrue(sqls.stream().allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
+        Assertions.assertEquals(5, sqls.size(), String.join("\n", sqls));
+        Assertions.assertTrue(sqls.stream()
+            .filter(sql -> !sql.contains("FROM DBA_OBJECTS"))
+            .allMatch(sql -> sql.contains("ALL_OBJECTS")), String.join("\n", sqls));
         Assertions.assertEquals(List.of("catalog=null,schema=APP\\_DATA\\%2026,table=%,types=null"), jdbcMetadataCalls);
     }
 
@@ -1539,6 +1830,171 @@ class DamengAgentMetadataTest {
 
     private static Connection metadataConnection(String allColumnComment, String fallbackColumnComment, boolean includeMaterializedView) {
         return metadataConnection(allColumnComment, fallbackColumnComment, includeMaterializedView, List.of(), null);
+    }
+
+    private static Connection viewValidityConnection(
+        List<String> sqls,
+        List<String> validityParams,
+        List<List<Object>> validityRows,
+        SQLException validityError
+    ) {
+        return viewValidityConnection(
+            sqls,
+            validityParams,
+            validityRows,
+            validityError,
+            List.of(
+                List.of("VALID_VIEW", "VIEW", "valid view"),
+                List.of("INVALID_VIEW", "VIEW", "invalid view")
+            )
+        );
+    }
+
+    private static Connection viewValidityConnection(
+        List<String> sqls,
+        List<String> validityParams,
+        List<List<Object>> validityRows,
+        SQLException validityError,
+        List<List<Object>> tableRows
+    ) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("FROM DBA_OBJECTS")) {
+                    if (validityError != null) return failingMetadataStatement(validityError);
+                    return statusMetadataStatement(validityRows, validityParams);
+                }
+                if (sql.contains("FROM ALL_OBJECTS o")) {
+                    return metadataStatement(tableRows);
+                }
+                return metadataStatement(List.of());
+            }
+            if ("close".equals(name)) return null;
+            if ("isClosed".equals(name)) return false;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static Connection viewValidityJdbcFallbackConnection(
+        List<String> sqls,
+        List<String> validityParams,
+        List<List<Object>> validityRows
+    ) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                sqls.add(sql);
+                if (sql.contains("FROM DBA_OBJECTS")) {
+                    return statusMetadataStatement(validityRows, validityParams);
+                }
+                return failingMetadataStatement(new SQLException("no ALL_OBJECTS privilege"));
+            }
+            if ("getMetaData".equals(name)) {
+                return proxy(DatabaseMetaData.class, (metadataMethod, metadataArgs) -> {
+                    if ("getSearchStringEscape".equals(metadataMethod.getName())) {
+                        return "\\";
+                    }
+                    if ("getTables".equals(metadataMethod.getName())) {
+                        return metadataResultSet(List.of(
+                            List.of("VIEW_B", "VIEW", "view comment"),
+                            List.of("TABLE_A", "TABLE", "table comment")
+                        ));
+                    }
+                    return defaultValue(metadataMethod.getReturnType());
+                });
+            }
+            if ("close".equals(name)) return null;
+            if ("isClosed".equals(name)) return false;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static final class ScopedViewValidityFixture {
+        final List<List<Object>> rows = new ArrayList<>();
+        final List<List<Object>> statusRows = new ArrayList<>();
+        final List<List<String>> requests = new ArrayList<>();
+        boolean rawFallback;
+        int failedBatch = -1;
+
+        Connection connection() {
+            return proxy(Connection.class, (method, args) -> {
+                if ("prepareStatement".equals(method.getName())) {
+                    String sql = (String) args[0];
+                    if (sql.contains("FROM DBA_OBJECTS")) {
+                        List<String> params = new ArrayList<>();
+                        int batch = requests.size();
+                        requests.add(params);
+                        return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                            if ("setString".equals(statementMethod.getName())) {
+                                int index = (Integer) statementArgs[0];
+                                while (params.size() < index) params.add(null);
+                                params.set(index - 1, (String) statementArgs[1]);
+                            }
+                            if ("executeQuery".equals(statementMethod.getName())) {
+                                Assertions.assertTrue(sql.contains("OWNER = ?"), sql);
+                                Assertions.assertTrue(params.size() > 1 && params.size() <= 501, params.toString());
+                                Assertions.assertTrue(sql.contains("OBJECT_NAME IN ("
+                                    + String.join(", ", Collections.nCopies(params.size() - 1, "?")) + ")"), sql);
+                                Assertions.assertEquals(params.size(), sql.chars().filter(character -> character == '?').count());
+                                for (String param : params) Assertions.assertFalse(sql.contains(param), sql);
+                                if (batch == failedBatch) throw new SQLException("DBA_OBJECTS permission denied");
+                                return statusResultSet(statusRows.stream()
+                                    .filter(row -> params.get(0).equals(row.get(0)) && params.subList(1, params.size()).contains(row.get(1)))
+                                    .toList());
+                            }
+                            return defaultValue(statementMethod.getReturnType());
+                        });
+                    }
+                    if (rawFallback && sql.contains("mv.OWNER")) {
+                        return failingMetadataStatement("no SYS.SYSOBJECTS privilege");
+                    }
+                    return metadataStatement(rows);
+                }
+                if ("isClosed".equals(method.getName())) return false;
+                return defaultValue(method.getReturnType());
+            });
+        }
+    }
+
+    private static PreparedStatement statusMetadataStatement(List<List<Object>> rows, List<String> params) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            String name = method.getName();
+            if ("setString".equals(name)) {
+                params.add(String.valueOf(args[1]));
+                return null;
+            }
+            if ("executeQuery".equals(name)) return statusResultSet(rows);
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static ResultSet statusResultSet(List<List<Object>> rows) {
+        int[] index = {-1};
+        return proxy(ResultSet.class, (method, args) -> {
+            String name = method.getName();
+            if ("next".equals(name)) {
+                index[0] += 1;
+                return index[0] < rows.size();
+            }
+            if ("getString".equals(name)) {
+                String column = String.valueOf(args[0]).toUpperCase();
+                int columnIndex = switch (column) {
+                    case "OWNER" -> 0;
+                    case "OBJECT_NAME" -> 1;
+                    case "OBJECT_TYPE" -> 2;
+                    case "STATUS" -> 3;
+                    default -> -1;
+                };
+                Object value = columnIndex < 0 ? null : rows.get(index[0]).get(columnIndex);
+                return value == null ? null : String.valueOf(value);
+            }
+            if ("close".equals(name)) return null;
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static Connection metadataConnectionWithIndexes(List<String> sqls) {

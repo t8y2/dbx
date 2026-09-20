@@ -4,9 +4,19 @@ import { createApp, defineComponent, h, nextTick, reactive, type App } from "vue
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import PluginConnectionFields from "./PluginConnectionFields.vue";
-import type { PluginConnectionProviderContribution, PluginFormFieldBinding, PluginFormFieldValue } from "@/types/database";
+import type { PluginConnectionProviderContribution, PluginFormField, PluginFormFieldBinding, PluginFormFieldValue } from "@/types/database";
 
 const invokePluginMock = vi.fn();
+const { pickPluginFieldFileMock, tauriRuntime } = vi.hoisted(() => ({
+  pickPluginFieldFileMock: vi.fn(),
+  tauriRuntime: { value: false },
+}));
+
+vi.mock("@/lib/plugins/pluginFieldPicker", () => ({
+  PLUGIN_PICKER_MAX_BYTES: 1_048_576,
+  pickPluginFieldFile: (...args: unknown[]) => pickPluginFieldFileMock(...args),
+}));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => tauriRuntime.value }));
 
 vi.mock("@/lib/backend/api", () => ({
   listLocalSshKeys: vi.fn(async () => [
@@ -55,6 +65,72 @@ async function mountFields(initialValues: Record<string, PluginFormFieldValue> =
   await nextTick();
   return state;
 }
+
+describe("PluginConnectionFields file picker", () => {
+  const pickerContribution = (picker: PluginFormField["picker"], contentField = true): PluginConnectionProviderContribution => ({
+    type: "connection-provider",
+    id: "ssh.connection",
+    label: "SSH",
+    database_type: "ssh",
+    fields: [{ key: "private_key_path", label: "Private key path", type: "text", picker }, ...(contentField ? [{ key: "private_key", label: "Private key", type: "textarea" as const, binding: "secret" as const }] : [])],
+  });
+
+  it("stores the chosen client path on desktop and drops a stale uploaded copy", async () => {
+    tauriRuntime.value = true;
+    pickPluginFieldFileMock.mockReset().mockResolvedValue({ path: "/Users/dev/.ssh/id_rsa", name: "id_rsa" });
+    const provider = pickerContribution({ kind: "file", accept: [".pem"], content_field: "private_key" });
+    const state = await mountContribution(provider, { private_key: "OLD-UPLOADED-KEY" });
+
+    const browse = document.querySelector<HTMLButtonElement>("#ssh-connection-private_key_path-picker");
+    expect(browse?.textContent).toContain("Choose file");
+    browse?.click();
+
+    await vi.waitFor(() => expect(state.values.private_key_path).toBe("/Users/dev/.ssh/id_rsa"));
+    // The plugin prefers content over a path, so picking a path must clear the
+    // previously uploaded key or the stale one would keep winning.
+    expect(state.values.private_key).toBeUndefined();
+  });
+
+  it("uploads the file content into the paired field on browser hosts", async () => {
+    tauriRuntime.value = false;
+    pickPluginFieldFileMock.mockReset().mockResolvedValue({ content: "UPLOADED-KEY", name: "id_rsa" });
+    const provider = pickerContribution({ kind: "file", accept: [".pem"], content_field: "private_key" });
+    const state = await mountContribution(provider, { private_key_path: "/Users/dev/.ssh/id_rsa" });
+
+    const upload = document.querySelector<HTMLButtonElement>("#ssh-connection-private_key_path-picker");
+    expect(upload?.textContent).toContain("Upload file");
+    upload?.click();
+
+    await vi.waitFor(() => expect(state.values.private_key).toBe("UPLOADED-KEY"));
+    // A browser path would point at the user's machine, not the host's.
+    expect(state.values.private_key_path).toBeUndefined();
+  });
+
+  it("hides a browser-unsupported picker and keeps the desktop one available", async () => {
+    const provider = pickerContribution({ kind: "file" }, false);
+
+    tauriRuntime.value = false;
+    await mountContribution(provider, {});
+    expect(document.querySelector("#ssh-connection-private_key_path-picker")).toBeNull();
+
+    tauriRuntime.value = true;
+    await mountContribution(provider, {});
+    expect(document.querySelector("#ssh-connection-private_key_path-picker")).not.toBeNull();
+  });
+
+  it("surfaces a picker failure without touching the form", async () => {
+    tauriRuntime.value = false;
+    pickPluginFieldFileMock.mockReset().mockRejectedValue(new Error("File is larger than 1024 KiB"));
+    const provider = pickerContribution({ kind: "file", content_field: "private_key" });
+    const state = await mountContribution(provider, { private_key: "KEEP-ME" });
+
+    document.querySelector<HTMLButtonElement>("#ssh-connection-private_key_path-picker")?.click();
+
+    await vi.waitFor(() => expect(pickPluginFieldFileMock).toHaveBeenCalled());
+    await nextTick();
+    expect(state.values).toEqual({ private_key: "KEEP-ME" });
+  });
+});
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
@@ -109,6 +185,39 @@ describe("PluginConnectionFields", () => {
     await nextTick();
 
     expect(state.values).toEqual({ password: "secret", host: "db.internal" });
+  });
+
+  it('renders a null value as an empty field instead of the text "null"', async () => {
+    // Hosts before the manifest serialization fix hydrated untouched fields with
+    // `null`, and a null reaching an <input> is coerced to the string "null" by
+    // the DOM — a password field then looked non-empty without any user input.
+    const provider: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "null.connection",
+      label: "Nulls",
+      database_type: "nulls",
+      fields: [
+        { key: "sudo_password", label: "Sudo password", type: "password", binding: "secret" },
+        { key: "sudo_command", label: "Sudo command", type: "text", binding: "config" },
+        { key: "set_env", label: "Env", type: "textarea", binding: "config" },
+      ],
+    };
+    const state = await mountContribution(provider, {
+      sudo_password: null,
+      sudo_command: null,
+      set_env: null,
+    } as unknown as Record<string, PluginFormFieldValue>);
+
+    expect(document.querySelector<HTMLInputElement>("#null-connection-sudo_password")?.value).toBe("");
+    expect(document.querySelector<HTMLInputElement>("#null-connection-sudo_command")?.value).toBe("");
+    expect(document.querySelector<HTMLTextAreaElement>("#null-connection-set_env")?.value).toBe("");
+
+    // Editing still emits a real value, so a null never survives the dialog.
+    const command = document.querySelector<HTMLInputElement>("#null-connection-sudo_command")!;
+    command.value = "sudo -n true";
+    command.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+    expect(state.values.sudo_command).toBe("sudo -n true");
   });
 
   it("can hide host-owned common bindings", async () => {
@@ -220,6 +329,69 @@ describe("PluginConnectionFields", () => {
     state.values = { sasl_mechanism: "OAUTHBEARER", oauth_token_source: "static_token" };
     await nextTick();
     expect(document.querySelector("#kafka-connection-msk_region")).toBeNull();
+  });
+
+  it("renders a field only while every clause of an all_of condition holds (sudo_source + read_only)", async () => {
+    // The SSH plugin cannot express "sudo_source = custom AND read_only =
+    // false" with one clause per field; all_of + a boolean literal covers it.
+    const ssh: PluginConnectionProviderContribution = {
+      type: "connection-provider",
+      id: "ssh.connection",
+      label: "SSH",
+      database_type: "ssh",
+      fields: [
+        {
+          key: "read_only",
+          label: "Read only",
+          type: "boolean",
+          default: false,
+        },
+        {
+          key: "sudo_source",
+          label: "Sudo source",
+          type: "select",
+          default: "none",
+          options: [
+            { label: "None", value: "none" },
+            { label: "Custom", value: "custom" },
+          ],
+        },
+        {
+          key: "sudo_command",
+          label: "Sudo command",
+          type: "text",
+          visible_when: {
+            all_of: [
+              { field: "sudo_source", one_of: ["custom"] },
+              { field: "read_only", one_of: [false] },
+            ],
+          },
+          required_when: {
+            all_of: [
+              { field: "sudo_source", one_of: ["custom"] },
+              { field: "read_only", one_of: [false] },
+            ],
+          },
+        },
+      ],
+    };
+    const state = await mountContribution(ssh, {});
+
+    expect(document.querySelector("#ssh-connection-sudo_command")).toBeNull();
+
+    state.values = { sudo_source: "custom", read_only: false };
+    await nextTick();
+    expect(document.querySelector("#ssh-connection-sudo_command")).not.toBeNull();
+    expect(document.querySelector('label[for="ssh-connection-sudo_command"]')?.textContent).toContain("*");
+
+    // Read-only sessions ignore the sudo block entirely.
+    state.values = { sudo_source: "custom", read_only: true };
+    await nextTick();
+    expect(document.querySelector("#ssh-connection-sudo_command")).toBeNull();
+
+    state.values = { sudo_source: "none", read_only: false };
+    await nextTick();
+    expect(document.querySelector("#ssh-connection-sudo_command")).toBeNull();
   });
 
   it("offers local SSH keys on private_key_path fields and fills the chosen path", async () => {

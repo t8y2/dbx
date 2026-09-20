@@ -18,6 +18,7 @@ fn generate_tables(count: usize, prefix: &str) -> Vec<TableInfo> {
         .map(|i| TableInfo {
             name: format!("{}_{}", prefix, i),
             table_type: "BASE TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,
@@ -261,6 +262,7 @@ fn benchmark_dependency_graph_build() {
         .map(|i| TableInfo {
             name: format!("tgt_{}", i),
             table_type: "BASE TABLE".to_string(),
+            valid: None,
             comment: None,
             parent_schema: None,
             parent_name: None,

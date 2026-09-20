@@ -4,8 +4,9 @@ import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/
 import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
-import { editableRowIdentifierColumns, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
@@ -142,6 +143,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     if (config.db_type === "neo4j") {
       const columns = await api.getColumns(target.connectionId, target.database, querySchema, target.tableName);
       const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, undefined, targetTableType);
+      const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(columns), identifierQuote);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: config.driver_profile,
@@ -155,6 +157,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         tableType: targetTableType,
         columns: columns.map((column) => column.name),
         primaryKeys,
+        orderBy: defaultSort.orderBy,
         whereInput: target.whereInput,
         limit: pageLimit,
       });
@@ -170,24 +173,34 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
         primaryKeys,
       });
       firstExecuteStarted = true;
+      if (targetTab) targetTab.orderByInput = defaultSort.orderBy;
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
+      if (isCurrentTarget() && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
       return;
     }
-    const eagerMetadata =
-      effectiveDbType === "mysql" || effectiveDbType === "postgres"
-        ? await loadTableMetadata({
-            connectionId: target.connectionId,
-            database: target.database,
-            schema: querySchema,
-            tableName: target.tableName,
-            tableType: targetTableType,
-            databaseType: effectiveDbType,
-            driverProfile: config.driver_profile || config.db_type,
-            catalog: target.catalog,
-          })
-        : undefined;
+    let eagerMetadata: Awaited<ReturnType<typeof loadTableMetadata>> | undefined;
+    if (effectiveDbType === "mysql" || effectiveDbType === "postgres" || (settingsStore.editorSettings.tableOpenSortMode ?? "none") !== "none") {
+      try {
+        eagerMetadata = await loadTableMetadata({
+          connectionId: target.connectionId,
+          database: target.database,
+          schema: querySchema,
+          tableName: target.tableName,
+          tableType: targetTableType,
+          databaseType: effectiveDbType ?? config.db_type,
+          driverProfile: config.driver_profile || config.db_type,
+          catalog: target.catalog,
+        });
+      } catch (error) {
+        // Metadata is needed for optional default sorting, but it must not
+        // prevent the data preview from opening. The later metadata refresh
+        // keeps the tab pending for edits and can retry independently.
+        console.warn("[DBX] unable to preload table metadata for default sort", error);
+      }
+    }
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
+    const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes), identifierQuote);
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config.driver_profile,
@@ -200,6 +213,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       tableType: targetTableType,
       columns: eagerColumns.map((column) => column.name),
       primaryKeys: eagerPrimaryKeys,
+      orderBy: defaultSort.orderBy,
       ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit),
       whereInput: target.whereInput,
       limit: pageLimit,
@@ -219,6 +233,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     // 取消计数快照：isCancelling 是瞬态的（取消失败/查询先完成会被清掉），
     // 比对计数才能跨越 executeTabSql 生命周期识别"执行期间用户请求过停止"
     const cancelCountBeforeExecute = queryStore.tabs.find((tab) => tab.id === tabId)?.cancelRequestCount ?? 0;
+    if (targetTab) targetTab.orderByInput = defaultSort.orderBy;
     await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
     if (!isCurrentTarget()) return;
     // 首次查询被停止/失败（executeTabSql 以 Error 结果表达，不抛出）时，
@@ -228,6 +243,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     const firstResult = tabAfterFirstExecute?.result;
     const cancelRequestedDuringExecute = (tabAfterFirstExecute?.cancelRequestCount ?? 0) > cancelCountBeforeExecute;
     const firstQueryFailed = cancelRequestedDuringExecute || tabAfterFirstExecute?.isCancelling === true || (firstResult !== undefined && isQueryExecutionErrorResult(firstResult));
+    if (!firstQueryFailed && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
     // executeTabSql surfaces query failures as an "Error" result instead of throwing.
     // A snapshot-less lake table fails the data preview above but its metadata still
     // reads fine — retry with LIMIT 0 so the user sees the table structure (columns +
@@ -298,11 +314,13 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
           primaryKeys,
           columns: columns.map((column) => column.name),
           includeRowId: true,
+          orderBy: defaultSort.orderBy,
           limit: pageLimit,
         });
         if (!isCurrentTarget()) return;
         queryStore.updateSql(tabId, newSql);
         await queryStore.executeTabSql(tabId, newSql, { pagination: { limit: pageLimit, offset: 0 } });
+        if (isCurrentTarget() && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
       }
     } catch (reason) {
       console.error("[DBX] ERROR fetching table metadata:", reason);

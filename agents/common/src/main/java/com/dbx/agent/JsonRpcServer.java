@@ -151,6 +151,9 @@ public final class JsonRpcServer {
     }
 
     private Object dispatch(String method, JsonObject params) throws Exception {
+        if (agent instanceof AbstractJdbcAgent observingAgent) {
+            observingAgent.beforeAgentMethod(method, stringOrNull(params, "sessionId"));
+        }
         if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
             return AgentProtocol.handshakeResult();
         }
@@ -245,6 +248,14 @@ public final class JsonRpcServer {
         if (AgentProtocol.METHOD_LIST_TRIGGERS.equals(method)) {
             switchCatalog(params);
             return agent.listTriggers(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
+        if (AgentProtocol.METHOD_LIST_PARTITIONS.equals(method)) {
+            switchCatalog(params);
+            return agent.listPartitions(params.get("schema").getAsString(), params.get("table").getAsString());
+        }
+        if (AgentProtocol.METHOD_LIST_SUBPARTITIONS.equals(method)) {
+            switchCatalog(params);
+            return agent.listSubpartitions(params.get("schema").getAsString(), params.get("table").getAsString());
         }
         if (AgentProtocol.METHOD_EXECUTE_QUERY.equals(method)) {
             return agent.executeQuery(

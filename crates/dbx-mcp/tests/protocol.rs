@@ -249,6 +249,30 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
     );
 }
 
+/// The client-facing field is `max_rows`. Only this rmcp-level test proves the
+/// published name survives tool-call serialization and that clamping happens at
+/// the native boundary; the in-process tests assert the internal `limit`
+/// argument directly and cannot catch a name mismatch.
+#[tokio::test]
+async fn execute_query_forwards_client_max_rows() {
+    let cases = [
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1" }), 100_u64),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 500 }), 500),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 100000 }), 1000),
+        (json!({ "connection_id": "scoped", "sql": "SELECT 1", "max_rows": 0 }), 1),
+    ];
+    for (request, expected) in cases {
+        let backend = Arc::new(CapturingBackend {
+            policy: McpGlobalPolicy::default(),
+            connections: vec![test_connection("scoped", "shared-db")],
+            calls: Mutex::new(Vec::new()),
+        });
+        let captured = captured_query_arguments(backend, request.clone()).await;
+        assert_eq!(captured.len(), 1, "expected one captured execute_query call");
+        assert_eq!(captured[0]["limit"], json!(expected), "max_rows in {request} must map to limit");
+    }
+}
+
 fn test_connection(id: &str, name: &str) -> ConnectionConfig {
     serde_json::from_value(json!({
         "id": id,
@@ -304,9 +328,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 19);
+    assert_eq!(names.len(), 22);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 20);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]
@@ -320,6 +344,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_list_routines"));
     assert!(names.contains(&"dbx_get_routine_source"));
     assert!(names.contains(&"dbx_open_session"));
+    assert!(names.contains(&"dbx_begin_transaction"));
+    assert!(names.contains(&"dbx_commit_transaction"));
+    assert!(names.contains(&"dbx_rollback_transaction"));
     assert!(names.contains(&"dbx_close_session"));
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_send_message"));

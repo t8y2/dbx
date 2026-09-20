@@ -1,5 +1,5 @@
 import { computed, reactive, ref, type ComputedRef, type Ref } from "vue";
-import type { MultiDbExecutionTarget, MultiDbExecutionItemStatus, MultiDbTargetExecutionResult } from "@/types/sqlExecution";
+import type { MultiDbExecutionTarget, MultiDbExecutionItemStatus, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
 
 export interface MultiDbExecutionItem {
   id: string;
@@ -9,6 +9,8 @@ export interface MultiDbExecutionItem {
   startedAt?: number;
   completedAt?: number;
   durationMs?: number;
+  transaction?: MultiDbManualTransaction;
+  settling?: boolean;
 }
 
 export interface MultiDbExecutionBatch {
@@ -39,9 +41,10 @@ export interface MultiDbExecutionContext {
   readonly targets: readonly MultiDbExecutionTarget[];
   /** Offset of the submitted SQL in the source editor, captured at confirmation time. */
   readonly sourceOffset?: number;
+  readonly manualTransaction?: boolean;
 }
 
-export type MultiDbExecutionContextOverrides = Pick<MultiDbExecutionContext, "sourceOffset">;
+export type MultiDbExecutionContextOverrides = Pick<MultiDbExecutionContext, "sourceOffset" | "manualTransaction">;
 
 export interface MultiDbExecutionOptions {
   sourceTabId: Ref<string> | ComputedRef<string> | string;
@@ -61,6 +64,46 @@ function normalizeError(error: unknown): string {
 export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: MultiDbExecutionOptions) {
   const batch = ref<MultiDbExecutionBatch>();
   const isRunning = computed(() => batch.value?.status === "running" || batch.value?.status === "cancelling");
+  const hasTransactions = computed(() => batch.value?.items.some((item) => !!item.transaction) === true);
+  let activeRun: Promise<void> | undefined;
+  let disposed = false;
+  const settlements = new Set<Promise<unknown>>();
+
+  async function finishTransaction(itemId: string, action: "commit" | "rollback"): Promise<boolean> {
+    const item = batch.value?.items.find((candidate) => candidate.id === itemId);
+    if (!item?.transaction || item.settling || (action === "commit" && (!item.transaction.canCommit || disposed || isRunning.value))) return false;
+    item.settling = true;
+    let settled!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
+    settlements.add(pending);
+    try {
+      const warning = await item.transaction.finish(action);
+      item.transaction = undefined;
+      if (warning) {
+        item.status = "failed";
+        item.errorMessage = warning;
+        return false;
+      }
+      item.status = action === "commit" ? "success" : "rolled_back";
+      item.errorMessage = undefined;
+      return true;
+    } catch (error) {
+      item.errorMessage = normalizeError(error);
+      return false;
+    } finally {
+      item.settling = false;
+      settlements.delete(pending);
+      settled();
+    }
+  }
+
+  async function rollbackPending(): Promise<boolean> {
+    const items = batch.value?.items ?? [];
+    const results = await Promise.all(items.filter((item) => item.transaction).map((item) => finishTransaction(item.id, "rollback")));
+    return results.every(Boolean) && !hasTransactions.value;
+  }
 
   function sourceTabId(): string {
     return typeof options.sourceTabId === "string" ? options.sourceTabId : options.sourceTabId.value;
@@ -115,6 +158,7 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
       item.status = current.cancelRequested && result.status === "failed" ? "cancelled" : result.status;
       item.errorMessage = result.errorMessage;
       item.durationMs = result.durationMs;
+      item.transaction = result.transaction;
     } catch (error) {
       // One target is intentionally isolated from the queue. Adapter errors
       // become target failures so later targets keep running.
@@ -136,14 +180,17 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
       }
     }
 
-    if (current.cancelRequested) markPendingNotExecuted();
+    if (current.cancelRequested) {
+      markPendingNotExecuted();
+      await rollbackPending();
+    }
     current.status = current.cancelRequested ? "cancelled" : "completed";
     current.completedAt = Date.now();
     current.durationMs = current.completedAt - current.startedAt;
   }
 
   async function start(sql: string, targets: readonly MultiDbExecutionTarget[], context: MultiDbExecutionContextOverrides = {}, mode: MultiDbExecutionMode = "serial"): Promise<MultiDbExecutionBatch | undefined> {
-    if (isRunning.value || !sql.trim() || targets.length === 0) return undefined;
+    if (disposed || isRunning.value || hasTransactions.value || !sql.trim() || targets.length === 0) return undefined;
     const sourceId = sourceTabId();
     const id = executionId();
     const targetSnapshot = targets.map((target) => Object.freeze({ ...target }));
@@ -169,7 +216,9 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
       startedAt: Date.now(),
     });
     batch.value = current;
-    await executeBatch(current);
+    activeRun = executeBatch(current);
+    await activeRun;
+    activeRun = undefined;
     return current;
   }
 
@@ -201,13 +250,30 @@ export function useMultiDbExecution(adapter: MultiDbExecutionAdapter, options: M
   }
 
   function reset(): void {
-    if (isRunning.value) return;
+    if (isRunning.value || hasTransactions.value) return;
     batch.value = undefined;
+  }
+
+  async function cancelAndRollback(): Promise<boolean> {
+    await cancel();
+    await activeRun;
+    await Promise.all(settlements);
+    return rollbackPending();
+  }
+
+  async function dispose(): Promise<boolean> {
+    disposed = true;
+    return cancelAndRollback();
   }
 
   return {
     batch,
     isRunning,
+    hasTransactions,
+    finishTransaction,
+    rollbackPending,
+    dispose,
+    cancelAndRollback,
     start,
     cancel,
     reset,

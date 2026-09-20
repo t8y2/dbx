@@ -1,5 +1,6 @@
 import { onScopeDispose } from "vue";
 import i18n from "@/i18n";
+import { uuid } from "@/lib/common/utils";
 
 const blockers = new Set<() => string | undefined>();
 let barrierDepth = 0;
@@ -127,7 +128,7 @@ export async function setupUpdatePreparation(participant: UpdatePreparationParti
   return {
     async prepare() {
       if (held.size) throw new Error(message("preparationBusy", "Update preparation already in progress"));
-      const id = crypto.randomUUID();
+      const id = uuid();
       const members = (await getAllWebviewWindows()).map((item) => item.label).sort();
       const expected = new Set(members.filter((item) => item !== label));
       let timer: ReturnType<typeof setTimeout> | undefined;

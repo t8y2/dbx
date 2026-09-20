@@ -24,6 +24,7 @@ export function buildTableTreeNodes({ nodeId, connectionId, database, schema, ta
         objectType,
         tableType: table.table_type,
         comment: table.comment,
+        valid: table.valid,
         parentSchema: table.parent_schema,
         parentName: table.parent_name,
         catalog,
@@ -53,6 +54,7 @@ function makeTableTreeEntry({
   objectType,
   tableType,
   comment,
+  valid,
   parentSchema,
   parentName,
   catalog,
@@ -66,6 +68,7 @@ function makeTableTreeEntry({
   objectType: DatabaseObjectTreeKind;
   tableType?: string;
   comment?: string | null;
+  valid?: boolean | null;
   parentSchema?: string | null;
   parentName?: string | null;
   catalog?: string;
@@ -79,6 +82,7 @@ function makeTableTreeEntry({
     type: objectType === "VIEW" ? ("view" as const) : objectType === "MATERIALIZED_VIEW" ? ("materialized_view" as const) : ("table" as const),
     tableType,
     comment,
+    valid,
     connectionId,
     database,
     schema,
@@ -248,6 +252,9 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
       if (matchingObject && table.comment && !matchingObject.comment) {
         matchingObject.comment = table.comment;
       }
+      if (matchingObject && matchingObject.valid == null && table.valid != null) {
+        matchingObject.valid = table.valid;
+      }
       continue;
     }
     seen.add(key);
@@ -257,6 +264,7 @@ export function mergeTableInfosIntoObjects(objects: readonly ObjectInfo[], table
       // downstream template strategies can distinguish special table kinds.
       object_type: table.table_type,
       schema: tableSchema,
+      valid: table.valid,
       comment: table.comment,
       created_at: undefined,
       updated_at: undefined,
@@ -541,6 +549,7 @@ function buildObjectTreeEntries({ nodeId, connectionId, database, schema, object
         objectType,
         tableType: obj.object_type,
         comment: obj.comment,
+        valid: obj.valid,
         parentSchema: obj.parent_schema,
         parentName: obj.parent_name,
       }),
@@ -658,6 +667,7 @@ export function buildSimpleObjectTreeNodes({ nodeId, connectionId, database, sch
       objectType,
       tableType: obj.object_type,
       comment: obj.comment,
+      valid: obj.valid,
       parentSchema: obj.parent_schema,
       parentName: obj.parent_name,
     });

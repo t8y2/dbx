@@ -1,4 +1,4 @@
-import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginWorkbenchContribution } from "@/types/database";
+import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
@@ -10,10 +10,21 @@ const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 // plugin iframe to disk and never traverse plugin frames.
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
 
+/** Structured editor appearance: SQL editor settings that have no CSS-token
+ * carrier (font size is a number, the syntax theme an id). Font families are
+ * additionally mirrored as `--font-sans` / `--font-mono` root tokens. */
+export interface PluginEditorAppearance {
+  fontFamily: string;
+  fontSize: number;
+  theme: string;
+}
+
 export interface PluginBridgeTheme {
   appearance: "light" | "dark";
-  /** Resolved DBX design tokens (`--color-*`, `--radius-*`, ...) for the current theme. */
+  /** Resolved DBX design tokens (`--color-*`, `--radius-*`, `--font-*`, ...) for the current theme. */
   tokens: Record<string, string>;
+  /** Editor appearance snapshot. Optional: older in-flight snapshots omit it. */
+  editor?: PluginEditorAppearance;
 }
 
 export interface PluginWorkbenchContext {
@@ -33,16 +44,25 @@ export interface PluginSaveFileResult {
   path: string;
 }
 
+export interface PluginDownloadRequest extends PluginSaveFileRequest {
+  downloadId: string;
+  params: Record<string, unknown>;
+}
+
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
-  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext): Promise<void> | void;
+  openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean }): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
+  /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
+  reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
+  downloadFile?(pluginId: string, request: PluginDownloadRequest, onProgress: (progress: unknown) => void): Promise<PluginSaveFileResult | null>;
+  cancelDownload?(pluginId: string, downloadId: string): Promise<void>;
   /** Write text to the system clipboard on behalf of the sandboxed plugin iframe. */
   copyText?(pluginId: string, text: string): Promise<void>;
 }
@@ -59,13 +79,17 @@ interface PluginRequestMessage {
 }
 
 export class PluginHostBridge {
+  private downloads = new Set<string>();
   private context: PluginWorkbenchContext;
   private locale: string;
   private theme?: PluginBridgeTheme;
 
+  /** Invoked once before each iframe load generation sends its init message. */
+  onReinit?: () => Promise<void> | void;
+
   constructor(
     private readonly plugin: InstalledPlugin,
-    private readonly workbench: PluginWorkbenchContribution,
+    private readonly contribution: PluginUiContribution,
     context: PluginWorkbenchContext,
     private readonly targetWindow: () => Window | null,
     private readonly api: PluginHostBridgeApi,
@@ -82,7 +106,7 @@ export class PluginHostBridge {
     if (!target || event.source !== target || !isRecord(event.data)) return false;
     if (event.data.source !== PLUGIN_MESSAGE_SOURCE || event.data.version !== BRIDGE_VERSION) return false;
     if (event.data.type === "ready") {
-      this.sendInit();
+      void this.handleReady();
       return true;
     }
     if (event.data.type === "shortcut" && event.data.shortcut === "closeTab") {
@@ -94,16 +118,66 @@ export class PluginHostBridge {
     return true;
   }
 
+  private handleReady(): void {
+    this.requestInit("ready");
+  }
+
   sendInit(): void {
+    this.requestInit("load");
+  }
+
+  private requestInit(signal: "load" | "ready"): void {
+    if ((this.initSignals.load && this.initSignals.ready) || (signal === "load" && this.initSignals.load)) {
+      for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
+      this.downloads.clear();
+      this.initGeneration += 1;
+      this.initSignals = { load: false, ready: false };
+      this.initStarted = false;
+    }
+    if (this.initSignals[signal]) return;
+    this.initSignals[signal] = true;
+    if (this.initStarted) return;
+    this.initStarted = true;
+    const generation = this.initGeneration;
+    const reinit = this.onReinit;
+    if (!reinit) {
+      if (!this.disposed && generation === this.initGeneration) this.postInit();
+      return;
+    }
+    void (async () => {
+      try {
+        await reinit();
+      } catch (error) {
+        console.warn("[DBX][plugin-bridge:reinit]", error);
+      }
+      // A newer load generation supersedes this one; never post a stale init.
+      if (!this.disposed && generation === this.initGeneration) this.postInit();
+    })();
+  }
+
+  /** Stop future posts (queued inits after an async reinit) for a torn-down bridge. */
+  dispose(): void {
+    this.disposed = true;
+    for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
+    this.downloads.clear();
+  }
+
+  private disposed = false;
+  private initGeneration = 0;
+  private initSignals = { load: false, ready: false };
+  private initStarted = false;
+
+  private postInit(): void {
     this.post({
       source: HOST_MESSAGE_SOURCE,
       version: BRIDGE_VERSION,
       type: "init",
       pluginId: this.plugin.manifest.id,
-      contributionId: this.workbench.id,
+      contributionId: this.contribution.id,
       locale: this.locale,
       theme: this.theme ? clonePluginData(this.theme) : undefined,
       permissions: [...(this.plugin.manifest.permissions || [])],
+      capabilities: { downloadFile: !!this.api.downloadFile },
       context: snapshotPluginWorkbenchContext(this.context),
     });
   }
@@ -154,6 +228,27 @@ export class PluginHostBridge {
   }
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
+    if (method === "host.downloadFile") {
+      if (!this.api.downloadFile) throw new Error("Streaming file downloads require the desktop host");
+      const input = requireRecord(params, "download params");
+      const downloadId = requireProtocolName(input.downloadId, "download ID");
+      if (this.downloads.size >= 2 || this.downloads.has(downloadId)) throw new Error("Too many active downloads or duplicate download ID");
+      const request = { downloadId, fileName: optionalTrimmedString(input.fileName), params: requireRecord(input.params, "download source") };
+      this.downloads.add(downloadId);
+      try {
+        return await this.api.downloadFile(this.plugin.manifest.id, request, (progress) => {
+          this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "event", method: "host.download.progress", params: progress });
+        });
+      } finally {
+        this.downloads.delete(downloadId);
+      }
+    }
+    if (method === "host.cancelDownload") {
+      const input = requireRecord(params, "cancel download params");
+      const downloadId = requireProtocolName(input.downloadId, "download ID");
+      if (this.downloads.has(downloadId)) await this.api.cancelDownload?.(this.plugin.manifest.id, downloadId);
+      return null;
+    }
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
@@ -186,8 +281,14 @@ export class PluginHostBridge {
       this.requirePermission("host.workbench");
       if (!this.api.openWorkbench) throw new Error("Host workbench navigation is unavailable");
       const input = requireRecord(params, "host.openWorkbench params");
-      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined);
+      await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true });
       return null;
+    }
+    if (method === "host.reopenConnection") {
+      if (!this.api.reopenConnection) throw new Error("Connection reopen is unavailable");
+      const input = requireRecord(params, "host.reopenConnection params");
+      await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
+      return { ok: true };
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
@@ -243,7 +344,7 @@ export class PluginHostBridge {
 /**
  * Parse `host.network:<origin>` permission entries into CSP connect-src
  * origins. Must stay aligned with `parse_host_network_permission` in
- * crates/dbx-core/src/plugins/manifest.rs.
+ * crates/dbx-plugin-runtime/src/plugins/manifest.rs.
  */
 export function pluginNetworkOrigins(permissions: readonly string[] | undefined): string[] {
   const origins = new Set<string>();
@@ -384,6 +485,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     let context;
     let locale = 'en';
     let theme;
+    let capabilities = {};
     let resolveReady;
     const initialTheme = ${serializedInitialTheme};
     const applyTheme = (value) => {
@@ -484,6 +586,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       get context() { return context; },
       get locale() { return locale; },
       get theme() { return theme; },
+      get capabilities() { return capabilities; },
+      downloadFile: (options) => request('host.downloadFile', options),
+      cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
@@ -498,8 +603,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
-      openWorkbench: (contributionId, childContext) => request('host.openWorkbench', { contributionId, context: childContext }),
+      openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
+      reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
@@ -523,6 +629,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         pending.delete(message.id);
         if (message.error) handler.reject(new Error(message.error)); else handler.resolve(message.result);
       } else if (message.type === 'init') {
+        capabilities = message.capabilities || {};
         context = message.context;
         locale = typeof message.locale === 'string' ? message.locale : 'en';
         applyTheme(message.theme);
@@ -616,6 +723,6 @@ function enforcePayloadLimit(value: unknown): void {
   if (bytes > MAX_BRIDGE_PAYLOAD_BYTES) throw new Error("Plugin bridge request is too large");
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

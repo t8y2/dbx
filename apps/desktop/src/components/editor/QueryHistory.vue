@@ -16,9 +16,12 @@ import { canRollbackHistoryEntry } from "@/lib/history/historyAiAnalysis";
 import { hasHistoryDateRange, historyDateRangeIsValid, type HistoryDateRange } from "@/lib/history/historyTimeRange";
 import { HISTORY_ROW_HEIGHT, HISTORY_SCROLL_BUFFER, shouldVirtualizeHistory } from "@/lib/history/historyVirtualList";
 import { historyConnectionHasSelectedDatabase } from "@/lib/history/historySearch";
+import { historyEntrySource } from "@/lib/history/historyEntrySource";
 import type { HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest } from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -53,6 +56,12 @@ const startDateInputRef = ref<HTMLInputElement | null>(null);
 const endDateInputRef = ref<HTMLInputElement | null>(null);
 const selectedEntry = ref<HistoryEntry | null>(null);
 const isRollingBack = ref(false);
+const manualRollback = ref(false);
+const resolvingTransaction = ref(false);
+const pendingRollback = ref<{ sessionId: string; entry: HistoryEntry; affectedRows: number; executionTime: number; ready: boolean; commitUncertain?: boolean }>();
+const rollbackLocked = computed(() => isRollingBack.value || !!pendingRollback.value || resolvingTransaction.value);
+let disposed = false;
+const canUseManualRollback = computed(() => supportsTransaction(connectionStore.getConfig(selectedEntry.value?.connection_id ?? "")?.db_type));
 const showDeleteConfirm = ref(false);
 const showClearConfirm = ref(false);
 const deleteTargetId = ref<string | null>(null);
@@ -356,12 +365,30 @@ function detailsRows(entry: HistoryEntry) {
   return rows;
 }
 
-async function rollback(entry: HistoryEntry) {
-  if (!canRollbackHistoryEntry(entry) || isRollingBack.value) return;
+async function recordRollback(entry: HistoryEntry, affectedRows: number, executionTime: number) {
+  await store.add({
+    connection_id: entry.connection_id,
+    connection_name: entry.connection_name,
+    database: entry.database,
+    sql: entry.rollback_sql!,
+    execution_time_ms: executionTime,
+    success: true,
+    activity_kind: "data_change",
+    operation: "ROLLBACK",
+    target: entry.target,
+    affected_rows: affectedRows,
+    details_json: JSON.stringify({ rollback_of: entry.id }),
+  });
+}
+
+async function rollback(entry: HistoryEntry, manual = false) {
+  if (!canRollbackHistoryEntry(entry) || rollbackLocked.value) return;
   if (!window.confirm(t("history.rollbackConfirm"))) return;
 
+  entry = { ...entry };
   const connectionId = entry.connection_id!;
   const rollbackSql = entry.rollback_sql!;
+  const useTransaction = manual && supportsTransaction(connectionStore.getConfig(connectionId)?.db_type);
   isRollingBack.value = true;
   const start = Date.now();
   try {
@@ -370,29 +397,82 @@ async function rollback(entry: HistoryEntry) {
       database: entry.database,
       sql: rollbackSql,
       source: t("production.sourceQueryHistory"),
-      execute: () => api.executeScript(connectionId, entry.database, rollbackSql),
+      execute: async () => {
+        if (!useTransaction) return api.executeScript(connectionId, entry.database, rollbackSql);
+        if (disposed) return undefined;
+        const sessionId = await api.beginManualTransaction(connectionId, entry.database);
+        pendingRollback.value = { sessionId, entry, affectedRows: 0, executionTime: 0, ready: false };
+        if (disposed) return undefined;
+        const results = await api.executeInManualTransaction(sessionId, rollbackSql, entry.database);
+        return { affected_rows: results.reduce((total, result) => total + result.affected_rows, 0) };
+      },
     });
     if (!result) return;
-    await store.add({
-      connection_id: connectionId,
-      connection_name: entry.connection_name,
-      database: entry.database,
-      sql: rollbackSql,
-      execution_time_ms: Date.now() - start,
-      success: true,
-      activity_kind: "data_change",
-      operation: "ROLLBACK",
-      target: entry.target,
-      affected_rows: result.affected_rows,
-      details_json: JSON.stringify({ rollback_of: entry.id }),
-    });
-    toast(t("history.rollbackSuccess"));
+    if (pendingRollback.value) {
+      pendingRollback.value.affectedRows = result.affected_rows;
+      pendingRollback.value.executionTime = Date.now() - start;
+      pendingRollback.value.ready = true;
+    } else {
+      await recordRollback(entry, result.affected_rows, Date.now() - start);
+      toast(t("history.rollbackSuccess"));
+    }
     selectedEntry.value = null;
   } catch (e: any) {
     toast(t("history.rollbackFailed", { message: e?.message || String(e) }), 5000);
   } finally {
+    if (pendingRollback.value && (!pendingRollback.value.ready || disposed)) await finishRollbackTransaction(false);
     isRollingBack.value = false;
   }
+}
+
+async function finishRollbackTransaction(commit: boolean): Promise<boolean> {
+  const pending = pendingRollback.value;
+  if (!pending || resolvingTransaction.value || (commit && (!pending.ready || isRollingBack.value))) return false;
+  resolvingTransaction.value = true;
+  try {
+    let committed = false;
+    try {
+      if (commit) {
+        await api.commitManualTransaction(pending.sessionId);
+        committed = true;
+      } else await api.rollbackManualTransaction(pending.sessionId);
+    } catch (error) {
+      if (!isManualTransactionSessionExpired(error) && formatError(error) !== "Transaction session not found") {
+        if (commit) {
+          pending.commitUncertain = true;
+          pending.ready = false;
+        }
+        throw error;
+      }
+      if (pending.commitUncertain) toast(t("toolbar.commitOutcomeUnknown"), 5000);
+      else if (commit) toast(t("history.transactionEnded"), 5000);
+    }
+    pendingRollback.value = undefined;
+    if (committed) {
+      toast(t("history.rollbackSuccess"));
+      // A history-storage error cannot undo a database commit or leave a
+      // transaction control that invites committing the same work again.
+      try {
+        await recordRollback(pending.entry, pending.affectedRows, pending.executionTime);
+      } catch (error) {
+        toast(formatError(error), 5000);
+      }
+    }
+    return true;
+  } catch (error) {
+    toast(formatError(error), 5000);
+    return false;
+  } finally {
+    resolvingTransaction.value = false;
+  }
+}
+
+async function closeHistory() {
+  if (resolvingTransaction.value || (isRollingBack.value && pendingRollback.value)) return;
+  if (pendingRollback.value) {
+    if (!window.confirm(t("history.rollbackBeforeClose")) || !(await finishRollbackTransaction(false))) return;
+  }
+  emit("close");
 }
 
 function getHistoryMenuItems(entry: HistoryEntry): ContextMenuItem[] {
@@ -433,6 +513,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
+  if (pendingRollback.value && !isRollingBack.value) void finishRollbackTransaction(false);
   store.setHistoryPanelActive(false);
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   searchDebounceTimer = null;
@@ -450,9 +532,15 @@ onBeforeUnmount(() => {
       <Button v-if="store.total > 0 || store.connectionOptions.length > 0" variant="ghost" size="icon" class="h-5 w-5" @click="confirmClearHistory">
         <Trash2 class="h-3 w-3" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
+      <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('common.close')" :disabled="resolvingTransaction || (isRollingBack && !!pendingRollback)" @click="closeHistory">
         <X class="h-3 w-3" />
       </Button>
+    </div>
+
+    <div v-if="pendingRollback" class="flex flex-wrap items-center gap-2 border-b p-2 text-xs" role="status">
+      <span class="w-full">{{ pendingRollback.entry.connection_name }} / {{ pendingRollback.entry.database }}: {{ t("history.pendingRollback") }}</span>
+      <Button size="sm" variant="outline" :disabled="isRollingBack || resolvingTransaction" @click="finishRollbackTransaction(false)">{{ t("history.discardRollback") }}</Button>
+      <Button size="sm" :disabled="isRollingBack || resolvingTransaction || !pendingRollback.ready" @click="finishRollbackTransaction(true)">{{ t("toolbar.commit") }}</Button>
     </div>
 
     <div class="border-b shrink-0">
@@ -605,6 +693,9 @@ onBeforeUnmount(() => {
                   {{ kindShortLabel(entry) }}
                 </span>
                 <span class="truncate font-medium">{{ entryTitle(entry) }}</span>
+                <span v-if="historyEntrySource(entry)" class="inline-flex h-5 shrink-0 items-center rounded border border-primary/30 bg-primary/5 px-1 text-[10px] font-medium text-primary">
+                  {{ historyEntrySource(entry) }}
+                </span>
                 <span class="ml-auto shrink-0 text-muted-foreground">{{ formatTime(entry.executed_at) }}</span>
               </div>
               <div class="truncate font-mono text-muted-foreground">{{ entrySubtitle(entry) }}</div>
@@ -679,7 +770,11 @@ onBeforeUnmount(() => {
             {{ t("history.analyzeWithAi") }}
           </Button>
           <Button variant="outline" @click="selectedEntry && restore(selectedEntry)">{{ t("history.restore") }}</Button>
-          <Button v-if="selectedEntry && canRollbackHistoryEntry(selectedEntry)" :disabled="isRollingBack" @click="rollback(selectedEntry)">
+          <label v-if="selectedEntry && canRollbackHistoryEntry(selectedEntry) && canUseManualRollback" class="flex items-center gap-2 text-xs" :title="t('history.manualRollbackHint')">
+            <input v-model="manualRollback" type="checkbox" :disabled="rollbackLocked" />
+            {{ t("toolbar.manualTransaction") }}
+          </label>
+          <Button v-if="selectedEntry && canRollbackHistoryEntry(selectedEntry)" :disabled="rollbackLocked" @click="rollback(selectedEntry, manualRollback)">
             <RotateCcw class="h-4 w-4" />
             {{ isRollingBack ? t("common.loading") : t("history.rollback") }}
           </Button>

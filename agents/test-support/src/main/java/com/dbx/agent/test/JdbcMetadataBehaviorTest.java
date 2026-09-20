@@ -60,7 +60,7 @@ public abstract class JdbcMetadataBehaviorTest extends JdbcConnectedAgentTest {
             for (String column : expectedColumnsInOrder()) {
                 assertTrue(ddl.contains("\"" + column + "\""), "DDL should include column " + column + ": " + ddl);
             }
-            assertTrue(ddl.contains("CREATE TABLE"), "DDL should include CREATE TABLE: " + ddl);
+            assertTrue(ddl.matches("(?s).*\\bCREATE (?:MEMORY |CACHED )?TABLE\\b.*"), "DDL should include CREATE TABLE: " + ddl);
             assertTrue(ddl.contains(metadataColumnsTable()), "DDL should include table name: " + ddl);
         });
     }

@@ -129,8 +129,16 @@ jobs:
             exit 1
           fi
 
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
+
       - name: Test Rust CLI
-        run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
+        run: cargo nextest run --locked --manifest-path plugins/sdk/cli/Cargo.toml --no-fail-fast
+
+      - name: Test Rust CLI docs
+        run: cargo test --doc --locked --manifest-path plugins/sdk/cli/Cargo.toml
 
       - name: Prepare and test plugin development runtime
         run: |

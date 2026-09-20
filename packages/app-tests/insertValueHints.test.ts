@@ -233,6 +233,52 @@ test("returns no positional hints for wildcard INSERT ... SELECT projections", (
   }
 });
 
+test("skips the hint when the SELECT projection already aliases its target column", () => {
+  // Reported as duplicated aliases that cannot be selected or deleted: the inlay pill repeated
+  // the `AS <target column>` name the statement already spells out.
+  const sql = ["INSERT INTO t_demo (operation_apply_id, pacu_enter_time, pacu_status)", "SELECT", "    noprid.ruid            as operation_apply_id,", "    noprid.enter_date      as pacu_enter_time,", "    noprid.flag            as unrelated_alias", "FROM noprid"].join("\n");
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [{ column: "pacu_status", text: "noprid.flag" }],
+  );
+});
+
+test("keeps positional mapping when only some projections repeat their target column", () => {
+  const sql = "INSERT INTO t (a, b, c) SELECT x AS a, y, z AS c FROM s";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => ({ column: hint.column, text: sql.slice(hint.from).split(/[ ,]/u, 1)[0] })),
+    [{ column: "b", text: "y" }],
+  );
+});
+
+test("matches projection aliases to target columns regardless of case or quoting", () => {
+  assert.deepEqual(parseInsertValueHints("INSERT INTO t (operation_apply_id) SELECT noprid.ruid AS Operation_Apply_ID FROM noprid"), []);
+  assert.deepEqual(parseInsertValueHints("INSERT INTO t (`pacu_status`) SELECT noprid.flag AS `pacu_status` FROM noprid"), []);
+  assert.deepEqual(parseInsertValueHints('INSERT INTO t (total) SELECT npl.additive AS "TOTAL" FROM npl'), []);
+});
+
+test("recognises implicit projection aliases without the AS keyword", () => {
+  assert.deepEqual(parseInsertValueHints("INSERT INTO t (cnt, name) SELECT COUNT(*) cnt, src.name name FROM s"), []);
+  assert.deepEqual(
+    parseInsertValueHints("INSERT INTO t (name) SELECT src.name FROM s").map((hint) => hint.column),
+    ["name"],
+  );
+  assert.deepEqual(
+    parseInsertValueHints("INSERT INTO t (cnt) SELECT COUNT(*) FROM s").map((hint) => hint.column),
+    ["cnt"],
+  );
+});
+
+test("keeps the hint for a projection whose alias names a different column", () => {
+  const sql = "INSERT INTO dbo.users (id, name) SELECT source_id AS old_id, source_name AS display_name FROM staging";
+  assert.deepEqual(
+    parseInsertValueHints(sql).map((hint) => hint.column),
+    ["id", "name"],
+  );
+});
+
 test("caps INSERT ... SELECT hints to the smaller target or projection count", () => {
   assert.deepEqual(
     parseInsertValueHints("INSERT INTO t (a, b) SELECT x, y, z FROM source").map((hint) => hint.column),

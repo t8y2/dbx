@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -12,10 +12,15 @@ use uuid::Uuid;
 use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
+use crate::transaction::{TransactionFailure, TransactionResult, TransactionStatus};
 use dbx_core::{
-    agent_tools::{format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow},
+    agent_tools::{
+        format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow, MAX_EXECUTE_QUERY_ROWS,
+    },
     database_manifest,
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
+    history::HistoryEntry,
+    models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
@@ -133,6 +138,11 @@ pub struct ExecuteQueryRequest {
     )]
     #[schemars(extend("type" = "integer"))]
     pub cell_char_limit: Option<u64>,
+    #[schemars(
+        description = "Maximum rows returned for this call (default 100, max 1000; larger values are clamped). SQL connections only - MongoDB shell commands always return at most 100 rows, and multi-statement scripts routed to the batch executor return at most 100 rows per statement."
+    )]
+    #[schemars(extend("type" = "integer"))]
+    pub max_rows: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -142,11 +152,20 @@ pub struct OpenSessionRequest {
     #[schemars(description = "Database name")]
     #[schemars(extend("type" = "string"))]
     pub database: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Eagerly reserve one native MySQL connection for explicit transaction tools")]
+    pub enable_transactions: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CloseSessionRequest {
     #[schemars(description = "Session ID returned by dbx_open_session")]
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TransactionSessionRequest {
+    #[schemars(description = "Transaction-enabled session ID returned by dbx_open_session")]
     pub session_id: String,
 }
 
@@ -190,7 +209,7 @@ pub struct RemoveConnectionRequest {
 pub struct ExecuteRedisCommandRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
-    #[schemars(description = "Redis logical database number")]
+    #[schemars(description = "Redis logical database number. Use this argument instead of the SELECT command.")]
     #[schemars(extend("type" = "integer"))]
     pub db: Option<u32>,
     #[schemars(description = "Redis command to execute, for example GET mykey or INFO")]
@@ -347,6 +366,11 @@ struct ResolvedConnection {
     group_ids: Vec<String>,
 }
 
+struct SessionCleanupResult {
+    status: Option<TransactionStatus>,
+    error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 enum DatabaseScope {
     All,
@@ -415,12 +439,116 @@ impl DbxMcpServer {
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
 
-    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
-        for session in sessions {
-            let _ = self
-                .backend
+    fn spawn_session_cleanup(&self, session: McpSession) -> tokio::sync::oneshot::Receiver<SessionCleanupResult> {
+        let backend = self.backend.clone();
+        let sessions = self.sessions.clone();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let status = if let Some(owner) = &session.transaction_owner {
+                match owner.close().await {
+                    Ok(status) => Some(status),
+                    Err(_) => {
+                        owner.wait_closed().await;
+                        Some(owner.status())
+                    }
+                }
+            } else {
+                None
+            };
+            let close_result = backend
                 .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
                 .await;
+            let error = match close_result {
+                Ok(_) => {
+                    sessions.finish_close(&session.id).await;
+                    None
+                }
+                Err(error) if session.transaction_owner.is_none() => {
+                    sessions.restore_after_failed_close(session).await;
+                    Some(error)
+                }
+                Err(error) => {
+                    sessions.finish_close(&session.id).await;
+                    Some(error)
+                }
+            };
+            let _ = result_tx.send(SessionCleanupResult { status, error });
+        });
+        result_rx
+    }
+
+    async fn close_backend_sessions_best_effort(&self, sessions: Vec<McpSession>) {
+        let cleanups = sessions.into_iter().map(|session| self.spawn_session_cleanup(session)).collect::<Vec<_>>();
+        for cleanup in cleanups {
+            let _ = cleanup.await;
+        }
+    }
+
+    fn spawn_transaction_session_open(
+        &self,
+        connection: ConnectionConfig,
+        database: String,
+        session: McpSession,
+    ) -> (
+        tokio::sync::oneshot::Receiver<Result<Arc<crate::transaction::TransactionOwner>, String>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let backend = self.backend.clone();
+        let sessions = self.sessions.clone();
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let owner = match backend.open_transaction_owner(&connection, &database, &session.client_session_id).await {
+                Ok(owner) => owner,
+                Err(error) => {
+                    sessions.cancel_opening(&session.id).await;
+                    let _ = backend
+                        .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+                        .await;
+                    let _ = prepared_tx.send(Err(error));
+                    return;
+                }
+            };
+            if prepared_tx.send(Ok(owner.clone())).is_err() || ack_rx.await.is_err() {
+                sessions.cancel_opening(&session.id).await;
+                let _ = owner.close().await;
+                owner.wait_closed().await;
+                let _ = backend
+                    .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
+                    .await;
+            }
+        });
+        (prepared_rx, ack_tx)
+    }
+    async fn save_mcp_sql_history(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+        started_at: Instant,
+        success: bool,
+        error: Option<String>,
+        affected_rows: Option<i64>,
+    ) {
+        let entry = HistoryEntry {
+            id: Uuid::new_v4().to_string(),
+            connection_id: connection.id.clone(),
+            connection_name: connection.name.clone(),
+            database: database.to_string(),
+            sql: sql.to_string(),
+            executed_at: chrono::Utc::now().to_rfc3339(),
+            execution_time_ms: started_at.elapsed().as_millis(),
+            success,
+            error,
+            activity_kind: mcp_sql_activity_kind(sql, connection.db_type).to_string(),
+            operation: mcp_sql_operation(sql, connection.db_type),
+            target: String::new(),
+            affected_rows,
+            rollback_sql: None,
+            details_json: Some(r#"{"source":"mcp"}"#.to_string()),
+        };
+        if let Err(error) = self.backend.save_history_entry(&entry).await {
+            log::warn!("failed to save MCP SQL history for connection {}: {error}", connection.id);
         }
     }
 }
@@ -605,8 +733,16 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_query",
-        description = "Execute a SQL query on a database connection (max 100 rows returned). For backwards compatibility, multi-statement scripts and stored-procedure scripts are routed through the dialect-aware batch executor."
+        description = "Execute a SQL query on a database connection (default 100 rows; pass max_rows to return up to 1000 rows; larger values are clamped; MongoDB shell commands and multi-statement scripts routed through the batch executor stay at 100 rows). For backwards compatibility, multi-statement scripts and stored-procedure scripts are routed through the dialect-aware batch executor."
     )]
+    async fn execute_query_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<ExecuteQueryRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.execute_query(parameters)).await
+    }
+
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
             return error;
@@ -687,6 +823,9 @@ impl DbxMcpServer {
             }
         }
         if connection.db_type == DatabaseType::MongoDb {
+            // max_rows is deliberately ignored here: MongoDB shell commands
+            // always return at most 100 rows, and this branch returns before the
+            // arguments below are built.
             let command = match validate_mongo_command_with_groups(
                 connection,
                 &resolved.policy,
@@ -729,7 +868,126 @@ impl DbxMcpServer {
             Ok(permissions) => permissions,
             Err(error) => return error,
         };
-        let mut arguments = json!({ "sql": request.sql, "limit": 100 });
+        let max_rows = request.max_rows.map(|value| value.clamp(1, MAX_EXECUTE_QUERY_ROWS as u64)).unwrap_or(100);
+        if let Some(session) = session.as_ref().filter(|session| session.transaction_owner.is_some()) {
+            if let Err(error) = validate_transaction_sql_shape(&request.sql) {
+                return tool_error("TRANSACTION_SQL_BLOCKED", error);
+            }
+            if let Some(reason) = confirmed_batch_sql_block_reason(
+                &request.sql,
+                connection.db_type,
+                permissions.confirmed_write_sql.as_deref(),
+            ) {
+                return tool_error("SQL_BLOCKED", reason);
+            }
+            let owner = session.transaction_owner.as_ref().expect("filtered transaction owner").clone();
+            let lease = match owner.acquire().await {
+                Ok(lease) => lease,
+                Err(error) => return transaction_failure_result(&session.id, error),
+            };
+
+            // The lease is the queue boundary. Re-read every mutable policy and
+            // connection binding after waiting so queued work cannot outrun a
+            // revocation or configuration refresh.
+            if let Err(error) = self.ensure_tool_allowed("dbx_execute_query").await {
+                return error;
+            }
+            let refreshed = match self
+                .resolve_connection(&ConnectionSelector {
+                    connection_id: Some(session.connection_id.clone()),
+                    connection_name: None,
+                })
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(error) => return error,
+            };
+            if !transaction_connection_supported(&refreshed.connection)
+                || refreshed.connection.id != session.connection_id
+            {
+                return tool_error("TRANSACTION_UNSUPPORTED", "The bound native MySQL connection changed.");
+            }
+            if let Err(error) = ensure_sql_database_scope(
+                &refreshed.database_scope,
+                &refreshed.connection,
+                &session.database,
+                &request.sql,
+            ) {
+                return error;
+            }
+            if let Err(error) = ensure_sql_database_execution_scope(
+                &refreshed.policy,
+                &refreshed.connection,
+                &session.database,
+                &request.sql,
+            ) {
+                return error;
+            }
+            let refreshed_policy = effective_policy_for_database_with_groups(
+                &refreshed.policy,
+                &refreshed.group_ids,
+                &refreshed.connection,
+                &session.database,
+            );
+            let refreshed_permissions = match validate_sql_policy(
+                &refreshed.connection,
+                &refreshed_policy,
+                &session.database,
+                &request.sql,
+                false,
+            ) {
+                Ok(permissions) => permissions,
+                Err(error) => return error,
+            };
+            if let Err(error) = validate_transaction_sql_shape(&request.sql) {
+                return tool_error("TRANSACTION_SQL_BLOCKED", error);
+            }
+            if let Some(reason) = confirmed_batch_sql_block_reason(
+                &request.sql,
+                refreshed.connection.db_type,
+                refreshed_permissions.confirmed_write_sql.as_deref(),
+            ) {
+                return tool_error("SQL_BLOCKED", reason);
+            }
+
+            let history_sql = request.sql.clone();
+            let started_at = Instant::now();
+            return match lease.query(request.sql, Some(max_rows as usize)).await {
+                Ok(execution) => {
+                    let rendered = explicit_cell_window
+                        .and_then(|window| {
+                            format_query_result_as_text(&execution.result, max_rows as usize, window).ok()
+                        })
+                        .unwrap_or_else(|| format_query_result(&execution.result, max_rows as usize));
+                    self.save_mcp_sql_history(
+                        &refreshed.connection,
+                        &session.database,
+                        &history_sql,
+                        started_at,
+                        true,
+                        None,
+                        Some(execution.result.affected_rows as i64),
+                    )
+                    .await;
+                    transaction_success_result(&session.id, &rendered, execution)
+                }
+                Err(error) => {
+                    self.save_mcp_sql_history(
+                        &refreshed.connection,
+                        &session.database,
+                        &history_sql,
+                        started_at,
+                        false,
+                        Some(error.message.clone()),
+                        None,
+                    )
+                    .await;
+                    transaction_failure_result(&session.id, error)
+                }
+            };
+        }
+        let history_sql = request.sql.clone();
+        let mut arguments = json!({ "sql": request.sql, "limit": max_rows });
         if let Some(schema) = self.scope.schema.as_deref() {
             arguments["schema"] = json!(schema);
         }
@@ -750,8 +1008,12 @@ impl DbxMcpServer {
         if let Some(secs) = resolved.policy.query_timeout_secs {
             arguments["timeout_secs"] = json!(secs);
         }
+        let started_at = Instant::now();
         let result =
             self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
+        let success = !result.is_error;
+        let error = result.is_error.then(|| result.content.trim_start_matches("Error: ").to_string());
+        self.save_mcp_sql_history(connection, &database, &history_sql, started_at, success, error, None).await;
         agent_result(result)
     }
 
@@ -759,6 +1021,14 @@ impl DbxMcpServer {
         name = "dbx_execute_batch",
         description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
     )]
+    async fn execute_batch_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<ExecuteBatchQueryRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.execute_batch(parameters)).await
+    }
+
     async fn execute_batch(&self, Parameters(request): Parameters<ExecuteBatchQueryRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_execute_batch").await {
             return error;
@@ -897,6 +1167,132 @@ impl DbxMcpServer {
         {
             return tool_error("SQL_BLOCKED", message);
         }
+        if let Some(session) = session.as_ref().filter(|session| session.transaction_owner.is_some()) {
+            if request.use_transaction == Some(true) {
+                return tool_error(
+                    "TRANSACTION_WITH_SESSION_UNSUPPORTED",
+                    "use_transaction cannot be combined with a transaction-enabled session; use dbx_begin_transaction and dbx_commit_transaction.",
+                );
+            }
+            for statement in &execution_plan.statements {
+                if let Err(error) = validate_transaction_sql_shape(statement) {
+                    return tool_error("TRANSACTION_SQL_BLOCKED", error);
+                }
+            }
+            let owner = session.transaction_owner.as_ref().expect("filtered transaction owner").clone();
+            let lease = match owner.acquire().await {
+                Ok(lease) => lease,
+                Err(error) => return transaction_failure_result(&session.id, error),
+            };
+            if let Err(error) = self.ensure_tool_allowed("dbx_execute_batch").await {
+                return error;
+            }
+            let refreshed = match self
+                .resolve_connection(&ConnectionSelector {
+                    connection_id: Some(session.connection_id.clone()),
+                    connection_name: None,
+                })
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(error) => return error,
+            };
+            if !transaction_connection_supported(&refreshed.connection)
+                || refreshed.connection.id != session.connection_id
+            {
+                return tool_error("TRANSACTION_UNSUPPORTED", "The bound native MySQL connection changed.");
+            }
+            if let Err(error) =
+                ensure_sql_database_scope(&refreshed.database_scope, &refreshed.connection, &session.database, sql)
+            {
+                return error;
+            }
+            if let Err(error) =
+                ensure_sql_database_execution_scope(&refreshed.policy, &refreshed.connection, &session.database, sql)
+            {
+                return error;
+            }
+            let refreshed_policy = effective_policy_for_database_with_groups(
+                &refreshed.policy,
+                &refreshed.group_ids,
+                &refreshed.connection,
+                &session.database,
+            );
+            let refreshed_permissions =
+                match validate_sql_policy(&refreshed.connection, &refreshed_policy, &session.database, sql, false) {
+                    Ok(permissions) => permissions,
+                    Err(error) => return error,
+                };
+            if let Some(message) = confirmed_batch_sql_block_reason(
+                sql,
+                refreshed.connection.db_type,
+                refreshed_permissions.confirmed_write_sql.as_deref(),
+            ) {
+                return tool_error("SQL_BLOCKED", message);
+            }
+            for statement in &execution_plan.statements {
+                if let Err(error) = validate_transaction_sql_shape(statement) {
+                    return tool_error("TRANSACTION_SQL_BLOCKED", error);
+                }
+            }
+
+            let started_at = Instant::now();
+            let executions = lease
+                .batch(
+                    execution_plan.statements.clone(),
+                    Some(BATCH_MAX_ROWS),
+                    request.continue_on_error.unwrap_or(false),
+                )
+                .await;
+            let mut results = Vec::with_capacity(executions.len());
+            let mut failures = Vec::new();
+            for (index, execution) in executions.into_iter().enumerate() {
+                match execution {
+                    Ok(execution) => results.push(crate::backend::BatchStatementResult {
+                        result: execution.result,
+                        execution_error: false,
+                        statement_index: Some(index),
+                        error_message: None,
+                        merged: false,
+                        transaction_state: Some(execution.state),
+                        transaction_outcome: execution.outcome,
+                    }),
+                    Err(error) => {
+                        failures.push(error.message.clone());
+                        results.push(crate::backend::BatchStatementResult {
+                            result: empty_query_result(),
+                            execution_error: true,
+                            statement_index: Some(index),
+                            error_message: Some(error.message),
+                            merged: false,
+                            transaction_state: Some(error.state),
+                            transaction_outcome: error.outcome,
+                        });
+                    }
+                }
+            }
+            let status = owner.status();
+            self.save_mcp_sql_history(
+                &refreshed.connection,
+                &session.database,
+                sql,
+                started_at,
+                failures.is_empty(),
+                (!failures.is_empty()).then(|| failures.join("; ")),
+                failures.is_empty().then(|| {
+                    results.iter().map(|result| result.result.affected_rows).sum::<u64>().min(i64::MAX as u64) as i64
+                }),
+            )
+            .await;
+            let mut tool_result = text(format_batch_results(&results));
+            tool_result.structured_content = Some(json!({
+                "session_id": session.id,
+                "transaction_state": status.state,
+                "transaction_outcome": status.outcome,
+                "results": results,
+            }));
+            return tool_result;
+        }
         // A transactional batch runs on the plain (non-session) pool: the core
         // transaction wrapper ignores client_session_id (query.rs:2970 →
         // execute_statements_in_transaction_typed re-resolves the default pool
@@ -922,6 +1318,7 @@ impl DbxMcpServer {
         // regeneration.
         options.timeout_secs = resolved.policy.query_timeout_secs;
         let schema = self.scope.schema.as_deref();
+        let started_at = Instant::now();
         let execution = self.backend.execute_batch(connection, &database, schema, sql, options).await;
         if let Some(client_session_id) = ephemeral_client_session_id.as_deref() {
             if let Err(error) = self.backend.close_client_session(&connection.id, &database, client_session_id).await {
@@ -941,6 +1338,30 @@ impl DbxMcpServer {
                     results[0].merged = true;
                     results[0].statement_index = None;
                 }
+                let failures = results
+                    .iter()
+                    .filter(|result| result.execution_error)
+                    .map(|result| {
+                        result.error_message.clone().unwrap_or_else(|| match result.statement_index {
+                            Some(index) => format!("Statement {} failed", index + 1),
+                            None => "Batch execution failed".to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let success = failures.is_empty();
+                let affected_rows = success.then(|| {
+                    results.iter().map(|result| result.result.affected_rows).sum::<u64>().min(i64::MAX as u64) as i64
+                });
+                self.save_mcp_sql_history(
+                    connection,
+                    &database,
+                    sql,
+                    started_at,
+                    success,
+                    (!failures.is_empty()).then(|| failures.join("; ")),
+                    affected_rows,
+                )
+                .await;
                 let markdown = format_batch_results(&results);
                 // Issue #7548 requires structured per-statement results so callers do not
                 // parse concatenated text. MCP requires structuredContent to be an object,
@@ -949,7 +1370,11 @@ impl DbxMcpServer {
                 tool_result.structured_content = Some(serde_json::json!({ "results": results }));
                 tool_result
             }
-            Err(error) => backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error),
+            Err(error) => {
+                self.save_mcp_sql_history(connection, &database, sql, started_at, false, Some(error.clone()), None)
+                    .await;
+                backend_tool_error("DBX_BATCH_EXECUTION_ERROR", error)
+            }
         }
     }
 
@@ -957,6 +1382,14 @@ impl DbxMcpServer {
         name = "dbx_open_session",
         description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes."
     )]
+    async fn open_session_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<OpenSessionRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.open_session(parameters)).await
+    }
+
     async fn open_session(&self, Parameters(request): Parameters<OpenSessionRequest>) -> CallToolResult {
         if let Err(error) = self.ensure_tool_allowed("dbx_open_session").await {
             return error;
@@ -976,14 +1409,169 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let (session, expired) = self.sessions.open(&connection.id, &database).await.into_parts();
+        if request.enable_transactions && !transaction_connection_supported(connection) {
+            return tool_error(
+                "TRANSACTION_UNSUPPORTED",
+                "Fixed-session transactions require a native local MySQL connection without an external driver profile.",
+            );
+        }
+        let (session, expired) = if request.enable_transactions {
+            self.sessions.reserve_opening(&connection.id, &database).await.into_parts()
+        } else {
+            self.sessions.open(&connection.id, &database).await.into_parts()
+        };
         self.close_backend_sessions_best_effort(expired).await;
-        match session {
-            Ok(session) => text(format!(
-                "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
+        let session = match session {
+            Ok(session) => session,
+            Err(error) => return tool_error("SESSION_LIMIT", error),
+        };
+        if request.enable_transactions {
+            let (prepared, acknowledge) =
+                self.spawn_transaction_session_open(connection.clone(), database.clone(), session.clone());
+            let owner = match prepared.await {
+                Ok(Ok(owner)) => owner,
+                Ok(Err(error)) => return backend_tool_error("TRANSACTION_UNSUPPORTED", error),
+                Err(_) => return tool_error("SESSION_OPEN_ERROR", "Transaction session open worker stopped."),
+            };
+            let session = match self.sessions.promote_opening(&session.id, owner).await {
+                Ok(session) => session,
+                Err(error) => return tool_error("SESSION_OPEN_ERROR", error),
+            };
+            let mut result = text(format!(
+                "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\ntransactions: enabled\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
                 session.id, connection.name, connection.id, database
-            )),
-            Err(error) => tool_error("SESSION_LIMIT", error),
+            ));
+            result.structured_content = Some(json!({
+                "session_id": session.id,
+                "transaction_state": "idle",
+                "transaction_outcome": null,
+            }));
+            let _ = acknowledge.send(());
+            return result;
+        }
+        text(format!(
+            "Session opened.\nsession_id: {}\nconnection: {} (id: {})\ndatabase: {}\n\nPass session_id to dbx_execute_query to run every query on the same pinned connection. Close with dbx_close_session when done.",
+            session.id, connection.name, connection.id, database
+        ))
+    }
+
+    #[tool(
+        name = "dbx_begin_transaction",
+        description = "Begin a transaction on a transaction-enabled native MySQL session"
+    )]
+    async fn begin_transaction_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<TransactionSessionRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.begin_transaction(parameters)).await
+    }
+
+    async fn begin_transaction(&self, Parameters(request): Parameters<TransactionSessionRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_begin_transaction").await {
+            return error;
+        }
+        let (session, expired) = self.sessions.resolve(&request.session_id).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        let Some(session) = session else {
+            return tool_error(
+                "SESSION_NOT_FOUND",
+                format!("Session \"{}\" not found or expired.", request.session_id),
+            );
+        };
+        let Some(owner) = session.transaction_owner.clone() else {
+            return tool_error("TRANSACTION_UNSUPPORTED", "This session was not opened with enable_transactions=true.");
+        };
+        let lease = match owner.acquire().await {
+            Ok(lease) => lease,
+            Err(error) => return transaction_failure_result(&session.id, error),
+        };
+        if let Err(error) = self.ensure_tool_allowed("dbx_begin_transaction").await {
+            return error;
+        }
+        if let Err(error) = self.validate_transaction_control(&session, "BEGIN").await {
+            return error;
+        }
+        match lease.begin().await {
+            Ok(result) => transaction_success_result(&session.id, "Transaction started.", result),
+            Err(error) => transaction_failure_result(&session.id, error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_commit_transaction",
+        description = "Commit the active transaction; committed is reported only after MySQL acknowledges COMMIT"
+    )]
+    async fn commit_transaction_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<TransactionSessionRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.commit_transaction(parameters)).await
+    }
+
+    async fn commit_transaction(&self, Parameters(request): Parameters<TransactionSessionRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_commit_transaction").await {
+            return error;
+        }
+        let (session, expired) = self.sessions.resolve(&request.session_id).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        let Some(session) = session else {
+            return tool_error(
+                "SESSION_NOT_FOUND",
+                format!("Session \"{}\" not found or expired.", request.session_id),
+            );
+        };
+        let Some(owner) = session.transaction_owner.clone() else {
+            return tool_error("TRANSACTION_UNSUPPORTED", "This session was not opened with enable_transactions=true.");
+        };
+        let lease = match owner.acquire().await {
+            Ok(lease) => lease,
+            Err(error) => return transaction_failure_result(&session.id, error),
+        };
+        if let Err(error) = self.ensure_tool_allowed("dbx_commit_transaction").await {
+            return error;
+        }
+        if let Err(error) = self.validate_transaction_control(&session, "COMMIT").await {
+            return error;
+        }
+        match lease.commit().await {
+            Ok(result) => transaction_success_result(&session.id, "Transaction committed.", result),
+            Err(error) => transaction_failure_result(&session.id, error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_rollback_transaction",
+        description = "Roll back the active transaction. Cleanup remains available after write-policy revocation."
+    )]
+    async fn rollback_transaction_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<TransactionSessionRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.rollback_transaction(parameters)).await
+    }
+
+    async fn rollback_transaction(&self, Parameters(request): Parameters<TransactionSessionRequest>) -> CallToolResult {
+        let (session, expired) = self.sessions.resolve(&request.session_id).await.into_parts();
+        self.close_backend_sessions_best_effort(expired).await;
+        let Some(session) = session else {
+            return tool_error(
+                "SESSION_NOT_FOUND",
+                format!("Session \"{}\" not found or expired.", request.session_id),
+            );
+        };
+        let Some(owner) = session.transaction_owner.clone() else {
+            return tool_error("TRANSACTION_UNSUPPORTED", "This session was not opened with enable_transactions=true.");
+        };
+        let lease = match owner.acquire().await {
+            Ok(lease) => lease,
+            Err(error) => return transaction_failure_result(&session.id, error),
+        };
+        match lease.rollback().await {
+            Ok(result) => transaction_success_result(&session.id, "Transaction rolled back.", result),
+            Err(error) => transaction_failure_result(&session.id, error),
         }
     }
 
@@ -991,10 +1579,15 @@ impl DbxMcpServer {
         name = "dbx_close_session",
         description = "Close a stateful query session and release its pinned backend connection"
     )]
+    async fn close_session_tool(
+        &self,
+        cancellation: tokio_util::sync::CancellationToken,
+        parameters: Parameters<CloseSessionRequest>,
+    ) -> CallToolResult {
+        cancellable_tool_call(cancellation, self.close_session(parameters)).await
+    }
+
     async fn close_session(&self, Parameters(request): Parameters<CloseSessionRequest>) -> CallToolResult {
-        if let Err(error) = self.ensure_tool_allowed("dbx_close_session").await {
-            return error;
-        }
         let (session, expired) = self.sessions.begin_close(&request.session_id).await.into_parts();
         self.close_backend_sessions_best_effort(expired).await;
         let Some(session) = session else {
@@ -1003,23 +1596,30 @@ impl DbxMcpServer {
                 format!("Session \"{}\" not found or already closed.", request.session_id),
             );
         };
-        match self
-            .backend
-            .close_client_session(&session.connection_id, &session.database, &session.client_session_id)
-            .await
-        {
-            Ok(_) => {
-                self.sessions.finish_close(&session.id).await;
-                text(format!("Session \"{}\" closed.", session.id))
-            }
-            Err(error) => {
-                self.sessions.restore_after_failed_close(session).await;
-                backend_tool_error("SESSION_CLOSE_ERROR", error)
-            }
+        let session_id = session.id.clone();
+        let cleanup = self.spawn_session_cleanup(session);
+        let cleanup = match cleanup.await {
+            Ok(cleanup) => cleanup,
+            Err(_) => return tool_error("SESSION_CLOSE_ERROR", "Session cleanup worker stopped."),
+        };
+        if let Some(error) = cleanup.error {
+            return backend_tool_error("SESSION_CLOSE_ERROR", error);
         }
+        let mut result = text(format!("Session \"{}\" closed.", session_id));
+        if let Some(status) = cleanup.status {
+            result.structured_content = Some(json!({
+                "session_id": session_id,
+                "transaction_state": status.state,
+                "transaction_outcome": status.outcome,
+            }));
+        }
+        result
     }
 
-    #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
+    #[tool(
+        name = "dbx_execute_redis_command",
+        description = "Execute a Redis command on a Redis connection. Use the db argument to select a logical database instead of sending SELECT. Use SCAN rather than KEYS when enumerating keys."
+    )]
     async fn execute_redis_command(
         &self,
         Parameters(request): Parameters<ExecuteRedisCommandRequest>,
@@ -1043,6 +1643,12 @@ impl DbxMcpServer {
             Ok(argv) => argv,
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
         };
+        if argv[0].eq_ignore_ascii_case("SELECT") {
+            return tool_error(
+                "REDIS_DATABASE_SELECTION_REQUIRED",
+                "Redis SELECT is not available through MCP. Set the db argument to the logical database number instead; when db is omitted, DBX uses the current scoped database.",
+            );
+        }
         let safety = classify_command(&argv[0]);
         let policy = effective_policy_for_database_with_groups(
             &resolved.policy,
@@ -1620,10 +2226,57 @@ impl DbxMcpServer {
         }
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
         self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
+    async fn validate_transaction_control(&self, session: &McpSession, operation: &str) -> Result<(), CallToolResult> {
+        let resolved = self
+            .resolve_connection(&ConnectionSelector {
+                connection_id: Some(session.connection_id.clone()),
+                connection_name: None,
+            })
+            .await?;
+        if !transaction_connection_supported(&resolved.connection) {
+            return Err(tool_error(
+                "TRANSACTION_UNSUPPORTED",
+                "The session connection is no longer a native MySQL connection.",
+            ));
+        }
+        ensure_database_in_scope(&resolved.database_scope, &session.database)?;
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            &resolved.connection,
+            &session.database,
+        );
+        if policy.read_only {
+            return Err(tool_error(
+                "MCP_READ_ONLY",
+                format!("MCP execution permission is read-only; {operation} is write-capable."),
+            ));
+        }
+        if resolved.connection.read_only {
+            return Err(tool_error(
+                "CONNECTION_READ_ONLY",
+                format!("Connection \"{}\" is read-only; {operation} is blocked.", resolved.connection.name),
+            ));
+        }
+        if is_production_database(&resolved.connection, &session.database) {
+            return Err(tool_error(
+                "PRODUCTION_WRITE_BLOCKED",
+                format!("{operation} is not allowed against a production database."),
+            ));
+        }
+        Ok(())
+    }
+
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn ensure_tool_allowed(&self, tool_name: &str) -> Result<(), CallToolResult> {
         let policy = self.load_policy().await?;
         if policy_allows_tool(&policy, tool_name) {
@@ -1723,6 +2376,8 @@ impl DbxMcpServer {
         Ok(database)
     }
 
+    // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
+    #[allow(clippy::result_large_err)]
     async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
         let policy = self.load_policy().await?;
         let group_paths = self
@@ -1824,6 +2479,43 @@ fn text(value: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(value)])
 }
 
+async fn cancellable_tool_call(
+    cancellation: tokio_util::sync::CancellationToken,
+    operation: impl std::future::Future<Output = CallToolResult>,
+) -> CallToolResult {
+    tokio::select! {
+        result = operation => result,
+        _ = cancellation.cancelled() => tool_error("REQUEST_CANCELLED", "The MCP request was cancelled."),
+    }
+}
+
+fn transaction_success_result(session_id: &str, message: &str, execution: TransactionResult) -> CallToolResult {
+    let mut result = text(format!(
+        "{message}\nsession_id: {session_id}\ntransaction_state: {}{}",
+        execution.state.as_str(),
+        execution.outcome.map(|outcome| format!("\ntransaction_outcome: {}", outcome.as_str())).unwrap_or_default()
+    ));
+    result.structured_content = Some(json!({
+        "session_id": session_id,
+        "transaction_state": execution.state,
+        "transaction_outcome": execution.outcome,
+        "result": execution.result,
+    }));
+    result
+}
+
+fn transaction_failure_result(session_id: &str, failure: TransactionFailure) -> CallToolResult {
+    let mut result = tool_error(failure.code, &failure.message);
+    result.structured_content = Some(json!({
+        "session_id": session_id,
+        "transaction_state": failure.state,
+        "transaction_outcome": failure.outcome,
+        "mysql_code": failure.mysql_code,
+        "error": failure.message,
+    }));
+    result
+}
+
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
 }
@@ -1841,6 +2533,7 @@ fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolR
         "PRODUCTION_DATABASE_READ_ONLY",
         "PRODUCTION_WRITE_BLOCKED",
         "SQL_BLOCKED",
+        "TRANSACTION_UNSUPPORTED",
     ] {
         let marker = format!("{code}:");
         if let Some(index) = error.find(&marker) {
@@ -1861,10 +2554,37 @@ fn sql_requires_batch_execution(sql: &str, database_type: DatabaseType) -> bool 
     dbx_core::sql::sql_execution_plan_for_database(sql, database_type).statements.len() > 1
 }
 
-/// Maximum rows returned per statement in a `dbx_execute_batch` call, matching
-/// the `dbx_execute_query` "at most 100 rows" contract so batch responses stay
-/// bounded.
+/// Maximum rows returned per statement in a `dbx_execute_batch` call. The batch
+/// executor is deliberately tighter than dbx_execute_query's default: a script
+/// has many statements, so its row budget multiplies.
 const BATCH_MAX_ROWS: usize = 100;
+
+fn mcp_sql_activity_kind(sql: &str, database_type: DatabaseType) -> &'static str {
+    let risks = dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
+        .statements
+        .into_iter()
+        .filter_map(|statement| classify_sql_risk_for_database(&statement, database_type).ok())
+        .collect::<Vec<_>>();
+    if risks.contains(&SqlRisk::Ddl) {
+        "schema_change"
+    } else if risks.contains(&SqlRisk::Write) {
+        "data_change"
+    } else {
+        "query"
+    }
+}
+
+fn mcp_sql_operation(sql: &str, database_type: DatabaseType) -> String {
+    dbx_core::sql::sql_execution_plan_for_database(sql, database_type)
+        .statements
+        .first()
+        .map(|statement| dbx_core::query_execution_sql::strip_sql_comments(statement))
+        .and_then(|statement| statement.split_whitespace().next().map(str::to_string))
+        .map(|operation| operation.trim_matches(|character: char| !character.is_ascii_alphabetic()).to_string())
+        .filter(|operation| !operation.is_empty())
+        .map(|operation| operation.to_ascii_uppercase())
+        .unwrap_or_else(|| "SQL".to_string())
+}
 
 /// Render a multi-statement batch result as one Markdown text block per
 /// statement. Each statement is labelled by its index so callers can see which
@@ -1906,6 +2626,25 @@ fn format_batch_results(results: &[crate::backend::BatchStatementResult]) -> Str
         }
     }
     output
+}
+
+fn empty_query_result() -> dbx_core::db::QueryResult {
+    dbx_core::db::QueryResult {
+        columns: Vec::new(),
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
+        rows: Vec::new(),
+        affected_rows: 0,
+        execution_time_ms: 0,
+        server_execute_time_us: None,
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+        messages: Vec::new(),
+    }
 }
 
 fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
@@ -2060,6 +2799,10 @@ fn mcp_permissions(
     }
 }
 
+fn transaction_connection_supported(connection: &dbx_core::models::connection::ConnectionConfig) -> bool {
+    crate::backend::native_mysql_transaction_connection(connection)
+}
+
 /// Read the DBX_MCP_CONFIRMED_WRITE_SQL env var (set by the CLI agent when the
 /// user confirmed a specific write SQL). Returns None when the var is unset or
 /// empty, so desktop-embedded MCP contexts (which don't set this var) continue
@@ -2100,6 +2843,214 @@ fn confirmed_batch_sql_block_reason(
          Attempted: {}",
         confirmed, sql
     ))
+}
+
+fn validate_transaction_sql_shape(sql: &str) -> Result<(), String> {
+    use sqlparser::{
+        ast::{Expr, Statement, Visit, Visitor},
+        dialect::MySqlDialect,
+        parser::Parser,
+        tokenizer::{Token, Tokenizer},
+    };
+    use std::ops::ControlFlow;
+
+    const SAFE_FUNCTIONS: &[&str] = &[
+        "abs",
+        "ascii",
+        "avg",
+        "bin",
+        "ceiling",
+        "char_length",
+        "character_length",
+        "coalesce",
+        "concat",
+        "concat_ws",
+        "connection_id",
+        "conv",
+        "count",
+        "crc32",
+        "curdate",
+        "curtime",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "date_format",
+        "datediff",
+        "dayname",
+        "dayofmonth",
+        "dayofweek",
+        "dayofyear",
+        "exp",
+        "floor",
+        "format",
+        "greatest",
+        "hex",
+        "hour",
+        "if",
+        "ifnull",
+        "inet_aton",
+        "inet_ntoa",
+        "instr",
+        "isnull",
+        "json_extract",
+        "json_length",
+        "json_unquote",
+        "json_valid",
+        "last_day",
+        "lcase",
+        "least",
+        "left",
+        "length",
+        "ln",
+        "locate",
+        "log",
+        "log10",
+        "log2",
+        "lower",
+        "lpad",
+        "ltrim",
+        "max",
+        "md5",
+        "microsecond",
+        "min",
+        "minute",
+        "mod",
+        "month",
+        "monthname",
+        "now",
+        "nullif",
+        "oct",
+        "ord",
+        "position",
+        "pow",
+        "power",
+        "quarter",
+        "rand",
+        "repeat",
+        "replace",
+        "reverse",
+        "right",
+        "round",
+        "rpad",
+        "rtrim",
+        "second",
+        "sha",
+        "sha1",
+        "sha2",
+        "sign",
+        "sleep",
+        "space",
+        "sqrt",
+        "str_to_date",
+        "substring",
+        "substr",
+        "time_format",
+        "timediff",
+        "timestampadd",
+        "timestampdiff",
+        "truncate",
+        "unhex",
+        "unix_timestamp",
+        "upper",
+        "ucase",
+        "utc_date",
+        "utc_time",
+        "utc_timestamp",
+        "uuid",
+        "version",
+        "week",
+        "weekday",
+        "year",
+    ];
+
+    struct TransactionFunctionVisitor {
+        rejected: bool,
+    }
+
+    impl Visitor for TransactionFunctionVisitor {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            if let Expr::Function(function) = expr {
+                let parts = &function.name.0;
+                let allowed = parts.len() == 1
+                    && parts.last().and_then(|part| part.as_ident()).is_some_and(|ident| {
+                        SAFE_FUNCTIONS.iter().any(|candidate| ident.value.eq_ignore_ascii_case(candidate))
+                    });
+                if !allowed {
+                    self.rejected = true;
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    if sql.contains("/*!") || sql.contains("/*+") {
+        return Err("Executable comments and optimizer hints are not allowed in transaction sessions.".to_string());
+    }
+    let dialect = MySqlDialect {};
+    let statements = Parser::parse_sql(&dialect, sql).map_err(|error| format!("SQL cannot be proven safe: {error}"))?;
+    let [statement] = statements.as_slice() else {
+        return Err("Transaction session calls must contain exactly one SQL statement.".to_string());
+    };
+    let tokens =
+        Tokenizer::new(&dialect, sql).tokenize().map_err(|error| format!("SQL cannot be tokenized safely: {error}"))?;
+    let has_word = |expected: &str| {
+        tokens.iter().any(|token| matches!(token, Token::Word(word) if word.value.eq_ignore_ascii_case(expected)))
+    };
+    if tokens.iter().any(|token| matches!(token, Token::Assignment)) {
+        return Err("User-variable assignment is not allowed in transaction sessions.".to_string());
+    }
+
+    match statement {
+        Statement::Query(_) => {
+            for forbidden in [
+                "INTO",
+                "OUTFILE",
+                "DUMPFILE",
+                "LOAD_FILE",
+                "GET_LOCK",
+                "RELEASE_LOCK",
+                "IS_FREE_LOCK",
+                "IS_USED_LOCK",
+                "MASTER_POS_WAIT",
+                "SQL_CALC_FOUND_ROWS",
+            ] {
+                if has_word(forbidden) {
+                    return Err(format!("{forbidden} is not allowed in transaction session queries."));
+                }
+            }
+            Ok(())
+        }
+        Statement::Insert(insert)
+            if insert.output.is_none()
+                && insert.returning.is_none()
+                && insert.settings.is_none()
+                && insert.format_clause.is_none()
+                && insert.multi_table_insert_type.is_none()
+                && insert.multi_table_into_clauses.is_empty()
+                && insert.multi_table_when_clauses.is_empty()
+                && insert.multi_table_else_clause.is_none() =>
+        {
+            Ok(())
+        }
+        Statement::Update(update) if update.output.is_none() && update.returning.is_none() => Ok(()),
+        Statement::Delete(delete) if delete.output.is_none() && delete.returning.is_none() => Ok(()),
+        _ => Err(
+            "Transaction sessions allow only SELECT (including locking reads), INSERT, UPDATE, DELETE, and REPLACE."
+                .to_string(),
+        ),
+    }?;
+
+    let mut visitor = TransactionFunctionVisitor { rejected: false };
+    let _ = statement.visit(&mut visitor);
+    if visitor.rejected {
+        return Err(
+            "Only unqualified, known-safe MySQL built-in functions are allowed in transaction sessions.".to_string()
+        );
+    }
+    Ok(())
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
@@ -2180,14 +3131,19 @@ fn validate_mongo_command_with_groups(
             ),
         )
     })?;
-    if matches!(command, MongoCommand::RunCommand { .. }) {
+    let (target_database, command_to_validate) = match &command {
+        MongoCommand::InDatabase { database, command } => (database.as_str(), command.as_ref()),
+        command => (database, command),
+    };
+    ensure_database_in_scope(database_scope, target_database)?;
+    if matches!(command_to_validate, MongoCommand::RunCommand { .. }) {
         return Err(tool_error(
             "SQL_BLOCKED",
             "MongoDB runCommand is not available through MCP; review and execute it manually in DBX.",
         ));
     }
-    if let MongoCommand::Aggregate { pipeline, .. } = &command {
-        dbx_core::mcp_policy::ensure_mongo_database_execution_scope(policy, &connection.id, database, pipeline)
+    if let MongoCommand::Aggregate { pipeline, .. } = command_to_validate {
+        dbx_core::mcp_policy::ensure_mongo_database_execution_scope(policy, &connection.id, target_database, pipeline)
             .map_err(|error| {
                 let (code, message) = error
                     .strip_prefix("QUERY_ERROR: ")
@@ -2196,21 +3152,24 @@ fn validate_mongo_command_with_groups(
                     });
                 tool_error(code, message)
             })?;
-        for target_database in mongo_aggregate_target_databases(pipeline, database)? {
-            ensure_database_in_scope(database_scope, &target_database)?;
+        for output_database in mongo_aggregate_target_databases(pipeline, target_database)? {
+            ensure_database_in_scope(database_scope, &output_database)?;
         }
     }
-    let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, database);
+    let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, target_database);
     let permissions = mcp_permissions(connection, &effective_policy);
-    let production_database = match &command {
+    let production_database = match command_to_validate {
         MongoCommand::Aggregate { pipeline, .. } => {
-            mongo_pipeline_targets_production_database(connection, database, pipeline)
+            mongo_pipeline_targets_production_database(connection, target_database, pipeline)
         }
-        _ => is_production_database(connection, database),
+        _ => is_production_database(connection, target_database),
     };
-    if let Err(error) =
-        mongo::validate_safety(&command, permissions.allow_writes, permissions.allow_dangerous, production_database)
-    {
+    if let Err(error) = mongo::validate_safety(
+        command_to_validate,
+        permissions.allow_writes,
+        permissions.allow_dangerous,
+        production_database,
+    ) {
         return Err(match error {
             MongoSafetyError::WritesDisabled => tool_error(
                 if effective_policy.read_only { "MCP_READ_ONLY" } else { "CONNECTION_READ_ONLY" },
@@ -2429,15 +3388,129 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dbx_core::models::connection::ConnectionConfig;
-    use std::collections::HashSet;
+    use rmcp::{
+        model::{CallToolRequest, CallToolRequestParams, ClientRequest},
+        service::PeerRequestOptions,
+        ServiceExt,
+    };
+    use std::{collections::HashSet, sync::atomic::AtomicUsize, time::Duration};
+
+    struct FakeTransactionIo {
+        in_transaction: bool,
+        executed_sql: Arc<std::sync::Mutex<Vec<String>>>,
+        block_next_sql: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+        disconnects: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::transaction::TransactionIo for FakeTransactionIo {
+        async fn execute(
+            &mut self,
+            sql: &str,
+            _max_rows: Option<usize>,
+        ) -> Result<crate::transaction::TransactionIoSuccess, crate::transaction::TransactionIoError> {
+            self.executed_sql.lock().unwrap().push(sql.to_string());
+            let block = self.block_next_sql.lock().unwrap().take();
+            if let Some(block) = block {
+                block.notified().await;
+            }
+            match sql {
+                "START TRANSACTION" => self.in_transaction = true,
+                "COMMIT" | "ROLLBACK" => self.in_transaction = false,
+                _ => {}
+            }
+            Ok(crate::transaction::TransactionIoSuccess {
+                result: dbx_core::db::QueryResult {
+                    columns: Vec::new(),
+                    column_types: Vec::new(),
+                    column_sortables: Vec::new(),
+                    spatial_columns: Vec::new(),
+                    spatial_values: Vec::new(),
+                    rows: Vec::new(),
+                    affected_rows: 0,
+                    execution_time_ms: 0,
+                    server_execute_time_us: None,
+                    truncated: false,
+                    session_id: None,
+                    has_more: false,
+                    elasticsearch_raw_body: None,
+                    messages: Vec::new(),
+                },
+                in_transaction: self.in_transaction,
+            })
+        }
+
+        async fn ping_in_transaction(&mut self) -> Result<bool, crate::transaction::TransactionIoError> {
+            Ok(self.in_transaction)
+        }
+
+        async fn disconnect(&mut self) {
+            self.disconnects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn transaction_sql_allowlist_accepts_only_rollback_safe_mysql_dml_and_queries() {
+        for sql in [
+            "SELECT id FROM accounts WHERE id = 1",
+            "SELECT id FROM accounts WHERE id = 1 FOR UPDATE",
+            "SELECT CONNECTION_ID(), VERSION(), SLEEP(0)",
+            "SELECT COUNT(*), LOWER(name), COALESCE(name, '') FROM accounts",
+            "INSERT INTO accounts(id) VALUES (1)",
+            "UPDATE accounts SET name = 'safe' WHERE id = 1",
+            "DELETE FROM accounts WHERE id = 1",
+            "REPLACE INTO accounts(id) VALUES (1)",
+        ] {
+            assert!(validate_transaction_sql_shape(sql).is_ok(), "expected allowed: {sql}");
+        }
+
+        for sql in [
+            "CREATE TABLE t(id INT)",
+            "CREATE TEMPORARY TABLE t(id INT)",
+            "ALTER TABLE t ADD COLUMN name TEXT",
+            "DROP TABLE t",
+            "CALL mutate_data()",
+            "LOAD DATA INFILE '/tmp/input' INTO TABLE t",
+            "LOCK TABLES t WRITE",
+            "UNLOCK TABLES",
+            "SET autocommit = 0",
+            "USE another_database",
+            "XA START 'x'",
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "SELECT 1 INTO OUTFILE '/tmp/output'",
+            "SELECT @value := 1",
+            "SELECT evil_udf(id) FROM accounts",
+            "SELECT app.evil_udf(id) FROM accounts",
+            "SELECT (SELECT evil_udf())",
+            "INSERT INTO accounts(id) VALUES (evil_udf(1))",
+            "UPDATE accounts SET name = evil_udf(name) WHERE id = 1",
+            "DELETE FROM accounts WHERE evil_udf(id) = 1",
+            "/*!40101 SET autocommit = 0 */",
+            "SELECT 1; DELETE FROM accounts",
+        ] {
+            assert!(validate_transaction_sql_shape(sql).is_err(), "expected rejected: {sql}");
+        }
+    }
 
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        history: std::sync::Mutex<Vec<dbx_core::history::HistoryEntry>>,
         closed_sessions: std::sync::Mutex<Vec<String>>,
         pinned_sessions: std::sync::Mutex<HashSet<String>>,
         close_failures_remaining: std::sync::Mutex<usize>,
+        transaction_owners_opened: AtomicUsize,
+        transaction_owner_sql: Arc<std::sync::Mutex<Vec<String>>>,
+        transaction_block_next_sql: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+        transaction_owner_disconnects: Arc<AtomicUsize>,
+        transaction_owner_budget: Arc<tokio::sync::Semaphore>,
+        transaction_open_before: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        transaction_open_after_owner: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+        transaction_open_error: Option<String>,
+        policy_override: std::sync::Mutex<Option<McpGlobalPolicy>>,
     }
 
     impl Default for FakeBackend {
@@ -2446,9 +3519,19 @@ mod tests {
                 connections: Vec::new(),
                 policy: McpGlobalPolicy::default(),
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
+                history: std::sync::Mutex::new(Vec::new()),
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
                 pinned_sessions: std::sync::Mutex::new(HashSet::new()),
                 close_failures_remaining: std::sync::Mutex::new(0),
+                transaction_owners_opened: AtomicUsize::new(0),
+                transaction_owner_sql: Arc::new(std::sync::Mutex::new(Vec::new())),
+                transaction_block_next_sql: Arc::new(std::sync::Mutex::new(None)),
+                transaction_owner_disconnects: Arc::new(AtomicUsize::new(0)),
+                transaction_owner_budget: Arc::new(tokio::sync::Semaphore::new(32)),
+                transaction_open_before: None,
+                transaction_open_after_owner: None,
+                transaction_open_error: None,
+                policy_override: std::sync::Mutex::new(None),
             }
         }
     }
@@ -2491,12 +3574,52 @@ mod tests {
 
     #[async_trait]
     impl DbxBackend for FakeBackend {
+        async fn save_history_entry(&self, entry: &dbx_core::history::HistoryEntry) -> Result<(), String> {
+            self.history.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
-            Ok(self.policy.clone())
+            Ok(self.policy_override.lock().unwrap().clone().unwrap_or_else(|| self.policy.clone()))
         }
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
+        }
+
+        async fn open_transaction_owner(
+            &self,
+            _connection: &ConnectionConfig,
+            _database: &str,
+            _client_session_id: &str,
+        ) -> Result<Arc<crate::transaction::TransactionOwner>, String> {
+            if let Some(error) = &self.transaction_open_error {
+                return Err(error.clone());
+            }
+            if let Some((entered, release)) = &self.transaction_open_before {
+                entered.notify_one();
+                release.notified().await;
+            }
+            self.transaction_owners_opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let permit = self
+                .transaction_owner_budget
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| "Too many open transaction-enabled MCP sessions (max 32).".to_string())?;
+            let owner = crate::transaction::TransactionOwner::spawn_with_resource_permit(
+                FakeTransactionIo {
+                    in_transaction: false,
+                    executed_sql: self.transaction_owner_sql.clone(),
+                    block_next_sql: self.transaction_block_next_sql.clone(),
+                    disconnects: self.transaction_owner_disconnects.clone(),
+                },
+                crate::transaction::TransactionOwnerConfig::default(),
+                permit,
+            );
+            if let Some((entered, release)) = &self.transaction_open_after_owner {
+                entered.notify_one();
+                release.notified().await;
+            }
+            Ok(owner)
         }
 
         async fn execute_agent_tool(
@@ -2507,6 +3630,8 @@ mod tests {
             arguments: serde_json::Value,
             _permissions: dbx_core::agent_tools::AgentSqlPermissions,
         ) -> dbx_core::agent_events::ToolResult {
+            let is_error = tool_name == "execute_query"
+                && arguments["sql"].as_str().is_some_and(|sql| sql.contains("FAIL_MCP_TEST"));
             if let Some(client_session_id) =
                 arguments.get("client_session_id").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty())
             {
@@ -2516,8 +3641,8 @@ mod tests {
             dbx_core::agent_events::ToolResult {
                 tool_call_id: "test".to_string(),
                 tool_name: tool_name.to_string(),
-                content: "ok".to_string(),
-                is_error: false,
+                content: if is_error { "Error: query failed" } else { "ok" }.to_string(),
+                is_error,
                 explain_data: None,
             }
         }
@@ -2609,6 +3734,8 @@ mod tests {
                     "client_session_id": client_session_id,
                 }),
             ));
+            let execution_error = sql.contains("FAIL_MCP_TEST") || sql.contains("FAIL_MCP_NO_MESSAGE_TEST");
+
             Ok(vec![crate::backend::BatchStatementResult {
                 result: dbx_core::db::QueryResult {
                     columns: vec![],
@@ -2619,16 +3746,19 @@ mod tests {
                     rows: vec![],
                     affected_rows: 0,
                     execution_time_ms: 1,
+                    server_execute_time_us: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
                     elasticsearch_raw_body: None,
                     messages: vec![],
                 },
-                execution_error: false,
+                execution_error,
                 statement_index: Some(0),
-                error_message: None,
+                error_message: sql.contains("FAIL_MCP_TEST").then(|| "statement failed".to_string()),
                 merged: false,
+                transaction_state: None,
+                transaction_outcome: None,
             }])
         }
     }
@@ -2804,9 +3934,9 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 22);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 20);
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
         #[cfg(not(feature = "mq-admin"))]
@@ -2819,6 +3949,9 @@ mod tests {
         assert!(names.contains(&"dbx_get_routine_source"));
         assert!(names.contains(&"dbx_execute_query"));
         assert!(names.contains(&"dbx_execute_batch"));
+        assert!(names.contains(&"dbx_begin_transaction"));
+        assert!(names.contains(&"dbx_commit_transaction"));
+        assert!(names.contains(&"dbx_rollback_transaction"));
         assert!(names.contains(&"dbx_add_connection"));
         assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
@@ -2930,9 +4063,9 @@ mod tests {
             ("dbx_describe_table", &["database", "schema"]),
             ("dbx_list_routines", &["database", "schema", "routine_type"]),
             ("dbx_get_routine_source", &["database", "schema", "signature"]),
-            ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit"]),
+            ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit", "max_rows"]),
             ("dbx_execute_batch", &["database", "session_id", "continue_on_error", "use_transaction"]),
-            ("dbx_open_session", &["database"]),
+            ("dbx_open_session", &["database", "enable_transactions"]),
             ("dbx_open_table", &["database", "schema"]),
             ("dbx_execute_and_show", &["database"]),
             ("dbx_add_connection", &["port", "database", "driver_profile"]),
@@ -2987,10 +4120,14 @@ mod tests {
 
         assert!(omitted.selector.connection_id.is_none());
         assert!(omitted.selector.connection_name.is_none());
+        assert!(omitted.max_rows.is_none());
         assert!(explicit_nulls.selector.connection_id.is_none());
         assert!(explicit_nulls.selector.connection_name.is_none());
         assert_eq!(by_name.selector.connection_name.as_deref(), Some("test_conn"));
         assert_eq!(by_id.selector.connection_id.as_deref(), Some("123e4567-e89b-12d3-a456-426614174000"));
+
+        let with_max_rows: ExecuteQueryRequest = serde_json::from_str(r#"{"sql":"SELECT 1","max_rows":500}"#).unwrap();
+        assert_eq!(with_max_rows.max_rows, Some(500));
 
         let nested = serde_json::from_str::<ExecuteQueryRequest>(
             r#"{"connection_name":{"tool":"dbx_dbx_execute_query","error":"Invalid input"},"sql":"SELECT 1"}"#,
@@ -3056,9 +4193,9 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 17);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 15);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -3069,6 +4206,9 @@ mod tests {
         assert!(names.iter().any(|name| name == "dbx_get_routine_source"));
         assert!(names.iter().any(|name| name == "dbx_open_session"));
         assert!(names.iter().any(|name| name == "dbx_close_session"));
+        assert!(names.iter().any(|name| name == "dbx_begin_transaction"));
+        assert!(names.iter().any(|name| name == "dbx_commit_transaction"));
+        assert!(names.iter().any(|name| name == "dbx_rollback_transaction"));
         #[cfg(feature = "mq-admin")]
         assert!(names.iter().any(|name| name == "dbx_send_message"));
     }
@@ -3134,6 +4274,34 @@ mod tests {
         assert_eq!(server.resolve_redis_database(Some(2), &redis).unwrap(), 2);
         let error = server.resolve_redis_database(Some(3), &redis).unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+    }
+
+    #[tokio::test]
+    async fn redis_select_is_rejected_even_with_high_risk_access() {
+        let redis = connection("redis", "redis", "redis", "0");
+        let backend = Arc::new(FakeBackend {
+            connections: vec![redis],
+            policy: McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: true,
+                allowed_connection_ids: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                selector: ConnectionSelector { connection_name: None, connection_id: Some("redis".to_string()) },
+                db: Some(8),
+                command: "SELECT 8".to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(result_text(&result).contains("REDIS_DATABASE_SELECTION_REQUIRED"));
+        assert!(result_text(&result).contains("Set the db argument"));
     }
 
     #[test]
@@ -3225,6 +4393,7 @@ mod tests {
                 session_id: None,
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert_eq!(result_text(&show_databases), "- aa\n- aaa\n- abc");
@@ -3336,6 +4505,109 @@ mod tests {
             assert!(result_text(&error).contains("SQL_BLOCKED"));
             assert!(result_text(&error).contains("runCommand"));
         }
+    }
+
+    #[test]
+    fn mongo_sibling_database_run_command_is_never_exposed_through_mcp() {
+        let mongo = connection("mongo", "mongo", "mongodb", "operations");
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            ..Default::default()
+        };
+
+        let error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::All,
+            "operations",
+            r#"db.getSiblingDB("staging").runCommand({ping: 1})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("SQL_BLOCKED"));
+        assert!(result_text(&error).contains("runCommand"));
+    }
+
+    #[test]
+    fn mongo_sibling_database_honors_target_scope_and_read_only_policy() {
+        let mongo = connection("mongo", "mongo", "mongodb", "operations");
+        let policy = McpGlobalPolicy {
+            connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
+                connection_id: "mongo".to_string(),
+                read_only: false,
+                allow_dangerous_sql: true,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: McpDatabaseScope::Selected,
+                allowed_databases: vec!["operations".to_string(), "reporting".to_string()],
+                database_policies: vec![
+                    dbx_core::storage::McpDatabasePolicy {
+                        database_name: "operations".to_string(),
+                        read_only: false,
+                        allow_dangerous_sql: true,
+                    },
+                    dbx_core::storage::McpDatabasePolicy {
+                        database_name: "reporting".to_string(),
+                        read_only: true,
+                        allow_dangerous_sql: false,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let read_only_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string(), "reporting".to_string()]),
+            "operations",
+            r#"db.getSiblingDB("reporting").users.deleteMany({_id: 1})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&read_only_error).contains("MCP_READ_ONLY"));
+
+        let scope_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string()]),
+            "operations",
+            r#"db.getSiblingDB("reporting").users.find({})"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&scope_error).contains("DATABASE_OUT_OF_SCOPE"));
+    }
+
+    #[test]
+    fn mongo_sibling_database_aggregate_honors_output_scope_and_production_protection() {
+        let mut mongo = connection("mongo", "mongo", "mongodb", "operations");
+        mongo.production_databases = vec!["production".to_string()];
+        let policy = McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: true,
+            allowed_connection_ids: None,
+            ..Default::default()
+        };
+
+        let production_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::All,
+            "operations",
+            r#"db.getSiblingDB("staging").items.aggregate([{"$out":{"db":"production","coll":"archive"}}])"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&production_error).contains("PRODUCTION_WRITE_BLOCKED"));
+
+        let scope_error = validate_mongo_command(
+            &mongo,
+            &policy,
+            &DatabaseScope::Selected(vec!["operations".to_string(), "staging".to_string()]),
+            "operations",
+            r#"db.getSiblingDB("staging").items.aggregate([{"$merge":{"into":{"db":"archive","coll":"items"}}}])"#,
+        )
+        .unwrap_err();
+        assert!(result_text(&scope_error).contains("DATABASE_OUT_OF_SCOPE"));
     }
 
     #[test]
@@ -3500,13 +4772,434 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opted_in_session_exposes_transaction_tools_and_structured_state() {
+        let policy = McpGlobalPolicy { read_only: false, allow_dangerous_sql: true, ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            policy,
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        let session_id = opened_session_id(&opened);
+        assert_eq!(backend.transaction_owners_opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(opened.structured_content.as_ref().unwrap()["transaction_state"], "idle");
+
+        let begun =
+            server.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&begun).contains("transaction_state: active"));
+        assert_eq!(begun.structured_content.as_ref().unwrap()["transaction_state"], "active");
+
+        let queried = server
+            .execute_query(Parameters(ExecuteQueryRequest {
+                selector: selector("mysql"),
+                database: None,
+                sql: "SELECT id FROM accounts WHERE id = 1 FOR UPDATE".to_string(),
+                session_id: Some(session_id.clone()),
+                cell_char_offset: None,
+                cell_char_limit: None,
+                max_rows: None,
+            }))
+            .await;
+        assert!(queried.structured_content.is_some(), "{}", result_text(&queried));
+        assert_eq!(queried.structured_content.as_ref().unwrap()["transaction_state"], "active");
+
+        let committed =
+            server.commit_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        let structured = committed.structured_content.as_ref().unwrap();
+        assert!(result_text(&committed).contains("transaction_outcome: committed"));
+        assert_eq!(structured["transaction_state"], "idle");
+        assert_eq!(structured["transaction_outcome"], "committed");
+
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
+        assert!(!closed.is_error.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn legacy_session_open_text_is_unchanged_when_transactions_are_disabled() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
+
+        assert!(!result_text(&opened).contains("transactions:"));
+    }
+
+    #[tokio::test]
+    async fn transaction_opt_in_rejects_non_mysql_external_profiles_and_unsupported_backends() {
+        let postgres_backend = Arc::new(FakeBackend {
+            connections: vec![connection("pg", "pg", "postgres", "app")],
+            ..Default::default()
+        });
+        let postgres_server = DbxMcpServer::with_runtime_options(postgres_backend.clone(), McpScope::default(), false);
+        let rejected = postgres_server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("pg"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&rejected).contains("TRANSACTION_UNSUPPORTED"));
+        assert_eq!(postgres_backend.transaction_owners_opened.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let mut builtin_mysql = connection("builtin", "builtin", "mysql", "app");
+        builtin_mysql.driver_profile = Some("mysql".to_string());
+        let builtin_backend = Arc::new(FakeBackend { connections: vec![builtin_mysql], ..Default::default() });
+        let builtin_server = DbxMcpServer::with_runtime_options(builtin_backend.clone(), McpScope::default(), false);
+        let opened = builtin_server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("builtin"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(!opened.is_error.unwrap_or(false));
+        assert_eq!(builtin_backend.transaction_owners_opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let mut external_mysql = connection("external", "external", "mysql", "app");
+        external_mysql.driver_profile = Some("custom-profile".to_string());
+        let external_backend = Arc::new(FakeBackend { connections: vec![external_mysql], ..Default::default() });
+        let external_server = DbxMcpServer::with_runtime_options(external_backend.clone(), McpScope::default(), false);
+        let rejected = external_server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("external"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&rejected).contains("TRANSACTION_UNSUPPORTED"));
+        assert_eq!(external_backend.transaction_owners_opened.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let unsupported_backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            transaction_open_error: Some("TRANSACTION_UNSUPPORTED: backend has no native fixed session".to_string()),
+            ..Default::default()
+        });
+        let unsupported_server = DbxMcpServer::with_runtime_options(unsupported_backend, McpScope::default(), false);
+        let rejected = unsupported_server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&rejected).contains("TRANSACTION_UNSUPPORTED"));
+    }
+
+    #[tokio::test]
+    async fn invalid_transaction_transitions_do_not_send_sql() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        let session_id = opened_session_id(&opened);
+
+        let no_active_commit =
+            server.commit_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&no_active_commit).contains("TRANSACTION_NOT_ACTIVE"));
+        server.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        let nested =
+            server.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&nested).contains("TRANSACTION_ALREADY_ACTIVE"));
+        server.rollback_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        let no_active_rollback =
+            server.rollback_transaction(Parameters(TransactionSessionRequest { session_id })).await;
+        assert!(result_text(&no_active_rollback).contains("TRANSACTION_NOT_ACTIVE"));
+        assert_eq!(backend.transaction_owner_sql.lock().unwrap().as_slice(), ["START TRANSACTION", "ROLLBACK"]);
+    }
+
+    #[tokio::test]
+    async fn queued_transaction_query_rechecks_revoked_policy_before_io() {
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            policy: policy.clone(),
+            ..Default::default()
+        });
+        let server = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        let session_id = opened_session_id(&opened);
+        server.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        *backend.transaction_block_next_sql.lock().unwrap() = Some(release_first.clone());
+        let first = {
+            let server = server.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        sql: "SELECT id FROM accounts WHERE id = 1 FOR UPDATE".to_string(),
+                        session_id: Some(session_id),
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                        max_rows: None,
+                    }))
+                    .await
+            })
+        };
+        while backend.transaction_owner_sql.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        let queued = {
+            let server = server.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        sql: "UPDATE accounts SET name = 'revoked' WHERE id = 1".to_string(),
+                        session_id: Some(session_id),
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                        max_rows: None,
+                    }))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        let mut revoked = policy;
+        revoked.read_only = true;
+        *backend.policy_override.lock().unwrap() = Some(revoked);
+        release_first.notify_one();
+        assert!(!first.await.unwrap().is_error.unwrap_or(false));
+
+        let denied = queued.await.unwrap();
+        assert!(result_text(&denied).contains("MCP_READ_ONLY"));
+        assert_eq!(
+            backend.transaction_owner_sql.lock().unwrap().as_slice(),
+            ["START TRANSACTION", "SELECT id FROM accounts WHERE id = 1 FOR UPDATE"]
+        );
+
+        let rolled_back =
+            server.rollback_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(!rolled_back.is_error.unwrap_or(false));
+        let closed = server.close_session(Parameters(CloseSessionRequest { session_id })).await;
+        assert!(!closed.is_error.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn transaction_batch_keeps_one_lease_and_reports_each_resulting_state() {
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            policy,
+            ..Default::default()
+        });
+        let server = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        let session_id = opened_session_id(&opened);
+        server.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        *backend.transaction_block_next_sql.lock().unwrap() = Some(release_first.clone());
+        let batch = {
+            let server = server.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                server
+                    .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        sql: "UPDATE accounts SET name = 'first' WHERE id = 1; SELECT id FROM accounts WHERE id = 1"
+                            .to_string(),
+                        session_id: Some(session_id),
+                        continue_on_error: Some(true),
+                        use_transaction: None,
+                    }))
+                    .await
+            })
+        };
+        while backend.transaction_owner_sql.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        let queued_query = {
+            let server = server.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        sql: "SELECT id FROM accounts WHERE id = 2".to_string(),
+                        session_id: Some(session_id),
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                        max_rows: None,
+                    }))
+                    .await
+            })
+        };
+        release_first.notify_one();
+        let batch = batch.await.unwrap();
+        assert!(!batch.is_error.unwrap_or(false));
+        let structured = batch.structured_content.as_ref().unwrap();
+        assert_eq!(structured["transaction_state"], "active");
+        assert_eq!(structured["results"][0]["transaction_state"], "active");
+        assert_eq!(structured["results"][1]["transaction_state"], "active");
+        assert!(!queued_query.await.unwrap().is_error.unwrap_or(false));
+        assert_eq!(
+            backend.transaction_owner_sql.lock().unwrap().as_slice(),
+            [
+                "START TRANSACTION",
+                "UPDATE accounts SET name = 'first' WHERE id = 1",
+                "SELECT id FROM accounts WHERE id = 1",
+                "SELECT id FROM accounts WHERE id = 2",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_protocol_server_rolls_back_its_active_transaction_sessions() {
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            policy,
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        let session_id = opened_session_id(&opened);
+        server.begin_transaction(Parameters(TransactionSessionRequest { session_id })).await;
+
+        drop(server);
+
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            loop {
+                if backend.transaction_owner_sql.lock().unwrap().as_slice() == ["START TRANSACTION", "ROLLBACK"] {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("protocol session teardown must trigger bounded rollback");
+    }
+
+    #[tokio::test]
+    async fn protocol_cancellation_drops_a_busy_transaction_tool_request() {
+        let policy = McpGlobalPolicy { allow_dangerous_sql: true, ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            policy,
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+        let mut client = ().serve(client_transport).await.unwrap();
+        let mut service = server_task.await.unwrap().unwrap();
+        let arguments = |value: serde_json::Value| value.as_object().cloned().unwrap();
+
+        let opened = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_open_session").with_arguments(arguments(json!({
+                "connection_id": "mysql",
+                "database": "app",
+                "enable_transactions": true
+            }))))
+            .await
+            .unwrap();
+        let session_id = opened.structured_content.unwrap()["session_id"].as_str().unwrap().to_string();
+        client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new("dbx_begin_transaction")
+                    .with_arguments(arguments(json!({"session_id": session_id}))),
+            )
+            .await
+            .unwrap();
+
+        *backend.transaction_block_next_sql.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+        let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+            CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments(json!({
+                "connection_id": "mysql",
+                "database": "app",
+                "session_id": session_id,
+                "sql": "SELECT id FROM accounts WHERE id = 1 FOR UPDATE"
+            }))),
+        ));
+        let request = client.peer().send_cancellable_request(request, PeerRequestOptions::no_options()).await.unwrap();
+        while backend.transaction_owner_sql.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        request.cancel(Some("test cancellation".to_string())).await.unwrap();
+
+        let follow_up = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            client.peer().call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(arguments(json!({
+                "connection_id": "mysql",
+                "database": "app",
+                "session_id": session_id,
+                "sql": "SELECT 2"
+            })))),
+        )
+        .await
+        .expect("protocol cancellation must release the transaction operation slot")
+        .unwrap();
+        assert_eq!(follow_up.is_error, Some(true));
+
+        let _ = client.close_with_timeout(std::time::Duration::from_millis(250)).await;
+        let _ = service.close_with_timeout(std::time::Duration::from_millis(250)).await;
+    }
+
+    #[tokio::test]
     async fn session_queries_pin_client_session_and_close_releases_pool() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
         let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
         let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
 
-        let opened =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("sr"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         let session_id = opened_session_id(&opened);
 
         // A USE statement is allowed inside the session and runs with the
@@ -3519,6 +5212,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert_eq!(result_text(&result), "ok");
@@ -3538,6 +5232,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert!(result_text(&mismatch).contains("SESSION_DATABASE_MISMATCH"));
@@ -3556,6 +5251,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));
@@ -3578,6 +5274,7 @@ mod tests {
                 session_id: None,
                 cell_char_offset: Some(200),
                 cell_char_limit: Some(800),
+                max_rows: None,
             }))
             .await;
 
@@ -3589,6 +5286,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_query_forwards_and_clamps_max_rows() {
+        let elasticsearch = connection("esm", "esm", "elasticsearch", "");
+        let backend = Arc::new(FakeBackend { connections: vec![elasticsearch], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        for max_rows in [None, Some(500), Some(100_000), Some(0)] {
+            let result = server
+                .execute_query(Parameters(ExecuteQueryRequest {
+                    selector: selector("esm"),
+                    database: None,
+                    sql: "GET /logs/_search".to_string(),
+                    session_id: None,
+                    cell_char_offset: None,
+                    cell_char_limit: None,
+                    max_rows,
+                }))
+                .await;
+            assert_eq!(result_text(&result), "ok");
+        }
+
+        let recorded = backend.recorded_arguments.lock().unwrap();
+        let limits = recorded
+            .iter()
+            .filter(|(name, _)| name == "execute_query")
+            .map(|(_, arguments)| arguments["limit"].as_u64().expect("limit should be published"))
+            .collect::<Vec<_>>();
+        // Omitted keeps the historical 100-row default; explicit values are clamped
+        // into 1..=MAX_EXECUTE_QUERY_ROWS rather than rejected.
+        assert_eq!(limits, vec![100, 500, MAX_EXECUTE_QUERY_ROWS as u64, 1]);
+    }
+
+    #[tokio::test]
     async fn expired_sessions_close_backend_pools_without_accumulating() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
         let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
@@ -3596,8 +5325,13 @@ mod tests {
         let mut expired_client_session_ids = Vec::new();
 
         for _ in 0..3 {
-            let opened =
-                server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+            let opened = server
+                .open_session(Parameters(OpenSessionRequest {
+                    selector: selector("sr"),
+                    database: None,
+                    enable_transactions: false,
+                }))
+                .await;
             let session_id = opened_session_id(&opened);
             let result = server
                 .execute_query(Parameters(ExecuteQueryRequest {
@@ -3607,6 +5341,7 @@ mod tests {
                     session_id: Some(session_id.clone()),
                     cell_char_offset: None,
                     cell_char_limit: None,
+                    max_rows: None,
                 }))
                 .await;
             assert_eq!(result_text(&result), "ok");
@@ -3616,8 +5351,13 @@ mod tests {
             expired_client_session_ids.push(format!("mcp:{session_id}"));
         }
 
-        let opened =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("sr"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         let final_session_id = opened_session_id(&opened);
         assert!(backend.pinned_sessions.lock().unwrap().is_empty());
         assert_eq!(backend.closed_sessions.lock().unwrap().as_slice(), expired_client_session_ids.as_slice());
@@ -3627,14 +5367,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_eager_open_while_backend_acquisition_is_blocked_does_not_leak_capacity() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            transaction_open_before: Some((entered.clone(), release.clone())),
+            ..Default::default()
+        });
+        let server = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let opening = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .open_session(Parameters(OpenSessionRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        enable_transactions: true,
+                    }))
+                    .await
+            })
+        };
+        entered.notified().await;
+
+        opening.abort();
+        assert!(opening.await.unwrap_err().is_cancelled());
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while backend.closed_sessions.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled provisional open must close its backend session");
+        assert_eq!(backend.transaction_owner_disconnects.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_eager_open_after_owner_acquisition_disposes_owner_and_backend_session() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            transaction_open_after_owner: Some((entered.clone(), release.clone())),
+            ..Default::default()
+        });
+        let server = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let opening = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .open_session(Parameters(OpenSessionRequest {
+                        selector: selector("mysql"),
+                        database: None,
+                        enable_transactions: true,
+                    }))
+                    .await
+            })
+        };
+        entered.notified().await;
+
+        opening.abort();
+        assert!(opening.await.unwrap_err().is_cancelled());
+        release.notify_waiters();
+
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while backend.closed_sessions.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled prepared open must close its backend session");
+        assert_eq!(backend.transaction_owner_disconnects.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn two_protocol_servers_share_physical_owner_budget_until_cleanup_finishes() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("mysql", "mysql", "mysql", "app")],
+            ..Default::default()
+        });
+        let server_a = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let server_b = Arc::new(DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false));
+        let mut sessions_a = Vec::new();
+        for _ in 0..16 {
+            let opened = server_a
+                .open_session(Parameters(OpenSessionRequest {
+                    selector: selector("mysql"),
+                    database: None,
+                    enable_transactions: true,
+                }))
+                .await;
+            assert!(!opened.is_error.unwrap_or(false));
+            sessions_a.push(opened_session_id(&opened));
+        }
+        for _ in 0..16 {
+            let opened = server_b
+                .open_session(Parameters(OpenSessionRequest {
+                    selector: selector("mysql"),
+                    database: None,
+                    enable_transactions: true,
+                }))
+                .await;
+            assert!(!opened.is_error.unwrap_or(false));
+        }
+
+        let rejected = server_b
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&rejected).contains("max 32"));
+
+        let session_id = sessions_a.pop().unwrap();
+        let hidden_from_other_protocol =
+            server_b.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        assert!(result_text(&hidden_from_other_protocol).contains("SESSION_NOT_FOUND"));
+        server_a.begin_transaction(Parameters(TransactionSessionRequest { session_id: session_id.clone() })).await;
+        let rollback_release = Arc::new(tokio::sync::Notify::new());
+        *backend.transaction_block_next_sql.lock().unwrap() = Some(rollback_release.clone());
+        let closing = {
+            let server = server_a.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move { server.close_session(Parameters(CloseSessionRequest { session_id })).await })
+        };
+        while !backend.transaction_owner_sql.lock().unwrap().iter().any(|sql| sql == "ROLLBACK") {
+            tokio::task::yield_now().await;
+        }
+        closing.abort();
+        assert!(closing.await.unwrap_err().is_cancelled());
+
+        let still_rejected = server_b
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(result_text(&still_rejected).contains("max 32"));
+
+        rollback_release.notify_one();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            while backend.transaction_owner_budget.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("physical owner permit must return after disposal");
+
+        let opened = server_b
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("mysql"),
+                database: None,
+                enable_transactions: true,
+            }))
+            .await;
+        assert!(!opened.is_error.unwrap_or(false));
+    }
+
+    #[tokio::test]
     async fn failed_session_close_can_be_retried() {
         let starrocks = connection("sr", "sr", "starrocks", "default_catalog");
         let backend = Arc::new(FakeBackend { connections: vec![starrocks], ..Default::default() });
         *backend.close_failures_remaining.lock().unwrap() = 1;
         let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
 
-        let opened =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("sr"), database: None })).await;
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("sr"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         let session_id = opened_session_id(&opened);
         let query = server
             .execute_query(Parameters(ExecuteQueryRequest {
@@ -3644,6 +5551,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert_eq!(result_text(&query), "ok");
@@ -3660,6 +5568,7 @@ mod tests {
                 session_id: Some(session_id.clone()),
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert_eq!(result_text(&retry_query), "ok");
@@ -3679,8 +5588,13 @@ mod tests {
             McpScope::default(),
             false,
         );
-        let rejected =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("redis"), database: None })).await;
+        let rejected = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("redis"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         assert!(result_text(&rejected).contains("SESSION_UNSUPPORTED"));
 
         let missing = server
@@ -3691,6 +5605,7 @@ mod tests {
                 session_id: Some("mcp-session-nope".to_string()),
                 cell_char_offset: None,
                 cell_char_limit: None,
+                max_rows: None,
             }))
             .await;
         assert!(result_text(&missing).contains("SESSION_NOT_FOUND"));
@@ -3740,8 +5655,13 @@ mod tests {
         let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
         let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
 
-        let opened =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("pg"), database: None })).await;
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("pg"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         let session_id = opened_session_id(&opened);
 
         let result = server
@@ -3830,13 +5750,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executed_mcp_query_is_saved_with_source_and_failure_status() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let query = |sql: &str| ExecuteQueryRequest {
+            selector: selector("pg"),
+            database: None,
+            sql: sql.to_string(),
+            session_id: None,
+            max_rows: None,
+            cell_char_offset: None,
+            cell_char_limit: None,
+        };
+        let success = server.execute_query(Parameters(query("SELECT 1"))).await;
+        let failure = server.execute_query(Parameters(query("SELECT 1 /* FAIL_MCP_TEST */"))).await;
+        assert_ne!(success.is_error, Some(true));
+        assert_eq!(failure.is_error, Some(true));
+
+        let history = backend.history.lock().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].connection_id, "pg");
+        assert_eq!(history[0].connection_name, "Reporting");
+        assert_eq!(history[0].database, "app");
+        assert_eq!(history[0].sql, "SELECT 1");
+        assert!(history[0].success);
+        assert_eq!(history[0].details_json.as_deref(), Some(r#"{"source":"mcp"}"#));
+        assert!(!history[1].success);
+        assert!(history[1].error.as_deref().unwrap_or_default().contains("query failed"));
+    }
+
+    #[tokio::test]
+    async fn mcp_batch_failure_is_recorded_once_without_claiming_success() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let sql = "SELECT 1 /* FAIL_MCP_TEST */; SELECT 2";
+        let result = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: sql.to_string(),
+                session_id: None,
+                continue_on_error: Some(true),
+                use_transaction: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("failed"));
+        let history = backend.history.lock().unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].sql, sql);
+        assert!(!history[0].success);
+        assert!(history[0].error.as_deref().unwrap_or_default().contains("statement failed"));
+    }
+
+    #[tokio::test]
+    async fn mcp_batch_error_without_message_is_still_recorded_as_failed() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "SELECT 1 /* FAIL_MCP_NO_MESSAGE_TEST */".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("failed"));
+        let history = backend.history.lock().unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].success);
+        assert_eq!(history[0].error.as_deref(), Some("Statement 1 failed"));
+    }
+
+    #[tokio::test]
+    async fn preflight_rejection_does_not_enter_execution_history() {
+        let postgres = connection("pg", "Reporting", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: " ".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: None,
+            }))
+            .await;
+        assert_eq!(result.is_error, Some(true));
+        assert!(backend.history.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mcp_history_metadata_handles_comments_and_mixed_batches() {
+        assert_eq!(mcp_sql_operation("-- context\nSELECT 1", DatabaseType::Postgres), "SELECT");
+        assert_eq!(
+            mcp_sql_activity_kind(
+                "UPDATE accounts SET active = true; CREATE INDEX active_idx ON accounts(active)",
+                DatabaseType::Postgres
+            ),
+            "schema_change"
+        );
+    }
+
+    #[tokio::test]
     async fn execute_batch_rejects_transaction_with_session() {
         let postgres = connection("pg", "pg", "postgres", "app");
         let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
         let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
 
-        let opened =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("pg"), database: None })).await;
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("pg"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         let session_id = opened_session_id(&opened);
 
         let result = server
@@ -4006,8 +6040,13 @@ mod tests {
 
         // A real session bound to the same connection must likewise reach
         // execution rather than be rejected as a transaction/session conflict.
-        let opened =
-            server.open_session(Parameters(OpenSessionRequest { selector: selector("pg"), database: None })).await;
+        let opened = server
+            .open_session(Parameters(OpenSessionRequest {
+                selector: selector("pg"),
+                database: None,
+                enable_transactions: false,
+            }))
+            .await;
         let session_id = opened_session_id(&opened);
         let with_session = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
@@ -4100,6 +6139,7 @@ mod tests {
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -4110,6 +6150,8 @@ mod tests {
             statement_index: Some(2),
             error_message: Some("syntax error near SELECT".to_string()),
             merged: false,
+            transaction_state: None,
+            transaction_outcome: None,
         }];
         let output = format_batch_results(&results);
         assert!(output.contains("### Statement 3"));
@@ -4129,6 +6171,7 @@ mod tests {
                 rows: vec![],
                 affected_rows: 2,
                 execution_time_ms: 0,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -4139,6 +6182,8 @@ mod tests {
             statement_index: None,
             error_message: None,
             merged: true,
+            transaction_state: None,
+            transaction_outcome: None,
         }];
         let output = format_batch_results(&results);
         assert!(output.contains("### Transaction outcome"));

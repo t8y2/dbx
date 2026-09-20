@@ -46,6 +46,7 @@ export type ShortcutActionId =
   | "closeOtherTabs"
   | "focusSearch"
   | "quickOpen"
+  | "globalSearch"
   | "toggleAiPanel"
   | "navigateTabHistoryBack"
   | "navigateTabHistoryForward"
@@ -411,6 +412,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+P",
   },
   {
+    id: "globalSearch",
+    labelKey: "settings.shortcutGlobalSearch",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+F",
+  },
+  {
     id: "toggleAiPanel",
     labelKey: "settings.shortcutToggleAiPanel",
     scope: "global",
@@ -626,7 +633,19 @@ function hasExplicitShortcut(settings: Partial<ShortcutSettings> | undefined, ac
 }
 
 function shortcutsUseSameKeys(first: string, second: string, platform = globalThis.navigator?.platform || ""): boolean {
-  return !!first && !!second && formatShortcut(first, platform).toLowerCase() === formatShortcut(second, platform).toLowerCase();
+  const comparisonKey = (shortcut: string) =>
+    formatShortcut(shortcut, platform)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((stroke) => {
+        const parts = stroke.split("+").filter(Boolean);
+        if (parts.length <= 1) return stroke.toLowerCase();
+        const key = parts.pop()!;
+        return [...parts.sort(), key].join("+").toLowerCase();
+      })
+      .join(" ");
+  return !!first && !!second && comparisonKey(first) === comparisonKey(second);
 }
 
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
@@ -777,4 +796,50 @@ export function findShortcutConflict(actionId: ShortcutActionId, shortcut: strin
 
   const conflict = SHORTCUT_DEFINITIONS.find((item) => item.id !== actionId && item.scope === definition.scope && shortcutsUseSameKeys(shortcuts[item.id], shortcut, platform));
   return conflict?.id ?? null;
+}
+
+/**
+ * 跨作用域同键（**仅用于提示，不参与任何修复**）。
+ *
+ * 不同作用域共用同一个组合是**有意的设计**：`find`（editor）与
+ * `focusSearch`（global）默认都是 `Mod+F`，运行时由焦点/目标路由区分
+ * （`App.vue` 在 `defaultPrevented` 时让位，`ContentArea.focusSearch()`
+ * 按聚焦面路由）。因此本函数只**只读地报告**这类重叠，供设置界面以
+ * “提示”级别展示；绝不能拿它的结果去改写配置——`normalizeShortcutSettings`
+ * 的占用判定刻意只统计**同作用域**（见该函数内的两张占用轮），跨作用域
+ * 重叠不在其范围内。
+ *
+ * 同作用域重复**不**在此返回（那是必须阻断的冲突，见 `findShortcutConflict`）。
+ * 未绑定（空串）不参与比较。比较口径与 `findShortcutConflict` 一致：
+ * `formatShortcut` 展开 `Mod`、修饰键排序、大小写不敏感，因此
+ * `Mod+Shift+D` 与 `Shift+Mod+D` 视为同键。
+ */
+export function findCrossScopeShortcutConflicts(shortcuts: ShortcutSettings, platform = globalThis.navigator?.platform || ""): Partial<Record<ShortcutActionId, ShortcutActionId[]>> {
+  const conflicts: Partial<Record<ShortcutActionId, ShortcutActionId[]>> = {};
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    const shortcut = shortcuts[definition.id];
+    if (!shortcut) continue;
+    const others = SHORTCUT_DEFINITIONS.filter((item) => item.id !== definition.id && item.scope !== definition.scope && shortcutsUseSameKeys(shortcuts[item.id], shortcut, platform)).map((item) => item.id);
+    if (others.length > 0) conflicts[definition.id] = others;
+  }
+  return conflicts;
+}
+
+/**
+ * 去重后的重复对数。行→对方 的映射会把同一对重复算两次（双向各一次），
+ * 而摘要文案要说的是“有多少组重复”，故统一按无序对折算。
+ *
+ * 同时接受 L1（每行单个对方）与 L2（每行多个对方）两种形状，
+ * 让同作用域与跨作用域的计数口径保持一致。
+ */
+export function countShortcutConflictPairs(conflicts: Partial<Record<ShortcutActionId, ShortcutActionId | ShortcutActionId[]>>): number {
+  const pairs = new Set<string>();
+  for (const [actionId, value] of Object.entries(conflicts)) {
+    if (!value) continue;
+    for (const other of Array.isArray(value) ? value : [value]) {
+      if (!other) continue;
+      pairs.add([actionId, other].sort().join("|"));
+    }
+  }
+  return pairs.size;
 }

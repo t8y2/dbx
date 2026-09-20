@@ -46,7 +46,7 @@ const STRUCTURED_BACKEND_ERROR_KEYS = [
   "backendErrors.unknown",
 ] as const;
 
-// Reproduces the exact string crates/dbx-core/src/agent_service.rs builds on
+// Reproduces the exact string crates/dbx-drivers/src/agent_service.rs builds on
 // Windows: `\` line continuations strip the newline plus the following indent.
 const WINDOWS_JRE_REMOVE_ERROR = [
   "Failed to remove the old JRE directory: C:\\dbx\\jre21",
@@ -60,6 +60,22 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // Every backend message changed away from hardcoded Chinese, paired with the
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
+  {
+    name: "plugin update requires closing related connections",
+    message: "Plugin update blocked by active connections: Production S3, Local storage",
+    key: "pluginPlatform.updateBlockedByConnections",
+    params: { labels: "Production S3, Local storage" },
+  },
+  {
+    name: "plugin update waits for active operations",
+    message: "Plugin update blocked by active operations. Please wait for them to finish.",
+    key: "pluginPlatform.updateBlockedByOperations",
+  },
+  {
+    name: "connection admission waits for plugin update",
+    message: "Plugin update is in progress. Please try again after it finishes.",
+    key: "pluginPlatform.updateInProgress",
+  },
   {
     name: "Nacos ordinary user must configure managed namespaces when namespace discovery is forbidden",
     message: "Failed to list Nacos namespaces: NACOS_ERROR[v3ManagedNamespacesRequired]: access denied",
@@ -107,7 +123,7 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "mongo.import.legacyInsertUnsupported",
   },
   {
-    // crates/dbx-core/src/mongodb_import_export.rs attributes a batch-level failure to a row.
+    // crates/dbx-core/src/data/mongodb_import_export.rs attributes a batch-level failure to a row.
     name: "MongoDB Legacy insertMany unsupported on a located row",
     message: "row 1: MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver",
     key: "mongo.import.legacyInsertUnsupported",
@@ -454,6 +470,26 @@ describe("backend error translation", () => {
     expect(translateBackendError(t, error, "ClickHouse error: table analytics.events does not exist")).toBe(`${t("backendErrors.legacy")}\n\nClickHouse error: table analytics.events does not exist`);
   });
 
+  test("renders plugin signature failures without exposing the JSON error envelope", () => {
+    const detail = "Plugin package is signed by untrusted key 'dbx-store-release-2026'";
+    const error = JSON.stringify({
+      version: 1,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend",
+      origin: { subsystem: "backend", adapter: "legacy" },
+      operationOutcome: "unknown",
+      detail,
+    });
+
+    for (const locale of ["zh-CN", "en"] as const) {
+      const t = translatorFor(locale);
+      expect(translateBackendError(t, error)).toBe(`${t("backendErrors.legacy")}\n\n${detail}`);
+      expect(translateBackendError(t, new Error(error))).toBe(`${t("backendErrors.legacy")}\n\n${detail}`);
+    }
+  });
+
   test("does not append the generic transport fallback to a structured error", () => {
     const t = translatorFor("zh-CN");
     const error = {
@@ -566,15 +602,15 @@ describe("backend error wording is pinned to the Rust sources", () => {
   const rust = (path: string) => readFileSync(new URL(`../../../../../${path}`, import.meta.url), "utf8");
 
   test.each([
-    ["crates/dbx-core/src/query_result_export.rs", "Streaming export is unsupported for this query. Simplify it or use a supported driver."],
-    ["crates/dbx-core/src/query_result_export.rs", "Streaming export needs a result-set session, but this driver returned no session_id."],
-    ["crates/dbx-core/src/mongodb_import_export.rs", "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"],
-    ["crates/dbx-core/src/mongodb_import_export.rs", "MongoDB Legacy Agent returned an invalid find cursor"],
-    ["crates/dbx-core/src/mongo_ops.rs", "MongoDB Legacy Agent rejected "],
-    ["crates/dbx-core/src/agent_service.rs", "Failed to remove the old JRE directory: "],
-    ["crates/dbx-core/src/agent_service.rs", "is in use by drivers: "],
-    ["crates/dbx-core/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],
-    ["crates/dbx-core/src/mq/adapters/kafka.rs", "Kafka does not support unloading topics"],
+    ["crates/dbx-core/src/data/query_result_export.rs", "Streaming export is unsupported for this query. Simplify it or use a supported driver."],
+    ["crates/dbx-core/src/data/query_result_export.rs", "Streaming export needs a result-set session, but this driver returned no session_id."],
+    ["crates/dbx-core/src/data/mongodb_import_export.rs", "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"],
+    ["crates/dbx-core/src/data/mongodb_import_export.rs", "MongoDB Legacy Agent returned an invalid find cursor"],
+    ["crates/dbx-core/src/query/mongo_ops.rs", "MongoDB Legacy Agent rejected "],
+    ["crates/dbx-drivers/src/agent_service.rs", "Failed to remove the old JRE directory: "],
+    ["crates/dbx-drivers/src/agent_service.rs", "is in use by drivers: "],
+    ["crates/dbx-drivers/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],
+    ["crates/dbx-core/src/admin/mq/adapters/kafka.rs", "Kafka does not support unloading topics"],
     ["crates/dbx-web/src/auth.rs", "Please try again in {remaining}s"],
     ["crates/dbx-web/src/routes/agents.rs", "Close these database connections before updating drivers: "],
     ["src-tauri/src/commands/agents.rs", "Close these database connections before updating drivers: "],

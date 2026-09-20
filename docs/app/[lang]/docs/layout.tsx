@@ -33,7 +33,7 @@ export default async function Layout({ params, children }: { params: Promise<{ l
         themeSwitch={{ enabled: false }}
         sidebar={{
           defaultOpenLevel: 1,
-          footer: <DocsSidebarFooter key="docs-sidebar-footer" />,
+          footer: <DocsSidebarFooter key="docs-sidebar-footer" lang={locale} />,
         }}
       >
         {children}

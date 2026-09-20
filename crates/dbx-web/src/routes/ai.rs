@@ -460,6 +460,7 @@ pub async fn ai_agent_stream(
         cli_mcp_server_command: None,
         sql_permissions,
         max_agent_turns,
+        prompt_cache_key: request.prompt_cache_key.clone(),
     };
 
     let sid = session_id.clone();

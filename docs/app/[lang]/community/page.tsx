@@ -104,7 +104,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ lang
   const t = i18n[l];
 
   return (
-    <main className="min-h-screen bg-[#08080a] text-landing-ink">
+    <main className="min-h-screen bg-landing-bg text-landing-ink">
       <LandingNav lang={l} active="community" />
 
       <div className="max-w-[860px] mx-auto px-6 pt-32 pb-4 max-[760px]:px-[18px] max-[760px]:pt-28">

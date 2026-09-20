@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.14"
+version = "0.6.17"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ rust-version = "1.88.0"
 
 [lib]
 name = "dbx_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts"]
@@ -56,6 +56,8 @@ tiberius = { version = "0.12.3", default-features = false, features = ["tds73", 
 tokio-util = { version = "0.7", features = ["compat"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 regex = "1"
+grep = "0.3"
+ignore = "0.4"
 futures = "0.3"
 mongodb = { version = "3.2.5", features = ["socks5-proxy"] }
 percent-encoding = "2"

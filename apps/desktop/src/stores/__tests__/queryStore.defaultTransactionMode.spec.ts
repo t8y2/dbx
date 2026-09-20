@@ -83,6 +83,22 @@ describe("queryStore default transaction mode", () => {
     expect(tab.autoCommit).toBe(false);
   });
 
+  it("creates a Dameng query tab in manual transaction mode when configured", async () => {
+    editorSettings.defaultTransactionMode = "manual";
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "dameng-1",
+      name: "Dameng",
+      db_type: "dameng",
+      database: "DM",
+    });
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("dameng-1", "DM", "Query", "query", "PUBLIC");
+
+    expect(store.tabs.find((item) => item.id === tabId)!.autoCommit).toBe(false);
+  });
+
   it("creates a query tab in auto-commit mode by default", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

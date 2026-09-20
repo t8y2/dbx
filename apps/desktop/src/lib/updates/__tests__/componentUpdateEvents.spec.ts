@@ -23,4 +23,14 @@ describe("component update events", () => {
     expect(listener).toHaveBeenCalledOnce();
     window.removeEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
   });
+
+  it("is inert when the store runs outside a browser environment", () => {
+    vi.stubGlobal("window", undefined);
+    try {
+      expect(() => notifyComponentPluginsUpdated()).not.toThrow();
+      expect(() => notifyComponentUpdatesChanged()).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

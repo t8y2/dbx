@@ -796,7 +796,7 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
                 Ok(Ok(_)) => Ok(()),
                 // Reachable and authenticated, only the PING privilege is missing (issue #9394).
                 Ok(Err(error)) if is_redis_command_denied_error(&error.to_string()) => Ok(()),
-                Ok(Err(error)) => Err(error.to_string()),
+                Ok(Err(error)) => Err(format!("Redis cluster ping failed: {error}")),
                 Err(_) => Err(format!("Redis cluster ping timed out ({}s)", super::CONNECTION_TIMEOUT_SECS)),
             };
         match cluster_ping {
@@ -1117,14 +1117,14 @@ fn is_redis_auth_error(error: &str) -> bool {
 
 /// True when the server rejected a command because the account may not run it, rather than because
 /// the connection or the credentials are broken. Redis reports this as `NOPERM`; managed Redis
-/// endpoints and proxies in front of them use "not supported" / "unknown command" phrasing for the
+/// endpoints and proxies in front of them use "not support" / "unknown command" phrasing for the
 /// same situation, which is what issue #9394 hit when its account was denied `PING`.
 fn is_redis_command_denied_error(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("noperm")
         || error.contains("no permissions")
         || error.contains("permission denied")
-        || error.contains("not supported")
+        || error.contains("not support")
         || error.contains("unknown command")
         || error.contains("unsupported command")
 }
@@ -7272,6 +7272,7 @@ mod tests {
         assert!(is_redis_command_denied_error(noperm));
         assert!(is_redis_command_denied_error("ERR unknown command 'PING'"));
         assert!(is_redis_command_denied_error("ERR command 'PING' not supported"));
+        assert!(is_redis_command_denied_error("command 'PING' not support for your account"));
         assert!(!is_redis_command_denied_error("WRONGPASS invalid username-password pair"));
 
         // The liveness probe must report a denied PING as plain wording, otherwise the credential

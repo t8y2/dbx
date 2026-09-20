@@ -32,6 +32,10 @@ describe("plugin center integration", () => {
     expect(appSource).toContain("function syncToolbarComponentUpdateState()");
   });
 
+  it("refreshes all update sources in the background whenever the update center opens", () => {
+    expect(appSource).toContain("function handleToolbarUpdateClick() {\n  showUpdateDialog.value = true;\n  if (!checkingAllUpdates.value) void checkAllUpdates();\n}");
+  });
+
   it("refreshes the plugin center after component-level plugin updates", () => {
     expect(appSource).toContain("notifyComponentPluginsUpdated()");
     expect(pluginCenterSource).toContain("COMPONENT_PLUGINS_UPDATED_EVENT");

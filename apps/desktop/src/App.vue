@@ -1223,7 +1223,7 @@ function openDriverStoreFromUpdate(target?: DriverStoreTab) {
 
 function handleToolbarUpdateClick() {
   showUpdateDialog.value = true;
-  if (!toolbarHasUpdateAvailable.value && !checkingAllUpdates.value) void checkAllUpdates();
+  if (!checkingAllUpdates.value) void checkAllUpdates();
 }
 
 function syncToolbarComponentUpdateState() {

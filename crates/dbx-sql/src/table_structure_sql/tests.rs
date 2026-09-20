@@ -1439,6 +1439,74 @@ fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers(
 }
 
 #[test]
+fn oracle_create_table_extracts_single_line_trigger_source_into_the_body() {
+    let mut id = column("id");
+    id.data_type = "NUMBER".to_string();
+    // Oracle returns ALL_SOURCE verbatim when a trigger is written on a single line, so the
+    // declaration must be stripped before it is appended after `FOR EACH ROW`. t8y2/dbx#9731.
+    let cloned_trigger = trigger(
+        "DBX_V1_TRG_COPY_TRG1",
+        "BEFORE",
+        "INSERT",
+        "TRIGGER dbx_v1_trg_bi BEFORE INSERT ON dbx_v1_trg FOR EACH ROW BEGIN NULL; END;",
+    );
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        driver_profile: None,
+        schema: Some("APP".to_string()),
+        table_name: "dbx_copy".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![cloned_trigger],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE \"APP\".dbx_copy (\n  \"id\" NUMBER\n);",
+            "CREATE OR REPLACE TRIGGER \"APP\".DBX_V1_TRG_COPY_TRG1 BEFORE INSERT ON \"APP\".dbx_copy\nFOR EACH ROW\nBEGIN NULL; END;",
+        ]
+    );
+}
+
+#[test]
+fn oracle_create_table_warns_instead_of_emitting_an_unparsed_trigger_declaration() {
+    let mut id = column("id");
+    id.data_type = "NUMBER".to_string();
+    let unsplittable = trigger("odd_trg", "BEFORE", "INSERT", "TRIGGER odd_trg COMPOUND TRIGGER");
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        driver_profile: None,
+        schema: Some("APP".to_string()),
+        table_name: "dbx_copy".to_string(),
+        columns: vec![id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![unsplittable],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+    });
+
+    assert_eq!(result.statements, vec!["CREATE TABLE \"APP\".dbx_copy (\n  \"id\" NUMBER\n);"]);
+    assert_eq!(result.warnings.len(), 1);
+    assert!(result.warnings[0].contains("odd_trg"), "unexpected warning: {:?}", result.warnings);
+}
+
+#[test]
 fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
     let mut column = column("CamelCase");
     column.data_type = "NUMBER".to_string();

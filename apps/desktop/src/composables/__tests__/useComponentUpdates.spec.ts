@@ -28,7 +28,7 @@ const settings = {
 vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => settings }));
 vi.mock("@/i18n", () => ({ currentLocale: () => "zh-CN" }));
-vi.mock("@/lib/plugins/pluginMarketplace", () => ({ buildMarketplacePluginListings: mocks.buildMarketplacePluginListings }));
+vi.mock("@/lib/plugins/pluginMarketplace", async (importOriginal) => ({ ...(await importOriginal<object>()), buildMarketplacePluginListings: mocks.buildMarketplacePluginListings }));
 
 const mcpStatus = {
   installed: true,

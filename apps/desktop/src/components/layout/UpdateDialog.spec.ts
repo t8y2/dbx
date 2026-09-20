@@ -512,4 +512,31 @@ describe("UpdateDialog aggregate update center", () => {
 
     expect(installComponentUpdates).toHaveBeenCalledWith("drivers");
   });
+
+  it("marks only a plugin whose update source changed as needing confirmation in the Plugin Center", async () => {
+    const listing = (id: string, provenance: Record<string, string>) => ({
+      key: `official:${id}`,
+      status: "update",
+      artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash", signingKeyId: "key-a" },
+      repository: { id: "official" },
+      plugin: { id, latestVersion: "1.1.0", publisher: "DBX" },
+      installed: { manifest: { id, version: "1.0.0" }, provenance },
+      name: `${id} plugin`,
+    });
+    await mountDialog(0, {}, undefined, {
+      updateInfo: null,
+      pluginUpdates: [listing("same", { repositoryId: "official" }), listing("moved", { repositoryId: "other-repo" })],
+    });
+
+    const pluginsTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="plugins"]');
+    pluginsTab?.click();
+    await flushDialog();
+
+    // "Update all" skips the changed-source plugin, so the dialog has to explain why it stays.
+    const hint = "Confirm the change in the Plugin Center first";
+    const rows = [...document.body.querySelectorAll<HTMLElement>(".rounded-md.border.p-3")];
+    const rowFor = (name: string) => rows.find((row) => row.textContent?.includes(name));
+    expect(rowFor("moved plugin")?.textContent).toContain(hint);
+    expect(rowFor("same plugin")?.textContent).not.toContain(hint);
+  });
 });

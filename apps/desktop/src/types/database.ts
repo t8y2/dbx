@@ -552,10 +552,18 @@ export interface PluginManifest {
   localizations?: Record<string, PluginManifestLocalization>;
 }
 
+export interface PluginInstallProvenance {
+  repositoryId?: string;
+  publisher?: string;
+  signingKeyId?: string;
+  source?: "marketplace" | "url" | "file" | "unknown";
+}
+
 export interface InstalledPlugin {
   manifest: PluginManifest;
   compatibility: PluginCompatibility;
   path?: string;
+  provenance?: PluginInstallProvenance;
 }
 
 export interface PluginTrustedKey {
@@ -635,6 +643,7 @@ export interface PluginMarketplaceInstallRequest {
   repositoryId: string;
   pluginId: string;
   version?: string;
+  allowSourceChange?: boolean;
 }
 
 export interface ActivePluginSession {

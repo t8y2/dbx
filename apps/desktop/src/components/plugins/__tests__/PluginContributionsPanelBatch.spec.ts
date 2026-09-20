@@ -68,6 +68,7 @@ type PanelState = {
   marketplaceListings: MarketplacePluginListing[];
   catalogResults: PluginRepositoryCatalogResult[];
   installedPlugins: InstalledPlugin[];
+  repositories: PluginRepositoryCatalogResult["repository"][];
   selectedListingKeys: Set<string>;
   selectedInstalledIds: Set<string>;
   selectedPluginId: string;
@@ -94,6 +95,17 @@ type PanelState = {
   removeTrustedKey: (keyId: string) => Promise<void>;
   toggleBatchMode: () => void;
   toggleInstalledSelection: (pluginId: string) => void;
+  installedUpdateIndex: Map<string, { listing: MarketplacePluginListing; repositoryName: string }>;
+  installedUpdateCount: number;
+  installedUpdateProgress: { current: number; total: number } | null;
+  catalogChecked: boolean;
+  marketplaceUnavailable: boolean;
+  pendingSourceChange: { listing: MarketplacePluginListing } | null;
+  installedUnsupportedListingFor: (pluginId: string) => MarketplacePluginListing | null;
+  updateInstalledPlugin: (pluginId: string) => Promise<void>;
+  runUpdateAllInstalled: () => Promise<void>;
+  proceedUpdateSourceChange: () => void;
+  refreshMarketplace: () => Promise<void>;
 };
 
 function installed(id: string, version = "1.0.0"): InstalledPlugin {
@@ -123,6 +135,14 @@ function catalog(repositoryId: string, ids: string[], version = "3.0.0"): Plugin
       })),
     },
   };
+}
+
+function unsupportedCatalog(repositoryId: string, ids: string[], version = "3.0.0"): PluginRepositoryCatalogResult {
+  const result = catalog(repositoryId, ids, version);
+  // No artifact for this platform on the catalog's latest version: the listing is "unsupported"
+  // rather than updatable, so the installed tab has to say so instead of reading as up to date.
+  for (const plugin of result.catalog!.plugins) plugin.versions[0].artifacts = [];
+  return result;
 }
 
 function deferred<T>() {
@@ -315,6 +335,96 @@ describe("PluginContributionsPanel installed plugin pin controls", () => {
     await nextTick();
     expect(state.selectedPluginId).toBe("b");
     expect(localStorage.getItem("dbx-plugin-pinned-ids")).toBe('["b"]');
+  });
+});
+
+describe("PluginContributionsPanel installed-tab updates", () => {
+  it("updates an installed plugin through the marketplace install path", async () => {
+    state.batchMode = false;
+    state.selectedPluginId = "a";
+    await nextTick();
+    expect(state.installedUpdateCount).toBe(3);
+
+    await state.updateInstalledPlugin("a");
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0" });
+    expect(mocks.listPlugins).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates all installed updatable plugins in one batch run", async () => {
+    state.batchMode = false;
+    mocks.installMarketplacePlugin.mockRejectedValueOnce(new Error("update denied"));
+    await state.runUpdateAllInstalled();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(3);
+    expect(state.error).toBe("a: update denied");
+    expect(state.installedUpdateProgress).toBeNull();
+    expect(state.batchRunning).toBe(false);
+  });
+
+  it("keeps source-changed plugins out of batch update and reports them", async () => {
+    const moved = installed("a");
+    moved.provenance = { repositoryId: "other-repo", publisher: "DBX", signingKeyId: "test.key", source: "marketplace" };
+    state.installedPlugins = [moved, installed("b"), installed("c")];
+    await nextTick();
+    state.batchMode = false;
+
+    await state.runUpdateAllInstalled();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledTimes(2);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("pluginPlatform.batchSourceChangeSkipped"), 8000);
+  });
+
+  it("confirms a source change before updating with allowSourceChange", async () => {
+    const moved = installed("a");
+    moved.provenance = { repositoryId: "other-repo", publisher: "DBX", signingKeyId: "test.key", source: "marketplace" };
+    state.installedPlugins = [moved, installed("b"), installed("c")];
+    await nextTick();
+    state.batchMode = false;
+    state.selectedPluginId = "a";
+
+    await state.updateInstalledPlugin("a");
+    expect(mutationCount()).toBe(0);
+    expect(state.pendingSourceChange).not.toBeNull();
+
+    state.proceedUpdateSourceChange();
+    await flushUi();
+    expect(mocks.installMarketplacePlugin).toHaveBeenCalledExactlyOnceWith({ repositoryId: "first", pluginId: "a", version: "3.0.0", allowSourceChange: true });
+    expect(state.pendingSourceChange).toBeNull();
+  });
+
+  it("flips to the up-to-date state only after a real catalog check", async () => {
+    state.batchMode = false;
+    state.repositories = [{ id: "first", name: "first", kind: "custom", enabled: true, managed: false }];
+    await nextTick();
+    expect(state.catalogChecked).toBe(true);
+    expect(state.installedUpdateCount).toBe(3);
+
+    mocks.fetchPluginMarketplaceCatalogs.mockRejectedValueOnce(new Error("offline"));
+    await state.refreshMarketplace();
+    expect(state.marketplaceUnavailable).toBe(true);
+    expect(state.catalogChecked).toBe(false);
+
+    await state.refreshMarketplace();
+    expect(state.marketplaceUnavailable).toBe(false);
+
+    state.installedPlugins = [installed("a", "3.0.0"), installed("b", "3.0.0"), installed("c", "3.0.0")];
+    await nextTick();
+    expect(state.catalogChecked).toBe(true);
+    expect(state.installedUpdateCount).toBe(0);
+  });
+
+  it("surfaces installed plugins whose catalog version has no artifact for this platform", async () => {
+    state.batchMode = false;
+    state.catalogResults = [unsupportedCatalog("first", ["a", "b", "c"])];
+    await nextTick();
+
+    expect(state.installedUpdateCount).toBe(0);
+    expect(state.installedUnsupportedListingFor("a")?.target).toBe("darwin-arm64");
+    expect(host.querySelector('[data-plugin-id="a"]')?.textContent).toContain("pluginPlatform.marketplaceStatus.unsupported:");
+
+    // The unsupported badge replaces the amber update marker, never both.
+    state.catalogResults = [catalog("first", ["a", "b", "c"])];
+    await nextTick();
+    expect(state.installedUnsupportedListingFor("a")).toBeNull();
+    expect(host.querySelector('[data-plugin-id="a"]')?.textContent).not.toContain("pluginPlatform.marketplaceStatus.unsupported:");
   });
 });
 

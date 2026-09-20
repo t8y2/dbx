@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import type { UpdateInfo } from "@/lib/backend/api";
 import type { AgentDriverInfo, McpServerStatus, UpdateDownloadSource } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
-import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { pluginSourceChange, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
@@ -302,6 +302,9 @@ watch(
                   <div class="min-w-0">
                     <div class="truncate font-medium">{{ plugin.name }}</div>
                     <div class="mt-0.5 text-xs text-muted-foreground">{{ plugin.installed?.manifest.version || t("updates.notInstalled") }} → {{ plugin.plugin.latestVersion }}</div>
+                    <!-- "Update all" deliberately skips a changed source: the user has to confirm it in
+                         the Plugin Center, so say so instead of leaving an item that never updates. -->
+                    <div v-if="pluginSourceChange(plugin)" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t("pluginPlatform.updateSourceChangeRequired") }}</div>
                   </div>
                   <span class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                 </div>

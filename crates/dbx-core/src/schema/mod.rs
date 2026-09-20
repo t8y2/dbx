@@ -3603,6 +3603,7 @@ done
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
@@ -3718,6 +3719,7 @@ done
                     backend_executable: Some(executable),
                     ..Default::default()
                 },
+                provenance: None,
             };
             let session = std::sync::Arc::new(
                 PluginDriverSession::start_for_test(plugin, "jdbc".into(), PluginRuntimeEnv::default()).await.unwrap(),

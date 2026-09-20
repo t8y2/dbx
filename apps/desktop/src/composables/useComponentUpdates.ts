@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import * as api from "@/lib/backend/api";
 import { currentLocale } from "@/i18n";
-import { buildMarketplacePluginListings, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { buildMarketplacePluginListings, pluginSourceChange, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isUpdatePreviewMockEnabled, previewDriverUpdates, previewJdbcUpdate, previewMcpUpdate, previewPluginUpdates } from "@/lib/updates/updatePreviewMock";
@@ -150,7 +150,10 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   }
 
   async function updatePlugins(result: ComponentUpdateResult) {
-    const updatable = pluginUpdates.value.filter((item) => item.artifact);
+    // Listings whose recorded provenance differs from the offering repository/publisher/key need an
+    // explicit confirmation, which the automatic path cannot give: keep them visible in the update
+    // center (they still count) but let the user confirm them in the Plugin Center instead.
+    const updatable = pluginUpdates.value.filter((item) => item.artifact && !pluginSourceChange(item));
     if (isUpdatePreviewMockEnabled()) {
       result.plugins += updatable.length;
       return;

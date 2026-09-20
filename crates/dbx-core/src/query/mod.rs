@@ -9415,6 +9415,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9521,6 +9522,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
@@ -9638,6 +9640,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9702,6 +9705,7 @@ for line in sys.stdin:
                 backend_executable: Some(dir.join("plugin.sh")),
                 ..Default::default()
             },
+            provenance: None,
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await

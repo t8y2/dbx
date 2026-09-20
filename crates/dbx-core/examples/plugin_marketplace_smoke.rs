@@ -41,6 +41,7 @@ async fn run() -> Result<(), String> {
             repository_id: OFFICIAL_PLUGIN_REPOSITORY_ID.to_string(),
             plugin_id: plugin_id.clone(),
             version,
+            allow_source_change: false,
         })
         .await?;
     if installed.plugin.manifest.id != plugin_id {

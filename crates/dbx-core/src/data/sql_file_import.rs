@@ -86,7 +86,7 @@ struct ControlledSqlFileImportStatement {
     stop_on_error: bool,
 }
 
-const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
+pub(crate) const SQL_FILE_READ_CHUNK_BYTES: usize = 256 * 1024;
 const SQL_FILE_STATEMENT_BATCH_SIZE: usize = 256;
 const SQL_FILE_PREVIEW_ENCODING_SAMPLE_BYTES: usize = 1024 * 1024;
 const SQL_FILE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -1142,8 +1142,9 @@ pub async fn read_sql_file_preview(file_path: &Path, max_chars: usize) -> Result
     Ok(preview.chars().take(max_chars).collect())
 }
 
-struct SqlFileStreamDecoder {
+pub(crate) struct SqlFileStreamDecoder {
     reader: SqlFileByteReader,
+    encoding: &'static encoding_rs::Encoding,
     decoder: encoding_rs::Decoder,
     mysql_binary_normalizer: Option<MysqlDumpBinaryLiteralNormalizer>,
     pending_bytes: Vec<u8>,
@@ -1209,6 +1210,28 @@ impl SqlFileByteReader {
     }
 }
 
+/// 按给定编码跳过匹配的字节序标记，与表导入 `matching_bom_len` 的规则一致：
+/// 只有文件开头确实是该编码的 BOM 时才跳过，编码不匹配时按原样解码。
+async fn detect_matching_charset_bom(
+    file_path: &Path,
+    encoding: &'static encoding_rs::Encoding,
+) -> Result<usize, String> {
+    let mut reader = SqlFileByteReader::open(file_path).await?;
+    let mut prefix = [0u8; 3];
+    let prefix_len = reader.read(&mut prefix).await?;
+    let prefix = &prefix[..prefix_len];
+    if encoding == encoding_rs::UTF_8 && prefix.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Ok(3);
+    }
+    if encoding == encoding_rs::UTF_16LE && prefix.starts_with(&[0xFF, 0xFE]) {
+        return Ok(2);
+    }
+    if encoding == encoding_rs::UTF_16BE && prefix.starts_with(&[0xFE, 0xFF]) {
+        return Ok(2);
+    }
+    Ok(0)
+}
+
 fn is_gzip_sql_file_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -1242,6 +1265,29 @@ impl SqlFileStreamDecoder {
         Self::open_with_options(file_path, None, normalize_mysql_binary_literals, Some(bytes_read)).await
     }
 
+    /// 以调用方已经确定的编码打开解码器。
+    ///
+    /// 表导入会先解析用户的编码设置：显式选择了编码时不再自动探测，
+    /// 只按该编码跳过匹配的 BOM，否则与旧的非流式实现按同一规则解码。
+    pub(crate) async fn open_for_import(
+        file_path: &Path,
+        encoding: Option<&'static encoding_rs::Encoding>,
+        normalize_mysql_binary_literals: bool,
+        bytes_read: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, String> {
+        let Some(encoding) = encoding else {
+            return Self::open_with_options(file_path, None, normalize_mysql_binary_literals, bytes_read).await;
+        };
+        let bom_len = detect_matching_charset_bom(file_path, encoding).await?;
+        Self::open_with_resolved_encoding(file_path, encoding, bom_len, normalize_mysql_binary_literals, bytes_read)
+            .await
+    }
+
+    /// 解码器实际使用的文本编码（显式指定或自动探测的结果）。
+    pub(crate) fn encoding(&self) -> &'static encoding_rs::Encoding {
+        self.encoding
+    }
+
     async fn open_with_options(
         file_path: &Path,
         detection_limit: Option<usize>,
@@ -1250,6 +1296,23 @@ impl SqlFileStreamDecoder {
     ) -> Result<Self, String> {
         let (encoding, bom_len, detected_mysql_binary_literals) =
             detect_sql_file_encoding(file_path, detection_limit).await?;
+        Self::open_with_resolved_encoding(
+            file_path,
+            encoding,
+            bom_len,
+            normalize_mysql_binary_literals || detected_mysql_binary_literals,
+            bytes_read,
+        )
+        .await
+    }
+
+    async fn open_with_resolved_encoding(
+        file_path: &Path,
+        encoding: &'static encoding_rs::Encoding,
+        bom_len: usize,
+        normalize_mysql_binary_literals: bool,
+        bytes_read: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, String> {
         let mut reader = SqlFileByteReader::open_with_progress(file_path, bytes_read).await?;
         let mut prefix = [0u8; 3];
         let prefix_len = reader.read(&mut prefix).await?;
@@ -1258,9 +1321,9 @@ impl SqlFileStreamDecoder {
         pending_bytes.reserve(SQL_FILE_READ_CHUNK_BYTES);
         Ok(Self {
             reader,
+            encoding,
             decoder: encoding.new_decoder_without_bom_handling(),
-            mysql_binary_normalizer: (encoding == encoding_rs::UTF_8
-                && (normalize_mysql_binary_literals || detected_mysql_binary_literals))
+            mysql_binary_normalizer: (encoding == encoding_rs::UTF_8 && normalize_mysql_binary_literals)
                 .then(MysqlDumpBinaryLiteralNormalizer::default),
             pending_bytes,
             pending_decoded_bytes: Vec::new(),
@@ -1268,7 +1331,7 @@ impl SqlFileStreamDecoder {
         })
     }
 
-    async fn next_chunk(&mut self) -> Result<Option<String>, String> {
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<String>, String> {
         if self.reached_eof && self.pending_bytes.is_empty() && self.pending_decoded_bytes.is_empty() {
             return Ok(None);
         }
@@ -1642,12 +1705,28 @@ async fn validate_utf8_with_mysql_binary_literals(
     }
 }
 
-enum StreamingSqlFileSplitter {
+pub(crate) struct StreamingSqlFileSplitter(StreamingSqlFileSplitterKind);
+
+enum StreamingSqlFileSplitterKind {
     Statements(SqlStatementSplitter),
     SqlServerBatches(SqlServerBatchSplitter),
 }
 
 impl StreamingSqlFileSplitter {
+    pub(crate) fn new(db_type: Option<DatabaseType>, options: SqlParsingOptions) -> Self {
+        Self(StreamingSqlFileSplitterKind::new(db_type, options))
+    }
+
+    pub(crate) fn push_chunk(&mut self, chunk: &str) -> Vec<SqlStatementWithControl> {
+        self.0.push_chunk(chunk)
+    }
+
+    pub(crate) fn finish(self) -> Vec<SqlStatementWithControl> {
+        self.0.finish()
+    }
+}
+
+impl StreamingSqlFileSplitterKind {
     fn new(db_type: Option<DatabaseType>, options: SqlParsingOptions) -> Self {
         if db_type == Some(DatabaseType::SqlServer) {
             Self::SqlServerBatches(SqlServerBatchSplitter::default())

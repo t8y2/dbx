@@ -2640,6 +2640,7 @@ export default withEnglishFallback({
     apply: "Aplicar",
   },
   explain: {
+    estimatedTime: "Tiempo estimado",
     title: "Plan de ejecución",
     standardTable: "Tabla",
     tree: "Árbol",

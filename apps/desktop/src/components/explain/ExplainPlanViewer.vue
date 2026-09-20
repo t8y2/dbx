@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlertCircle, Braces, GitBranch, Table2, FileText, Workflow } from "@lucide/vue";
 import type { ParsedExplainPlan, ExplainPlanNode } from "@/lib/diagram/explainPlan";
-import { flattenExplainPlanNodes } from "@/lib/diagram/explainPlan";
+import { flattenExplainPlanNodes, formatExplainPlanDetails } from "@/lib/diagram/explainPlan";
 import { extractActualRows } from "@/lib/diagram/planCanvas";
 import { Button } from "@/components/ui/button";
 import type { QueryResult } from "@/types/database";
@@ -185,7 +185,7 @@ function tableCellText(value: unknown): string {
                 <td class="px-2 py-1.5 tabular-nums">{{ row.node.cost || "-" }}</td>
                 <td class="px-2 py-1.5 tabular-nums">{{ row.node.rows || "-" }}</td>
                 <td class="px-2 py-1.5 text-muted-foreground">
-                  {{ row.node.details.join("; ") || "-" }}
+                  {{ formatExplainPlanDetails(row.node, t("explain.estimatedTime")).join("; ") || "-" }}
                 </td>
               </tr>
             </tbody>

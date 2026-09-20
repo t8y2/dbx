@@ -12,6 +12,7 @@ export interface ExplainPlanNode {
   cost?: string;
   rows?: string;
   width?: string;
+  estimatedTimeUs?: string;
   details: string[];
   children: ExplainPlanNode[];
 }
@@ -25,6 +26,11 @@ export interface ParsedExplainPlan {
 }
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
+
+export function formatExplainPlanDetails(node: ExplainPlanNode | undefined, estimatedTimeLabel: string): string[] {
+  if (!node) return [];
+  return node.estimatedTimeUs === undefined ? node.details : [`${estimatedTimeLabel}: ${node.estimatedTimeUs} µs`, ...node.details];
+}
 
 const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver"]);
 export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is ExplainPlanDatabaseType {
@@ -598,25 +604,29 @@ function parseOceanbaseOracleExplain(result: QueryResult): ParsedExplainPlan {
   return { databaseType: "oceanbase-oracle", raw, nodes: root ? [parseOceanbaseOracleNode(root, "0")] : [] };
 }
 
+const OCEANBASE_PLAN_KEYS = { id: "ID", operator: "OPERATOR", name: "NAME", rows: "EST.ROWS", time: "EST.TIME(us)", cost: "COST" } as const;
+const OCEANBASE_PLAN_FIELDS = new Set<string>(Object.values(OCEANBASE_PLAN_KEYS));
+const OCEANBASE_CHILD_KEY = /^CHILD_\d+$/;
+
 function parseOceanbaseOracleNode(plan: Record<string, unknown>, fallbackId: string): ExplainPlanNode {
-  const nodeType = stringValue(plan.OPERATOR)?.trim() || "Plan";
-  const relation = stringValue(plan.NAME)?.trim() || undefined;
+  const nodeType = stringValue(plan[OCEANBASE_PLAN_KEYS.operator])?.trim() || "Plan";
+  const relation = stringValue(plan[OCEANBASE_PLAN_KEYS.name])?.trim() || undefined;
   const children = Object.entries(plan)
-    .filter(([key, value]) => /^CHILD_\d+$/.test(key) && objectValue(value))
+    .filter(([key, value]) => OCEANBASE_CHILD_KEY.test(key) && objectValue(value))
     .sort(([left], [right]) => Number(left.slice(6)) - Number(right.slice(6)))
     .map(([key, value]) => parseOceanbaseOracleNode(objectValue(value)!, `${fallbackId}.${key.slice(6)}`));
-  const estimatedTime = numberLike(plan["EST.TIME(us)"]);
+  const estimatedTimeUs = numberLike(plan[OCEANBASE_PLAN_KEYS.time]);
   const details = Object.entries(plan)
-    .filter(([key, value]) => !["ID", "OPERATOR", "NAME", "EST.ROWS", "EST.TIME(us)", "COST"].includes(key) && !/^CHILD_\d+$/.test(key) && value !== null)
+    .filter(([key, value]) => !OCEANBASE_PLAN_FIELDS.has(key) && !OCEANBASE_CHILD_KEY.test(key) && value !== null)
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
-  if (estimatedTime !== undefined) details.unshift(`Estimated time: ${estimatedTime} µs`);
   return {
-    id: numberLike(plan.ID) || fallbackId,
+    id: numberLike(plan[OCEANBASE_PLAN_KEYS.id]) || fallbackId,
     title: relation && relation !== nodeType ? `${nodeType} on ${relation}` : nodeType,
     nodeType,
     relation,
-    cost: numberLike(plan.COST),
-    rows: numberLike(plan["EST.ROWS"]),
+    cost: numberLike(plan[OCEANBASE_PLAN_KEYS.cost]),
+    rows: numberLike(plan[OCEANBASE_PLAN_KEYS.rows]),
+    estimatedTimeUs,
     details,
     children,
   };

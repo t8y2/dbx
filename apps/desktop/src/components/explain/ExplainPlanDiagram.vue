@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { ArrowDownWideNarrow, CircleHelp, GitMerge, KeyRound, Layers, ListTree, Maximize2, MonitorCheck, Pencil, Sigma, Split, Table2, ZoomIn, ZoomOut } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import type { ExplainPlanNode } from "@/lib/diagram/explainPlan";
+import { formatExplainPlanDetails } from "@/lib/diagram/explainPlan";
 import type { PlanCanvasCategory, PlanCanvasNode } from "@/lib/diagram/planCanvas";
 import { buildPlanCanvas, edgeStrokeWidth, formatPlanRows, heatLevel, PLAN_CANVAS_GAP_X, PLAN_CANVAS_NODE_H, PLAN_CANVAS_NODE_W } from "@/lib/diagram/planCanvas";
 
@@ -110,7 +111,7 @@ interface DetailEntry {
 }
 
 const selectedDetails = computed<DetailEntry[]>(() =>
-  (selected.value?.node.details ?? [])
+  formatExplainPlanDetails(selected.value?.node, t("explain.estimatedTime"))
     .map((detail): DetailEntry => {
       const separatorIndex = detail.indexOf(":");
       if (separatorIndex === -1) return { value: detail.trim() };

@@ -57,7 +57,7 @@ describe("queryStore OceanBase Oracle explain", () => {
       isExplaining: false,
       explainError: undefined,
       explainSql: "EXPLAIN FORMAT=JSON SELECT 1 FROM DUAL",
-      explainPlan: { databaseType: "oceanbase-oracle", nodes: [{ id: "0", nodeType: "EXPRESSION", rows: "1", details: ["Estimated time: 1 µs"] }] },
+      explainPlan: { databaseType: "oceanbase-oracle", nodes: [{ id: "0", nodeType: "EXPRESSION", rows: "1", estimatedTimeUs: "1", details: [] }] },
     });
   });
 });

@@ -2663,6 +2663,7 @@ export default withEnglishFallback({
     apply: "適用",
   },
   explain: {
+    estimatedTime: "推定時間",
     title: "実行計画",
     standardTable: "標準テーブル",
     tree: "ツリー",

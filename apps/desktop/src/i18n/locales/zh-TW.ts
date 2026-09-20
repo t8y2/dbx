@@ -2637,6 +2637,7 @@ export default withEnglishFallback({
     apply: "套用",
   },
   explain: {
+    estimatedTime: "預估耗時",
     title: "執行計畫",
     standardTable: "標準表格",
     tree: "樹狀",

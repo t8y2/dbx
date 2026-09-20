@@ -2546,6 +2546,7 @@ export default withEnglishFallback({
     apply: "적용",
   },
   explain: {
+    estimatedTime: "예상 시간",
     title: "실행 계획",
     standardTable: "표",
     tree: "트리",

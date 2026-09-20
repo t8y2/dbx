@@ -2568,6 +2568,7 @@ export default withEnglishFallback({
     apply: "Tətbiq et",
   },
   explain: {
+    estimatedTime: "Təxmini vaxt",
     title: "İcra planı",
     standardTable: "Cədvəl",
     tree: "Ağac",

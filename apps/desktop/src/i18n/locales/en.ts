@@ -2740,6 +2740,7 @@ export default {
     apply: "Apply",
   },
   explain: {
+    estimatedTime: "Estimated time",
     title: "Explain Plan",
     standardTable: "Table",
     tree: "Tree",

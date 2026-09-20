@@ -209,7 +209,7 @@ pub struct RemoveConnectionRequest {
 pub struct ExecuteRedisCommandRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
-    #[schemars(description = "Redis logical database number")]
+    #[schemars(description = "Redis logical database number. Use this argument instead of the SELECT command.")]
     #[schemars(extend("type" = "integer"))]
     pub db: Option<u32>,
     #[schemars(description = "Redis command to execute, for example GET mykey or INFO")]
@@ -1616,7 +1616,10 @@ impl DbxMcpServer {
         result
     }
 
-    #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
+    #[tool(
+        name = "dbx_execute_redis_command",
+        description = "Execute a Redis command on a Redis connection. Use the db argument to select a logical database instead of sending SELECT. Use SCAN rather than KEYS when enumerating keys."
+    )]
     async fn execute_redis_command(
         &self,
         Parameters(request): Parameters<ExecuteRedisCommandRequest>,
@@ -1640,6 +1643,12 @@ impl DbxMcpServer {
             Ok(argv) => argv,
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
         };
+        if argv[0].eq_ignore_ascii_case("SELECT") {
+            return tool_error(
+                "REDIS_DATABASE_SELECTION_REQUIRED",
+                "Redis SELECT is not available through MCP. Set the db argument to the logical database number instead; when db is omitted, DBX uses the current scoped database.",
+            );
+        }
         let safety = classify_command(&argv[0]);
         let policy = effective_policy_for_database_with_groups(
             &resolved.policy,
@@ -2629,6 +2638,7 @@ fn empty_query_result() -> dbx_core::db::QueryResult {
         rows: Vec::new(),
         affected_rows: 0,
         execution_time_ms: 0,
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,
@@ -3419,6 +3429,7 @@ mod tests {
                     rows: Vec::new(),
                     affected_rows: 0,
                     execution_time_ms: 0,
+                    server_execute_time_us: None,
                     truncated: false,
                     session_id: None,
                     has_more: false,
@@ -4263,6 +4274,34 @@ mod tests {
         assert_eq!(server.resolve_redis_database(Some(2), &redis).unwrap(), 2);
         let error = server.resolve_redis_database(Some(3), &redis).unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+    }
+
+    #[tokio::test]
+    async fn redis_select_is_rejected_even_with_high_risk_access() {
+        let redis = connection("redis", "redis", "redis", "0");
+        let backend = Arc::new(FakeBackend {
+            connections: vec![redis],
+            policy: McpGlobalPolicy {
+                read_only: false,
+                allow_dangerous_sql: true,
+                allowed_connection_ids: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+
+        let result = server
+            .execute_redis_command(Parameters(ExecuteRedisCommandRequest {
+                selector: ConnectionSelector { connection_name: None, connection_id: Some("redis".to_string()) },
+                db: Some(8),
+                command: "SELECT 8".to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(result_text(&result).contains("REDIS_DATABASE_SELECTION_REQUIRED"));
+        assert!(result_text(&result).contains("Set the db argument"));
     }
 
     #[test]

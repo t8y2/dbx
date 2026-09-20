@@ -5127,6 +5127,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "점수 임계값",
     results: "검색 결과",
     exportResults: "결과보내기",
+    exportFiltered: "필터링된 결과 내보내기",
+    exportAll: "모든 문서 내보내기",
+    exportLimitReached: "{total}개 중 {count}개의 결과만 사용할 수 있어 Meilisearch 제한으로 전체 내보내기를 완료할 수 없습니다.",
+    importResults: "JSON 가져오기",
+    importSuccess: "문서 {count}개를 가져왔습니다",
+    importFailed: "가져오기 실패: {message}",
+    importInvalidJson: "JSON은 객체 또는 객체 배열이어야 합니다",
     exportSearchUnsupported: "Meilisearch는 텍스트, 하이브리드 또는 점수 임계값 검색의 페이지 탐색을 제한합니다. 필터링된 모든 문서를 내보내려면 해당 옵션을 지우세요.",
   },
   dynamodb: {

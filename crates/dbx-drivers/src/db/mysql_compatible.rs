@@ -189,8 +189,10 @@ pub async fn get_columns_show_from(
     Ok(rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "Field").trim().to_string();
-            if name.is_empty() {
+            // MySQL allows leading/trailing spaces in column names, so keep the name verbatim
+            // and only drop rows whose name is blank, matching `mysql_column_name` in mysql.rs.
+            let name = get_str_by_name(row, "Field");
+            if name.trim().is_empty() {
                 return None;
             }
             let key = get_str_by_name(row, "Key");

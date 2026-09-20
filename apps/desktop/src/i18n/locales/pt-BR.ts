@@ -5493,6 +5493,13 @@ export default withEnglishFallback({
     rankingScoreThreshold: "Limite de pontuação",
     results: "Resultados",
     exportResults: "Exportar resultados",
+    exportFiltered: "Exportar resultados filtrados",
+    exportAll: "Exportar todos os documentos",
+    exportLimitReached: "Apenas {count} de {total} resultados estão disponíveis; o limite do Meilisearch impede a exportação completa.",
+    importResults: "Importar JSON",
+    importSuccess: "{count} documento(s) importado(s)",
+    importFailed: "Falha ao importar: {message}",
+    importInvalidJson: "O JSON deve conter um objeto ou uma matriz de objetos",
     exportSearchUnsupported: "O Meilisearch limita a paginação de buscas por texto, híbridas ou com limite de pontuação. Limpe essas opções para exportar todos os documentos filtrados.",
   },
   dynamodb: {

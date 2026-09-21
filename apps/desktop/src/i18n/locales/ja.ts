@@ -7529,6 +7529,7 @@ export default withEnglishFallback({
     shortcutSearchNoResults: "一致するショートカットはありません。",
     shortcutConflict: "このショートカットは同じスコープ内の別のアクションと競合しています。",
     shortcutReserved: "このショートカットはシステムで予約されています。",
+    shortcutPlatformDefault: "この組み合わせは他プラットフォームの既定キーです。ここでは割り当てできないため、別の組み合わせを選んでください。",
     shortcutClear: "ショートカットをクリア",
     preview: "ライブプレビュー",
     previewSyntaxErrorHint: "プレビューは読み取り専用です。デモ SQL 内の FOM は意図的な構文エラーで、エラーのハイライトを示しています。",

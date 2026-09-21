@@ -8033,6 +8033,7 @@ export default {
     shortcutSearchNoResults: "No shortcuts match your search.",
     shortcutConflict: "This shortcut conflicts with another action in the same scope.",
     shortcutReserved: "This shortcut is reserved by the system.",
+    shortcutPlatformDefault: "This combination is another platform's default shortcut and cannot be bound here. Please use a different one.",
     shortcutClear: "Clear shortcut",
     preview: "Live Preview",
     previewSyntaxErrorHint: "Read-only preview. The FOM typo in the demo SQL is intentional and demonstrates syntax-error highlighting.",

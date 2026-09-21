@@ -11,6 +11,7 @@ import {
   MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
   normalizeShortcutSettings,
+  resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
   SHORTCUT_DEFINITIONS,
   shortcutToCodeMirrorKey,
@@ -523,6 +524,67 @@ describe("shortcutRegistry editor actions", () => {
         expect(findShortcutConflict("gotoLine", shortcuts.gotoLine, shortcuts, platform)).toBeNull();
         expect(findShortcutConflict("addNextSelectionOccurrence", shortcuts.addNextSelectionOccurrence, shortcuts, platform)).toBeNull();
       }
+    });
+  });
+
+  describe("resolveCapturedShortcutEdit", () => {
+    // #9881：设置面板「应用」点了毫无反应、「应用并关闭」每次都弹未保存确认，
+    // 根因就是捕获到的组合被落盘口径改写，草稿和 store 值再也对不上。
+    const macDefaults = normalizeShortcutSettings(undefined, "MacIntel");
+    const crossPlatformCases: [ShortcutActionId, string][] = [
+      ["closeOtherTabs", "Shift+Alt+W"],
+      ["navigateTabHistoryBack", "Mod+Alt+ArrowLeft"],
+      ["navigateTabHistoryForward", "Mod+Alt+ArrowRight"],
+      ["addNextSelectionOccurrence", "Alt+J"],
+      ["selectAllSelectionOccurrences", "Ctrl+Alt+Shift+J"],
+      ["toggleAiPanel", "Ctrl+Alt+I"],
+      ["gotoLine", "Mod+G"],
+    ];
+
+    it("flags combinations that are another platform's default for the same action", () => {
+      for (const [actionId, shortcut] of crossPlatformCases) {
+        const edit = resolveCapturedShortcutEdit(actionId, shortcut, macDefaults, "MacIntel");
+
+        expect(edit.rejectedByPlatformDefault).toBe(true);
+        // 落盘值是该动作本机平台的默认键，绝不能用它当草稿值写入
+        expect(edit.shortcuts[actionId]).not.toBe(shortcut);
+      }
+    });
+
+    it("accepts a plain rebind and keeps the draft a fixed point of the persistence normalizer", () => {
+      const edit = resolveCapturedShortcutEdit("executeSql", "Shift+Ctrl+U", macDefaults, "MacIntel");
+
+      expect(edit.rejectedByPlatformDefault).toBe(false);
+      expect(edit.changed).toBe(true);
+      expect(edit.shortcuts.executeSql).toBe("Shift+Ctrl+U");
+      // 关键不变式：草稿再走一遍落盘口径不会被改写，否则“未保存”永远消不掉
+      expect(normalizeShortcutSettings(edit.shortcuts, "MacIntel")).toEqual(edit.shortcuts);
+    });
+
+    it("adopts the copyCurrentRow/editTableStructure legacy migration into the draft", () => {
+      const draft = normalizeShortcutSettings({ ...macDefaults, copyCurrentRow: "" }, "MacIntel");
+      const edit = resolveCapturedShortcutEdit("editTableStructure", "Mod+D", draft, "MacIntel");
+
+      expect(edit.rejectedByPlatformDefault).toBe(false);
+      expect(edit.changed).toBe(true);
+      expect(edit.shortcuts).toMatchObject({ editTableStructure: "Mod+Shift+D", copyCurrentRow: "Mod+D" });
+      expect(normalizeShortcutSettings(edit.shortcuts, "MacIntel")).toEqual(edit.shortcuts);
+    });
+
+    it("reports no changes when the user re-presses the current combination", () => {
+      const edit = resolveCapturedShortcutEdit("closeOtherTabs", macDefaults.closeOtherTabs, macDefaults, "MacIntel");
+
+      expect(edit.rejectedByPlatformDefault).toBe(false);
+      expect(edit.changed).toBe(false);
+      expect(edit.shortcuts).toEqual(macDefaults);
+    });
+
+    it("still applies the cross-platform rule on Windows for the macOS default literals", () => {
+      const windowsDefaults = normalizeShortcutSettings(undefined, "Win32");
+      const edit = resolveCapturedShortcutEdit("closeOtherTabs", "Alt+Mod+W", windowsDefaults, "Win32");
+
+      expect(edit.rejectedByPlatformDefault).toBe(true);
+      expect(edit.shortcuts.closeOtherTabs).toBe(closeOtherTabsDefaultShortcut("Win32"));
     });
   });
 

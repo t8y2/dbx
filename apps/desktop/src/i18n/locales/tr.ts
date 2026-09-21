@@ -7582,6 +7582,7 @@ export default withEnglishFallback({
     shortcutSearchNoResults: "Aramanızla eşleşen kısayol yok.",
     shortcutConflict: "Bu kısayol aynı kapsamdaki başka bir eylemle çakışıyor.",
     shortcutReserved: "Bu kısayol sistem tarafından ayrılmıştır.",
+    shortcutPlatformDefault: "Bu kombinasyon diğer platformun varsayılan kısayoludur ve burada atanamaz. Başka bir kombinasyon seçin.",
     shortcutClear: "Kısayolu temizle",
     preview: "Canlı Önizleme",
     previewSyntaxErrorHint: "Salt okunur önizleme. Örnek SQL'deki FOM yazım hatası kasıtlıdır ve sözdizimi hatası vurgulamasını gösterir.",

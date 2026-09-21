@@ -7526,6 +7526,7 @@ export default withEnglishFallback({
     shortcutSearchNoResults: "Nenhum atalho corresponde à pesquisa.",
     shortcutConflict: "Este atalho conflita com outra ação no mesmo escopo.",
     shortcutReserved: "Este atalho é reservado pelo sistema.",
+    shortcutPlatformDefault: "Esta combinação é o atalho padrão de outra plataforma e não pode ser atribuída aqui. Escolha outra.",
     shortcutClear: "Limpar atalho",
     preview: "Pré-visualização ao vivo",
     previewSyntaxErrorHint: "Pré-visualização somente leitura. O erro FOM no SQL de exemplo é intencional e demonstra o destaque de erros de sintaxe.",

@@ -7683,6 +7683,7 @@ export default withEnglishFallback({
     shortcutSearchNoResults: "Axtarışınıza uyğun qısayol yoxdur.",
     shortcutConflict: "Bu qısayol eyni əhatə dairəsində başqa əməliyyatla ziddiyyət təşkil edir.",
     shortcutReserved: "Bu qısayol sistem tərəfindən qorunur.",
+    shortcutPlatformDefault: "Bu kombinasiya digər platformanın standart qısayoludur və burada təyin edilə bilməz. Başqa kombinasiya seçin.",
     shortcutClear: "Qısayolu təmizlə",
     preview: "Canlı önbaxış",
     previewSyntaxErrorHint: "Yalnız oxumaq üçün önbaxış. Nümunə SQL-dəki FOM yazı xətası qəsdəndir və sintaksis xətalarının vurğulanmasını göstərir.",

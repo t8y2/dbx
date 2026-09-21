@@ -7525,6 +7525,7 @@ export default withEnglishFallback({
     shortcutSearchNoResults: "Ningún atajo coincide con la búsqueda.",
     shortcutConflict: "Este atajo entra en conflicto con otra acción del mismo ámbito.",
     shortcutReserved: "Este atajo está reservado por el sistema.",
+    shortcutPlatformDefault: "Esta combinación es el atajo predeterminado de otra plataforma y no se puede asignar aquí. Elige otra.",
     shortcutClear: "Borrar atajo",
     preview: "Vista previa en tiempo real",
     previewSyntaxErrorHint: "Vista previa de solo lectura. El error FOM en el SQL de ejemplo es intencionado y demuestra el resaltado de errores de sintaxis.",

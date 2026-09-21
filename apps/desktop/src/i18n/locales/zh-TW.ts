@@ -6826,6 +6826,7 @@ export default withEnglishFallback({
     shortcutSearchNoResults: "沒有符合的快速鍵。",
     shortcutConflict: "這個快速鍵與同一作用域內的其他操作衝突。",
     shortcutReserved: "此快速鍵由系統保留，請改用其他組合。",
+    shortcutPlatformDefault: "該組合是其它平台的預設鍵，本平台無法綁定，請換一個組合。",
     shortcutClear: "清除快速鍵",
     preview: "即時預覽",
     previewSyntaxErrorHint: "預覽為唯讀。範例 SQL 中的 FOM 拼寫是刻意設置的語法錯誤，用於示範錯誤高亮效果。",

@@ -2373,12 +2373,12 @@ pub async fn completion_assistant_search(
             }
         })
         .collect::<Vec<_>>();
+    // Dedup only shrinks the list, so completeness must be judged on the raw
+    // candidate count: a result that hit the server-side TOP (limit) must stay
+    // incomplete even if the translation below collapses duplicates.
+    let incomplete = candidates.len() >= limit;
     let candidates = normalize_sqlserver_completion_candidates(candidates);
-    Ok(crate::types::CompletionAssistantResponse {
-        incomplete: candidates.len() >= limit,
-        candidates,
-        fallback_used: false,
-    })
+    Ok(crate::types::CompletionAssistantResponse { incomplete, candidates, fallback_used: false })
 }
 
 /// Rewrites the raw catalog names of a completion response into names the user
@@ -2396,8 +2396,12 @@ fn normalize_sqlserver_completion_candidates(
         // One internal temp table per module can share the same visible name, so
         // the translated candidates must not repeat it.
         .filter(|candidate| {
+            // The schema carries the namespace for table/view/routine candidates
+            // (their parent fields are empty); leaving it out would collapse
+            // same-named objects from different schemas into one candidate.
             seen.insert((
                 format!("{:?}", candidate.kind),
+                candidate.schema.clone(),
                 candidate.name.clone(),
                 candidate.parent_schema.clone(),
                 candidate.parent_name.clone(),
@@ -5094,6 +5098,31 @@ mod tests {
             normalized.iter().map(|candidate| candidate.name.as_str()).collect::<Vec<_>>(),
             vec!["#ypsl_py", "#ypsl_py_extra", "dbo.orders"]
         );
+    }
+
+    #[test]
+    fn sqlserver_completion_keeps_same_named_tables_from_different_schemas() {
+        let candidate = |schema: &str, name: &str| crate::types::CompletionAssistantCandidate {
+            name: name.to_string(),
+            kind: crate::types::CompletionAssistantCandidateKind::Table,
+            database: Some("master".to_string()),
+            schema: Some(schema.to_string()),
+            parent_schema: None,
+            parent_name: None,
+            comment: None,
+            data_type: None,
+            signature: None,
+        };
+
+        let normalized = super::normalize_sqlserver_completion_candidates(vec![
+            candidate("dbo", "orders"),
+            candidate("sales", "orders"),
+            candidate("dbo", "orders"),
+        ]);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].schema.as_deref(), Some("dbo"));
+        assert_eq!(normalized[1].schema.as_deref(), Some("sales"));
     }
 
     #[test]

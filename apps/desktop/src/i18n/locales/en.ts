@@ -10041,7 +10041,7 @@ export default {
     contentReplaceNoMatches: "No published config contains this exact value.",
     contentReplaceViewDiff: "View replacement diff",
     contentReplacePreview: "Preview replacements",
-    contentReplaceApply: "Replace in {count} configs",
+    contentReplaceApply: "Replace in {count} selected configs",
     contentReplaceRollback: "Rollback replaced configs",
     contentReplaceReport: "{replaced} replaced, {conflicts} conflicts, {failed} failed",
     contentReplaceRollbackReport: "Rollback: {restored} restored, {conflicts} conflicts, {failed} failed",

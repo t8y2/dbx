@@ -3847,7 +3847,11 @@ async fn publish_response(resp: reqwest::Response, path: &str, uses_cas: bool) -
     let response = error_for_status(resp, path).await?;
     let body = response.text().await.map_err(|error| format!("Failed to read Nacos publish response: {error}"))?;
     if body.trim().eq_ignore_ascii_case("false") {
-        return Err(if uses_cas { format!("Nacos publish rejected by CAS validation at {path}") } else { format!("Nacos publish rejected at {path}") });
+        return Err(if uses_cas {
+            format!("Nacos publish rejected by CAS validation at {path}")
+        } else {
+            format!("Nacos publish rejected at {path}")
+        });
     }
     Ok(())
 }

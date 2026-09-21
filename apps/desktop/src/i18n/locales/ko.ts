@@ -9128,7 +9128,7 @@ export default withEnglishFallback({
     contentReplaceNoMatches: "게시된 구성에서 이 값과 정확히 일치하는 내용을 찾지 못했습니다.",
     contentReplaceViewDiff: "바꾸기 차이 보기",
     contentReplacePreview: "바꾸기 미리 보기",
-    contentReplaceApply: "구성 {count}개 바꾸기",
+    contentReplaceApply: "선택한 구성 {count}개 바꾸기",
     contentReplaceRollback: "바꾼 구성 되돌리기",
     contentReplaceReport: "바꾸기 성공 {replaced}개, 충돌 {conflicts}개, 실패 {failed}개",
     contentReplaceRollbackReport: "되돌리기 결과: 복원 {restored}개, 충돌 {conflicts}개, 실패 {failed}개",

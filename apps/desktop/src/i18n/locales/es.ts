@@ -8279,7 +8279,7 @@ export default withEnglishFallback({
     contentReplaceNoMatches: "Ninguna configuración publicada contiene este valor exacto.",
     contentReplaceViewDiff: "Ver diferencias del reemplazo",
     contentReplacePreview: "Previsualizar reemplazos",
-    contentReplaceApply: "Reemplazar en {count} configuraciones",
+    contentReplaceApply: "Reemplazar en {count} configuraciones seleccionadas",
     contentReplaceRollback: "Revertir configuraciones reemplazadas",
     contentReplaceReport: "Reemplazadas: {replaced}; conflictos: {conflicts}; fallidas: {failed}",
     contentReplaceRollbackReport: "Reversión: {restored} restauradas; {conflicts} conflictos; {failed} fallidas",

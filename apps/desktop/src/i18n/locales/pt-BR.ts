@@ -8280,7 +8280,7 @@ export default withEnglishFallback({
     contentReplaceNoMatches: "Nenhuma configuração publicada contém exatamente este valor.",
     contentReplaceViewDiff: "Ver diferenças da substituição",
     contentReplacePreview: "Visualizar substituições",
-    contentReplaceApply: "Substituir em {count} configurações",
+    contentReplaceApply: "Substituir em {count} configurações selecionadas",
     contentReplaceRollback: "Reverter configurações substituídas",
     contentReplaceReport: "Substituídas: {replaced}; conflitos: {conflicts}; falhas: {failed}",
     contentReplaceRollbackReport: "Reversão: {restored} restauradas; {conflicts} conflitos; {failed} falhas",

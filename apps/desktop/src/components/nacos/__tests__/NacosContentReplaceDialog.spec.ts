@@ -299,6 +299,7 @@ describe("NacosContentReplaceDialog", () => {
     await click("nacos-replace-select-1");
 
     expect(document.body.querySelector("[data-testid=nacos-replace-apply]")?.textContent).toContain("1");
+    expect((document.body.querySelector("[data-testid=nacos-replace-select-all]") as HTMLInputElement).indeterminate).toBe(true);
     await click("nacos-replace-apply");
 
     await vi.waitFor(() => expect(api.nacosPublishConfig).toHaveBeenCalledTimes(1));
@@ -308,6 +309,12 @@ describe("NacosContentReplaceDialog", () => {
     expect(saved.plan.items.map((item) => item.dataId)).toEqual(["application.yaml"]);
     expect(saved.plan.totalReplacements).toBe(1);
     expect(saved.report.items.map((item) => item.dataId)).toEqual(["application.yaml"]);
+
+    await click("nacos-replace-history-rollback");
+    await click("history-confirm");
+    await vi.waitFor(() => expect(api.nacosPublishConfig).toHaveBeenCalledTimes(2));
+    expect(configs.get("public/DEFAULT_GROUP/application.yaml")?.content).toBe("primary=mysql-old");
+    expect(configs.get("public/DEFAULT_GROUP/orders.yaml")?.content).toBe("replica=mysql-old");
   });
 
   it("disables replacement when every preview result is deselected", async () => {
@@ -328,8 +335,17 @@ describe("NacosContentReplaceDialog", () => {
     await click("nacos-replace-select-all");
 
     expect((document.body.querySelector("[data-testid=nacos-replace-apply]") as HTMLButtonElement).disabled).toBe(true);
+    expect((document.body.querySelector("[data-testid=nacos-replace-select-0]") as HTMLInputElement).checked).toBe(false);
     await click("nacos-replace-apply");
     expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+
+    await click("nacos-replace-select-all");
+    expect((document.body.querySelector("[data-testid=nacos-replace-select-0]") as HTMLInputElement).checked).toBe(true);
+    expect((document.body.querySelector("[data-testid=nacos-replace-apply]") as HTMLButtonElement).disabled).toBe(false);
+
+    await click("nacos-replace-select-all");
+    await click("nacos-replace-preview");
+    await vi.waitFor(() => expect((document.body.querySelector("[data-testid=nacos-replace-select-0]") as HTMLInputElement).checked).toBe(true));
   });
 
   it("blocks apply when the global search result is incomplete", async () => {

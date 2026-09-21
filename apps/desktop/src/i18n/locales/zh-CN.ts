@@ -10009,7 +10009,7 @@ export default withEnglishFallback({
     contentReplaceNoMatches: "已发布配置中没有找到这个精确值。",
     contentReplaceViewDiff: "查看替换差异",
     contentReplacePreview: "预览替换",
-    contentReplaceApply: "替换 {count} 个配置",
+    contentReplaceApply: "替换选中的 {count} 个配置",
     contentReplaceRollback: "回滚已替换配置",
     contentReplaceReport: "成功替换 {replaced} 个，冲突 {conflicts} 个，失败 {failed} 个",
     contentReplaceRollbackReport: "回滚结果：已恢复 {restored} 个，冲突 {conflicts} 个，失败 {failed} 个",

@@ -7593,7 +7593,7 @@ export default withEnglishFallback({
     contentReplaceNoMatches: "已發布的設定中找不到這個精確值。",
     contentReplaceViewDiff: "檢視取代差異",
     contentReplacePreview: "預覽取代",
-    contentReplaceApply: "取代 {count} 個設定",
+    contentReplaceApply: "取代已選取的 {count} 個設定",
     contentReplaceRollback: "回復已取代的設定",
     contentReplaceReport: "成功取代 {replaced} 個，衝突 {conflicts} 個，失敗 {failed} 個",
     contentReplaceRollbackReport: "回復結果：已還原 {restored} 個，衝突 {conflicts} 個，失敗 {failed} 個",

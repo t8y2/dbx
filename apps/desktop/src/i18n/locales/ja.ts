@@ -8317,7 +8317,7 @@ export default withEnglishFallback({
     contentReplaceNoMatches: "公開済みの設定に、この値と完全に一致する内容はありません。",
     contentReplaceViewDiff: "置換差分を表示",
     contentReplacePreview: "置換をプレビュー",
-    contentReplaceApply: "{count} 件の設定を置換",
+    contentReplaceApply: "選択した {count} 件の設定を置換",
     contentReplaceRollback: "置換済み設定を元に戻す",
     contentReplaceReport: "置換成功: {replaced} 件、競合: {conflicts} 件、失敗: {failed} 件",
     contentReplaceRollbackReport: "復元結果: 復元 {restored} 件、競合 {conflicts} 件、失敗 {failed} 件",

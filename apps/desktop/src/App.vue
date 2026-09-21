@@ -4334,6 +4334,7 @@ onUnmounted(() => {
                 @execute-redis-command="(command: string) => routeAiRedisCommand(command, true)"
                 @open-explain-plan="onAiOpenExplainPlan"
                 @toggle-maximize="toggleAiPanelMaximized"
+                @open-settings="activateSettingsPage"
                 @close="closeRightSidebarPanel('ai')"
               />
             </div>

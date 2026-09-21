@@ -63,6 +63,8 @@ import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
+import { useUserSkillStore } from "@/stores/userSkillStore";
+import type { ReadUserSkill, ReadUserSkillFailure, UserSkillFailureReason, UserSkillMeta, UserSkillRootSettings } from "@/types/userSkills";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -153,7 +155,7 @@ import { buildAiAgentStepItems, formatToolDurationMs, toolCallStepKey, upsertAge
 import { createAiShikiCodeHighlighter, type AiCodeHighlighter } from "@/lib/ai/aiCodeHighlighter";
 import { createAiMessageRenderer } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
-import { aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
+import { aiCancelStream, saveAiConversation, saveAiRun, saveAiRunState, loadAiConversations, loadAiRuns, deleteAiConversation, listSchemas, listTables, readUserSkills, type AiConversation, type AiRun, type AiRunStatus } from "@/lib/backend/api";
 import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
@@ -292,6 +294,7 @@ const emit = defineEmits<{
   openExplainPlan: [sql: string];
   toggleMaximize: [];
   close: [];
+  openSettings: [];
 }>();
 
 const prompt = ref("");
@@ -497,6 +500,64 @@ watch(
     activeTemplateIds.value = activeTemplateIds.value.filter((id) => availableIds.has(id));
   },
 );
+
+// User skills (read-only Codex-compatible SKILL.md). Selection is panel-session
+// scope like activeTemplateIds above: closing the panel or restarting clears it,
+// conversation switches keep it (prd.md:30).
+const userSkillStore = useUserSkillStore();
+const selectedSkillIds = ref<string[]>([]);
+const showSkillSelector = ref(false);
+const skillFailures = ref<ReadUserSkillFailure[]>([]);
+const selectedSkillMetas = computed(() => selectedSkillIds.value.map((id) => userSkillStore.metaFor(id)).filter((meta): meta is UserSkillMeta => Boolean(meta)));
+// Selector retry-on-open mirrors the template selector above.
+watch(showSkillSelector, (open) => {
+  if (open) void userSkillStore.refresh(skillRootSettings());
+});
+watch(
+  () => [settings.desktopSettings?.custom_ai_skill_root_enabled, settings.desktopSettings?.custom_ai_skill_root] as const,
+  () => {
+    if (showSkillSelector.value) void userSkillStore.refresh(skillRootSettings());
+  },
+);
+
+function skillRootSettings(): UserSkillRootSettings {
+  return {
+    customRootEnabled: settings.desktopSettings?.custom_ai_skill_root_enabled === true,
+    customRoot: settings.desktopSettings?.custom_ai_skill_root?.trim() || null,
+  };
+}
+
+function toggleSkillSelected(id: string) {
+  skillFailures.value = [];
+  selectedSkillIds.value = selectedSkillIds.value.includes(id) ? selectedSkillIds.value.filter((skillId) => skillId !== id) : [...selectedSkillIds.value, id];
+}
+
+function removeSelectedSkill(id: string) {
+  selectedSkillIds.value = selectedSkillIds.value.filter((skillId) => skillId !== id);
+  skillFailures.value = [];
+}
+
+function refreshSkills() {
+  void userSkillStore.refresh(skillRootSettings());
+}
+
+const skillFailureReasonKeys: Record<UserSkillFailureReason, string> = {
+  not_found: "ai.skillsReasonNotFound",
+  root_unavailable: "ai.skillsReasonRootUnavailable",
+  oversized: "ai.skillsReasonOversized",
+  not_utf8: "ai.skillsReasonNotUtf8",
+  invalid_frontmatter: "ai.skillsReasonInvalidFrontmatter",
+  unreadable: "ai.skillsReasonUnreadable",
+};
+
+function skillFailureReasonKey(reason: UserSkillFailureReason): string {
+  return skillFailureReasonKeys[reason];
+}
+
+function openSkillRootSettings() {
+  skillFailures.value = [];
+  emit("openSettings");
+}
 
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
 watch(showTemplateSelector, (open) => {
@@ -1116,9 +1177,19 @@ const commandOpen = ref(false);
 const commandSelectedIndex = ref(0);
 const commandStart = ref(0);
 
-const filteredCommands = computed(() => {
+/**
+ * `/skill` is a selector shortcut, not an action: it rides a separate command
+ * source and never touches `activeAction` or the mode+action picker (prd.md:31).
+ */
+type AiSlashEntry = { type: "action"; button: AiActionButton } | { type: "skills" };
+
+const filteredCommands = computed<AiSlashEntry[]>(() => {
   const query = prompt.value.slice(commandStart.value + 1).toLowerCase();
-  return actionButtons.value.filter((cmd) => cmd.action.toLowerCase().includes(query) || t(cmd.key).toLowerCase().includes(query));
+  const entries: AiSlashEntry[] = [...actionButtons.value.map((button): AiSlashEntry => ({ type: "action", button })), { type: "skills" }];
+  return entries.filter((entry) => {
+    const haystack = entry.type === "action" ? `${entry.button.action} ${t(entry.button.key)}` : `skill ${t("ai.skillsEntry")}`;
+    return haystack.toLowerCase().includes(query);
+  });
 });
 
 const AI_SQL_FILE_MENTION_CANDIDATE_LIMIT = 50;
@@ -2486,12 +2557,18 @@ function onPromptKeyup(event: KeyboardEvent) {
   refreshMentionState();
 }
 
-function selectCommand(command: AiActionButton) {
+function selectCommand(command: AiSlashEntry) {
   const before = prompt.value.slice(0, commandStart.value);
   const after = prompt.value.slice(promptTextareaRef.value?.selectionStart ?? prompt.value.length);
   prompt.value = `${before}${after}`.replace(/\s{2,}/g, " ").trim();
   commandOpen.value = false;
-  activeAction.value = command.action;
+  if (command.type === "skills") {
+    skillFailures.value = [];
+    showSkillSelector.value = true;
+    nextTick(() => promptTextareaRef.value?.focus());
+    return;
+  }
+  activeAction.value = command.button.action;
   nextTick(() => {
     const textarea = promptTextareaRef.value;
     if (textarea) {
@@ -3030,6 +3107,31 @@ async function send() {
   }
   const generationCanContinue = () => (detachedRun ? !detachedRun.cancelRequested : aiGenerationGuard.isCurrent(myGeneration));
   const runIsVisible = () => !detachedRun || (assistantViewMounted && conversationId.value === runConversationId);
+  // Selected skills are read and validated through the backend registry right
+  // before the request pipeline starts (after the generation guard: no awaits
+  // above this point). On any failure no AI request is sent: the failure banner
+  // appears above the composer while the draft and selection stay untouched
+  // (prd send-time loading contract).
+  let sendSkillSnapshot: ReadUserSkill[] | undefined;
+  if (selectedSkillIds.value.length > 0) {
+    skillFailures.value = [];
+    const skillRead = await readUserSkills([...selectedSkillIds.value], skillRootSettings());
+    if (skillRead.failures.length > 0) {
+      skillFailures.value = skillRead.failures;
+      clearPendingWriteGrant();
+      if (generationCanContinue()) {
+        if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
+        if (runIsVisible()) {
+          isGenerating.value = false;
+          stopStatusTimer();
+          generationStatus.value = createGenerationStatus(Date.now());
+        }
+      }
+      resolveDetachedRunSettled();
+      return;
+    }
+    sendSkillSnapshot = skillRead.skills;
+  }
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();
     if (generationCanContinue()) {
@@ -3068,6 +3170,7 @@ async function send() {
   const customPromptContext: CustomPromptContext = {
     globalInstructions: promptTemplateStore.globalInstructions,
     activeTemplates: [...activeTemplates.value],
+    ...(sendSkillSnapshot?.length ? { selectedSkills: sendSkillSnapshot } : {}),
   };
   // Remember what was actually sent for this db_type so panels opened later can
   // restore it when no explicit per-db_type defaults are configured. This runs
@@ -5358,6 +5461,56 @@ async function openExternalUrl(url: string) {
                 </div>
               </PopoverContent>
             </Popover>
+            <!-- Skill selector (read-only user SKILL.md library) -->
+            <Popover v-model:open="showSkillSelector">
+              <PopoverTrigger as-child>
+                <button type="button" class="flex min-w-0 items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('ai.skillsEntry')" :title="t('ai.skillsEntry')">
+                  <Layers class="h-3 w-3" />
+                  <span class="truncate">{{ t("ai.skillsEntry") }}</span>
+                  <span v-if="selectedSkillIds.length" class="rounded-sm bg-primary px-1 text-[10px] font-medium text-primary-foreground">{{ selectedSkillIds.length }}</span>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" class="w-72 gap-0 p-1.5">
+                <div class="max-h-64 overflow-auto">
+                  <div v-if="userSkillStore.isLoading && !userSkillStore.hasLoadedOnce" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.skillsLoading") }}
+                  </div>
+                  <div v-else-if="userSkillStore.lastError" class="space-y-1 px-3 py-4 text-center text-xs text-muted-foreground">
+                    <div>{{ t("ai.skillsLoadError") }}</div>
+                    <button type="button" class="text-[11px] text-primary hover:underline" @click="refreshSkills">
+                      {{ t("ai.skillsRetry") }}
+                    </button>
+                  </div>
+                  <div v-else-if="userSkillStore.totalCount === 0" class="px-3 py-4 text-center text-xs text-muted-foreground">
+                    {{ t("ai.skillsEmpty") }}
+                  </div>
+                  <template v-else>
+                    <template v-for="group in userSkillStore.groupedSkills" :key="group.source">
+                      <div class="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        {{ t(group.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}
+                      </div>
+                      <template v-for="skill in group.skills" :key="skill.id">
+                        <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs hover:bg-muted" @click="toggleSkillSelected(skill.id)">
+                          <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="selectedSkillIds.includes(skill.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                            <Check v-if="selectedSkillIds.includes(skill.id)" class="h-3 w-3" />
+                          </div>
+                          <div class="min-w-0 flex-1 text-left">
+                            <div class="truncate font-medium">{{ skill.name }}</div>
+                            <div class="truncate text-[10px] text-muted-foreground">{{ skill.description }}</div>
+                          </div>
+                        </button>
+                      </template>
+                    </template>
+                  </template>
+                </div>
+                <div class="border-t mt-1 px-1 pt-1">
+                  <button type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
+                    <Loader2 v-if="userSkillStore.isLoading" class="h-3 w-3 animate-spin" />
+                    {{ t("ai.skillsRefresh") }}
+                  </button>
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
           <div v-if="mentionOpen" class="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-56 overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md">
             <div v-if="mentionLoading" class="flex items-center gap-2 px-2 py-2 text-xs text-muted-foreground">
@@ -5394,16 +5547,16 @@ async function openExternalUrl(url: string) {
             <div class="max-h-56 overflow-auto p-1">
               <button
                 v-for="(cmd, index) in filteredCommands"
-                :key="cmd.action"
+                :key="cmd.type === 'action' ? `action:${cmd.button.action}` : 'skills'"
                 type="button"
                 class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-muted"
                 :class="{ 'bg-muted': index === commandSelectedIndex }"
                 @mousedown.prevent="selectCommand(cmd)"
                 @mouseenter="commandSelectedIndex = index"
               >
-                <component :is="cmd.icon" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span class="font-medium">/{{ cmd.action }}</span>
-                <span class="ml-auto text-[11px] text-muted-foreground">{{ t(cmd.key) }}</span>
+                <component :is="cmd.type === 'action' ? cmd.button.icon : Layers" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span class="font-medium">/{{ cmd.type === "action" ? cmd.button.action : "skill" }}</span>
+                <span class="ml-auto text-[11px] text-muted-foreground">{{ t(cmd.type === "action" ? cmd.button.key : "ai.skillsEntry") }}</span>
               </button>
             </div>
           </div>
@@ -5419,6 +5572,21 @@ async function openExternalUrl(url: string) {
               <FileCode v-if="mention.kind === 'sqlFile'" class="h-3 w-3 shrink-0 text-primary" />
               <Table2 v-else class="h-3 w-3 shrink-0 text-primary" />
               <span class="truncate">{{ mentionDisplayName(mention) }}</span>
+              <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
+            </button>
+          </div>
+          <div v-if="selectedSkillMetas.length" class="mb-1.5 flex flex-wrap gap-1">
+            <button
+              v-for="skill in selectedSkillMetas"
+              :key="skill.id"
+              type="button"
+              class="group inline-flex max-w-full items-center gap-1 rounded border border-border/80 bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
+              :title="skill.description"
+              @click="removeSelectedSkill(skill.id)"
+            >
+              <Layers class="h-3 w-3 shrink-0 text-primary" />
+              <span class="truncate">{{ skill.name }}</span>
+              <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(userSkillStore.sourceOf(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
           </div>
@@ -5454,6 +5622,25 @@ async function openExternalUrl(url: string) {
               @preview="showImageAttachmentPreview(attachment)"
               @remove="removeImageAttachment(index)"
             />
+          </div>
+          <div v-if="skillFailures.length" class="mb-1.5 flex items-start gap-1.5 rounded-[7px] border border-destructive/40 bg-destructive/10 px-[9px] py-[5px] text-[11px] text-destructive" role="alert">
+            <AlertTriangle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div class="min-w-0 flex-1">
+              <div class="font-medium">{{ t("ai.skillsSendBlocked") }}</div>
+              <div v-for="failure in skillFailures" :key="failure.id" class="truncate">{{ userSkillStore.metaFor(failure.id)?.name ?? failure.id }} — {{ t(skillFailureReasonKey(failure.reason)) }}</div>
+            </div>
+            <button type="button" class="shrink-0 rounded border border-destructive/40 px-1.5 py-0.5 text-[10px] font-medium hover:bg-destructive/20" @click="send()">
+              {{ t("ai.skillsRetry") }}
+            </button>
+            <button type="button" class="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" :disabled="userSkillStore.isLoading" @click="refreshSkills">
+              {{ t("ai.skillsRefresh") }}
+            </button>
+            <button v-if="skillFailures.some((failure) => failure.reason === 'root_unavailable')" type="button" class="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" @click="openSkillRootSettings">
+              {{ t("ai.skillsOpenSettings") }}
+            </button>
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive" :aria-label="t('common.remove')" @click="skillFailures = []">
+              <X class="h-3 w-3" />
+            </button>
           </div>
           <div v-if="recoveredDraftActive" class="mb-1.5 flex items-center gap-1.5 rounded-[7px] border border-primary/30 bg-primary/10 px-[9px] py-[5px] text-[11px] text-primary" role="status">
             <Clock class="h-3.5 w-3.5 shrink-0" />

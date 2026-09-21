@@ -266,6 +266,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "ai-agent-turn-limit", category: "ai", titleKey: "ai.maxAgentTurns", descriptionKey: "ai.maxAgentTurnsDescription", targetId: "ai" },
   { id: "ai-global-retries", category: "ai", titleKey: "ai.maxRetriesGlobal", descriptionKey: "ai.maxRetriesGlobalDescription", targetId: "ai" },
   { id: "ai-global-instructions", category: "ai", titleKey: "ai.globalInstructions", descriptionKey: "ai.globalInstructionsDescription", targetId: "ai" },
+  { id: "ai-custom-skill-root", category: "ai", titleKey: "settings.aiSkillRoot", descriptionKey: "settings.aiSkillRootDesc", targetId: "ai", visible: desktopOnly },
   { id: "mcp", category: "mcp", titleKey: "settings.mcpTitle", descriptionKey: "settings.mcpDescription", targetId: "mcp" },
   { id: "mcp-bin-path", category: "mcp", titleKey: "settings.mcpBinPath", targetId: "mcp" },
   { id: "mcp-permissions", category: "mcp", titleKey: "settings.mcpExecutionMode", descriptionKey: "settings.mcpExecutionModeDescription", targetId: "mcp" },

@@ -3446,6 +3446,7 @@ export default {
     skillsReasonNotUtf8: "SKILL.md is no longer valid UTF-8",
     skillsReasonInvalidFrontmatter: "SKILL.md frontmatter is missing name/description or is malformed",
     skillsReasonUnreadable: "SKILL.md could not be read",
+    skillsTotalTrimmed: "Some selected skills exceed the combined content limit ({max} characters) and were skipped for this send.",
     templateSelectorEmpty: "No templates. Click Manage to add.",
     templateSelectorTooLong: "Selected templates exceed the total content limit ({max} characters). Deselect some to continue.",
     templateSetDefault: "Set as default",

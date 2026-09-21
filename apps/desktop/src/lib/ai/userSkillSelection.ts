@@ -1,4 +1,5 @@
-import type { UserSkillMeta } from "@/types/userSkills";
+import type { ReadUserSkill, UserSkillMeta } from "@/types/userSkills";
+import { promptTemplateCharacterCount } from "@/types/promptTemplate";
 
 /** A selected skill rendered as a chip, whether or not it is still discoverable. */
 export interface SelectedSkillChip {
@@ -41,4 +42,26 @@ export function buildSelectedSkillChips(ids: readonly string[], lookup: (id: str
 export function removeSkillIds(ids: readonly string[], removed: Iterable<string>): string[] {
   const dropped = new Set(removed);
   return ids.filter((id) => !dropped.has(id));
+}
+
+/**
+ * Keep the leading skills that fit the combined character budget for one
+ * request. A skill whose content would push the total past maxTotal is
+ * skipped, but a later smaller skill still fits (same budget semantics as
+ * capTemplateIdsToCharLimit for templates). Selection order is preserved so
+ * the injected set matches the chips top to bottom.
+ */
+export function capSkillsToCharLimit(skills: readonly ReadUserSkill[], maxTotal: number): ReadUserSkill[] {
+  const kept: ReadUserSkill[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  for (const skill of skills) {
+    if (seen.has(skill.id)) continue;
+    seen.add(skill.id);
+    const size = promptTemplateCharacterCount(skill.content);
+    if (total + size > maxTotal) continue;
+    total += size;
+    kept.push(skill);
+  }
+  return kept;
 }

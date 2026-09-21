@@ -43,3 +43,11 @@ export interface UserSkillRootSettings {
   customRootEnabled: boolean;
   customRoot: string | null;
 }
+
+/**
+ * Combined character budget for skills injected into one AI request. Skill
+ * bodies are only known after the send-time read (the catalog is metadata
+ * only), so the budget is enforced on the read snapshots with the same
+ * semantics as the template budget.
+ */
+export const ACTIVE_SKILLS_TOTAL_MAX = 65536;

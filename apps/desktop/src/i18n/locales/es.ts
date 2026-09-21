@@ -3217,6 +3217,7 @@ export default withEnglishFallback({
     skillsReasonNotUtf8: "SKILL.md ya no es UTF-8 válido",
     skillsReasonInvalidFrontmatter: "El frontmatter de SKILL.md no tiene name/description o no es válido",
     skillsReasonUnreadable: "No se pudo leer SKILL.md",
+    skillsTotalTrimmed: "Algunas skills seleccionadas superan el límite combinado de contenido ({max} caracteres) y se omitieron en este envío.",
     templateSelectorEmpty: "Sin plantillas. Haz clic en Gestionar para añadir.",
     templateSelectorTooLong: "Las plantillas seleccionadas superan el límite total de contenido ({max} caracteres). Deselecciona algunas para continuar.",
     templateSetDefault: "Establecer como predeterminada",

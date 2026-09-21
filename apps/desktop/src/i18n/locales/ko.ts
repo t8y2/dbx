@@ -3237,6 +3237,7 @@ export default withEnglishFallback({
     skillsReasonNotUtf8: "SKILL.md 이(가) 더 이상 유효한 UTF-8 이(가) 아닙니다",
     skillsReasonInvalidFrontmatter: "SKILL.md frontmatter 에 name/description 이(가) 없거나 형식이 잘못되었습니다",
     skillsReasonUnreadable: "SKILL.md 을(를) 읽을 수 없습니다",
+    skillsTotalTrimmed: "선택한 일부 스킬이 결합 콘텐츠 한도({max}자)를 초과하여 이번 전송에서 건너뛰었습니다.",
     templateSelectorEmpty: "템플릿이 없습니다. 추가하려면 관리를 클릭하세요.",
     templateSelectorTooLong: "선택한 템플릿이 전체 내용 한도를 초과합니다 ({max}자). 계속하려면 일부를 선택 해제하세요.",
     templateSetDefault: "기본값으로 설정",

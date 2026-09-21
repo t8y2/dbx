@@ -64,8 +64,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
-import { buildSelectedSkillChips, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
-import type { ReadUserSkill, ReadUserSkillFailure, UserSkillFailureReason, UserSkillRootSettings } from "@/types/userSkills";
+import { buildSelectedSkillChips, capSkillsToCharLimit, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
+import { ACTIVE_SKILLS_TOTAL_MAX, type ReadUserSkill, type ReadUserSkillFailure, type UserSkillFailureReason, type UserSkillRootSettings } from "@/types/userSkills";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -3148,7 +3148,14 @@ async function send() {
       resolveDetachedRunSettled();
       return;
     }
-    sendSkillSnapshot = skillRead.skills;
+    // Skill bodies are only known here, so the combined budget is enforced on
+    // the read snapshots: overflowing skills are skipped for this send while
+    // the selection itself stays untouched.
+    const cappedSkills = capSkillsToCharLimit(skillRead.skills, ACTIVE_SKILLS_TOTAL_MAX);
+    if (cappedSkills.length < skillRead.skills.length) {
+      toast(t("ai.skillsTotalTrimmed", { max: ACTIVE_SKILLS_TOTAL_MAX }), 4000);
+    }
+    sendSkillSnapshot = cappedSkills;
   }
   if (!(await promptTemplateStore.ensureLoaded())) {
     clearPendingWriteGrant();

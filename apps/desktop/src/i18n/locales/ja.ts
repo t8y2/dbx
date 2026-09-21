@@ -3251,6 +3251,7 @@ export default withEnglishFallback({
     skillsReasonNotUtf8: "SKILL.md は有効な UTF-8 ではありません",
     skillsReasonInvalidFrontmatter: "SKILL.md の frontmatter に name/description がないか形式が不正です",
     skillsReasonUnreadable: "SKILL.md を読み取れませんでした",
+    skillsTotalTrimmed: "選択した一部のスキルが合計上限（{max} 文字）を超えたため、今回の送信ではスキップされました。",
     templateSelectorEmpty: "テンプレートがありません。「管理」をクリックして追加してください。",
     templateSelectorTooLong: "選択されたテンプレートの合計が上限（{max}文字）を超えています。選択を解除してください。",
     templateSetDefault: "デフォルトに設定",

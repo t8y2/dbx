@@ -3225,6 +3225,7 @@ export default withEnglishFallback({
     skillsReasonNotUtf8: "SKILL.md artık geçerli UTF-8 değil",
     skillsReasonInvalidFrontmatter: "SKILL.md frontmatter içinde name/description eksik veya biçim geçersiz",
     skillsReasonUnreadable: "SKILL.md okunamadı",
+    skillsTotalTrimmed: "Bazı seçili beceriler birleşik içerik sınırını ({max} karakter) aştığı için bu gönderimde atlandı.",
     templateSelectorEmpty: "Şablon yok. Eklemek için Yönet'e tıklayın.",
     templateSelectorTooLong: "Seçili şablonlar toplam içerik sınırını aşıyor ({max} karakter). Devam etmek için bazılarının seçimini kaldırın.",
     templateSetDefault: "Varsayılan yap",

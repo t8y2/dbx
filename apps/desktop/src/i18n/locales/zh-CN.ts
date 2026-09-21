@@ -3358,6 +3358,7 @@ export default withEnglishFallback({
     skillsReasonNotUtf8: "SKILL.md 已不是有效的 UTF-8 编码",
     skillsReasonInvalidFrontmatter: "SKILL.md frontmatter 缺少 name/description 或格式无效",
     skillsReasonUnreadable: "无法读取 SKILL.md",
+    skillsTotalTrimmed: "部分已选 Skills 合计超出内容上限（最多 {max} 字符），本次发送已跳过。",
     templateSelectorEmpty: "暂无模板，请点击管理添加。",
     templateSelectorTooLong: "已选模板内容合计超过限制（最多 {max} 字符），请取消部分勾选。",
     templateSetDefault: "设为默认",

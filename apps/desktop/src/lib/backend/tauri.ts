@@ -4721,6 +4721,11 @@ export interface MeilisearchIndexOverview {
   updatedAt: string | null;
   numberOfDocuments: number;
   isIndexing: boolean;
+  /** Raw document store size of this index (Meilisearch >= 1.14); null on older servers. */
+  documentSize: number | null;
+  /** Average document size of this index (Meilisearch >= 1.14); null on older servers. */
+  avgDocumentSize: number | null;
+  /** Instance-wide database size; every index shares it, so it is only a fallback. */
   databaseSize: number | null;
 }
 

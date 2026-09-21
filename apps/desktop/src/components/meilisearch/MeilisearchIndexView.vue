@@ -100,8 +100,17 @@ onMounted(() => {
           <div class="text-muted-foreground">{{ t("meilisearch.documentCountLabel") }}</div>
           <div class="mt-0.5 tabular-nums text-foreground/80">{{ overview ? overview.numberOfDocuments : "-" }}</div>
         </div>
-        <div v-if="overview?.databaseSize != null">
-          <div class="text-muted-foreground">{{ t("meilisearch.databaseSize") }}</div>
+        <div v-if="overview?.documentSize != null">
+          <div class="text-muted-foreground">{{ t("meilisearch.documentSize") }}</div>
+          <div class="mt-0.5 tabular-nums text-foreground/80">{{ formatBytes(overview.documentSize) }}</div>
+        </div>
+        <div v-if="overview?.avgDocumentSize != null">
+          <div class="text-muted-foreground">{{ t("meilisearch.avgDocumentSize") }}</div>
+          <div class="mt-0.5 tabular-nums text-foreground/80">{{ formatBytes(overview.avgDocumentSize) }}</div>
+        </div>
+        <!-- Older servers report no per-index size; label the instance-wide number so it is not read as this index's size. -->
+        <div v-else-if="overview?.databaseSize != null">
+          <div class="text-muted-foreground">{{ t("meilisearch.instanceDatabaseSize") }}</div>
           <div class="mt-0.5 tabular-nums text-foreground/80">{{ formatBytes(overview.databaseSize) }}</div>
         </div>
       </div>

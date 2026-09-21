@@ -3683,7 +3683,7 @@ export default {
     viewDdlLoading: "Loading DDL...",
     ddlCopied: "DDL copied",
     excludeDdlStorage: "Exclude storage attributes",
-    excludeDdlStorageHint: "Applies to OceanBase Oracle DDL display, copying and structure export. Disable to retain compression, replica and storage options. Partitions and constraints are preserved.",
+    excludeDdlStorageHint: "Applies to Oracle and OceanBase Oracle DDL display, copying and structure export. Disable to retain compression, replica and storage options. Partitions and constraints are preserved.",
     refreshDdlOnOpen: "Refresh each time it opens",
     refreshDdlOnOpenHint: "When enabled, DDL is reloaded from the database each time it opens; when disabled, cached data is preferred",
     dropObject: "Drop Object",

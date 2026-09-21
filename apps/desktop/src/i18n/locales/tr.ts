@@ -3449,7 +3449,7 @@ export default withEnglishFallback({
     viewDdlLoading: "DDL yükleniyor...",
     ddlCopied: "DDL kopyalandı",
     excludeDdlStorage: "Depolama özelliklerini hariç tut",
-    excludeDdlStorageHint: "OceanBase Oracle DDL görüntüleme, kopyalama ve yapı dışa aktarma işlemlerine uygulanır. Sıkıştırma, replika ve depolama parametrelerini korumak için kapatın. Bölümler ve kısıtlamalar her zaman korunur.",
+    excludeDdlStorageHint: "Oracle ve OceanBase Oracle DDL görüntüleme, kopyalama ve yapı dışa aktarma işlemlerine uygulanır. Sıkıştırma, replika ve depolama parametrelerini korumak için kapatın. Bölümler ve kısıtlamalar her zaman korunur.",
     refreshDdlOnOpen: "Her açılışta yenile",
     refreshDdlOnOpenHint: "Etkinleştirildiğinde DDL her açılışta veritabanından yeniden yüklenir; kapatıldığında önbellekteki veri tercih edilir",
     dropObject: "Nesneyi Sil",

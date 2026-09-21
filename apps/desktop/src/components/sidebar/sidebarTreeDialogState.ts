@@ -1,5 +1,5 @@
 import { ref, shallowRef } from "vue";
-import type { TreeNode } from "@/types/database";
+import type { DatabaseType, TreeNode } from "@/types/database";
 import type { PasteTableMode } from "@/lib/table/tableClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
@@ -39,7 +39,7 @@ export const showBatchTruncateConfirm = ref(false);
 export const showStructurePreviewDialog = ref(false);
 export const showStructureDocCopyDialog = ref(false);
 export const structurePreviewSql = ref("");
-export const structurePreviewHasOceanBase = ref(false);
+export const structurePreviewDdlStorageType = ref<DatabaseType | undefined>(undefined);
 export const structurePreviewTitle = ref("");
 export const structurePreviewDefaultFileName = ref("structure.sql");
 export const structurePreviewError = ref("");

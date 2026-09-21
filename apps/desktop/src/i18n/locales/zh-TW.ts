@@ -3533,7 +3533,7 @@ export default withEnglishFallback({
     viewDdlLoading: "正在讀取 DDL...",
     ddlCopied: "DDL 已複製",
     excludeDdlStorage: "移除儲存屬性",
-    excludeDdlStorageHint: "用於 OceanBase Oracle 的 DDL 顯示、複製和結構匯出。關閉後保留壓縮、副本和儲存參數；分割區和約束條件一律保留。",
+    excludeDdlStorageHint: "用於 Oracle 與 OceanBase Oracle 的 DDL 顯示、複製和結構匯出。關閉後保留壓縮、副本和儲存參數；分割區和約束條件一律保留。",
     refreshDdlOnOpen: "每次開啟時重新整理",
     refreshDdlOnOpenHint: "開啟後每次開啟都會從資料庫重新讀取；關閉時優先使用快取",
     dropObject: "刪除物件",

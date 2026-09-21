@@ -3437,7 +3437,7 @@ export default withEnglishFallback({
     viewDdlLoading: "DDL을 불러오는 중...",
     ddlCopied: "DDL을 복사했습니다",
     excludeDdlStorage: "스토리지 속성 제외",
-    excludeDdlStorageHint: "OceanBase Oracle의 DDL 표시, 복사 및 구조 내보내기에 적용됩니다. 끄면 압축, 복제본 및 스토리지 매개변수를 유지합니다. 파티션과 제약 조건은 항상 유지됩니다.",
+    excludeDdlStorageHint: "Oracle 및 OceanBase Oracle의 DDL 표시, 복사 및 구조 내보내기에 적용됩니다. 끄면 압축, 복제본 및 스토리지 매개변수를 유지합니다. 파티션과 제약 조건은 항상 유지됩니다.",
     dropObject: "객체 삭제",
     dropView: "뷰 삭제",
     dropColumn: "컬럼 삭제",

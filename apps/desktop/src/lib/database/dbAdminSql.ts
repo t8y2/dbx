@@ -334,6 +334,7 @@ export interface CopyTableDataSqlOptions {
   columns?: string[];
   postgresOverridingSystemValue?: boolean;
   sqlserverIdentityInsert?: boolean;
+  damengIdentityInsert?: boolean;
   normalizeNewTargetName?: boolean;
   /** Quote character reported by the connected server, for types whose quote is not fixed by the
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the

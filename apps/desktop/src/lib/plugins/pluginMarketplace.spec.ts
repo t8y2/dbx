@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInstalledUpdateIndex, buildMarketplacePluginListings, compareVersions, filterMarketplacePluginListings, marketplaceHomepageUrl, pluginSourceChange, selectMarketplaceArtifact } from "./pluginMarketplace";
+import { buildInstalledUpdateIndex, buildMarketplacePluginListings, compareVersions, filterMarketplacePluginListings, formatMarketplaceReleaseDate, marketplaceHomepageUrl, pluginSourceChange, selectMarketplaceArtifact } from "./pluginMarketplace";
 import type { InstalledPlugin, PluginRepositoryCatalogResult } from "@/types/database";
 
 const result: PluginRepositoryCatalogResult = {
@@ -21,6 +21,8 @@ const result: PluginRepositoryCatalogResult = {
         versions: [
           {
             version: "1.1.0",
+            releasedAt: "2026-07-28T00:00:00Z",
+            releaseNotes: "Initial release.",
             artifacts: [{ target: "darwin-arm64", url: "https://plugins.example.com/hello.dbxp", sha256: "a".repeat(64), signingKeyId: "dbx.release" }],
           },
         ],
@@ -66,7 +68,27 @@ describe("plugin marketplace listings", () => {
     const listings = buildMarketplacePluginListings([result], [installed("1.0.0")], "zh-CN");
 
     expect(listings[0]).toMatchObject({ name: "你好工作台", status: "update", target: "darwin-arm64" });
+    expect(listings[0].latestRelease).toMatchObject({ version: "1.1.0", releaseNotes: "Initial release." });
     expect(filterMarketplacePluginListings(listings, "验证", "dbx-official")).toHaveLength(1);
+  });
+
+  it("projects release metadata only from the catalog latest version", () => {
+    const reordered = structuredClone(result);
+    reordered.catalog!.plugins[0].versions = [
+      {
+        version: "1.0.0",
+        releasedAt: "2026-07-01T00:00:00Z",
+        releaseNotes: "Older release.",
+        artifacts: [],
+      },
+      reordered.catalog!.plugins[0].versions[0],
+    ];
+
+    const listing = buildMarketplacePluginListings([reordered], [], "en")[0];
+    expect(listing.latestRelease).toMatchObject({ version: "1.1.0", releaseNotes: "Initial release." });
+
+    reordered.catalog!.plugins[0].latestVersion = "2.0.0";
+    expect(buildMarketplacePluginListings([reordered], [], "en")[0].latestRelease).toBeUndefined();
   });
 
   it("marks a plugin unsupported when the current target has no artifact", () => {
@@ -169,5 +191,17 @@ describe("compareVersions", () => {
     // Legacy migrated installs can carry non-semver manifest versions; the numeric-aware
     // fallback must still rank the catalog version above them.
     expect(compareVersions("1.1.0", "0.9")).toBeGreaterThan(0);
+  });
+});
+
+describe("formatMarketplaceReleaseDate", () => {
+  it("formats valid release timestamps with the requested locale", () => {
+    const expected = new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date("2026-07-28T00:00:00Z"));
+    expect(formatMarketplaceReleaseDate("2026-07-28T00:00:00Z", "en-US")).toBe(expected);
+  });
+
+  it("hides missing and invalid release timestamps", () => {
+    expect(formatMarketplaceReleaseDate(undefined, "en-US")).toBe("");
+    expect(formatMarketplaceReleaseDate("not-a-date", "en-US")).toBe("");
   });
 });

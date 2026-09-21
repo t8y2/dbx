@@ -53,7 +53,7 @@ export interface SolrAdminViewDef {
   /** REST 路径模板；core scope 中 {core} 会被替换。 */
   path: string;
   /** 需要专用渲染而非通用 JSON 树。 */
-  view: "generic" | "dashboard" | "properties" | "logging" | "coreAdmin" | "overview" | "ping" | "schema" | "analysis" | "segments" | "queryForm" | "action";
+  view: "generic" | "dashboard" | "properties" | "logging" | "coreAdmin" | "overview" | "ping" | "schema" | "analysis" | "segments" | "queryForm" | "replication" | "action";
 }
 
 export type SolrAdminViewId = "dashboard" | "logging" | "javaProps" | "threads" | "coreAdmin" | "metrics" | "overview" | "analysis" | "documents" | "paramsets" | "files" | "ping" | "plugins" | "query" | "replication" | "schema" | "segments";
@@ -68,7 +68,7 @@ export const SOLR_ADMIN_SERVER_VIEWS: readonly SolrAdminViewDef[] = [
 ];
 
 export const SOLR_ADMIN_CORE_VIEWS: readonly SolrAdminViewDef[] = [
-  { id: "overview", scope: "core", path: "/{core}/admin/luke", view: "overview" },
+  { id: "overview", scope: "core", path: "/{core}/admin/luke?show=index", view: "overview" },
   { id: "analysis", scope: "core", path: "/{core}/analysis/field", view: "analysis" },
   { id: "documents", scope: "core", path: "", view: "action" },
   { id: "paramsets", scope: "core", path: "/{core}/config/params", view: "generic" },
@@ -76,7 +76,7 @@ export const SOLR_ADMIN_CORE_VIEWS: readonly SolrAdminViewDef[] = [
   { id: "ping", scope: "core", path: "/{core}/admin/ping", view: "ping" },
   { id: "plugins", scope: "core", path: "/{core}/admin/mbeans?stats=true", view: "generic" },
   { id: "query", scope: "core", path: "", view: "queryForm" },
-  { id: "replication", scope: "core", path: "/{core}/replication?command=details", view: "generic" },
+  { id: "replication", scope: "core", path: "/{core}/replication?command=details", view: "replication" },
   { id: "schema", scope: "core", path: "/{core}/schema", view: "schema" },
   { id: "segments", scope: "core", path: "/{core}/admin/segments", view: "segments" },
 ];
@@ -399,4 +399,174 @@ export function parseSolrNumFound(rawBody: string): number | null {
   } catch {
     return null;
   }
+}
+
+/* ---------- Overview（对标官方 UI：Statistics / Instance / Replication / Healthcheck 组合） ---------- */
+
+/** luke ?show=index 的 index 块 → Statistics 行 */
+export interface SolrIndexStats {
+  lastModified?: string;
+  numDocs?: number;
+  maxDoc?: number;
+  deletedDocs?: number;
+  version?: number;
+  segmentCount?: number;
+  current?: boolean;
+  /** Lucene Directory 实现类（org.apache.lucene.store.NRTCachingDirectory 等） */
+  directoryImpl?: string;
+}
+
+export function parseIndexStats(body: unknown): SolrIndexStats {
+  const index = (body as Record<string, unknown> | null)?.index as Record<string, unknown> | undefined;
+  if (!index) return {};
+  const directory = typeof index.directory === "string" ? index.directory : undefined;
+  return {
+    lastModified: index.lastModified as string | undefined,
+    numDocs: typeof index.numDocs === "number" ? index.numDocs : undefined,
+    maxDoc: typeof index.maxDoc === "number" ? index.maxDoc : undefined,
+    deletedDocs: typeof index.deletedDocs === "number" ? index.deletedDocs : undefined,
+    version: typeof index.version === "number" ? index.version : undefined,
+    segmentCount: typeof index.segmentCount === "number" ? index.segmentCount : undefined,
+    current: typeof index.current === "boolean" ? index.current : undefined,
+    directoryImpl: directory?.split(":")[0],
+  };
+}
+
+/** replication?command=details 的 details 块 */
+export interface SolrReplicationDetails {
+  isLeader: boolean;
+  isFollower: boolean;
+  indexSize?: string;
+  indexPath?: string;
+  indexVersion?: string;
+  generation?: number;
+  replicableVersion?: number;
+  replicableGeneration?: number;
+  replicationEnabled?: boolean;
+  replicateAfter: string[];
+  /** follower 侧信息（isLeader=false 时展示） */
+  follower?: Record<string, unknown>;
+}
+
+export function parseReplicationDetails(body: unknown): SolrReplicationDetails | null {
+  const details = (body as Record<string, unknown> | null)?.details as Record<string, unknown> | undefined;
+  if (!details) return null;
+  const leader = (details.leader ?? {}) as Record<string, unknown>;
+  const follower = details.follower as Record<string, unknown> | undefined;
+  const num = (v: unknown) => (typeof v === "number" ? v : v != null ? Number(v) : undefined);
+  return {
+    isLeader: details.isLeader === true || details.isLeader === "true",
+    isFollower: details.isFollower === true || details.isFollower === "true",
+    indexSize: details.indexSize as string | undefined,
+    indexPath: details.indexPath as string | undefined,
+    indexVersion: details.indexVersion != null ? String(details.indexVersion) : undefined,
+    generation: num(details.generation),
+    replicableVersion: num(leader.replicableVersion),
+    replicableGeneration: num(leader.replicableGeneration),
+    replicationEnabled: leader.replicationEnabled === true || leader.replicationEnabled === "true",
+    replicateAfter: Array.isArray(leader.replicateAfter) ? leader.replicateAfter.map(String) : [],
+    follower,
+  };
+}
+
+/** leader 侧启停复制：/{core}/replication?command=enablereplication|disablereplication */
+export function solrReplicationCommand(connectionId: string, core: string, command: "enablereplication" | "disablereplication"): Promise<SolrAdminResponse> {
+  return solrAdminRequest(connectionId, "GET", `/${encodeURIComponent(core)}/replication?command=${command}`);
+}
+
+/** /admin/info/properties 响应 → JVM 工作目录（官方 Instance 框的 CWD）。 */
+export function parseServerCwd(body: unknown): string | undefined {
+  const props = (body as Record<string, unknown> | null)?.["system.properties"] as Record<string, unknown> | undefined;
+  return typeof props?.["user.dir"] === "string" ? props["user.dir"] : undefined;
+}
+
+/* ---------- Dashboard（官方布局：Instance / Versions / JVM + System 进度条） ---------- */
+
+export interface SolrSystemInfo {
+  mode?: string;
+  solrHome?: string;
+  coreRoot?: string;
+  /** jvm.jmx.startTime（ISO） */
+  startTime?: string;
+  uptimeMs?: number;
+  solrSpec?: string;
+  solrImpl?: string;
+  luceneSpec?: string;
+  luceneImpl?: string;
+  /** name + version 拼接，如 "Eclipse Adoptium OpenJDK 64-Bit Server VM 17.0.15 17.0.15+6" */
+  jvmRuntime?: string;
+  processors?: number;
+  args: string[];
+  jvmMemUsedPct?: number;
+  jvmMemUsed?: string;
+  jvmMemTotal?: string;
+  /** 物理内存：bytes */
+  physMemUsedPct?: number;
+  physMemUsed?: number;
+  physMemTotal?: number;
+  swapUsedPct?: number;
+  swapUsed?: number;
+  swapTotal?: number;
+  fdUsed?: number;
+  fdMax?: number;
+}
+
+export function parseSolrSystemInfo(body: unknown): SolrSystemInfo {
+  const root = (body ?? {}) as Record<string, unknown>;
+  const jvm = (root.jvm ?? {}) as Record<string, unknown>;
+  const jmx = (jvm.jmx ?? {}) as Record<string, unknown>;
+  const lucene = (root.lucene ?? {}) as Record<string, unknown>;
+  const system = (root.system ?? {}) as Record<string, unknown>;
+  const memory = (jvm.memory ?? {}) as Record<string, unknown>;
+  const raw = (memory.raw ?? {}) as Record<string, unknown>;
+
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
+  const pct = (used: number | undefined, total: number | undefined) => (used != null && total != null && total > 0 ? (used / total) * 100 : undefined);
+
+  const physTotal = num(system.totalPhysicalMemorySize);
+  const physFree = num(system.freePhysicalMemorySize);
+  const physUsed = physTotal != null && physFree != null ? physTotal - physFree : undefined;
+  const swapTotal = num(system.totalSwapSpaceSize);
+  const swapFree = num(system.freeSwapSpaceSize);
+  const swapUsed = swapTotal != null && swapFree != null ? swapTotal - swapFree : undefined;
+
+  const jvmName = str(jvm.name);
+  const jvmVersion = str(jvm.version);
+
+  return {
+    mode: str(root.mode),
+    solrHome: str(root.solr_home),
+    coreRoot: str(root.core_root),
+    startTime: str(jmx.startTime),
+    uptimeMs: num(jmx.upTimeMS),
+    solrSpec: str(lucene["solr-spec-version"]),
+    solrImpl: str(lucene["solr-impl-version"]),
+    luceneSpec: str(lucene["lucene-spec-version"]),
+    luceneImpl: str(lucene["lucene-impl-version"]),
+    jvmRuntime: [jvmName, jvmVersion].filter(Boolean).join(" ") || undefined,
+    processors: num(jvm.processors),
+    args: Array.isArray(jmx.commandLineArgs) ? jmx.commandLineArgs.map(String) : [],
+    jvmMemUsedPct: num(raw["used%"]),
+    jvmMemUsed: str(memory.used),
+    jvmMemTotal: str(memory.total),
+    physMemUsedPct: pct(physUsed, physTotal),
+    physMemUsed: physUsed,
+    physMemTotal: physTotal,
+    swapUsedPct: pct(swapUsed, swapTotal),
+    swapUsed,
+    swapTotal,
+    fdUsed: num(system.openFileDescriptorCount),
+    fdMax: num(system.maxFileDescriptorCount),
+  };
+}
+
+/** solr-impl-version 里带构建日期（"9.8.1 dab835... - houston - 2025-03-06 13:59:17"），>1 年提示升级。 */
+export function solrReleaseAgeDays(implVersion?: string): number | null {
+  if (!implVersion) return null;
+  const match = implVersion.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  const ts = Date.parse(`${match[1]}-${match[2]}-${match[3]}T00:00:00Z`);
+  if (!Number.isFinite(ts)) return null;
+  return Math.floor((Date.now() - ts) / 86400000);
 }

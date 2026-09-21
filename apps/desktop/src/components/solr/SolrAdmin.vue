@@ -19,15 +19,21 @@ import {
   defaultSolrQueryForm,
   parseAnalysisResponse,
   parseCoreStatus,
+  parseIndexStats,
   parseParamsetNames,
+  parseReplicationDetails,
+  parseServerCwd,
   parseSolrNumFound,
   parseSolrSchema,
+  parseSolrSystemInfo,
+  solrReleaseAgeDays,
   solrAdminErrorMessage,
   solrAdminGet,
   solrAdminPath,
   solrAdminViewById,
   solrAnalysisPath,
   solrCoreAdminRequest,
+  solrReplicationCommand,
   SOLR_ADMIN_CORE_VIEWS,
   SOLR_ADMIN_SERVER_VIEWS,
   type SolrAdminResponse,
@@ -35,7 +41,9 @@ import {
   type SolrAdminViewId,
   type SolrAnalysisResult,
   type SolrCoreStatus,
+  type SolrIndexStats,
   type SolrQueryParam,
+  type SolrReplicationDetails,
 } from "@/lib/solr/solrAdmin";
 
 const props = defineProps<{
@@ -80,30 +88,15 @@ const connectionName = computed(() => connectionStore.getConfig(props.connection
 const coreNames = computed(() => cores.value.map((core) => core.name));
 
 const responseBody = computed(() => response.value?.body ?? null);
-const dashboardEntries = computed(() => {
-  const body = responseBody.value;
-  if (!body || typeof body !== "object" || Array.isArray(body)) return [];
-  const root = body as Record<string, unknown>;
-  const jvm = (root.jvm ?? {}) as Record<string, unknown>;
-  const lucene = (root.lucene ?? {}) as Record<string, unknown>;
-  const memory = (jvm.memory ?? {}) as Record<string, unknown>;
-  const pick = (key: string, value: unknown) => (value == null || value === "" ? [] : [{ key, value: String(value) }]);
-  return [
-    ...pick("mode", root.mode),
-    ...pick("solr_home", root.solr_home),
-    ...pick("core_root", root.core_root),
-    ...pick("lucene_spec", lucene["solr-spec-version"]),
-    ...pick("lucene_impl", lucene["solr-impl-version"]),
-    ...pick("jvm_name", jvm.name),
-    ...pick("jvm_version", jvm.version),
-    ...pick("jvm_vendor", jvm.vendor),
-    ...pick("processors", jvm.processors),
-    ...pick("memory_free", memory.free),
-    ...pick("memory_total", memory.total),
-    ...pick("memory_max", memory.max),
-    ...pick("memory_used", memory.used),
-  ];
+const systemInfo = computed(() => parseSolrSystemInfo(responseBody.value));
+const solrReleaseOld = computed(() => {
+  const days = solrReleaseAgeDays(systemInfo.value.solrImpl);
+  return days != null && days > 365;
 });
+
+function barPct(pct?: number): string {
+  return `${Math.min(100, Math.max(0, pct ?? 0)).toFixed(1)}%`;
+}
 
 const propertyEntries = computed(() => {
   const body = responseBody.value;
@@ -124,14 +117,101 @@ const loggingLevels = computed(() => {
     .sort((a, b) => a.name.localeCompare(b.name));
 });
 
-const lukeIndexEntries = computed(() => {
-  const body = responseBody.value;
-  const index = (body as Record<string, unknown> | null)?.index;
-  if (!index || typeof index !== "object" || Array.isArray(index)) return [];
-  return Object.entries(index as Record<string, unknown>)
-    .filter(([, value]) => value != null && typeof value !== "object")
-    .map(([key, value]) => ({ key, value: String(value) }));
+/* ---------- Overview（官方 UI 组合视图：luke index + STATUS + replication + ping + user.dir） ---------- */
+
+const overviewStats = ref<SolrIndexStats | null>(null);
+const overviewReplication = ref<SolrReplicationDetails | null>(null);
+const overviewPingStatus = ref("");
+const overviewCwd = ref("");
+
+async function loadOverview() {
+  const core = selectedCore.value;
+  if (!core) return;
+  loading.value = true;
+  error.value = "";
+  overviewStats.value = null;
+  overviewReplication.value = null;
+  overviewPingStatus.value = "";
+  overviewCwd.value = "";
+  const enc = encodeURIComponent(core);
+  const [lukeRes, replRes, pingRes, propsRes] = await Promise.allSettled([
+    solrAdminGet(props.connectionId, `/${enc}/admin/luke?show=index`),
+    solrAdminGet(props.connectionId, `/${enc}/replication?command=details`),
+    solrAdminGet(props.connectionId, `/${enc}/admin/ping`),
+    solrAdminGet(props.connectionId, "/admin/info/properties"),
+  ]);
+  loading.value = false;
+  // luke 是 Statistics/Impl 的主数据源，失败则整页报错；其余块允许局部降级
+  if (lukeRes.status === "rejected") {
+    error.value = String(lukeRes.reason?.message ?? lukeRes.reason);
+    return;
+  }
+  response.value = lukeRes.value;
+  overviewStats.value = parseIndexStats(lukeRes.value.body);
+  overviewReplication.value = replRes.status === "fulfilled" ? parseReplicationDetails(replRes.value.body) : null;
+  if (pingRes.status === "fulfilled") {
+    const status = (pingRes.value.body as Record<string, unknown> | null)?.status;
+    overviewPingStatus.value = typeof status === "string" ? status : "";
+  }
+  overviewCwd.value = propsRes.status === "fulfilled" ? (parseServerCwd(propsRes.value.body) ?? "") : "";
+}
+
+const overviewInstanceRows = computed(() => {
+  const core = cores.value.find((c) => c.name === selectedCore.value);
+  const rows = [
+    { key: "cwd", value: overviewCwd.value },
+    { key: "instanceDir", value: core?.instanceDir },
+    { key: "data", value: core?.dataDir },
+    { key: "index", value: overviewReplication.value?.indexPath },
+    { key: "impl", value: overviewStats.value?.directoryImpl },
+  ];
+  return rows.filter((row) => row.value);
 });
+
+function replicationRows(r: SolrReplicationDetails | null) {
+  if (!r?.isLeader) return [];
+  return [
+    { label: t("solrAdmin.overview.leaderSearching"), version: r.indexVersion ?? "-", gen: r.generation ?? "-", size: r.indexSize ?? "-" },
+    { label: t("solrAdmin.overview.leaderReplicable"), version: r.replicableVersion ?? "-", gen: r.replicableGeneration ?? "-", size: "-" },
+  ];
+}
+
+const overviewReplicationRows = computed(() => replicationRows(overviewReplication.value));
+
+/* ---------- Replication 视图（官方布局：操作按钮 + Index 表 + Settings） ---------- */
+
+const replicationDetails = ref<SolrReplicationDetails | null>(null);
+const replicationRowsComputed = computed(() => replicationRows(replicationDetails.value));
+
+async function loadReplication() {
+  const core = selectedCore.value;
+  if (!core) return;
+  loading.value = true;
+  error.value = "";
+  try {
+    const res = await solrAdminGet(props.connectionId, `/${encodeURIComponent(core)}/replication?command=details`);
+    response.value = res;
+    replicationDetails.value = parseReplicationDetails(res.body);
+  } catch (e: any) {
+    error.value = String(e?.message ?? e);
+    response.value = null;
+  } finally {
+    loading.value = false;
+  }
+}
+
+function relativeTime(iso?: string): string {
+  if (!iso) return "-";
+  const t0 = Date.parse(iso);
+  if (!Number.isFinite(t0)) return iso;
+  const sec = Math.max(0, Math.floor((Date.now() - t0) / 1000));
+  if (sec < 60) return t("solrAdmin.overview.justNow");
+  const min = Math.floor(sec / 60);
+  if (min < 60) return t("solrAdmin.overview.minutesAgo", { n: min });
+  const hours = Math.floor(min / 60);
+  if (hours < 48) return t("solrAdmin.overview.hoursAgo", { n: hours });
+  return t("solrAdmin.overview.daysAgo", { n: Math.floor(hours / 24) });
+}
 
 const schemaInfo = computed(() => parseSolrSchema(responseBody.value));
 const segmentEntries = computed(() => {
@@ -171,6 +251,14 @@ async function loadCores() {
 async function load() {
   const view = activeView.value;
   if (view.view === "action") return;
+  if (view.view === "overview") {
+    await loadOverview();
+    return;
+  }
+  if (view.view === "replication") {
+    await loadReplication();
+    return;
+  }
   if (view.view === "queryForm") {
     // core 切换后 paramset 列表过期，结果属于旧 core，一并清掉
     queryResult.value = null;
@@ -323,7 +411,8 @@ async function runAnalysis() {
 /* ---------- Core Admin actions ---------- */
 
 const actionPending = ref(false);
-const confirmAction = ref<{ action: "RELOAD" | "UNLOAD" | "RENAME" | "SWAP"; core: string; label: string } | null>(null);
+type CoreActionId = "RELOAD" | "UNLOAD" | "RENAME" | "SWAP" | "DISABLE_REPLICATION" | "ENABLE_REPLICATION";
+const confirmAction = ref<{ action: CoreActionId; core: string; label: string } | null>(null);
 const renameTarget = ref("");
 const swapTarget = ref("");
 const createOpen = ref(false);
@@ -331,10 +420,20 @@ const createName = ref("");
 const createConfigSet = ref("_default");
 const createInstanceDir = ref("");
 
-function askCoreAction(action: "RELOAD" | "UNLOAD" | "RENAME" | "SWAP", core: string) {
+function askCoreAction(action: CoreActionId, core: string) {
   renameTarget.value = "";
   swapTarget.value = "";
   confirmAction.value = { action, core, label: t(`solrAdmin.actions.${action.toLowerCase()}`) };
+}
+
+function askReplicationToggle() {
+  if (!selectedCore.value || !replicationDetails.value) return;
+  const disabling = replicationDetails.value.replicationEnabled !== false;
+  confirmAction.value = {
+    action: disabling ? "DISABLE_REPLICATION" : "ENABLE_REPLICATION",
+    core: selectedCore.value,
+    label: t(disabling ? "solrAdmin.replication.disable" : "solrAdmin.replication.enable"),
+  };
 }
 
 async function runCoreAction() {
@@ -342,6 +441,16 @@ async function runCoreAction() {
   if (!pending) return;
   actionPending.value = true;
   try {
+    if (pending.action === "DISABLE_REPLICATION" || pending.action === "ENABLE_REPLICATION") {
+      const command = pending.action === "DISABLE_REPLICATION" ? "disablereplication" : "enablereplication";
+      const res = await solrReplicationCommand(props.connectionId, pending.core, command);
+      const failed = solrAdminErrorMessage(res);
+      if (failed) throw new Error(failed);
+      toast(t("solrAdmin.actions.success", { action: pending.label, core: pending.core }), 3000);
+      confirmAction.value = null;
+      await loadReplication();
+      return;
+    }
     const params: Record<string, string> = { action: pending.action };
     if (pending.action === "SWAP") {
       params.core = pending.core;
@@ -477,12 +586,127 @@ onMounted(async () => {
         </div>
 
         <div v-else class="min-h-0 flex-1 overflow-y-auto p-4">
-          <!-- Dashboard -->
+          <!-- Dashboard（官方双栏：Instance / Versions / JVM + System/JVM-Memory 进度条） -->
           <template v-if="activeView.view === 'dashboard'">
-            <div class="grid grid-cols-2 gap-2 md:grid-cols-3">
-              <div v-for="entry in dashboardEntries" :key="entry.key" class="rounded border p-2">
-                <div class="text-xs text-muted-foreground">{{ t(`solrAdmin.dashboard.${entry.key}`) }}</div>
-                <div class="truncate font-mono text-sm" :title="entry.value">{{ entry.value }}</div>
+            <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <div class="space-y-3">
+                <!-- Instance -->
+                <div class="rounded border">
+                  <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.dashboard.instance") }}</div>
+                  <table class="w-full text-sm">
+                    <tbody>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.start") }}</td>
+                        <td class="px-3 py-1.5 text-xs">
+                          {{ relativeTime(systemInfo.startTime) }}<span v-if="systemInfo.uptimeMs" class="ml-2 text-muted-foreground">({{ formatUptime(systemInfo.uptimeMs) }})</span>
+                        </td>
+                      </tr>
+                      <tr v-if="systemInfo.mode" class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.mode") }}</td>
+                        <td class="px-3 py-1.5 font-mono text-xs">{{ systemInfo.mode }}</td>
+                      </tr>
+                      <tr v-if="systemInfo.solrHome" class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.solr_home") }}</td>
+                        <td class="break-all px-3 py-1.5 font-mono text-xs">{{ systemInfo.solrHome }}</td>
+                      </tr>
+                      <tr v-if="systemInfo.coreRoot" class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.core_root") }}</td>
+                        <td class="break-all px-3 py-1.5 font-mono text-xs">{{ systemInfo.coreRoot }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- Versions -->
+                <div class="rounded border">
+                  <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.dashboard.versions") }}</div>
+                  <table class="w-full text-sm">
+                    <tbody>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">solr-spec</td>
+                        <td class="px-3 py-1.5 font-mono text-xs">{{ systemInfo.solrSpec ?? "-" }}</td>
+                      </tr>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">solr-impl</td>
+                        <td class="break-all px-3 py-1.5 font-mono text-xs">{{ systemInfo.solrImpl ?? "-" }}</td>
+                      </tr>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">lucene-spec</td>
+                        <td class="px-3 py-1.5 font-mono text-xs">{{ systemInfo.luceneSpec ?? "-" }}</td>
+                      </tr>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">lucene-impl</td>
+                        <td class="break-all px-3 py-1.5 font-mono text-xs">{{ systemInfo.luceneImpl ?? "-" }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div v-if="solrReleaseOld" class="flex items-center gap-2 border-t px-3 py-2 text-xs text-amber-600">
+                    <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
+                    {{ t("solrAdmin.dashboard.outdatedWarning") }}
+                  </div>
+                </div>
+
+                <!-- JVM -->
+                <div class="rounded border">
+                  <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.dashboard.jvmTitle") }}</div>
+                  <table class="w-full text-sm">
+                    <tbody>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.runtime") }}</td>
+                        <td class="break-all px-3 py-1.5 font-mono text-xs">{{ systemInfo.jvmRuntime ?? "-" }}</td>
+                      </tr>
+                      <tr class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.processors") }}</td>
+                        <td class="px-3 py-1.5 font-mono text-xs">{{ systemInfo.processors ?? "-" }}</td>
+                      </tr>
+                      <tr v-if="systemInfo.args.length" class="border-b last:border-0">
+                        <td class="w-32 px-3 py-1.5 align-top text-xs text-muted-foreground">{{ t("solrAdmin.dashboard.args") }}</td>
+                        <td class="break-all px-3 py-1.5 font-mono text-[11px] leading-relaxed">{{ systemInfo.args.join(" ") }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="space-y-3">
+                <!-- System -->
+                <div class="rounded border p-3">
+                  <div class="mb-2 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.dashboard.system") }}</div>
+                  <div v-if="systemInfo.physMemUsedPct != null" class="mb-3">
+                    <div class="mb-1 flex justify-between text-xs">
+                      <span>{{ t("solrAdmin.dashboard.physMem") }}</span
+                      ><span>{{ barPct(systemInfo.physMemUsedPct) }}</span>
+                    </div>
+                    <div class="h-2 overflow-hidden rounded bg-muted"><div class="h-full rounded bg-primary" :style="{ width: barPct(systemInfo.physMemUsedPct) }" /></div>
+                    <div class="mt-0.5 text-right font-mono text-[10px] text-muted-foreground">{{ formatBytes(systemInfo.physMemUsed) }} / {{ formatBytes(systemInfo.physMemTotal) }}</div>
+                  </div>
+                  <div v-if="systemInfo.swapUsedPct != null" class="mb-3">
+                    <div class="mb-1 flex justify-between text-xs">
+                      <span>{{ t("solrAdmin.dashboard.swap") }}</span
+                      ><span>{{ barPct(systemInfo.swapUsedPct) }}</span>
+                    </div>
+                    <div class="h-2 overflow-hidden rounded bg-muted"><div class="h-full rounded bg-primary" :style="{ width: barPct(systemInfo.swapUsedPct) }" /></div>
+                    <div class="mt-0.5 text-right font-mono text-[10px] text-muted-foreground">{{ formatBytes(systemInfo.swapUsed) }} / {{ formatBytes(systemInfo.swapTotal) }}</div>
+                  </div>
+                  <div v-if="systemInfo.fdMax">
+                    <div class="mb-1 flex justify-between text-xs">
+                      <span>{{ t("solrAdmin.dashboard.fd") }}</span
+                      ><span>{{ barPct((systemInfo.fdUsed! / systemInfo.fdMax) * 100) }}</span>
+                    </div>
+                    <div class="h-2 overflow-hidden rounded bg-muted"><div class="h-full rounded bg-primary" :style="{ width: barPct((systemInfo.fdUsed! / systemInfo.fdMax) * 100) }" /></div>
+                    <div class="mt-0.5 text-right font-mono text-[10px] text-muted-foreground">{{ systemInfo.fdUsed ?? "-" }} / {{ systemInfo.fdMax }}</div>
+                  </div>
+                </div>
+
+                <!-- JVM-Memory -->
+                <div class="rounded border p-3">
+                  <div class="mb-1 flex justify-between text-xs">
+                    <span class="font-medium text-muted-foreground">{{ t("solrAdmin.dashboard.jvmMemory") }}</span
+                    ><span>{{ barPct(systemInfo.jvmMemUsedPct) }}</span>
+                  </div>
+                  <div class="h-2 overflow-hidden rounded bg-muted"><div class="h-full rounded bg-primary" :style="{ width: barPct(systemInfo.jvmMemUsedPct) }" /></div>
+                  <div class="mt-0.5 text-right font-mono text-[10px] text-muted-foreground">{{ systemInfo.jvmMemUsed ?? "-" }} / {{ systemInfo.jvmMemTotal ?? "-" }}</div>
+                </div>
               </div>
             </div>
             <div class="mt-4">
@@ -572,16 +796,91 @@ onMounted(async () => {
             </div>
           </template>
 
-          <!-- Core Overview (luke) -->
+          <!-- Core Overview（官方布局：Statistics + Instance + Replication + Healthcheck） -->
           <template v-else-if="activeView.view === 'overview'">
-            <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
-              <div v-for="entry in lukeIndexEntries" :key="entry.key" class="rounded border p-2">
-                <div class="text-xs text-muted-foreground">{{ entry.key }}</div>
-                <div class="truncate font-mono text-sm" :title="entry.value">{{ entry.value }}</div>
+            <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              <!-- Statistics -->
+              <div class="rounded border">
+                <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.overview.statistics") }}</div>
+                <table class="w-full text-sm">
+                  <tbody>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.lastModified") }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ relativeTime(overviewStats.lastModified) }}</td>
+                    </tr>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.numDocs") }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ overviewStats.numDocs ?? "-" }}</td>
+                    </tr>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.maxDoc") }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ overviewStats.maxDoc ?? "-" }}</td>
+                    </tr>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.deletedDocs") }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ overviewStats.deletedDocs ?? "-" }}</td>
+                    </tr>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.version") }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ overviewStats.version ?? "-" }}</td>
+                    </tr>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.segmentCount") }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ overviewStats.segmentCount ?? "-" }}</td>
+                    </tr>
+                    <tr v-if="overviewStats" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t("solrAdmin.overview.current") }}</td>
+                      <td class="px-3 py-1 text-xs">{{ overviewStats.current ? "✓" : "✗" }}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
-            </div>
-            <div class="mt-4">
-              <JsonTree v-if="responseBody" :value="responseBody" :initial-expanded-depth="1" virtualized />
+
+              <!-- Instance -->
+              <div class="rounded border">
+                <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.overview.instance") }}</div>
+                <table class="w-full text-sm">
+                  <tbody>
+                    <tr v-for="row in overviewInstanceRows" :key="row.key" class="border-b last:border-0">
+                      <td class="w-40 px-3 py-1 text-xs text-muted-foreground">{{ t(`solrAdmin.overview.${row.key}`) }}</td>
+                      <td class="break-all px-3 py-1 font-mono text-xs">{{ row.value }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <!-- Replication (Leader) -->
+              <div class="rounded border">
+                <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.overview.replication") }}</div>
+                <table v-if="overviewReplicationRows.length" class="w-full text-sm">
+                  <thead>
+                    <tr class="border-b text-left text-xs text-muted-foreground">
+                      <th class="px-3 py-1 font-medium"></th>
+                      <th class="px-3 py-1 font-medium">{{ t("solrAdmin.overview.colVersion") }}</th>
+                      <th class="px-3 py-1 font-medium">{{ t("solrAdmin.overview.colGen") }}</th>
+                      <th class="px-3 py-1 font-medium">{{ t("solrAdmin.overview.colSize") }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in overviewReplicationRows" :key="row.label" class="border-b last:border-0">
+                      <td class="px-3 py-1 text-xs">{{ row.label }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ row.version }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ row.gen }}</td>
+                      <td class="px-3 py-1 font-mono text-xs">{{ row.size }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="px-3 py-2 text-xs text-muted-foreground">{{ t("solrAdmin.overview.noReplication") }}</div>
+              </div>
+
+              <!-- Healthcheck -->
+              <div class="rounded border">
+                <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">{{ t("solrAdmin.overview.healthcheck") }}</div>
+                <div class="px-3 py-2 text-sm">
+                  <Badge v-if="overviewPingStatus === 'OK'" variant="default" class="text-xs">OK</Badge>
+                  <span v-else class="text-xs text-muted-foreground">{{ overviewPingStatus || t("solrAdmin.overview.noHealthcheck") }}</span>
+                </div>
+              </div>
             </div>
           </template>
 
@@ -941,7 +1240,68 @@ onMounted(async () => {
             </tbody>
           </table>
 
-          <!-- 通用 JSON 视图（threads / metrics / paramsets / files / plugins / replication 及兜底） -->
+          <!-- Replication（官方布局：操作按钮 + Index 表 + Settings） -->
+          <template v-else-if="activeView.view === 'replication'">
+            <div class="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" class="h-8" :disabled="loading" @click="loadReplication">
+                <RefreshCcw class="mr-1.5 h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
+                {{ t("solrAdmin.replication.refresh") }}
+              </Button>
+              <Button v-if="replicationDetails?.isLeader" size="sm" :variant="replicationDetails.replicationEnabled !== false ? 'destructive' : 'default'" class="h-8" @click="askReplicationToggle">
+                {{ replicationDetails.replicationEnabled !== false ? t("solrAdmin.replication.disable") : t("solrAdmin.replication.enable") }}
+              </Button>
+            </div>
+
+            <table v-if="replicationRowsComputed.length" class="mt-4 w-full max-w-2xl text-sm">
+              <thead>
+                <tr class="border-b text-left text-xs text-muted-foreground">
+                  <th class="px-2 py-1 font-medium">{{ t("solrAdmin.replication.index") }}</th>
+                  <th class="px-2 py-1 font-medium">{{ t("solrAdmin.overview.colVersion") }}</th>
+                  <th class="px-2 py-1 font-medium">{{ t("solrAdmin.overview.colGen") }}</th>
+                  <th class="px-2 py-1 font-medium">{{ t("solrAdmin.overview.colSize") }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in replicationRowsComputed" :key="row.label" class="border-b last:border-0">
+                  <td class="px-2 py-1.5 text-xs">{{ row.label }}</td>
+                  <td class="px-2 py-1.5 font-mono text-xs">{{ row.version }}</td>
+                  <td class="px-2 py-1.5 font-mono text-xs">{{ row.gen }}</td>
+                  <td class="px-2 py-1.5 font-mono text-xs">{{ row.size }}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div v-if="replicationDetails" class="mt-4 max-w-2xl rounded border">
+              <div class="border-b bg-muted/30 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                {{ replicationDetails.isLeader ? t("solrAdmin.replication.settingsLeader") : t("solrAdmin.replication.settingsFollower") }}
+              </div>
+              <table v-if="replicationDetails.isLeader" class="w-full text-sm">
+                <tbody>
+                  <tr class="border-b last:border-0">
+                    <td class="w-48 px-3 py-1.5 text-xs text-muted-foreground">replication enable:</td>
+                    <td class="px-3 py-1.5 text-xs">{{ replicationDetails.replicationEnabled !== false ? "✓" : "✗" }}</td>
+                  </tr>
+                  <tr class="border-b last:border-0">
+                    <td class="w-48 px-3 py-1.5 text-xs text-muted-foreground">replicateAfter:</td>
+                    <td class="px-3 py-1.5 font-mono text-xs">{{ replicationDetails.replicateAfter.join(", ") || "-" }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <table v-else-if="replicationDetails.follower" class="w-full text-sm">
+                <tbody>
+                  <tr v-for="(value, key) in replicationDetails.follower" :key="key" class="border-b last:border-0">
+                    <td class="w-48 px-3 py-1.5 font-mono text-xs text-muted-foreground">{{ key }}</td>
+                    <td class="break-all px-3 py-1.5 font-mono text-xs">{{ queryCellText(value) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else-if="!loading" class="mt-4 text-sm text-muted-foreground">{{ t("solrAdmin.replication.noDetails") }}</div>
+
+            <JsonTree v-if="responseBody" :value="responseBody" :initial-expanded-depth="1" virtualized class="mt-4" />
+          </template>
+
+          <!-- 通用 JSON 视图（threads / metrics / paramsets / files / plugins 及兜底） -->
           <JsonTree v-else-if="responseBody" :value="responseBody" :initial-expanded-depth="2" virtualized />
           <div v-else-if="response" class="text-sm text-muted-foreground">{{ t("solrAdmin.emptyBody") }}</div>
         </div>
@@ -982,7 +1342,11 @@ onMounted(async () => {
         </div>
         <DialogFooter>
           <Button variant="outline" :disabled="actionPending" @click="confirmAction = null">{{ t("dangerDialog.cancel") }}</Button>
-          <Button :variant="confirmAction?.action === 'UNLOAD' ? 'destructive' : 'default'" :disabled="actionPending || (confirmAction?.action === 'RENAME' && !renameTarget.trim()) || (confirmAction?.action === 'SWAP' && !swapTarget)" @click="runCoreAction">
+          <Button
+            :variant="confirmAction?.action === 'UNLOAD' || confirmAction?.action === 'DISABLE_REPLICATION' ? 'destructive' : 'default'"
+            :disabled="actionPending || (confirmAction?.action === 'RENAME' && !renameTarget.trim()) || (confirmAction?.action === 'SWAP' && !swapTarget)"
+            @click="runCoreAction"
+          >
             <Loader2 v-if="actionPending" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
             {{ confirmAction?.label }}
           </Button>

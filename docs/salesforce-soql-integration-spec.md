@@ -1,6 +1,6 @@
 # Salesforce (SOQL) 驱动集成 Spec
 
-> 状态：v1.0 — D1~D6 已决策（见 §13），待排期，M0+M1 优先
+> 状态：v1.1 — D1~D6 已决策（见 §13）；M0+M1 已交付并经真实 sandbox 验证；M2 OAuth 已实现（PKCE 浏览器流 + Device Flow + refresh 持久化/自动续期），Connected App 暂为 BYO（bundled client id 待注册后填入 salesforce_oauth.rs 默认值）
 > 日期：2026-09-21
 > 范围：为 DBX 新增 Salesforce 连接类型，支持 SOQL 查询、sObject 元数据浏览、行级 DML、SOQL 自动补全，并最终暴露到 MCP。
 
@@ -225,9 +225,9 @@ capabilities 覆盖（MVP）：
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **M0 骨架** | salesforce.yaml + sync 脚本 + PoolKind/分发接线 + 图标 + 表单（token 粘贴模式）| manifest 三测试通过（`cargo test -p dbx-core --test database_capabilities` + 两个 `driver-manifest.test.ts`），能用粘贴 token 连上 dev org |
-| **M1 查询闭环** | execute_query（SOQL→QueryResult）+ 分页 + 错误映射 + listTables/listColumns（describe 缓存）+ userinfo/admin 探测 | 对象树可浏览，SOQL 查询出结果，配额友好 |
-| **M2 OAuth** | PKCE 浏览器流（桌面）+ Device Flow（web）+ token 持久化与刷新 | 桌面一键授权，重启不丢登录 |
+| ✅ **M0 骨架** | salesforce.yaml + sync 脚本 + PoolKind/分发接线 + 图标 + 表单（token 粘贴模式）| manifest 三测试通过（`cargo test -p dbx-core --test database_capabilities` + 两个 `driver-manifest.test.ts`），能用粘贴 token 连上 dev org |
+| ✅ **M1 查询闭环** | execute_query（SOQL→QueryResult）+ 分页 + 错误映射 + listTables/listColumns（describe 缓存）+ userinfo/admin 探测 | 对象树可浏览，SOQL 查询出结果，配额友好 |
+| ✅ **M2 OAuth** | PKCE 浏览器流（桌面）+ Device Flow（web）+ token 持久化与刷新 | 桌面一键授权，重启不丢登录 |
 | **M3 编辑体验** | SOQL 方言高亮 + 补全（对象/字段/关系/picklist）+ 展开全部字段 | 补全基于 describe 缓存，无重复 API 消耗 |
 | **M4 DML** | 网格行级编辑（§8.2）+ tableDataEdit capability 打开 + 只读/警示联动 | 编辑-保存-逐行错误反馈闭环 |
 | **M5 MCP** | bridge 暴露只读工具（DML 视 D3 决策） | agent 可通过 MCP 查询 org |

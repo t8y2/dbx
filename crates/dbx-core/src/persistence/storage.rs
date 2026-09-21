@@ -24,7 +24,8 @@ use crate::connection_secrets::{
     CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY,
     MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
     NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
-    PLUGIN_CONNECTION_SECRET_PREFIX,
+    PLUGIN_CONNECTION_SECRET_PREFIX, SALESFORCE_AUTH_CLIENT_SECRET_KEY, SALESFORCE_AUTH_REFRESH_TOKEN_KEY,
+    SALESFORCE_AUTH_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -1380,6 +1381,17 @@ fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
     };
     scrub_json_secret(tls, "truststore_password");
     scrub_json_secret(tls, "keystore_password");
+}
+
+fn scrub_salesforce_auth_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Salesforce {
+        return;
+    }
+    let Some(auth) = salesforce_auth_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(auth, "clientSecret");
+    scrub_json_secret(auth, "refreshToken");
 }
 
 fn delete_secret_prefix_in_tx(
@@ -3211,6 +3223,7 @@ fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     scrub_mq_token_signing_secret(&mut sanitized);
     scrub_nacos_auth_secrets(&mut sanitized);
     scrub_cassandra_tls_secrets(&mut sanitized);
+    scrub_salesforce_auth_secrets(&mut sanitized);
     sanitized.connection_secrets.clear();
     sanitized
 }
@@ -3289,6 +3302,7 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_mq_token_signing_secret_in_tx(tx, &config)?;
     persist_nacos_auth_secrets_in_tx(tx, &config)?;
     persist_cassandra_tls_secrets_in_tx(tx, &config)?;
+    persist_salesforce_auth_secrets_in_tx(tx, &config)?;
     delete_secret_prefix_in_tx(tx, &config.id, PLUGIN_CONNECTION_SECRET_PREFIX)?;
     for (key, secret) in &config.connection_secrets {
         if !key.is_empty() {
@@ -3457,6 +3471,7 @@ impl Storage {
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
                 scrub_cassandra_tls_secrets(&mut sanitized);
+                scrub_salesforce_auth_secrets(&mut sanitized);
                 sanitized.connection_secrets.clear();
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
@@ -3814,6 +3829,7 @@ impl Storage {
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
             let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
             let needs_cassandra_tls_rewrite = self.hydrate_cassandra_tls_secrets(&id, &mut config).await?;
+            let needs_salesforce_auth_rewrite = self.hydrate_salesforce_auth_secrets(&id, &mut config).await?;
             let mut needs_plugin_secret_rewrite = false;
             let plugin_secret_keys = config.connection_secrets.keys().cloned().collect::<Vec<_>>();
             for key in plugin_secret_keys {
@@ -3832,6 +3848,7 @@ impl Storage {
                 || needs_mq_token_signing_rewrite
                 || needs_nacos_auth_rewrite
                 || needs_cassandra_tls_rewrite
+                || needs_salesforce_auth_rewrite
                 || needs_plugin_secret_rewrite;
             if needs_external_secret_rewrite {
                 let mut sanitized = config.clone().canonicalized();
@@ -3839,6 +3856,7 @@ impl Storage {
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
                 scrub_cassandra_tls_secrets(&mut sanitized);
+                scrub_salesforce_auth_secrets(&mut sanitized);
                 scrub_plugin_connection_secrets(&mut sanitized);
                 let sanitized_json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
                 let update_id = id.clone();
@@ -3969,6 +3987,26 @@ impl Storage {
             hydrate_mq_json_secret(self, connection_id, CASSANDRA_KEYSTORE_PASSWORD_KEY, tls, "keystore_password")
                 .await?;
         Ok(truststore_rewrite || keystore_rewrite)
+    }
+
+    async fn hydrate_salesforce_auth_secrets(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::Salesforce {
+            return Ok(false);
+        }
+        let Some(auth) = salesforce_auth_object_mut(config.external_config.as_mut()) else {
+            return Ok(false);
+        };
+        let client_secret_rewrite =
+            hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")
+                .await?;
+        let refresh_token_rewrite =
+            hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")
+                .await?;
+        Ok(client_secret_rewrite || refresh_token_rewrite)
     }
 }
 
@@ -5326,6 +5364,43 @@ fn persist_cassandra_tls_secrets_in_tx(
     )
 }
 
+fn persist_salesforce_auth_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::Salesforce {
+        delete_secret_prefix_in_tx(tx, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    }
+    let Some(auth) = salesforce_auth_object(config.external_config.as_ref()) else {
+        delete_secret_prefix_in_tx(tx, &config.id, SALESFORCE_AUTH_SECRET_PREFIX)?;
+        return Ok(());
+    };
+    replace_salesforce_auth_secret_in_tx(tx, &config.id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?;
+    replace_salesforce_auth_secret_in_tx(tx, &config.id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")?;
+    Ok(())
+}
+
+fn replace_salesforce_auth_secret_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    connection_id: &str,
+    key: &str,
+    auth: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), String> {
+    let current = auth.get(field).and_then(serde_json::Value::as_str).filter(|secret| !secret.is_empty());
+    let existing = if current.is_none() { get_secret_in_tx(tx, connection_id, key)? } else { None };
+    tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1 AND key = ?2", params![connection_id, key])
+        .map_err(|e| e.to_string())?;
+    match current {
+        Some(secret) => persist_secret_in_tx(tx, connection_id, key, secret),
+        None => match existing {
+            Some(secret) => persist_secret_in_tx(tx, connection_id, key, &secret),
+            None => Ok(()),
+        },
+    }
+}
+
 fn persist_json_secret_if_present_in_tx(
     tx: &rusqlite::Transaction<'_>,
     connection_id: &str,
@@ -5395,6 +5470,16 @@ fn cassandra_tls_object_mut(
     value: Option<&mut serde_json::Value>,
 ) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
     value?.get_mut("tls")?.as_object_mut()
+}
+
+fn salesforce_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("auth")?.as_object()
+}
+
+fn salesforce_auth_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("auth")?.as_object_mut()
 }
 
 fn nacos_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {

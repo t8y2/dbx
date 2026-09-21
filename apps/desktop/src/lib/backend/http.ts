@@ -63,6 +63,7 @@ import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSql
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
 import type { AiChatSelectionState, AiEffortCapability } from "@/types/ai";
+import type { SalesforceOAuthAuthorizeParams, SalesforceOAuthDevicePollResult, SalesforceOAuthDeviceStartResult, SalesforceOAuthRefreshResult, SalesforceOAuthToken } from "@/types/salesforce";
 import type {
   AgentDriverInfo,
   AiCompletionRequest,
@@ -429,6 +430,30 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
   }
   if (!response.ok) throw await backendResponseError(response);
   return normalizeConnectionTestResult(await response.json(), config);
+}
+
+// ---------------------------------------------------------------------------
+// Salesforce OAuth (browser redirect + device-code flows)
+// ---------------------------------------------------------------------------
+// Web mode only supports the device-code flow end-to-end; the browser-redirect
+// flow is gated by the desktop shell (it binds a localhost callback server).
+// The HTTP endpoints mirror the Tauri commands one-for-one so `api.ts` can
+// forward both transports through the same surface.
+
+export async function salesforceOauthBrowserAuthorize(params: SalesforceOAuthAuthorizeParams): Promise<SalesforceOAuthToken> {
+  return post("/api/connection/salesforce-oauth-browser-authorize", { params });
+}
+
+export async function salesforceOauthDeviceStart(params: SalesforceOAuthAuthorizeParams): Promise<SalesforceOAuthDeviceStartResult> {
+  return post("/api/connection/salesforce-oauth-device-start", { params });
+}
+
+export async function salesforceOauthDevicePoll(params: SalesforceOAuthAuthorizeParams, deviceCode: string, intervalSecs: number): Promise<SalesforceOAuthDevicePollResult> {
+  return post("/api/connection/salesforce-oauth-device-poll", { params, deviceCode, intervalSecs });
+}
+
+export async function salesforceOauthRefresh(params: SalesforceOAuthAuthorizeParams, refreshToken: string): Promise<SalesforceOAuthRefreshResult> {
+  return post("/api/connection/salesforce-oauth-refresh", { params, refreshToken });
 }
 
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {

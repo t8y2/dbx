@@ -43,6 +43,7 @@ use crate::plugins::{
     PluginRuntimeEnv, PluginRuntimeProxy,
 };
 use crate::query_cancel::RunningQueries;
+use crate::salesforce_oauth::SfBrowserOpener;
 use crate::session_credentials::SessionCredentialStore;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
 use crate::task_supervisor::TaskSupervisor;
@@ -394,6 +395,7 @@ pub struct AppState {
     pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     mongo_oidc_browser_opener: std::sync::RwLock<Option<MongoOidcBrowserOpener>>,
+    salesforce_browser_opener: std::sync::RwLock<Option<SfBrowserOpener>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -1528,6 +1530,7 @@ impl AppState {
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             mongo_oidc_browser_opener: std::sync::RwLock::new(None),
+            salesforce_browser_opener: std::sync::RwLock::new(None),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
@@ -1539,6 +1542,14 @@ impl AppState {
 
     pub fn mongo_oidc_browser_opener(&self) -> Option<MongoOidcBrowserOpener> {
         self.mongo_oidc_browser_opener.read().expect("MongoDB OIDC browser opener lock poisoned").clone()
+    }
+
+    pub fn set_salesforce_browser_opener(&self, opener: SfBrowserOpener) {
+        *self.salesforce_browser_opener.write().expect("Salesforce browser opener lock poisoned") = Some(opener);
+    }
+
+    pub fn salesforce_browser_opener(&self) -> Option<SfBrowserOpener> {
+        self.salesforce_browser_opener.read().expect("Salesforce browser opener lock poisoned").clone()
     }
 
     pub(crate) async fn acquire_metadata_permit(

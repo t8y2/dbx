@@ -402,6 +402,13 @@ async fn main() {
         .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
         .route("/connection/mcp/duplicate", post(routes::connection::mcp_duplicate_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
+        .route(
+            "/connection/salesforce-oauth-browser-authorize",
+            post(routes::connection::salesforce_oauth_browser_authorize),
+        )
+        .route("/connection/salesforce-oauth-device-start", post(routes::connection::salesforce_oauth_device_start))
+        .route("/connection/salesforce-oauth-device-poll", post(routes::connection::salesforce_oauth_device_poll))
+        .route("/connection/salesforce-oauth-refresh", post(routes::connection::salesforce_oauth_refresh))
         .route("/plugins", get(routes::plugins::list_plugins))
         .route("/plugins/trusted-keys", get(routes::plugins::list_plugin_trusted_keys))
         .route("/plugins/trusted-keys/save", post(routes::plugins::save_plugin_trusted_key))

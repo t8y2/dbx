@@ -22,4 +22,5 @@ pub mod metadata;
 pub mod mongo_oidc;
 pub mod mongo_shell;
 pub mod runtime_config;
+pub mod salesforce_oauth;
 pub mod ssh_config;

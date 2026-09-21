@@ -10,9 +10,10 @@
 //! - field          -> column (label + apiName + type + picklist values)
 //! - SOQL query     -> `QueryResult` (rows/columns), pagination via QueryLocator
 //!
-//! DML, OAuth flows and SOQL completion metadata are layered on top in later
-//! milestones; this module intentionally keeps one HTTP surface (`api_get` /
-//! `api_send`) so auth refresh can be added in a single place.
+//! DML and SOQL completion metadata are layered on top in later milestones.
+//! OAuth lives in `crate::salesforce_oauth`; this module consumes it for
+//! transparent token refresh — every request funnels through `api_send` /
+//! `api_get_conditional`, both of which retry once after a refresh on 401.
 
 use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::Serialize;
@@ -23,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use super::{http_client_builder, json_value_for_js, with_connection_timeout};
 use crate::db::ColumnInfo;
+use crate::salesforce_oauth::{oauth_params_from_external_config, refresh_access_token, SfOauthParams};
 use crate::types::QueryResult;
 
 /// API version pinned by default. Salesforce keeps every version alive for
@@ -43,7 +45,13 @@ pub struct SfClient {
     http: HttpClient,
     /// Normalized org instance base URL, no trailing slash.
     instance_url: String,
-    access_token: String,
+    /// Live access token. Mutable because it is transparently replaced by the
+    /// refresh flow (spec §2.4); readers clone it under the lock, never hold
+    /// the guard across an await.
+    access_token: Arc<Mutex<String>>,
+    /// Refresh context parsed from `external_config.auth` (OAuth connections
+    /// only). `None` for pasted-token connections.
+    refresh: Arc<tokio::sync::Mutex<Option<SfRefreshContext>>>,
     /// e.g. `v62.0` (no leading path component).
     api_version: String,
     timeout: Duration,
@@ -58,12 +66,35 @@ pub struct SfClient {
     org_name_cache: Arc<Mutex<Option<String>>>,
 }
 
+/// OAuth refresh material held for the connection's lifetime.
+struct SfRefreshContext {
+    params: SfOauthParams,
+    refresh_token: String,
+}
+
+/// Distinguishes 401s (retryable via refresh) from everything else so the two
+/// HTTP surfaces share one retry policy.
+enum ApiFailure {
+    Unauthorized(String),
+    Other(String),
+}
+
+impl ApiFailure {
+    fn into_error(self) -> String {
+        match self {
+            Self::Unauthorized(message) | Self::Other(message) => message,
+        }
+    }
+}
+
 impl std::fmt::Debug for SfClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let refresh_configured = self.refresh.try_lock().map(|guard| guard.is_some()).unwrap_or(true);
         f.debug_struct("SfClient")
             .field("instance_url", &self.instance_url)
             .field("api_version", &self.api_version)
             .field("access_token", &"<redacted>")
+            .field("refresh_configured", &refresh_configured)
             .finish()
     }
 }
@@ -102,7 +133,12 @@ impl SfClient {
     /// - `instance_url`: org instance (`host` field of the connection; scheme
     ///   defaults to https when missing).
     /// - `access_token`: OAuth access token / session id (`password` field).
-    /// - `external_config`: optional `{ "apiVersion": "v62.0" }` overrides.
+    ///   May be empty when `external_config.auth` carries a refresh token —
+    ///   the first request then refreshes before hitting the API.
+    /// - `external_config`: optional overrides —
+    ///   `{ "apiVersion": "v62.0", "auth": { "environment", "loginUrl",
+    ///   "clientId", "clientSecret", "refreshToken" } }`. The auth values are
+    ///   hydrated from the secret store by dbx-core for saved connections.
     pub fn from_config(
         instance_url: &str,
         access_token: Option<&str>,
@@ -111,7 +147,9 @@ impl SfClient {
     ) -> Result<Self, String> {
         let instance_url = normalize_instance_url(instance_url)?;
         let access_token = access_token.unwrap_or("").trim().to_string();
-        if access_token.is_empty() {
+        let refresh_context = oauth_params_from_external_config(external_config)
+            .map(|(params, refresh_token)| SfRefreshContext { params, refresh_token });
+        if access_token.is_empty() && refresh_context.is_none() {
             return Err("Salesforce access token is required. Paste a session/access token, or sign in via OAuth (desktop app).".to_string());
         }
         let api_version = salesforce_api_version(external_config)?;
@@ -121,13 +159,72 @@ impl SfClient {
         Ok(Self {
             http,
             instance_url,
-            access_token,
+            access_token: Arc::new(Mutex::new(access_token)),
+            refresh: Arc::new(tokio::sync::Mutex::new(refresh_context)),
             api_version,
             timeout,
             sobject_cache: Arc::new(Mutex::new(None)),
             describe_cache: Arc::new(Mutex::new(HashMap::new())),
             org_name_cache: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Whether this client can transparently refresh its access token.
+    pub fn has_refresh_token(&self) -> bool {
+        self.refresh.try_lock().map(|guard| guard.is_some()).unwrap_or(true)
+    }
+
+    fn current_token(&self) -> String {
+        self.access_token.lock().map(|token| token.clone()).unwrap_or_default()
+    }
+
+    /// Refresh the access token in place. Returns true when a fresh token was
+    /// installed; serialized by the async mutex so concurrent 401s trigger a
+    /// single refresh.
+    async fn try_refresh_token(&self) -> bool {
+        let mut guard = self.refresh.lock().await;
+        let Some(context) = guard.as_mut() else { return false };
+        match refresh_access_token(&context.params, &context.refresh_token).await {
+            Ok(tokens) => {
+                if let Some(rotated) = tokens.refresh_token {
+                    context.refresh_token = rotated;
+                }
+                if let Ok(mut current) = self.access_token.lock() {
+                    *current = tokens.access_token;
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Run one HTTP surface with a single refresh retry: when the first
+    /// attempt fails with 401 and a refresh token is configured, refresh and
+    /// replay once.
+    async fn with_refresh_retry<T, F, Fut>(&self, attempt: F) -> Result<T, String>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ApiFailure>>,
+    {
+        // No token yet (expired paste cleared, or OAuth connection whose
+        // access token was never persisted): refresh proactively.
+        if self.current_token().is_empty() && self.has_refresh_token() {
+            let _ = self.try_refresh_token().await;
+        }
+        match attempt().await {
+            Ok(value) => Ok(value),
+            Err(ApiFailure::Unauthorized(message)) => {
+                if self.try_refresh_token().await {
+                    match attempt().await {
+                        Ok(value) => Ok(value),
+                        Err(failure) => Err(failure.into_error()),
+                    }
+                } else {
+                    Err(message)
+                }
+            }
+            Err(failure) => Err(failure.into_error()),
+        }
     }
 
     pub fn instance_url(&self) -> &str {
@@ -144,9 +241,21 @@ impl SfClient {
     }
 
     async fn api_send(&self, method: Method, url: &str, body: Option<Value>) -> Result<Value, String> {
+        let method = method.clone();
+        let url = url.to_string();
+        self.with_refresh_retry(|| {
+            let method = method.clone();
+            let url = url.clone();
+            let body = body.clone();
+            async move { self.api_send_once(method, &url, body).await }
+        })
+        .await
+    }
+
+    async fn api_send_once(&self, method: Method, url: &str, body: Option<Value>) -> Result<Value, ApiFailure> {
         let label = format!("Salesforce {} {}", method, url);
         let request =
-            self.http.request(method, url).bearer_auth(&self.access_token).header("Accept", "application/json");
+            self.http.request(method, url).bearer_auth(self.current_token()).header("Accept", "application/json");
         let request = match body {
             Some(value) => request.json(&value),
             None => request,
@@ -154,21 +263,28 @@ impl SfClient {
         let response = with_connection_timeout(&label, self.timeout, async {
             request.send().await.map_err(|error| format!("Salesforce request failed: {error}"))
         })
-        .await?;
+        .await
+        .map_err(ApiFailure::Other)?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| format!("Failed to read Salesforce response: {error}"))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| ApiFailure::Other(format!("Failed to read Salesforce response: {error}")))?;
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ApiFailure::Unauthorized(map_salesforce_error(status, &text)));
+        }
         if status == StatusCode::NO_CONTENT || text.trim().is_empty() {
             if status.is_success() {
                 return Ok(Value::Null);
             }
-            return Err(map_salesforce_error(status, ""));
+            return Err(ApiFailure::Other(map_salesforce_error(status, "")));
         }
         let value: Value = serde_json::from_str(&text)
-            .map_err(|error| format!("Invalid Salesforce JSON response ({status}): {error}"))?;
+            .map_err(|error| ApiFailure::Other(format!("Invalid Salesforce JSON response ({status}): {error}")))?;
         if status.is_success() {
             return Ok(value);
         }
-        Err(salesforce_error_message(status, &value))
+        Err(ApiFailure::Other(salesforce_error_message(status, &value)))
     }
 
     async fn api_get(&self, url: &str) -> Result<Value, String> {
@@ -181,28 +297,51 @@ impl SfClient {
         url: &str,
         etag: Option<&str>,
     ) -> Result<Option<(Value, Option<String>)>, String> {
+        let url = url.to_string();
+        let etag = etag.map(str::to_string);
+        self.with_refresh_retry(|| {
+            let url = url.clone();
+            let etag = etag.clone();
+            async move { self.api_get_conditional_once(&url, etag.as_deref()).await }
+        })
+        .await
+    }
+
+    async fn api_get_conditional_once(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+    ) -> Result<Option<(Value, Option<String>)>, ApiFailure> {
         let label = format!("Salesforce GET {url}");
-        let mut request = self.http.get(url).bearer_auth(&self.access_token).header("Accept", "application/json");
+        let mut request = self.http.get(url).bearer_auth(self.current_token()).header("Accept", "application/json");
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag);
         }
         let response = with_connection_timeout(&label, self.timeout, async {
             request.send().await.map_err(|error| format!("Salesforce request failed: {error}"))
         })
-        .await?;
+        .await
+        .map_err(ApiFailure::Other)?;
         let status = response.status();
+        if status == StatusCode::UNAUTHORIZED {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiFailure::Unauthorized(map_salesforce_error(status, &text)));
+        }
         if status == StatusCode::NOT_MODIFIED {
             return Ok(None);
         }
         let new_etag =
             response.headers().get(reqwest::header::ETAG).and_then(|value| value.to_str().ok()).map(str::to_string);
-        let text = response.text().await.map_err(|error| format!("Failed to read Salesforce response: {error}"))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| ApiFailure::Other(format!("Failed to read Salesforce response: {error}")))?;
         if !status.is_success() {
             let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-            return Err(salesforce_error_message(status, &value));
+            return Err(ApiFailure::Other(salesforce_error_message(status, &value)));
         }
         let value: Value = serde_json::from_str(&text)
-            .map_err(|error| format!("Invalid Salesforce JSON response ({status}): {error}"))?;
+            .map_err(|error| ApiFailure::Other(format!("Invalid Salesforce JSON response ({status}): {error}")))?;
         Ok(Some((value, new_etag)))
     }
 
@@ -800,5 +939,41 @@ mod tests {
             SfClient::from_config("acme.my.salesforce.com", Some("tok"), None, Duration::from_secs(5)).unwrap();
         assert_eq!(client.instance_url(), "https://acme.my.salesforce.com");
         assert_eq!(client.api_base(), "https://acme.my.salesforce.com/services/data/v62.0");
+    }
+
+    #[test]
+    fn from_config_accepts_empty_token_when_oauth_refresh_is_configured() {
+        let oauth_config = serde_json::json!({
+            "apiVersion": "v62.0",
+            "auth": {
+                "environment": "sandbox",
+                "clientId": "3MVG9xxx",
+                "refreshToken": "refresh-abc"
+            }
+        });
+        // empty access token + refresh context is allowed (first request refreshes)
+        let client = SfClient::from_config(
+            "acme--qas1.sandbox.my.salesforce.com",
+            Some(""),
+            Some(&oauth_config),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(client.has_refresh_token());
+        assert_eq!(client.current_token(), "");
+        // debug output must never leak token material
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("refresh-abc"));
+        assert!(!debug.contains("3MVG9xxx"));
+        assert!(debug.contains("<redacted>"));
+        // token-only connections have no refresh context
+        let manual =
+            SfClient::from_config("acme.my.salesforce.com", Some("tok"), None, Duration::from_secs(5)).unwrap();
+        assert!(!manual.has_refresh_token());
+        // auth block without refreshToken keeps the strict token requirement
+        let incomplete = serde_json::json!({ "auth": { "clientId": "x" } });
+        assert!(
+            SfClient::from_config("acme.my.salesforce.com", None, Some(&incomplete), Duration::from_secs(5)).is_err()
+        );
     }
 }

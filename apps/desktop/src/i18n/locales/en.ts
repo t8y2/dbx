@@ -3176,6 +3176,7 @@ export default {
       executeSafe: "Safety check passed · Executed",
       executeBlocked: "Blocked by safety check",
       contextCompacted: "Context compressed",
+      skillsLoaded: "Skills loaded",
     },
     agentStepTitles: {
       riskCheck: "Risk check: {action} · {category} · {environment} · {reasons}",

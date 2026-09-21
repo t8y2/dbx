@@ -3159,6 +3159,7 @@ export default withEnglishFallback({
       executeSafe: "Controllo di sicurezza superato · Eseguito",
       executeBlocked: "Bloccato dal controllo di sicurezza",
       contextCompacted: "Contesto compresso",
+      skillsLoaded: "Skills caricati",
     },
     agentStepTitles: {
       riskCheck: "Controllo rischi: {action} · {category} · {environment} · {reasons}",

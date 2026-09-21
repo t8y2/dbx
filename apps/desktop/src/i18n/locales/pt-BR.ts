@@ -3267,6 +3267,7 @@ export default withEnglishFallback({
       executeSafe: "Verificação de segurança aprovada · Executado",
       executeBlocked: "Bloqueado pela verificação de segurança",
       contextCompacted: "Contexto compactado",
+      skillsLoaded: "Skills carregados",
     },
     agentStepTitles: {
       riskCheck: "Verificação de risco: {action} · {category} · {environment} · {reasons}",

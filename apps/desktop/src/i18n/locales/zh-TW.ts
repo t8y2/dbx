@@ -3133,6 +3133,7 @@ export default withEnglishFallback({
       executeSafe: "安全檢查通過 · 已執行",
       executeBlocked: "安全檢查攔截",
       contextCompacted: "上下文已壓縮",
+      skillsLoaded: "已載入上下文 Skills",
     },
     agentStepTitles: {
       riskCheck: "風險檢查：{action} · {category} · {environment} · {reasons}",

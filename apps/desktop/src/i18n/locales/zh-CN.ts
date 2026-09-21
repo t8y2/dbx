@@ -3088,6 +3088,7 @@ export default withEnglishFallback({
       executeSafe: "安全检查通过 · 已执行",
       executeBlocked: "安全检查拦截",
       contextCompacted: "上下文已压缩",
+      skillsLoaded: "已加载上下文 Skills",
     },
     agentStepTitles: {
       riskCheck: "风险检查：{action} · {category} · {environment} · {reasons}",

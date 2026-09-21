@@ -2982,6 +2982,7 @@ export default withEnglishFallback({
       executeSafe: "Təhlükəsizlik yoxlamasından keçdi · İcra edildi",
       executeBlocked: "Təhlükəsizlik yoxlaması ilə bloklandı",
       contextCompacted: "Kontekst sıxlaşdırıldı",
+      skillsLoaded: "Skills yükləndi",
     },
     agentStepTitles: {
       riskCheck: "Risk yoxlaması: {action} · {category} · {environment} · {reasons}",

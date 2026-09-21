@@ -2958,6 +2958,7 @@ export default withEnglishFallback({
       executeSafe: "Güvenlik denetimi geçildi · Çalıştırıldı",
       executeBlocked: "Güvenlik denetimi tarafından engellendi",
       contextCompacted: "Bağlam sıkıştırıldı",
+      skillsLoaded: "Skills yüklendi",
     },
     agentStepTitles: {
       riskCheck: "Risk denetimi: {action} · {category} · {environment} · {reasons}",

@@ -3300,6 +3300,7 @@ export default withEnglishFallback({
       executeSafe: "安全チェック通過 · 実行済み",
       executeBlocked: "安全チェックによりブロック",
       contextCompacted: "コンテキストを圧縮しました",
+      skillsLoaded: "Skills を読み込みました",
     },
     agentStepTitles: {
       riskCheck: "リスクチェック: {action} · {category} · {environment} · {reasons}",

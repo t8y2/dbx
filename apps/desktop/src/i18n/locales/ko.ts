@@ -2973,6 +2973,7 @@ export default withEnglishFallback({
       executeSafe: "안전성 검사 통과 · 실행됨",
       executeBlocked: "안전성 검사로 차단됨",
       contextCompacted: "컨텍스트 압축됨",
+      skillsLoaded: "Skills 로드됨",
     },
     agentStepTitles: {
       riskCheck: "위험 검사: {action} · {category} · {environment} · {reasons}",

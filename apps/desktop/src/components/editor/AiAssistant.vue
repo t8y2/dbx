@@ -64,7 +64,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
-import { buildSelectedSkillChips, removeSkillIds } from "@/lib/ai/userSkillSelection";
+import { buildSelectedSkillChips, removeSkillIds, userSkillSourceOfId } from "@/lib/ai/userSkillSelection";
 import type { ReadUserSkill, ReadUserSkillFailure, UserSkillFailureReason, UserSkillRootSettings } from "@/types/userSkills";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -570,6 +570,11 @@ function skillFailureReasonKey(reason: UserSkillFailureReason): string {
 function openSkillRootSettings() {
   skillFailures.value = [];
   emit("openSettings");
+}
+
+function selectedSkillsAgentStep(skills: ReadUserSkill[]): AiAgentStepItem {
+  const details = skills.map((skill) => `${skill.name} (${t(userSkillSourceOfId(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault")})`).join(" · ");
+  return { key: "selected-skills", labelKey: "ai.agentSteps.skillsLoaded", tone: "success", toolName: skills.map((skill) => skill.name).join(", "), toolResult: details };
 }
 
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
@@ -3345,6 +3350,9 @@ async function send() {
   }
   runMessages.push({ role: "assistant", content: "", sourceConnectionName: connection.name });
   const assistantIdx = runMessages.length - 1;
+  if (requestedMode === "agent" && sendSkillSnapshot?.length) {
+    runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
+  }
   const sessionId = uuid();
   if (runIsVisible()) {
     currentAssistantMessageIndex = assistantIdx;
@@ -3564,8 +3572,9 @@ async function send() {
         statusNow.value = Date.now();
       }
       // Render agent tool call steps from agent events (fallback when no real-time steps)
-      if (msg && agentEvents.length > 0 && !msg.agentSteps?.length) {
-        const steps: AiAgentStepItem[] = [];
+      const hasRuntimeSteps = msg?.agentSteps?.some((step) => step.key !== "selected-skills") ?? false;
+      if (msg && agentEvents.length > 0 && !hasRuntimeSteps) {
+        const steps: AiAgentStepItem[] = [...(msg.agentSteps ?? [])];
         agentEvents.forEach((e, index) => {
           const step = agentEventToStep(e, index, Date.now());
           if (step) upsertAgentStep(steps, step);
@@ -3573,7 +3582,7 @@ async function send() {
         if (steps.length) msg.agentSteps = steps;
       }
       // Fallback: use aiAgentPlan for backward compatibility
-      if (msg && !msg.agentSteps?.length) {
+      if (msg && !hasRuntimeSteps) {
         const agentPlan = buildAiAgentPlan({
           mode: requestedMode,
           action: requestedAction,
@@ -3582,7 +3591,7 @@ async function send() {
           connection: connection,
           database: tab.database,
         });
-        if (msg && requestedMode === "agent") msg.agentSteps = buildAiAgentStepItems(agentPlan);
+        if (msg && requestedMode === "agent") msg.agentSteps = [...(msg.agentSteps ?? []), ...buildAiAgentStepItems(agentPlan)];
         if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
       }
       if (runIsVisible()) {

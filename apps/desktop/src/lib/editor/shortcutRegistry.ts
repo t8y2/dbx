@@ -715,7 +715,10 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, 
     normalized.copyCurrentRow = LEGACY_COPY_CURRENT_ROW_DEFAULT;
   }
 
-  for (const actionId of TAB_NAVIGATION_HISTORY_ACTIONS) {
+  // gotoLine 的平台默认键（Win/Linux 为 Ctrl+G）在该动作引入前是其他动作可合法
+  // 显式绑定的自由键位；无显式配置的默认值与同作用域显式绑定同键时同样让位，
+  // 否则运行时 keymap 先注册的 gotoLine 会遮蔽用户的显式配置。
+  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine"] as ShortcutActionId[]) {
     if (hasExplicitShortcut(settings, actionId)) continue;
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
     if (!definition) continue;

@@ -2437,6 +2437,108 @@ fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     }
 }
 
+/// The `findAndModify` server command behind `findOneAndUpdate()`, for drivers that only expose
+/// `runCommand` (the legacy agent). Same inputs and option validation as [`find_one_and_update`].
+pub fn find_one_and_update_command(
+    collection: &str,
+    filter_json: &str,
+    update_json: &str,
+    options_json: Option<&str>,
+) -> Result<Document, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let update_value: serde_json::Value =
+        serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let update = match json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))? {
+        UpdateModifications::Document(document) => Bson::Document(document),
+        UpdateModifications::Pipeline(stages) => Bson::Array(stages.into_iter().map(Bson::Document).collect()),
+        _ => return Err("Unsupported update modification".to_string()),
+    };
+    let options: MongoFindOneAndUpdateOptions = parse_find_and_modify_options(options_json, "findOneAndUpdate")?;
+    let mut command = doc! { "findAndModify": collection, "query": filter, "update": update };
+    if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
+        command.insert("new", true);
+    }
+    if let Some(upsert) = options.upsert {
+        command.insert("upsert", upsert);
+    }
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        command.insert("fields", projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        command.insert("sort", sort);
+    }
+    if let Some(array_filters) = find_and_modify_array_filters(options.array_filters.as_ref())? {
+        command.insert("arrayFilters", array_filters);
+    }
+    Ok(command)
+}
+
+/// The `findAndModify` server command behind `findOneAndReplace()`. A replacement with update
+/// operators is refused here because the server would silently treat it as an update instead.
+pub fn find_one_and_replace_command(
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<Document, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let replacement_value: serde_json::Value =
+        serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    if let Some(operator) = replacement.keys().find(|key| key.starts_with('$')) {
+        return Err(format!("Replacement document must not contain update operators such as {operator}"));
+    }
+    let options: MongoFindOneAndReplaceOptions = parse_find_and_modify_options(options_json, "findOneAndReplace")?;
+    let mut command = doc! { "findAndModify": collection, "query": filter, "update": replacement };
+    if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
+        command.insert("new", true);
+    }
+    if let Some(upsert) = options.upsert {
+        command.insert("upsert", upsert);
+    }
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        command.insert("fields", projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        command.insert("sort", sort);
+    }
+    Ok(command)
+}
+
+/// The `findAndModify` server command behind `findOneAndDelete()`.
+pub fn find_one_and_delete_command(
+    collection: &str,
+    filter_json: &str,
+    options_json: Option<&str>,
+) -> Result<Document, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let options: MongoFindOneAndDeleteOptions = parse_find_and_modify_options(options_json, "findOneAndDelete")?;
+    let mut command = doc! { "findAndModify": collection, "query": filter, "remove": true };
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        command.insert("fields", projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        command.insert("sort", sort);
+    }
+    Ok(command)
+}
+
+/// Turns a `findAndModify` response into the same shape the native helpers return: the matched
+/// document (before or after the change, as requested) or nothing.
+pub fn find_and_modify_response_result(response: &Document) -> Result<MongoDocumentResult, String> {
+    match response.get("value") {
+        Some(Bson::Document(document)) => Ok(single_document_result(Some(document.clone()))),
+        Some(Bson::Null) | None => Ok(single_document_result(None)),
+        Some(other) => Err(format!("Unexpected findAndModify value: {other:?}")),
+    }
+}
+
 pub async fn find_one_and_update(
     client: &Client,
     database: &str,
@@ -4818,6 +4920,62 @@ mod tests {
         assert!(find_and_modify_returns_after(Some("after"), None, None).unwrap());
         assert!(!find_and_modify_returns_after(Some("before"), None, None).unwrap());
         assert!(find_and_modify_returns_after(Some("newest"), None, None).is_err());
+    }
+
+    #[test]
+    fn find_and_modify_commands_mirror_the_native_options() {
+        let update = find_one_and_update_command(
+            "users",
+            r#"{"_id":{"$oid":"64b1f0c2a1b2c3d4e5f60718"}}"#,
+            r#"{"$set":{"active":true}}"#,
+            Some(r#"{"returnDocument":"after","upsert":true,"projection":{"active":1},"sort":{"_id":1},"arrayFilters":[{"item.active":true}]}"#),
+        )
+        .unwrap();
+        assert_eq!(update.get_str("findAndModify"), Ok("users"));
+        assert_eq!(
+            update.get_document("query").unwrap().get_object_id("_id").unwrap().to_hex(),
+            "64b1f0c2a1b2c3d4e5f60718"
+        );
+        assert_eq!(update.get_document("update"), Ok(&doc! { "$set": { "active": true } }));
+        assert_eq!(update.get_bool("new"), Ok(true));
+        assert_eq!(update.get_bool("upsert"), Ok(true));
+        assert_eq!(update.get_document("fields"), Ok(&doc! { "active": 1i64 }));
+        assert_eq!(update.get_document("sort"), Ok(&doc! { "_id": 1i64 }));
+        assert_eq!(update.get_array("arrayFilters").unwrap().len(), 1);
+
+        // Default return is the pre-change document, and absent options stay absent.
+        let minimal = find_one_and_update_command("users", "{}", r#"{"$inc":{"n":1}}"#, None).unwrap();
+        assert_eq!(minimal.keys().collect::<Vec<_>>(), vec!["findAndModify", "query", "update"]);
+
+        // A pipeline update is passed through as an array.
+        let pipeline = find_one_and_update_command("users", "{}", r#"[{"$set":{"n":1}}]"#, None).unwrap();
+        assert!(pipeline.get_array("update").is_ok());
+
+        let replace =
+            find_one_and_replace_command("users", r#"{"_id":1}"#, r#"{"name":"Grace"}"#, Some(r#"{"new":true}"#))
+                .unwrap();
+        assert_eq!(replace.get_document("update"), Ok(&doc! { "name": "Grace" }));
+        assert_eq!(replace.get_bool("new"), Ok(true));
+        assert!(!replace.contains_key("remove"));
+        // The server would run an operator document as an update; refuse it up front instead.
+        let refused = find_one_and_replace_command("users", "{}", r#"{"$set":{"name":"Grace"}}"#, None).unwrap_err();
+        assert!(refused.contains("must not contain update operators such as $set"), "{refused}");
+
+        let delete = find_one_and_delete_command("users", r#"{"_id":1}"#, Some(r#"{"sort":{"_id":-1}}"#)).unwrap();
+        assert_eq!(delete.get_bool("remove"), Ok(true));
+        assert_eq!(delete.get_document("sort"), Ok(&doc! { "_id": -1i64 }));
+        assert!(!delete.contains_key("update"));
+    }
+
+    #[test]
+    fn find_and_modify_response_maps_value_to_zero_or_one_document() {
+        let matched =
+            find_and_modify_response_result(&doc! { "value": { "_id": 1, "name": "Ada" }, "ok": 1.0 }).unwrap();
+        assert_eq!(matched.total, 1);
+        assert_eq!(matched.documents[0]["name"], "Ada");
+        let none = find_and_modify_response_result(&doc! { "value": Bson::Null, "ok": 1.0 }).unwrap();
+        assert_eq!(none.total, 0);
+        assert!(find_and_modify_response_result(&doc! { "value": "oops", "ok": 1.0 }).is_err());
     }
 
     #[test]

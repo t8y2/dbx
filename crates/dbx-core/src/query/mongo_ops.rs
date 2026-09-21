@@ -11,6 +11,35 @@ use crate::types::QueryResult;
 pub const MONGO_SHOW_DATABASES_DATABASE: &str = "admin";
 pub const MONGO_SHOW_DATABASES_COMMAND_JSON: &str = r#"{"listDatabases":1}"#;
 
+/// Runs one server command through the legacy agent's generic `runCommand` and returns the
+/// response document. The agent surfaces `ok: 0` as an error, so a returned document succeeded.
+async fn agent_run_command_document(
+    client: &crate::db::agent_driver::PooledAgentClient,
+    database: &str,
+    command: mongodb::bson::Document,
+    label: &str,
+) -> Result<mongodb::bson::Document, String> {
+    let mut client = client.lock().await;
+    if !client.supports_capability(AgentCapability::MongoRunCommand) {
+        return Err(format!(
+            "MongoDB Legacy Agent does not support {label}; upgrade or reinstall the MongoDB Legacy driver"
+        ));
+    }
+    let result: MongoDocumentResult = client
+        .mongo_run_command(serde_json::json!({
+            "database": database,
+            "command_json": mongo_driver::document_to_canonical_extended_json(&command).to_string(),
+        }))
+        .await?;
+    let response = result
+        .extended_documents
+        .as_ref()
+        .and_then(|documents| documents.first())
+        .or_else(|| result.documents.first())
+        .ok_or_else(|| format!("MongoDB Legacy Agent returned an empty {label} response"))?;
+    mongo_driver::json_object_to_document_extended_json(response)
+}
+
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
 }
@@ -983,7 +1012,12 @@ pub async fn mongo_find_one_and_update_core(
             mongo_driver::find_one_and_update(client, database, collection, filter_json, update_json, options_json)
                 .await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndUpdate".to_string()),
+        PoolKind::Agent(client) => {
+            let command =
+                mongo_driver::find_one_and_update_command(collection, filter_json, update_json, options_json)?;
+            let response = agent_run_command_document(client, database, command, "findOneAndUpdate").await?;
+            mongo_driver::find_and_modify_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1011,7 +1045,12 @@ pub async fn mongo_find_one_and_replace_core(
             )
             .await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndReplace".to_string()),
+        PoolKind::Agent(client) => {
+            let command =
+                mongo_driver::find_one_and_replace_command(collection, filter_json, replacement_json, options_json)?;
+            let response = agent_run_command_document(client, database, command, "findOneAndReplace").await?;
+            mongo_driver::find_and_modify_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -1030,7 +1069,11 @@ pub async fn mongo_find_one_and_delete_core(
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one_and_delete(client, database, collection, filter_json, options_json).await
         }
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support findOneAndDelete".to_string()),
+        PoolKind::Agent(client) => {
+            let command = mongo_driver::find_one_and_delete_command(collection, filter_json, options_json)?;
+            let response = agent_run_command_document(client, database, command, "findOneAndDelete").await?;
+            mongo_driver::find_and_modify_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

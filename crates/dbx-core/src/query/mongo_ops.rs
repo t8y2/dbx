@@ -61,7 +61,11 @@ pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, d
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::create_database(client, database).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support create database".to_string()),
+        PoolKind::Agent(client) => {
+            let database = mongo_driver::validate_create_database_name(database)?;
+            let command = mongodb::bson::doc! { "create": mongo_driver::CREATE_DATABASE_PLACEHOLDER_COLLECTION };
+            agent_run_command_document(client, database, command, "create database").await.map(|_| ())
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -240,7 +244,11 @@ pub async fn mongo_collection_stats_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::collection_stats(client, database, collection, scale).await,
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support collection stats helpers".to_string()),
+        PoolKind::Agent(client) => {
+            let command = mongo_driver::collection_stats_command(collection, scale.as_ref())?;
+            let response = agent_run_command_document(client, database, command, "collection stats").await?;
+            Ok(mongo_driver::collection_stats_result_from_document(&response))
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
@@ -548,7 +556,7 @@ pub async fn mongo_distinct_core(
         PoolKind::Agent(client) => {
             let command = mongo_driver::distinct_command(collection, field, filter)?;
             let response = agent_run_command_document(client, database, command, "distinct").await?;
-            mongo_driver::distinct_response_result(&response)
+            mongo_driver::distinct_response_result(response)
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }

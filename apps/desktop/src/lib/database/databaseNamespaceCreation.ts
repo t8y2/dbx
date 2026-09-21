@@ -1,5 +1,4 @@
 import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
-import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 export type DatabaseNamespaceCreationTarget = "database" | "schema" | "attach" | "special";
@@ -113,7 +112,6 @@ function namespaceCreationMatrixEntry(connection: NonNullable<CreationConnection
 
 export function connectionNamespaceCreationTarget(connection: CreationConnection): ConnectionCreationTarget | null {
   if (!connection || connectionIsEffectivelyReadOnly(connection)) return null;
-  if (connection.db_type === "mongodb" && isMongoLegacyDriverProfile(connection.driver_profile)) return null;
   if (connection.db_type === "sqlite" && (connection.host?.trim().toLowerCase() === ":memory:" || Boolean(connection.password))) {
     return null;
   }

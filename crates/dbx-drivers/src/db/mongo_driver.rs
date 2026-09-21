@@ -297,7 +297,7 @@ pub async fn list_object_statistics(client: &Client, database: &str) -> Result<V
         stream::iter(collections.into_iter().filter(|spec| spec.kind != MongoCollectionKind::View).map(|spec| {
             let handle = handle.clone();
             async move {
-                let result = handle.run_command(collection_stats_command_document(&spec.name, None)).await.ok()?;
+                let result = handle.run_command(collection_stats_command(&spec.name, None).ok()?).await.ok()?;
                 Some(object_statistics_from_collection_stats(&spec.name, database, &result))
             }
         }))
@@ -354,21 +354,26 @@ pub async fn collection_stats(
 
     let result = client
         .database(database)
-        .run_command(collection_stats_command_document(collection, scale.as_ref()))
+        .run_command(collection_stats_command(collection, scale.as_ref())?)
         .await
         .map_err(|e| e.to_string())?;
     Ok(collection_stats_result_from_document(&result))
 }
 
-fn collection_stats_command_document(collection: &str, scale: Option<&serde_json::Number>) -> Document {
+/// The `collStats` command behind [`collection_stats`], for drivers that only expose `runCommand`.
+pub fn collection_stats_command(collection: &str, scale: Option<&serde_json::Number>) -> Result<Document, String> {
+    let collection = collection.trim();
+    if collection.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
     let mut command = doc! { "collStats": collection };
     if let Some(scale) = scale {
         command.insert("scale", json_value_to_bson(&serde_json::Value::Number(scale.clone())));
     }
-    command
+    Ok(command)
 }
 
-fn collection_stats_result_from_document(result: &Document) -> MongoCollectionStatsResult {
+pub fn collection_stats_result_from_document(result: &Document) -> MongoCollectionStatsResult {
     MongoCollectionStatsResult {
         count: collection_stats_field(result, "count"),
         size: collection_stats_field(result, "size"),
@@ -750,12 +755,21 @@ fn mongo_namespace_missing(error: &str) -> bool {
     lower.contains("ns not found") || lower.contains("namespace not found")
 }
 
+/// MongoDB has no "create database"; a database exists once it holds a collection, so both
+/// drivers create this placeholder.
+pub const CREATE_DATABASE_PLACEHOLDER_COLLECTION: &str = "dbx_init";
+
 pub async fn create_database(client: &Client, database: &str) -> Result<(), String> {
+    let database = validate_create_database_name(database)?;
+    client.database(database).create_collection(CREATE_DATABASE_PLACEHOLDER_COLLECTION).await.map_err(|e| e.to_string())
+}
+
+pub fn validate_create_database_name(database: &str) -> Result<&str, String> {
     let database = database.trim();
     if database.is_empty() {
         return Err("Database name is required".to_string());
     }
-    client.database(database).create_collection("dbx_init").await.map_err(|e| e.to_string())
+    Ok(database)
 }
 
 pub async fn drop_database(client: &Client, database: &str) -> Result<(), String> {
@@ -1689,7 +1703,12 @@ fn aggregate_options_explain(options: &Document) -> Result<bool, String> {
 /// array fields contribute their elements rather than the whole array, and the server may
 /// answer from an index with a DISTINCT_SCAN. Values are returned in the `documents` slot as
 /// bare scalars, which `mongoDocumentsToQueryResult` already renders as a single column.
-fn distinct_filter_document(filter: Option<&str>) -> Result<Document, String> {
+/// Validates the field name and parses the filter shared by the native `distinct` helper and the
+/// command builder, so both drivers reject the same inputs with the same message.
+fn distinct_inputs(field: &str, filter: Option<&str>) -> Result<Document, String> {
+    if field.trim().is_empty() {
+        return Err("Distinct field name is required".to_string());
+    }
     match filter {
         Some(f) if !f.trim().is_empty() => {
             let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
@@ -1716,17 +1735,14 @@ fn distinct_values_result(values: Vec<Bson>) -> MongoDocumentResult {
 /// The `distinct` server command behind `distinct()`, for drivers that only expose `runCommand`
 /// (the legacy agent). Same field and filter validation as [`distinct`].
 pub fn distinct_command(collection: &str, field: &str, filter: Option<&str>) -> Result<Document, String> {
-    if field.trim().is_empty() {
-        return Err("Distinct field name is required".to_string());
-    }
-    let query = distinct_filter_document(filter)?;
+    let query = distinct_inputs(field, filter)?;
     Ok(doc! { "distinct": collection, "key": field, "query": query })
 }
 
 /// Turns a `distinct` response (`{ values: [...] }`) into the same result shape as [`distinct`].
-pub fn distinct_response_result(response: &Document) -> Result<MongoDocumentResult, String> {
-    match response.get("values") {
-        Some(Bson::Array(values)) => Ok(distinct_values_result(values.clone())),
+pub fn distinct_response_result(mut response: Document) -> Result<MongoDocumentResult, String> {
+    match response.remove("values") {
+        Some(Bson::Array(values)) => Ok(distinct_values_result(values)),
         other => Err(format!("Unexpected distinct values: {other:?}")),
     }
 }
@@ -1738,10 +1754,7 @@ pub async fn distinct(
     field: &str,
     filter: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
-    if field.trim().is_empty() {
-        return Err("Distinct field name is required".to_string());
-    }
-    let filter_doc = distinct_filter_document(filter)?;
+    let filter_doc = distinct_inputs(field, filter)?;
     let col = client.database(database).collection::<Document>(collection);
     let values = col.distinct(field, filter_doc).await.map_err(|e| e.to_string())?;
     Ok(distinct_values_result(values))
@@ -4989,10 +5002,18 @@ mod tests {
 
     #[test]
     fn collection_stats_command_serializes_scale() {
-        let command = collection_stats_command_document("users", Some(&serde_json::Number::from(1024)));
+        let command = collection_stats_command("users", Some(&serde_json::Number::from(1024))).unwrap();
 
         assert_eq!(command.get_str("collStats").unwrap(), "users");
         assert!(matches!(command.get("scale"), Some(Bson::Int64(1024))));
+        assert!(!collection_stats_command("users", None).unwrap().contains_key("scale"));
+        assert!(collection_stats_command("  ", None).unwrap_err().contains("Collection name is required"));
+    }
+
+    #[test]
+    fn create_database_name_is_trimmed_and_required() {
+        assert_eq!(validate_create_database_name("  app "), Ok("app"));
+        assert!(validate_create_database_name("   ").unwrap_err().contains("Database name is required"));
     }
 
     #[test]
@@ -5128,10 +5149,10 @@ mod tests {
         assert!(distinct_command("users", "  ", None).unwrap_err().contains("field name is required"));
         assert!(distinct_command("users", "status", Some("{not json")).unwrap_err().contains("Invalid filter JSON"));
 
-        let result = distinct_response_result(&doc! { "values": ["a", 2i64, Bson::Null], "ok": 1.0 }).unwrap();
+        let result = distinct_response_result(doc! { "values": ["a", 2i64, Bson::Null], "ok": 1.0 }).unwrap();
         assert_eq!(result.total, 3);
         assert_eq!(result.documents, vec![serde_json::json!("a"), serde_json::json!(2), serde_json::Value::Null]);
-        assert!(distinct_response_result(&doc! { "ok": 1.0 }).is_err());
+        assert!(distinct_response_result(doc! { "ok": 1.0 }).is_err());
     }
 
     #[test]

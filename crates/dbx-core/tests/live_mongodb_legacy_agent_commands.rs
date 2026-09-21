@@ -3,7 +3,10 @@
 use dbx_core::{
     connection::{AppState, PoolKind},
     models::connection::ConnectionConfig,
-    mongo_ops::{execute_mongo_command_core, mongo_run_command_core},
+    mongo_ops::{
+        execute_mongo_command_core, mongo_collection_stats_core, mongo_create_database_core, mongo_list_databases_core,
+        mongo_run_command_core,
+    },
     mongo_shell,
     storage::Storage,
 };
@@ -199,5 +202,71 @@ async fn distinct_runs_over_the_legacy_agent() {
     let none = shell(&state, id, &database, r#"db.orders.distinct("status", {status: "missing"})"#).await.unwrap();
     assert_eq!(none.rows.len(), 0);
 
+    command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
+}
+
+#[tokio::test]
+#[ignore = "opt-in: DBX_MONGO_LEGACY_DUMP_TEST_HOST (host:port, MongoDB 3.6+ without auth) and an installed MongoDB Legacy Agent; creates temporary databases"]
+async fn collection_stats_and_create_database_run_over_the_legacy_agent() {
+    let endpoint = std::env::var("DBX_MONGO_LEGACY_DUMP_TEST_HOST").expect("DBX_MONGO_LEGACY_DUMP_TEST_HOST");
+    let (host, port) = endpoint.split_once(':').expect("host:port");
+    let files = tempfile::tempdir().unwrap();
+    let database = format!("dbx_legacy_admin_{}", uuid::Uuid::new_v4().simple());
+    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let id = "legacy-admin-test";
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy admin test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
+    state.configs.write().await.insert(id.into(), config);
+    let key = state.get_or_create_pool(id, Some(&database)).await.unwrap();
+    assert!(matches!(state.pool_handle(&key).await, Some(PoolKind::Agent(_))), "test must run over the legacy agent");
+
+    command(
+        &state,
+        id,
+        &database,
+        doc! { "insert": "orders", "documents": [ { "_id": 1, "n": 1 }, { "_id": 2, "n": 2 }, { "_id": 3, "n": 3 } ] },
+    )
+    .await;
+    command(
+        &state,
+        id,
+        &database,
+        doc! { "createIndexes": "orders", "indexes": [ { "key": { "n": 1 }, "name": "n_1" } ] },
+    )
+    .await;
+
+    let stats = mongo_collection_stats_core(&state, id, &database, "orders", None).await.unwrap();
+    assert_eq!(stats.count, serde_json::json!(3), "{stats:?}");
+    assert_eq!(stats.nindexes, serde_json::json!(2), "{stats:?}");
+    assert!(stats.size.as_u64().is_some_and(|size| size > 0), "{stats:?}");
+    // scale divides byte sizes; count and index count are unaffected.
+    let scaled = mongo_collection_stats_core(&state, id, &database, "orders", Some(serde_json::Number::from(1024)))
+        .await
+        .unwrap();
+    assert_eq!(scaled.count, serde_json::json!(3));
+    assert!(scaled.storage_size.as_u64().unwrap() <= stats.storage_size.as_u64().unwrap());
+    let missing = mongo_collection_stats_core(&state, id, &database, "no_such_collection", None).await.unwrap_err();
+    assert!(
+        missing.contains("not found") || missing.contains("ns not found") || missing.contains("NamespaceNotFound"),
+        "{missing}"
+    );
+
+    // Create database: the new database becomes visible with its placeholder collection.
+    let created = format!("{database}_created");
+    mongo_create_database_core(&state, id, &created).await.unwrap();
+    let databases = mongo_list_databases_core(&state, id).await.unwrap();
+    assert!(databases.iter().any(|name| name == &created), "{databases:?}");
+    let listed = command(&state, id, &created, doc! { "listCollections": 1 }).await;
+    let names: Vec<String> = listed
+        .get_document("cursor")
+        .unwrap()
+        .get_array("firstBatch")
+        .unwrap()
+        .iter()
+        .map(|b| b.as_document().unwrap().get_str("name").unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec!["dbx_init"]);
+    assert!(mongo_create_database_core(&state, id, "   ").await.unwrap_err().contains("Database name is required"));
+
+    command(&state, id, &created, doc! { "dropDatabase": 1 }).await;
     command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
 }

@@ -486,7 +486,8 @@ mod tests {
         let custom = temp_skills_root("custom");
         write_skill(&custom, "team", VALID_BODY);
         let custom_id = skill_id("c", "team");
-        let disabled = read_user_skills_blocking(&[custom_id.clone()], false, Some(custom.to_str().unwrap()));
+        let disabled =
+            read_user_skills_blocking(std::slice::from_ref(&custom_id), false, Some(custom.to_str().unwrap()));
         assert_eq!(disabled.failures.len(), 1);
         assert_eq!(disabled.failures[0].reason, "root_unavailable");
         let vanished = read_user_skills_blocking(&[custom_id], true, Some(custom.join("nope").to_str().unwrap()));

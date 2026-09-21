@@ -1279,6 +1279,10 @@ export async function salesforceOauthRefresh(params: SalesforceOAuthAuthorizePar
   return invokeBackend("salesforce_oauth_refresh", { params, refreshToken });
 }
 
+export async function salesforceOauthPasswordLogin(params: SalesforceOAuthAuthorizeParams, username: string, password: string): Promise<SalesforceOAuthToken> {
+  return invokeBackend("salesforce_oauth_password_login", { params, username, password });
+}
+
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
   return invokeBackend("connect_db", { config, clientAttempt });
 }

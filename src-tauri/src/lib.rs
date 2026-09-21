@@ -1867,6 +1867,7 @@ pub fn run() {
             commands::salesforce_oauth::salesforce_oauth_device_start,
             commands::salesforce_oauth::salesforce_oauth_device_poll,
             commands::salesforce_oauth::salesforce_oauth_refresh,
+            commands::salesforce_oauth::salesforce_oauth_password_login,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,

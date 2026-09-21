@@ -9,6 +9,9 @@
 //!   shows the user code and drives the polling loop.
 //! - **Refresh** ([`refresh_access_token`]) — used by the driver on 401 and
 //!   available for explicit re-auth without a browser.
+//! - **Username-password (ROPC)** ([`password_grant_token`]) — deprecated by
+//!   Salesforce but common in corporate orgs; no refresh token is issued, so
+//!   the driver replays the login on 401 ([`SfRefreshMethod`]).
 //!
 //! The Connected App is bring-your-own for now (decision D1): users register
 //! one in their org with callback URL [`SALESFORCE_OAUTH_REDIRECT_URI`] and
@@ -585,38 +588,100 @@ fn token_error_to_string(error: TokenEndpointError) -> String {
     }
 }
 
+/// Username-password flow (ROPC). Deprecated by Salesforce but still enabled
+/// on many orgs via Session Settings → "Permit users to exchange
+/// username–password credentials for an access token", and the grant many
+/// corporate integrations already rely on. Issues **no refresh token** — the
+/// driver re-runs this grant with the stored credentials when the session
+/// expires instead.
+pub async fn password_grant_token(
+    params: &SfOauthParams,
+    username: &str,
+    password: &str,
+) -> Result<SfTokenSet, String> {
+    password_grant_token_policy(params, username, password, EndpointPolicy::HttpsOnly).await
+}
+
+async fn password_grant_token_policy(
+    params: &SfOauthParams,
+    username: &str,
+    password: &str,
+    policy: EndpointPolicy,
+) -> Result<SfTokenSet, String> {
+    if username.trim().is_empty() || password.is_empty() {
+        return Err(oauth_error("username and password are required"));
+    }
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "password"),
+        ("client_id", params.client_id.trim()),
+        ("username", username.trim()),
+        ("password", password),
+        ("format", "json"),
+    ];
+    let client_secret = client_secret_pair(params);
+    if let Some(secret) = client_secret.as_deref() {
+        form.push(("client_secret", secret));
+    }
+    let value = post_token_form(params, &form, policy).await.map_err(|error| match error {
+        TokenEndpointError::Oauth { error, description } => oauth_error(format!(
+            "{error}{} — check the username (sandbox users end with the sandbox name, e.g. user@example.com.qas1), \
+             the password (append your security token if your IP is not trusted), and that the org permits the \
+             username-password flow (Session Settings). MFA-enforced users cannot use this grant.",
+            description.map(|detail| format!(" ({detail})")).unwrap_or_default()
+        )),
+        TokenEndpointError::Other(message) => message,
+    })?;
+    token_set_from_value(&value, true)
+}
+
+/// How a saved connection re-authenticates when its access token expires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SfRefreshMethod {
+    /// OAuth flows: exchange the stored refresh token.
+    RefreshToken(String),
+    /// Username-password flow: Salesforce issues no refresh token, so the
+    /// driver replays the login with the stored credentials.
+    Password { username: String, password: String },
+}
+
 /// Parse the `external_config.auth` object a saved Salesforce connection
 /// carries (values hydrated from the secret store by dbx-core). Returns
-/// `None` when OAuth refresh is not configured.
-pub fn oauth_params_from_external_config(external_config: Option<&Value>) -> Option<(SfOauthParams, String)> {
+/// `None` when no automatic re-auth is configured (pasted-token mode).
+pub fn oauth_params_from_external_config(external_config: Option<&Value>) -> Option<(SfOauthParams, SfRefreshMethod)> {
     let auth = external_config?.get("auth")?;
     let client_id = auth.get("clientId").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-    let refresh_token = auth.get("refreshToken").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-    if client_id.is_empty() || refresh_token.is_empty() {
+    if client_id.is_empty() {
         return None;
     }
-    let environment = match auth.get("environment").and_then(Value::as_str).unwrap_or_default() {
+    let text = |key: &str| auth.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let mode = text("mode");
+    let refresh_token = text("refreshToken");
+    let method = if mode == "password" {
+        let username = text("username");
+        let password = auth.get("password").and_then(Value::as_str).unwrap_or_default().to_string();
+        if username.is_empty() || password.is_empty() {
+            return None;
+        }
+        SfRefreshMethod::Password { username, password }
+    } else if !refresh_token.is_empty() {
+        SfRefreshMethod::RefreshToken(refresh_token)
+    } else {
+        return None;
+    };
+    let environment = match text("environment").as_str() {
         "sandbox" => SfLoginEnvironment::Sandbox,
         "custom" => SfLoginEnvironment::Custom,
         _ => SfLoginEnvironment::Production,
     };
+    let login_url = text("loginUrl");
+    let client_secret = text("clientSecret");
     let params = SfOauthParams {
         environment,
-        login_url: auth
-            .get("loginUrl")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(str::to_string),
+        login_url: (!login_url.is_empty()).then_some(login_url),
         client_id,
-        client_secret: auth
-            .get("clientSecret")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|secret| !secret.is_empty())
-            .map(str::to_string),
+        client_secret: (!client_secret.is_empty()).then_some(client_secret),
     };
-    Some((params, refresh_token))
+    Some((params, method))
 }
 
 #[cfg(test)]
@@ -949,8 +1014,8 @@ mod tests {
                 "refreshToken": "refresh-abc"
             }
         });
-        let (params, refresh) = oauth_params_from_external_config(Some(&config)).unwrap();
-        assert_eq!(refresh, "refresh-abc");
+        let (params, method) = oauth_params_from_external_config(Some(&config)).unwrap();
+        assert_eq!(method, SfRefreshMethod::RefreshToken("refresh-abc".to_string()));
         assert_eq!(params.environment, SfLoginEnvironment::Sandbox);
         assert_eq!(params.client_id, "3MVG9xxx");
         assert_eq!(params.client_secret.as_deref(), Some("secret"));
@@ -965,5 +1030,79 @@ mod tests {
         let (params, _) = oauth_params_from_external_config(Some(&custom)).unwrap();
         assert_eq!(params.environment, SfLoginEnvironment::Custom);
         assert_eq!(params.login_url.as_deref(), Some("https://acme.my.salesforce.com"));
+    }
+
+    #[test]
+    fn external_config_auth_parses_password_mode() {
+        let config = serde_json::json!({
+            "auth": {
+                "mode": "password",
+                "environment": "sandbox",
+                "clientId": "3MVG9xxx",
+                "clientSecret": "secret",
+                "username": "user@example.com.qas1",
+                "password": "pw+securitytoken"
+            }
+        });
+        let (params, method) = oauth_params_from_external_config(Some(&config)).unwrap();
+        assert_eq!(params.environment, SfLoginEnvironment::Sandbox);
+        assert_eq!(
+            method,
+            SfRefreshMethod::Password { username: "user@example.com.qas1".into(), password: "pw+securitytoken".into() }
+        );
+        // password mode without stored password (scrubbed, not yet hydrated) => no context
+        let missing_pw = serde_json::json!({
+            "auth": { "mode": "password", "clientId": "c", "username": "u" }
+        });
+        assert!(oauth_params_from_external_config(Some(&missing_pw)).is_none());
+        // explicit mode:password wins over a leftover refreshToken
+        let hybrid = serde_json::json!({
+            "auth": { "mode": "password", "clientId": "c", "username": "u", "password": "p", "refreshToken": "r" }
+        });
+        let (_, method) = oauth_params_from_external_config(Some(&hybrid)).unwrap();
+        assert!(matches!(method, SfRefreshMethod::Password { .. }));
+    }
+
+    #[tokio::test]
+    async fn password_grant_posts_ropc_form_and_returns_tokens() {
+        let (base, requests, server) = start_mock_oauth_server(vec![
+            r#"{"access_token":"ropc-token","instance_url":"https://acme--qas1.sandbox.my.salesforce.com/","id":"https://test.salesforce.com/id/00D/005"}"#.to_string(),
+        ])
+        .await;
+        let mut p = params(&base);
+        p.client_secret = Some("app-secret".to_string());
+        let tokens =
+            password_grant_token_policy(&p, "user@example.com.qas1", "pw+token", EndpointPolicy::AllowLoopbackHttp)
+                .await
+                .unwrap();
+        server.abort();
+        assert_eq!(tokens.access_token, "ropc-token");
+        assert_eq!(tokens.refresh_token, None, "ROPC issues no refresh token");
+        assert_eq!(tokens.instance_url, "https://acme--qas1.sandbox.my.salesforce.com");
+        let recorded = requests.lock().unwrap();
+        assert!(recorded[0].contains("grant_type=password"));
+        assert!(recorded[0].contains("client_secret=app-secret"));
+        assert!(recorded[0].contains("format=json"));
+        // password is form-encoded, '+' must not leak as a space separator
+        assert!(recorded[0].contains("pw%2Btoken"), "{}", recorded[0]);
+
+        assert!(password_grant_token_policy(&p, "", "x", EndpointPolicy::AllowLoopbackHttp)
+            .await
+            .unwrap_err()
+            .contains("username and password are required"));
+    }
+
+    #[tokio::test]
+    async fn password_grant_invalid_grant_error_lists_common_causes() {
+        let (base, _requests, server) = start_mock_oauth_server(vec![
+            r#"{"error":"invalid_grant","description":"authentication failure"}"#.to_string(),
+        ])
+        .await;
+        let err =
+            password_grant_token_policy(&params(&base), "u", "p", EndpointPolicy::AllowLoopbackHttp).await.unwrap_err();
+        server.abort();
+        assert!(err.contains("invalid_grant"), "{err}");
+        assert!(err.contains("security token"), "{err}");
+        assert!(err.contains("MFA"), "{err}");
     }
 }

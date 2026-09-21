@@ -24,8 +24,8 @@ use crate::connection_secrets::{
     CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY,
     MQ_AUTH_SECRET_PREFIX, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX,
     NACOS_AUTH_PASSWORD_KEY, NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
-    PLUGIN_CONNECTION_SECRET_PREFIX, SALESFORCE_AUTH_CLIENT_SECRET_KEY, SALESFORCE_AUTH_REFRESH_TOKEN_KEY,
-    SALESFORCE_AUTH_SECRET_PREFIX,
+    PLUGIN_CONNECTION_SECRET_PREFIX, SALESFORCE_AUTH_CLIENT_SECRET_KEY, SALESFORCE_AUTH_PASSWORD_KEY,
+    SALESFORCE_AUTH_REFRESH_TOKEN_KEY, SALESFORCE_AUTH_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -1392,6 +1392,7 @@ fn scrub_salesforce_auth_secrets(config: &mut ConnectionConfig) {
     };
     scrub_json_secret(auth, "clientSecret");
     scrub_json_secret(auth, "refreshToken");
+    scrub_json_secret(auth, "password");
 }
 
 fn delete_secret_prefix_in_tx(
@@ -4006,7 +4007,9 @@ impl Storage {
         let refresh_token_rewrite =
             hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")
                 .await?;
-        Ok(client_secret_rewrite || refresh_token_rewrite)
+        let password_rewrite =
+            hydrate_mq_json_secret(self, connection_id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password").await?;
+        Ok(client_secret_rewrite || refresh_token_rewrite || password_rewrite)
     }
 }
 
@@ -5378,6 +5381,7 @@ fn persist_salesforce_auth_secrets_in_tx(
     };
     replace_salesforce_auth_secret_in_tx(tx, &config.id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?;
     replace_salesforce_auth_secret_in_tx(tx, &config.id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")?;
+    replace_salesforce_auth_secret_in_tx(tx, &config.id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password")?;
     Ok(())
 }
 

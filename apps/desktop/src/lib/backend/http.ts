@@ -456,6 +456,10 @@ export async function salesforceOauthRefresh(params: SalesforceOAuthAuthorizePar
   return post("/api/connection/salesforce-oauth-refresh", { params, refreshToken });
 }
 
+export async function salesforceOauthPasswordLogin(params: SalesforceOAuthAuthorizeParams, username: string, password: string): Promise<SalesforceOAuthToken> {
+  return post("/api/connection/salesforce-oauth-password-login", { params, username, password });
+}
+
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
   return post("/api/connection/connect", { config, clientAttempt });
 }

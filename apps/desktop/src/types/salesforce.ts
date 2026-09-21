@@ -2,7 +2,7 @@
 // The backend owns encryption/storage of refreshToken; the frontend only keeps
 // enough state to re-render the connection card and re-authorize when needed.
 
-export type SalesforceAuthMode = "token" | "oauth" | "device";
+export type SalesforceAuthMode = "token" | "oauth" | "device" | "password";
 
 export type SalesforceEnvironment = "production" | "sandbox" | "custom";
 
@@ -44,6 +44,10 @@ export interface SalesforceAuthContext {
   clientId?: string;
   clientSecret?: string;
   refreshToken?: string;
+  // Username-password (ROPC) mode. The password is scrubbed into the backend
+  // secret store (key salesforce.auth.password) and never rendered back.
+  username?: string;
+  password?: string;
   authorizedAt?: string;
 }
 

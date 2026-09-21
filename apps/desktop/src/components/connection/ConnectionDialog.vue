@@ -1585,6 +1585,10 @@ const salesforceEnvironment = ref<SalesforceEnvironment>("production");
 const salesforceLoginUrl = ref("");
 const salesforceClientId = ref("");
 const salesforceClientSecret = ref("");
+// Username-password (ROPC) mode credentials. The password is never
+// round-tripped from the backend; blank on edit unless re-typed.
+const salesforceUsername = ref("");
+const salesforceUserPassword = ref("");
 
 const salesforceOauthRunning = ref(false);
 const salesforceOauthError = ref("");
@@ -1613,7 +1617,7 @@ let salesforceDeviceExpiresTimer: ReturnType<typeof setInterval> | null = null;
 function salesforceAuthModeFromConfig(externalConfig: unknown, fallbackPassword?: string): SalesforceAuthMode {
   const cfg = (externalConfig as SalesforceExternalConfig | undefined) ?? undefined;
   const mode = cfg?.auth?.mode;
-  if (mode === "oauth" || mode === "device") return mode;
+  if (mode === "oauth" || mode === "device" || mode === "password") return mode;
   if (cfg?.auth && (cfg.auth.refreshToken || cfg.auth.clientId || cfg.auth.authorizedAt)) return "oauth";
   // No persisted auth context: if a password/token is present, treat as manual token.
   if (fallbackPassword?.trim()) return "token";
@@ -1630,6 +1634,8 @@ function resetSalesforceOAuthFields(externalConfig?: unknown, fallbackPassword?:
   // Client secret is never round-tripped from the backend for security; the
   // input is blank on edit and only sent when the user re-types it.
   salesforceClientSecret.value = "";
+  salesforceUsername.value = auth?.username?.trim() || "";
+  salesforceUserPassword.value = "";
   salesforceOauthRunning.value = false;
   salesforceOauthError.value = "";
   salesforceOauthSuccess.value = "";
@@ -1691,6 +1697,12 @@ function salesforceBuildAuthContext(mode: SalesforceAuthMode, token?: { refreshT
   if (salesforceClientSecret.value.trim()) {
     context.clientSecret = salesforceClientSecret.value.trim();
   }
+  if (mode === "password") {
+    context.username = salesforceUsername.value.trim() || undefined;
+    if (salesforceUserPassword.value) {
+      context.password = salesforceUserPassword.value;
+    }
+  }
   if (token?.refreshToken) {
     context.refreshToken = token.refreshToken;
   }
@@ -1709,6 +1721,11 @@ function salesforceMergeAuthIntoExternalConfig(mode: SalesforceAuthMode, token?:
   // backend returning a new one (e.g. refresh flow that omits a rotation).
   if (!auth.refreshToken && existing.auth?.refreshToken) {
     auth.refreshToken = existing.auth.refreshToken;
+  }
+  // Same for the ROPC password: it is not round-tripped for display, so an
+  // edit-without-retype must not clobber the stored credential.
+  if (!auth.password && existing.auth?.password) {
+    auth.password = existing.auth.password;
   }
   form.value.external_config = { ...existing, auth };
 }
@@ -1729,6 +1746,40 @@ async function salesforceStartBrowserAuthorize() {
     const token = await api.salesforceOauthBrowserAuthorize(params);
     salesforceApplyTokenToForm(token);
     salesforceMergeAuthIntoExternalConfig("oauth", token);
+    salesforceOauthSuccess.value = t("connection.salesforceOauthSuccess", { instanceUrl: token.instanceUrl });
+    salesforceOauthPreviouslyAuthorized.value = true;
+  } catch (e) {
+    salesforceOauthError.value = errorMessage(e);
+  } finally {
+    salesforceOauthRunning.value = false;
+  }
+}
+
+async function salesforceStartPasswordLogin() {
+  salesforceOauthError.value = "";
+  salesforceOauthSuccess.value = "";
+  salesforceOauthPreviouslyAuthorized.value = false;
+  let params: SalesforceOAuthAuthorizeParams;
+  try {
+    params = salesforceBuildAuthorizeParams();
+  } catch (e) {
+    salesforceOauthError.value = errorMessage(e);
+    return;
+  }
+  const username = salesforceUsername.value.trim();
+  if (!username) {
+    salesforceOauthError.value = t("connection.salesforceUsernameRequired");
+    return;
+  }
+  if (!salesforceUserPassword.value) {
+    salesforceOauthError.value = t("connection.salesforceUserPasswordRequired");
+    return;
+  }
+  salesforceOauthRunning.value = true;
+  try {
+    const token = await api.salesforceOauthPasswordLogin(params, username, salesforceUserPassword.value);
+    salesforceApplyTokenToForm(token);
+    salesforceMergeAuthIntoExternalConfig("password", token);
     salesforceOauthSuccess.value = t("connection.salesforceOauthSuccess", { instanceUrl: token.instanceUrl });
     salesforceOauthPreviouslyAuthorized.value = true;
   } catch (e) {
@@ -4797,7 +4848,16 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
         // Preserve secret indicator without leaking the value to the client.
         auth.clientSecret = existing.auth.clientSecret;
       }
-      if (existing.auth?.refreshToken) {
+      if (salesforceAuthMode.value === "password") {
+        auth.username = salesforceUsername.value.trim() || existing.auth?.username;
+        if (salesforceUserPassword.value) {
+          auth.password = salesforceUserPassword.value;
+        } else if (existing.auth?.password) {
+          // Stored ROPC credential (scrubbed into the backend secret store);
+          // keep it when the user edits the connection without retyping.
+          auth.password = existing.auth.password;
+        }
+      } else if (existing.auth?.refreshToken) {
         auth.refreshToken = existing.auth.refreshToken;
       }
       config.external_config = { ...existing, auth };
@@ -8348,7 +8408,7 @@ function openExternalUrl(url: string) {
                     <!-- Authentication mode picker -->
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.salesforceAuthMode") }}</Label>
-                      <div class="col-span-3 grid h-8 grid-cols-3 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
+                      <div class="col-span-3 grid h-8 grid-cols-4 overflow-hidden rounded-md border border-input bg-muted/30 p-0.5">
                         <button
                           type="button"
                           class="h-7 rounded-sm px-2 text-xs transition-colors"
@@ -8380,9 +8440,19 @@ function openExternalUrl(url: string) {
                         >
                           {{ t("connection.salesforceAuthModeDevice") }}
                         </button>
+                        <button
+                          type="button"
+                          class="h-7 rounded-sm px-2 text-xs transition-colors"
+                          :class="salesforceAuthMode === 'password' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          :aria-pressed="salesforceAuthMode === 'password'"
+                          :disabled="salesforceOauthRunning"
+                          @click="salesforceSetAuthMode('password')"
+                        >
+                          {{ t("connection.salesforceAuthModePassword") }}
+                        </button>
                       </div>
                     </div>
-                    <div v-if="!isDesktop && salesforceAuthMode !== 'token'" class="grid grid-cols-4 items-start gap-4">
+                    <div v-if="!isDesktop && salesforceAuthMode === 'oauth'" class="grid grid-cols-4 items-start gap-4">
                       <span />
                       <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceAuthModeOauthDesktopOnly") }}</p>
                     </div>
@@ -8441,6 +8511,24 @@ function openExternalUrl(url: string) {
                         </div>
                       </div>
 
+                      <!-- Username & password (ROPC) credentials -->
+                      <template v-if="salesforceAuthMode === 'password'">
+                        <div class="grid grid-cols-4 items-start gap-4">
+                          <Label :class="connectionLabelClass">{{ t("connection.salesforceUsernameLabel") }}</Label>
+                          <div class="col-span-3 space-y-1.5">
+                            <Input v-model="salesforceUsername" :placeholder="t('connection.salesforceUsernamePlaceholder')" :disabled="salesforceOauthRunning" autocomplete="off" />
+                            <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceUsernameHint") }}</p>
+                          </div>
+                        </div>
+                        <div class="grid grid-cols-4 items-start gap-4">
+                          <Label :class="connectionLabelClass">{{ t("connection.salesforceUserPasswordLabel") }}</Label>
+                          <div class="col-span-3 space-y-1.5">
+                            <PasswordInput v-model="salesforceUserPassword" :placeholder="t('connection.salesforceUserPasswordPlaceholder')" :disabled="salesforceOauthRunning" autocomplete="new-password" />
+                            <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceUserPasswordHint") }}</p>
+                          </div>
+                        </div>
+                      </template>
+
                       <!-- Previously-authorized banner (edit flow) -->
                       <div v-if="salesforceOauthPreviouslyAuthorized && !salesforceOauthRunning && salesforceDevicePhase !== 'polling'" class="grid grid-cols-4 items-center gap-4">
                         <span />
@@ -8464,6 +8552,19 @@ function openExternalUrl(url: string) {
                         <div v-if="salesforceOauthRunning" class="grid grid-cols-4 items-start gap-4">
                           <span />
                           <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceOauthAuthorizingHint") }}</p>
+                        </div>
+                      </template>
+
+                      <!-- Username-password sign in -->
+                      <template v-if="salesforceAuthMode === 'password'">
+                        <div class="grid grid-cols-4 items-center gap-4">
+                          <span />
+                          <div class="col-span-3 flex items-center gap-2">
+                            <Button type="button" :disabled="salesforceOauthRunning || !salesforceClientId.trim() || !salesforceUsername.trim() || !salesforceUserPassword" @click="salesforceStartPasswordLogin">
+                              <Loader2 v-if="salesforceOauthRunning" class="mr-2 h-4 w-4 animate-spin" />
+                              {{ salesforceOauthRunning ? t("connection.salesforceOauthAuthorizing") : salesforceOauthPreviouslyAuthorized ? t("connection.salesforcePasswordSignInAgain") : t("connection.salesforcePasswordSignIn") }}
+                            </Button>
+                          </div>
                         </div>
                       </template>
 
@@ -8540,14 +8641,14 @@ function openExternalUrl(url: string) {
                     </template>
 
                     <!-- Shared status / error strip (oauth success + any error) -->
-                    <div v-if="salesforceOauthSuccess && (salesforceAuthMode === 'oauth' || salesforceDevicePhase === 'success')" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="salesforceOauthSuccess && (salesforceAuthMode === 'oauth' || salesforceAuthMode === 'password' || salesforceDevicePhase === 'success')" class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <div class="col-span-3 flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
                         <ShieldCheck class="h-4 w-4 shrink-0" />
                         <span>{{ salesforceOauthSuccess }}</span>
                       </div>
                     </div>
-                    <div v-if="salesforceOauthError && salesforceAuthMode === 'oauth'" class="grid grid-cols-4 items-center gap-4">
+                    <div v-if="salesforceOauthError && (salesforceAuthMode === 'oauth' || salesforceAuthMode === 'password')" class="grid grid-cols-4 items-center gap-4">
                       <span />
                       <div class="col-span-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
                         {{ salesforceOauthError }}

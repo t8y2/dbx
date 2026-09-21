@@ -30,6 +30,7 @@ pub const CASSANDRA_KEYSTORE_PASSWORD_KEY: &str = "cassandra.tls.keystore_passwo
 pub const SALESFORCE_AUTH_SECRET_PREFIX: &str = "salesforce.auth.";
 pub const SALESFORCE_AUTH_CLIENT_SECRET_KEY: &str = "salesforce.auth.client_secret";
 pub const SALESFORCE_AUTH_REFRESH_TOKEN_KEY: &str = "salesforce.auth.refresh_token";
+pub const SALESFORCE_AUTH_PASSWORD_KEY: &str = "salesforce.auth.password";
 pub const PLUGIN_CONNECTION_SECRET_PREFIX: &str = "plugin_connection.";
 
 /// Storage-level secret key for one plugin connection field: namespaced under
@@ -681,6 +682,7 @@ fn persist_salesforce_auth_secrets(store: &dyn ConnectionSecretStore, config: &C
 
     replace_salesforce_auth_secret(store, &config.id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret")?;
     replace_salesforce_auth_secret(store, &config.id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken")?;
+    replace_salesforce_auth_secret(store, &config.id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password")?;
 
     Ok(())
 }
@@ -721,6 +723,7 @@ fn hydrate_salesforce_auth_secrets(
 
     hydrate_json_secret(store, &config.id, SALESFORCE_AUTH_CLIENT_SECRET_KEY, auth, "clientSecret", needs_rewrite)?;
     hydrate_json_secret(store, &config.id, SALESFORCE_AUTH_REFRESH_TOKEN_KEY, auth, "refreshToken", needs_rewrite)?;
+    hydrate_json_secret(store, &config.id, SALESFORCE_AUTH_PASSWORD_KEY, auth, "password", needs_rewrite)?;
 
     Ok(())
 }
@@ -734,6 +737,7 @@ fn scrub_salesforce_auth_secrets(config: &mut ConnectionConfig) {
     };
     scrub_json_secret(auth, "clientSecret");
     scrub_json_secret(auth, "refreshToken");
+    scrub_json_secret(auth, "password");
 }
 
 fn salesforce_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {

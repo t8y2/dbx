@@ -15,8 +15,8 @@ use dbx_core::runtime_config::{
     release_runtime_config_on_disconnect, should_retain_runtime_config, TEST_PROBE_ID_PREFIX,
 };
 use dbx_core::salesforce_oauth::{
-    device_authorization_request, device_poll, refresh_access_token, SfDeviceAuthorization, SfDevicePoll,
-    SfOauthParams, SfRefreshedToken, SfTokenSet,
+    device_authorization_request, device_poll, password_grant_token, refresh_access_token, SfDeviceAuthorization,
+    SfDevicePoll, SfOauthParams, SfRefreshedToken, SfTokenSet,
 };
 use dbx_core::session_credentials::{PurposeSessionCredentialWriteToken, SessionCredentialWriteToken};
 use serde::{Deserialize, Serialize};
@@ -874,6 +874,13 @@ pub async fn salesforce_oauth_refresh(
     refresh_access_token(&body.params, &body.refresh_token).await.map(Json).map_err(AppError::from)
 }
 
+pub async fn salesforce_oauth_password_login(
+    State(_state): State<Arc<WebState>>,
+    Json(body): Json<SalesforcePasswordLoginRequest>,
+) -> Result<Json<SfTokenSet>, AppError> {
+    password_grant_token(&body.params, &body.username, &body.password).await.map(Json).map_err(AppError::from)
+}
+
 #[derive(Deserialize)]
 pub struct SalesforceOauthParamsRequest {
     pub params: SfOauthParams,
@@ -893,6 +900,13 @@ pub struct SalesforceRefreshRequest {
     pub params: SfOauthParams,
     #[serde(rename = "refreshToken")]
     pub refresh_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforcePasswordLoginRequest {
+    pub params: SfOauthParams,
+    pub username: String,
+    pub password: String,
 }
 
 #[cfg(test)]

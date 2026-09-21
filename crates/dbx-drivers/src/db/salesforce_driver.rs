@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 
 use super::{http_client_builder, json_value_for_js, with_connection_timeout};
 use crate::db::ColumnInfo;
-use crate::salesforce_oauth::{oauth_params_from_external_config, refresh_access_token, SfOauthParams};
+use crate::salesforce_oauth::{
+    oauth_params_from_external_config, password_grant_token, refresh_access_token, SfOauthParams, SfRefreshMethod,
+};
 use crate::types::QueryResult;
 
 /// API version pinned by default. Salesforce keeps every version alive for
@@ -66,10 +68,11 @@ pub struct SfClient {
     org_name_cache: Arc<Mutex<Option<String>>>,
 }
 
-/// OAuth refresh material held for the connection's lifetime.
+/// Re-auth material held for the connection's lifetime (refresh token for
+/// OAuth connections, stored credentials for username-password connections).
 struct SfRefreshContext {
     params: SfOauthParams,
-    refresh_token: String,
+    method: SfRefreshMethod,
 }
 
 /// Distinguishes 401s (retryable via refresh) from everything else so the two
@@ -148,7 +151,7 @@ impl SfClient {
         let instance_url = normalize_instance_url(instance_url)?;
         let access_token = access_token.unwrap_or("").trim().to_string();
         let refresh_context = oauth_params_from_external_config(external_config)
-            .map(|(params, refresh_token)| SfRefreshContext { params, refresh_token });
+            .map(|(params, method)| SfRefreshContext { params, method });
         if access_token.is_empty() && refresh_context.is_none() {
             return Err("Salesforce access token is required. Paste a session/access token, or sign in via OAuth (desktop app).".to_string());
         }
@@ -178,19 +181,30 @@ impl SfClient {
         self.access_token.lock().map(|token| token.clone()).unwrap_or_default()
     }
 
-    /// Refresh the access token in place. Returns true when a fresh token was
-    /// installed; serialized by the async mutex so concurrent 401s trigger a
-    /// single refresh.
+    /// Re-authenticate in place (refresh-token exchange, or replaying the
+    /// username-password login for ROPC connections). Returns true when a
+    /// fresh token was installed; serialized by the async mutex so concurrent
+    /// 401s trigger a single re-auth.
     async fn try_refresh_token(&self) -> bool {
         let mut guard = self.refresh.lock().await;
         let Some(context) = guard.as_mut() else { return false };
-        match refresh_access_token(&context.params, &context.refresh_token).await {
-            Ok(tokens) => {
-                if let Some(rotated) = tokens.refresh_token {
-                    context.refresh_token = rotated;
+        let outcome = match &context.method {
+            SfRefreshMethod::RefreshToken(refresh_token) => refresh_access_token(&context.params, refresh_token)
+                .await
+                .map(|tokens| (tokens.access_token, tokens.refresh_token)),
+            SfRefreshMethod::Password { username, password } => {
+                password_grant_token(&context.params, username, password)
+                    .await
+                    .map(|tokens| (tokens.access_token, None))
+            }
+        };
+        match outcome {
+            Ok((access_token, rotated)) => {
+                if let (Some(rotated), SfRefreshMethod::RefreshToken(current)) = (rotated, &mut context.method) {
+                    *current = rotated;
                 }
                 if let Ok(mut current) = self.access_token.lock() {
-                    *current = tokens.access_token;
+                    *current = access_token;
                 }
                 true
             }
@@ -975,5 +989,26 @@ mod tests {
         assert!(
             SfClient::from_config("acme.my.salesforce.com", None, Some(&incomplete), Duration::from_secs(5)).is_err()
         );
+        // username-password mode: stored credentials also satisfy the empty-token rule
+        let ropc = serde_json::json!({
+            "auth": {
+                "mode": "password",
+                "environment": "sandbox",
+                "clientId": "3MVG9xxx",
+                "clientSecret": "secret",
+                "username": "user@example.com.qas1",
+                "password": "pw"
+            }
+        });
+        let ropc_client = SfClient::from_config(
+            "acme--qas1.sandbox.my.salesforce.com",
+            Some(""),
+            Some(&ropc),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(ropc_client.has_refresh_token());
+        let ropc_debug = format!("{ropc_client:?}");
+        assert!(!ropc_debug.contains("user@example.com"), "{ropc_debug}");
     }
 }

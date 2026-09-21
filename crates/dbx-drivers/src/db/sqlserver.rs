@@ -2373,11 +2373,70 @@ pub async fn completion_assistant_search(
             }
         })
         .collect::<Vec<_>>();
+    let candidates = normalize_sqlserver_completion_candidates(candidates);
     Ok(crate::types::CompletionAssistantResponse {
         incomplete: candidates.len() >= limit,
         candidates,
         fallback_used: false,
     })
+}
+
+/// Rewrites the raw catalog names of a completion response into names the user
+/// can actually write, and drops the duplicates that translation can create.
+fn normalize_sqlserver_completion_candidates(
+    candidates: Vec<crate::types::CompletionAssistantCandidate>,
+) -> Vec<crate::types::CompletionAssistantCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.name = sqlserver_original_temp_table_name(&candidate.name).to_string();
+            candidate
+        })
+        // One internal temp table per module can share the same visible name, so
+        // the translated candidates must not repeat it.
+        .filter(|candidate| {
+            seen.insert((
+                format!("{:?}", candidate.kind),
+                candidate.name.clone(),
+                candidate.parent_schema.clone(),
+                candidate.parent_name.clone(),
+            ))
+        })
+        .collect()
+}
+
+/// SQL Server stores a temp table that is created inside a module (stored
+/// procedure, trigger, function) under a mangled name: the original name is
+/// padded with underscores to 116 characters and a 12-character hex stamp is
+/// appended, so `#orders` becomes `#orders___...___0000000BFC4EE` (128
+/// characters). Only the original name can be referenced from SQL, so
+/// completion has to translate the internal name back instead of offering a
+/// name the user cannot type or reuse (#9854). Temp table names are limited to
+/// 116 characters, so a 128-character `#`-prefixed name is always SQL Server's
+/// internal form; `##` global temp tables keep their name unchanged.
+fn sqlserver_original_temp_table_name(name: &str) -> &str {
+    const INTERNAL_TEMP_TABLE_NAME_CHARS: usize = 128;
+    const TEMP_TABLE_NAME_MAX_CHARS: usize = 116;
+
+    if !name.starts_with('#') || name.starts_with("##") {
+        return name;
+    }
+    let chars = name.char_indices().collect::<Vec<_>>();
+    if chars.len() != INTERNAL_TEMP_TABLE_NAME_CHARS {
+        return name;
+    }
+    let (padded_end, _) = chars[TEMP_TABLE_NAME_MAX_CHARS];
+    let stamp = &name[padded_end..];
+    if !stamp.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return name;
+    }
+    let original = name[..padded_end].trim_end_matches('_');
+    if original.len() > 1 {
+        original
+    } else {
+        name
+    }
 }
 
 fn sqlserver_completion_candidate_kind(object_type: &str) -> crate::types::CompletionAssistantCandidateKind {
@@ -4972,6 +5031,69 @@ mod tests {
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('#Temp%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(128)) AS parent_schema"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(MAX)) AS object_comment"));
+    }
+
+    #[test]
+    fn sqlserver_completion_translates_mangled_temp_table_names() {
+        let mangled = |original: &str, stamp: &str| {
+            let padded = 116usize.saturating_sub(original.chars().count());
+            format!("{original}{}{stamp}", "_".repeat(padded))
+        };
+
+        let orders = mangled("#orders", "000000BFC4EE");
+        assert_eq!(orders.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&orders), "#orders");
+
+        let unicode_orders = mangled("#订单明细", "00000000000A");
+        assert_eq!(unicode_orders.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&unicode_orders), "#订单明细");
+
+        // Global temp tables keep their name, so the translation must not touch them.
+        assert_eq!(super::sqlserver_original_temp_table_name("##orders"), "##orders");
+        // Ordinary temp tables and regular objects are returned unchanged.
+        assert_eq!(super::sqlserver_original_temp_table_name("#orders"), "#orders");
+        assert_eq!(super::sqlserver_original_temp_table_name("dbo.orders"), "dbo.orders");
+        // A 128-character name without the trailing hex stamp is not SQL Server's
+        // internal temp table form and must survive untouched.
+        let padded_without_stamp = format!("#{}{}", "o".repeat(115), "_".repeat(12));
+        assert_eq!(padded_without_stamp.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&padded_without_stamp), padded_without_stamp);
+        let non_temp = mangled("orders", "000000BFC4EE");
+        assert_eq!(non_temp.chars().count(), 128);
+        assert_eq!(super::sqlserver_original_temp_table_name(&non_temp), non_temp);
+    }
+
+    #[test]
+    fn sqlserver_completion_normalizes_temp_table_candidates() {
+        let mangled = |original: &str, stamp: &str| {
+            let padded = 116usize.saturating_sub(original.chars().count());
+            format!("{original}{}{stamp}", "_".repeat(padded))
+        };
+        let candidate = |name: &str| crate::types::CompletionAssistantCandidate {
+            name: name.to_string(),
+            kind: crate::types::CompletionAssistantCandidateKind::Table,
+            database: Some("master".to_string()),
+            schema: Some("dbo".to_string()),
+            parent_schema: None,
+            parent_name: None,
+            comment: None,
+            data_type: None,
+            signature: None,
+        };
+
+        // Two modules creating the same temp table produce two internal names that
+        // must collapse into the one name the user can reference.
+        let normalized = super::normalize_sqlserver_completion_candidates(vec![
+            candidate(&mangled("#ypsl_py", "00000000000D")),
+            candidate(&mangled("#ypsl_py", "000000BFC4EE")),
+            candidate("#ypsl_py_extra"),
+            candidate("dbo.orders"),
+        ]);
+
+        assert_eq!(
+            normalized.iter().map(|candidate| candidate.name.as_str()).collect::<Vec<_>>(),
+            vec!["#ypsl_py", "#ypsl_py_extra", "dbo.orders"]
+        );
     }
 
     #[test]

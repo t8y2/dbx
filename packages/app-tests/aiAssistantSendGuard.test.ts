@@ -32,11 +32,7 @@ function scriptSetupContent(): string {
 function functionBody(script: string, signature: string): string {
   const sigIndex = script.indexOf(signature);
   assert.notEqual(sigIndex, -1, `expected to find ${signature}`);
-  assert.equal(
-    script.indexOf(signature, sigIndex + signature.length),
-    -1,
-    `${signature} should be unique`,
-  );
+  assert.equal(script.indexOf(signature, sigIndex + signature.length), -1, `${signature} should be unique`);
   const openBrace = script.indexOf("{", sigIndex + signature.length);
   assert.notEqual(openBrace, -1, "function body should open with a brace");
 
@@ -72,11 +68,15 @@ test("send() acquires the guard synchronously before the first await", () => {
   assert.ok(entryCheck < guardSet, "isGenerating check must precede the guard set");
   assert.ok(guardSet < firstAwait, "guard must be set before the first await (no await between check and set)");
 
-  // The first suspension point is specifically the prompt-template load — the
-  // await the reviewer flagged as happening before the guard existed.
+  // The first suspension point is the send-time skill read or the prompt-template
+  // load — both run after the guard and both are pipeline-entry awaits whose
+  // failure paths release the guard state explicitly (see the early returns
+  // after `aiGenerationGuard.begin()`).
   const ensureLoadedAwait = body.indexOf("await promptTemplateStore.ensureLoaded()");
   assert.notEqual(ensureLoadedAwait, -1, "send() should await promptTemplateStore.ensureLoaded()");
-  assert.equal(firstAwait, ensureLoadedAwait, "ensureLoaded() must be the first await in send()");
+  const skillReadAwait = body.indexOf("await readUserSkills([...selectedSkillIds.value], skillRootSettings())");
+  const pipelineEntryAwaits = [ensureLoadedAwait, skillReadAwait].filter((index) => index >= 0);
+  assert.ok(pipelineEntryAwaits.includes(firstAwait), "the first await in send() must be the skill read or the prompt-template load");
 });
 
 test("send() never leaks the guard on an early return after acquiring it", () => {
@@ -93,10 +93,7 @@ test("send() never leaks the guard on an early return after acquiring it", () =>
 
   for (const match of returnsAfterGuard) {
     const preceding = tail.slice(0, match.index);
-    assert.ok(
-      preceding.includes("isGenerating.value = false"),
-      "any early return after the guard is acquired must reset isGenerating first",
-    );
+    assert.ok(preceding.includes("isGenerating.value = false"), "any early return after the guard is acquired must reset isGenerating first");
   }
 });
 

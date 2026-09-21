@@ -897,7 +897,8 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     let insert_sql = format!(
         "INSERT INTO {target} ({target_column_list}){postgres_override} SELECT {source_column_list} FROM {source};"
     );
-    let needs_identity_insert = (options.sqlserver_identity_insert && options.database_type == Some(DatabaseType::SqlServer))
+    let needs_identity_insert = (options.sqlserver_identity_insert
+        && options.database_type == Some(DatabaseType::SqlServer))
         || (options.dameng_identity_insert && options.database_type == Some(DatabaseType::Dameng));
     if needs_identity_insert {
         return format!("SET IDENTITY_INSERT {target} ON;\n{insert_sql}\nSET IDENTITY_INSERT {target} OFF;");
@@ -2588,7 +2589,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: true,
                 sqlserver_identity_insert: false,
-                dameng_identity_insert: false,
+            dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2603,7 +2604,7 @@ mod tests {
                 columns: Some(vec!["id".to_string(), "name".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: true,
-                dameng_identity_insert: false,
+            dameng_identity_insert: false,
                 normalize_new_target_name: false,
                 identifier_quote: None,
             }),
@@ -2624,9 +2625,18 @@ mod tests {
             });
             assert!(dameng.starts_with("SET IDENTITY_INSERT "), "dameng copy should enable identity insert: {dameng}");
             assert!(dameng.ends_with("OFF;"), "dameng copy should disable identity insert: {dameng}");
-            assert!(dameng.contains("INSERT INTO ") && dameng.contains(" SELECT "), "dameng copy should carry an INSERT..SELECT: {dameng}");
+            assert!(
+                dameng.contains("INSERT INTO ") && dameng.contains(" SELECT "),
+                "dameng copy should carry an INSERT..SELECT: {dameng}"
+            );
             // Dameng rejects assigning an identity column unless a column list is specified.
-            assert!(dameng.contains("(\"id\", \"name\")") || dameng.contains("(`id`, `name`)") || dameng.contains("(id, name)") || dameng.contains("([id], [name])"), "dameng copy must use an explicit column list: {dameng}");
+            assert!(
+                dameng.contains("(\"id\", \"name\")")
+                    || dameng.contains("(`id`, `name`)")
+                    || dameng.contains("(id, name)")
+                    || dameng.contains("([id], [name])"),
+                "dameng copy must use an explicit column list: {dameng}"
+            );
         }
         assert_eq!(
             build_copy_table_data_sql(CopyTableDataSqlOptions {
@@ -2667,7 +2677,7 @@ mod tests {
                 columns: Some(vec!["user_id".to_string(), "userName".to_string(), "order total".to_string()]),
                 postgres_overriding_system_value: false,
                 sqlserver_identity_insert: false,
-                dameng_identity_insert: false,
+            dameng_identity_insert: false,
                 normalize_new_target_name: true,
                 identifier_quote: None,
             }),
@@ -2742,7 +2752,7 @@ mod tests {
             columns: Some(vec!["user_id".to_string(), "userName".to_string()]),
             postgres_overriding_system_value: false,
             sqlserver_identity_insert: false,
-                dameng_identity_insert: false,
+            dameng_identity_insert: false,
             normalize_new_target_name: true,
             identifier_quote: None,
         });

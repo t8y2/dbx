@@ -24,7 +24,7 @@ const locales = { en, es, it: itLocale, ja, ko, "pt-BR": ptBR, "zh-TW": zhTW };
 
 describe("Nacos global replacement translations", () => {
   it("declares the new source messages", () => {
-    expect(source.size).toBe(48);
+    expect(source.size).toBe(51);
   });
 
   it.each(Object.entries(locales))("%s has localized messages with matching placeholders", (name, locale) => {

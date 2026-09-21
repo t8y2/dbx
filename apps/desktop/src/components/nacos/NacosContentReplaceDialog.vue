@@ -10,6 +10,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import * as api from "@/lib/backend/api";
+import { buildNacosInlineDiff, type NacosInlineDiffRow } from "@/lib/nacos/nacosAdmin";
 import { buildNacosContentReplacePlan, type NacosContentReplacePlan, type NacosContentReplacePlanItem, type NacosContentReplaceReport, type NacosContentRollbackReport } from "@/lib/nacos/nacosContentReplace";
 import { applyWithNacosHistory, rollbackFromNacosHistory, nacosHistoryTarget, nacosHistoryRollbackCandidates, withNacosHistoryLock, type NacosReplaceHistoryEntry } from "@/lib/nacos/nacosReplaceHistory";
 import { deleteNacosReplaceHistory, listNacosReplaceHistory } from "@/lib/nacos/nacosReplaceHistoryStorage";
@@ -40,6 +41,8 @@ const progress = ref<NacosSearchProgress | null>(null);
 const activeOperationId = ref("");
 const diffItem = ref<NacosContentReplacePlanItem | null>(null);
 const diffOpen = ref(false);
+const selectedKeys = ref<Set<string>>(new Set());
+const activeItemKey = ref("");
 const tab = ref("replace");
 const entries = ref<NacosReplaceHistoryEntry[]>([]);
 const activeEntry = ref<NacosReplaceHistoryEntry | null>(null);
@@ -55,7 +58,14 @@ let previewSequence = 0;
 
 const busy = computed(() => previewing.value || applying.value || rollingBack.value || deleting.value);
 const canPreview = computed(() => !!search.value && search.value !== replacement.value && !busy.value && !props.readOnly);
-const canApply = computed(() => !!plan.value?.items.length && !report.value && !busy.value && !props.readOnly);
+const selectedItems = computed(() => plan.value?.items.filter((item) => selectedKeys.value.has(item.key)) ?? []);
+const selectedReplacements = computed(() => selectedItems.value.reduce((total, item) => total + item.replacements, 0));
+const selectedPlan = computed<NacosContentReplacePlan | null>(() => (plan.value ? { ...plan.value, items: selectedItems.value, totalReplacements: selectedReplacements.value } : null));
+const allSelected = computed(() => !!plan.value?.items.length && selectedItems.value.length === plan.value.items.length);
+const someSelected = computed(() => selectedItems.value.length > 0 && !allSelected.value);
+const canApply = computed(() => !!selectedItems.value.length && !report.value && !busy.value && !props.readOnly);
+const activeDiffItem = computed(() => plan.value?.items.find((item) => item.key === activeItemKey.value) ?? plan.value?.items[0] ?? null);
+const inlineDiffRows = computed(() => (activeDiffItem.value ? buildNacosInlineDiff(activeDiffItem.value.beforeContent, activeDiffItem.value.afterContent) : []));
 const resultItemsByKey = computed(() => new Map(report.value?.items.map((item) => [item.key, item]) ?? []));
 const rollbackItemsByKey = computed(() => new Map(rollbackReport.value?.items.map((item) => [item.key, item]) ?? []));
 const canRollback = computed(() => !!activeEntry.value && nacosHistoryRollbackCandidates(activeEntry.value).length > 0 && !busy.value && !props.readOnly);
@@ -87,6 +97,8 @@ onBeforeUnmount(() => {
 watch([search, replacement, scope, group, dataId, () => props.currentNamespace], () => {
   if (previewing.value || applying.value || report.value) return;
   plan.value = null;
+  selectedKeys.value = new Set();
+  activeItemKey.value = "";
   error.value = "";
 });
 
@@ -115,6 +127,8 @@ function clearResults() {
   report.value = null;
   rollbackReport.value = null;
   activeEntry.value = null;
+  selectedKeys.value = new Set();
+  activeItemKey.value = "";
 }
 
 function showError(cause: unknown) {
@@ -154,6 +168,8 @@ function viewHistory(entry: NacosReplaceHistoryEntry) {
   plan.value = entry.plan;
   report.value = entry.report;
   rollbackReport.value = entry.rollback ?? null;
+  selectedKeys.value = new Set();
+  activeItemKey.value = entry.plan.items[0]?.key ?? "";
   error.value = "";
 }
 
@@ -232,6 +248,8 @@ async function preview() {
   plan.value = null;
   report.value = null;
   rollbackReport.value = null;
+  selectedKeys.value = new Set();
+  activeItemKey.value = "";
   progress.value = null;
   try {
     const connectionId = props.connectionId;
@@ -262,7 +280,10 @@ async function preview() {
       return { ...config, namespace: config.namespace || match.namespace, group: config.group || match.group, dataId: config.dataId || match.dataId };
     });
     if (sequence !== previewSequence) return;
-    plan.value = buildNacosContentReplacePlan(configs, search.value, replacement.value);
+    const nextPlan = buildNacosContentReplacePlan(configs, search.value, replacement.value);
+    plan.value = nextPlan;
+    selectedKeys.value = new Set(nextPlan.items.map((item) => item.key));
+    activeItemKey.value = nextPlan.items[0]?.key ?? "";
   } catch (cause) {
     if (sequence === previewSequence) error.value = cause instanceof Error ? cause.message : String(cause);
   } finally {
@@ -282,12 +303,12 @@ async function cancelPreview() {
 }
 
 async function apply() {
-  if (!canApply.value || !plan.value) return;
+  const currentPlan = selectedPlan.value;
+  if (!canApply.value || !currentPlan) return;
   applying.value = true;
   error.value = "";
   try {
     const connectionId = props.connectionId;
-    const currentPlan = plan.value;
     activeEntry.value = await withNacosHistoryLock(connectionId, async () => {
       const target = await currentTarget(connectionId);
       if (target !== previewTarget) throw new Error("nacos-history-target-mismatch");
@@ -296,6 +317,9 @@ async function apply() {
         publishConfig: (request) => api.nacosPublishConfig(connectionId, request),
       });
     });
+    plan.value = activeEntry.value.plan;
+    selectedKeys.value = new Set(plan.value.items.map((item) => item.key));
+    if (!selectedKeys.value.has(activeItemKey.value)) activeItemKey.value = plan.value.items[0]?.key ?? "";
     report.value = activeEntry.value.report;
     if (report.value.replaced) emit("changed");
   } catch (cause) {
@@ -303,6 +327,8 @@ async function apply() {
     // The interrupted batch is already durable; do not allow a second apply
     // using the same stale plan after a journal failure.
     plan.value = null;
+    selectedKeys.value = new Set();
+    activeItemKey.value = "";
     emit("changed");
   } finally {
     applying.value = false;
@@ -343,11 +369,53 @@ function showDiff(item: NacosContentReplacePlanItem) {
   diffItem.value = item;
   diffOpen.value = true;
 }
+
+function toggleAllSelection(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked;
+  selectedKeys.value = checked ? new Set(plan.value?.items.map((item) => item.key) ?? []) : new Set();
+}
+
+function toggleItemSelection(item: NacosContentReplacePlanItem, event: Event) {
+  const next = new Set(selectedKeys.value);
+  if ((event.target as HTMLInputElement).checked) next.add(item.key);
+  else next.delete(item.key);
+  selectedKeys.value = next;
+  activeItemKey.value = item.key;
+}
+
+function inlineRowClass(type: NacosInlineDiffRow["type"]) {
+  return {
+    "bg-red-500/20 text-red-700 dark:text-red-50": type === "delete",
+    "bg-emerald-500/18 text-emerald-700 dark:text-emerald-50": type === "insert",
+    "text-foreground": type === "equal",
+  };
+}
+
+function inlineGutterClass(type: NacosInlineDiffRow["type"]) {
+  return {
+    "text-red-600 dark:text-red-300": type === "delete",
+    "text-emerald-600 dark:text-emerald-300": type === "insert",
+    "text-muted-foreground": type === "equal",
+  };
+}
+
+function inlinePrefix(type: NacosInlineDiffRow["type"]) {
+  if (type === "delete") return "-";
+  if (type === "insert") return "+";
+  return "";
+}
+
+function inlineRowSegmentClass(type: NacosInlineDiffRow["type"], changed: boolean) {
+  if (!changed) return "";
+  if (type === "delete") return "rounded-[2px] bg-red-500/80 px-px text-red-50";
+  if (type === "insert") return "rounded-[2px] bg-emerald-500/75 px-px text-emerald-50";
+  return "";
+}
 </script>
 
 <template>
   <Dialog :open="open" @update:open="closeDialog">
-    <DialogContent class="flex max-h-[88vh] flex-col overflow-hidden sm:max-w-5xl" :show-close-button="!busy" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
+    <DialogContent class="nacos-content-replace-dialog flex max-h-[88vh] flex-col overflow-hidden" :show-close-button="!busy" @escape-key-down="busy && $event.preventDefault()" @pointer-down-outside="busy && $event.preventDefault()">
       <DialogHeader>
         <DialogTitle>{{ t("nacos.contentReplaceTitle") }}</DialogTitle>
         <DialogDescription>{{ t("nacos.contentReplaceDescription") }}</DialogDescription>
@@ -435,21 +503,54 @@ function showDiff(item: NacosContentReplacePlanItem) {
         <section v-if="plan && (tab === 'replace' || selectedHistoryId)" class="space-y-3">
           <div class="flex flex-wrap items-center gap-2">
             <Badge variant="secondary">{{ t("nacos.contentReplaceConfigCount", { count: plan.items.length }) }}</Badge>
-            <Badge variant="outline">{{ t("nacos.contentReplaceOccurrenceCount", { count: plan.totalReplacements }) }}</Badge>
+            <Badge v-if="tab === 'replace' && !report" variant="outline">{{ t("nacos.contentReplaceSelectedCount", { selected: selectedItems.length, total: plan.items.length }) }}</Badge>
+            <Badge variant="outline">{{ t("nacos.contentReplaceOccurrenceCount", { count: tab === "replace" && !report ? selectedReplacements : plan.totalReplacements }) }}</Badge>
           </div>
           <div v-if="!plan.items.length" class="py-8 text-center text-sm text-muted-foreground">{{ t("nacos.contentReplaceNoMatches") }}</div>
-          <div v-else class="divide-y rounded-md border">
-            <div v-for="item in plan.items" :key="item.key" class="flex min-w-0 items-center gap-3 px-3 py-2.5">
-              <div class="min-w-0 flex-1">
-                <div class="break-all font-mono text-sm font-medium">{{ item.dataId }}</div>
-                <div class="break-all text-xs text-muted-foreground">{{ item.namespace || "public" }} / {{ item.group }} · {{ t("nacos.contentReplaceOccurrenceCount", { count: item.replacements }) }}</div>
-                <div v-if="resultItemsByKey.get(item.key)?.message || rollbackItemsByKey.get(item.key)?.message" class="break-words text-xs text-destructive">{{ rollbackItemsByKey.get(item.key)?.message || resultItemsByKey.get(item.key)?.message }}</div>
+          <div v-else class="grid min-h-[360px] overflow-hidden rounded-md border lg:h-[min(48vh,520px)] lg:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
+            <div class="flex min-h-0 flex-col border-b lg:border-b-0 lg:border-r">
+              <label v-if="tab === 'replace' && !report" class="flex shrink-0 items-center gap-2 border-b px-3 py-2.5 text-sm font-medium">
+                <input data-testid="nacos-replace-select-all" type="checkbox" class="h-4 w-4 rounded border-border" :checked="allSelected" :indeterminate="someSelected" :disabled="busy || readOnly" @change="toggleAllSelection" />
+                <span>{{ t("nacos.contentReplaceSelectAll") }}</span>
+                <span class="ml-auto text-xs font-normal text-muted-foreground">{{ selectedItems.length }} / {{ plan.items.length }}</span>
+              </label>
+              <div class="max-h-64 min-h-0 divide-y overflow-y-auto lg:max-h-none lg:flex-1">
+                <div v-for="(item, index) in plan.items" :key="item.key" class="flex min-w-0 items-center gap-2 px-2 py-1.5" :class="{ 'bg-muted/60': activeDiffItem?.key === item.key }">
+                  <input
+                    v-if="tab === 'replace' && !report"
+                    :data-testid="`nacos-replace-select-${index}`"
+                    type="checkbox"
+                    class="h-4 w-4 shrink-0 rounded border-border"
+                    :aria-label="t('nacos.contentReplaceSelectConfig', { dataId: item.dataId })"
+                    :checked="selectedKeys.has(item.key)"
+                    :disabled="busy || readOnly"
+                    @change="toggleItemSelection(item, $event)"
+                  />
+                  <button :data-testid="`nacos-replace-item-${index}`" type="button" class="min-w-0 flex-1 px-1 py-1 text-left" :aria-pressed="activeDiffItem?.key === item.key" @click="activeItemKey = item.key">
+                    <span class="block break-all font-mono text-sm font-medium">{{ item.dataId }}</span>
+                    <span class="block break-all text-xs text-muted-foreground">{{ item.namespace || "public" }} / {{ item.group }} · {{ t("nacos.contentReplaceOccurrenceCount", { count: item.replacements }) }}</span>
+                    <span v-if="resultItemsByKey.get(item.key)?.message || rollbackItemsByKey.get(item.key)?.message" class="block break-words text-xs text-destructive">{{ rollbackItemsByKey.get(item.key)?.message || resultItemsByKey.get(item.key)?.message }}</span>
+                  </button>
+                  <Badge v-if="report" class="max-w-28 shrink-0 whitespace-normal text-center" :variant="resultItemsByKey.get(item.key)?.status === 'replaced' ? 'secondary' : 'destructive'">
+                    {{ historyItemStatus(item) }}
+                  </Badge>
+                  <Button type="button" size="icon" variant="ghost" class="shrink-0" :title="t('nacos.contentReplaceViewDiff')" :aria-label="t('nacos.contentReplaceViewDiff')" @click="showDiff(item)"><Eye class="h-4 w-4" /></Button>
+                </div>
               </div>
-              <Badge v-if="report" class="max-w-28 shrink-0 whitespace-normal text-center" :variant="resultItemsByKey.get(item.key)?.status === 'replaced' ? 'secondary' : 'destructive'">
-                {{ historyItemStatus(item) }}
-              </Badge>
-              <Button type="button" size="icon" variant="ghost" :title="t('nacos.contentReplaceViewDiff')" :aria-label="t('nacos.contentReplaceViewDiff')" @click="showDiff(item)"><Eye class="h-4 w-4" /></Button>
             </div>
+            <section class="flex min-h-[280px] min-w-0 flex-col bg-background lg:min-h-0">
+              <div class="shrink-0 border-b px-4 py-2.5">
+                <div class="text-sm font-medium">{{ t("nacos.contentReplaceViewDiff") }}</div>
+                <div v-if="activeDiffItem" class="break-all text-xs text-muted-foreground">{{ activeDiffItem.namespace || "public" }} / {{ activeDiffItem.group }} / {{ activeDiffItem.dataId }}</div>
+              </div>
+              <div data-testid="nacos-replace-inline-diff" class="min-h-0 flex-1 overflow-auto font-mono text-[13px] leading-6">
+                <div v-for="row in inlineDiffRows" :key="row.id" class="grid min-w-max grid-cols-[48px_22px_minmax(40rem,1fr)]" :class="inlineRowClass(row.type)">
+                  <span class="select-none border-r border-border pr-2 text-right" :class="inlineGutterClass(row.type)">{{ row.lineNumber ?? "" }}</span>
+                  <span class="select-none pl-2" :class="inlineGutterClass(row.type)">{{ inlinePrefix(row.type) }}</span>
+                  <pre class="whitespace-pre px-2"><template v-for="(segment, segmentIndex) in row.segments" :key="segmentIndex"><span :class="inlineRowSegmentClass(row.type, segment.changed)">{{ segment.value }}</span></template></pre>
+                </div>
+              </div>
+            </section>
           </div>
         </section>
 
@@ -469,7 +570,7 @@ function showDiff(item: NacosContentReplacePlanItem) {
         <Button v-if="previewing" type="button" variant="outline" @click="cancelPreview"><Square class="h-3.5 w-3.5" />{{ t("nacos.cancel") }}</Button>
         <Button v-if="tab === 'replace' && plan?.items.length && !report" type="button" data-testid="nacos-replace-apply" :disabled="!canApply" @click="apply">
           <Loader2 v-if="applying" class="h-4 w-4 animate-spin" />
-          {{ t("nacos.contentReplaceApply", { count: plan?.items.length ?? 0 }) }}
+          {{ t("nacos.contentReplaceApply", { count: selectedItems.length }) }}
         </Button>
         <Button v-if="activeEntry && (tab === 'replace' || selectedHistoryId)" type="button" variant="outline" data-testid="nacos-replace-history-rollback" :disabled="!canRollback" @click="confirmOperation('rollback', activeEntry.id)">
           <Loader2 v-if="rollingBack" class="h-4 w-4 animate-spin" />
@@ -493,3 +594,10 @@ function showDiff(item: NacosContentReplacePlanItem) {
     @confirm="confirmedOperation"
   />
 </template>
+
+<style>
+.nacos-content-replace-dialog {
+  width: min(96vw, 1440px) !important;
+  max-width: min(96vw, 1440px) !important;
+}
+</style>

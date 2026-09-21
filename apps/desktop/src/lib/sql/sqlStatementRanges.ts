@@ -893,6 +893,13 @@ const SQLSERVER_NON_BLOCK_END_KEYWORDS = new Set(["CONVERSATION", "DIALOG"]);
 interface SqlServerControlFlowScan {
   /** BEGIN/CASE blocks left open at the end of the scanned fragment. */
   openBlocks: number;
+  /** Offset just after the token that closed the block carried into this
+   *  fragment, when the carried depth reached zero inside it. `null` when the
+   *  fragment was scanned from depth 0 or leaves the carried block open. */
+  closedAt: number | null;
+  /** First top-level word after the closing token (`""` when nothing follows),
+   *  so the caller can tell `END ELSE ...` (same IF) from `END <next statement>`. */
+  wordAfterClose: string;
   /** A top-level `BEGIN` that really opens a block was seen. */
   sawBlockBegin: boolean;
   /** A top-level `ELSE` belonging to the enclosing `IF` (not to a `CASE`) was seen. */
@@ -904,10 +911,18 @@ interface SqlServerControlFlowScan {
  * it leaves open and whether it contains an `IF`-level `ELSE`. Tokens inside
  * parentheses, string literals and comments are ignored, and `CASE ... END`
  * nesting keeps a `CASE`'s own `ELSE` from looking like an `IF` branch.
+ *
+ * `initialOpenBlocks` is the depth the previous fragment of the same statement
+ * left open. Scanning with the carried depth (instead of every fragment
+ * restarting from zero) is what lets a fragment that begins by closing the
+ * previous block — `END ELSE BEGIN SELECT 2`, or `END` followed by the next
+ * statement — report where the block actually ends.
  */
-function scanSqlServerControlFlow(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): SqlServerControlFlowScan {
-  const words = topLevelWordsInRange(sql, from, to, databaseType, parameterOptions);
-  let openBlocks = 0;
+function scanSqlServerControlFlow(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions, initialOpenBlocks = 0): SqlServerControlFlowScan {
+  const { words, ends } = topLevelWordsInRange(sql, from, to, databaseType, parameterOptions);
+  let openBlocks = initialOpenBlocks;
+  let closedAt: number | null = null;
+  let wordAfterClose = "";
   let sawBlockBegin = false;
   let hasControlFlowElse = false;
 
@@ -926,7 +941,14 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
     }
     if (word === "END") {
       if (next !== undefined && SQLSERVER_NON_BLOCK_END_KEYWORDS.has(next)) continue;
-      if (openBlocks > 0) openBlocks -= 1;
+      openBlocks -= 1;
+      // Only the closure of the *carried* block is a statement boundary: a
+      // block opened and closed inside this fragment (`IF ... BEGIN ... END`
+      // in one piece) belongs to the statement that contains it.
+      if (initialOpenBlocks > 0 && closedAt === null && openBlocks === 0) {
+        closedAt = ends[index];
+        wordAfterClose = next ?? "";
+      }
       continue;
     }
     if (word === "ELSE" && openBlocks === 0) {
@@ -934,7 +956,7 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
     }
   }
 
-  return { openBlocks, sawBlockBegin, hasControlFlowElse };
+  return { openBlocks, closedAt, wordAfterClose, sawBlockBegin, hasControlFlowElse };
 }
 
 /**
@@ -961,36 +983,60 @@ function isSqlServerControlFlowBatch(sql: string, statement: RawStatement, datab
  */
 function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[], databaseType: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
   const merged: RawStatement[] = [];
-  let index = 0;
+  const pending = [...statements];
 
-  while (index < statements.length) {
-    const first = statements[index];
+  while (pending.length > 0) {
+    const first = pending.shift()!;
     const firstWord = nextSqlWordToken(sql, first.from, databaseType, parameterOptions)?.word;
     if (firstWord !== "IF" && firstWord !== "WHILE") {
       merged.push(first);
-      index += 1;
       continue;
     }
 
-    let last = index;
+    // Thread the block depth through the fragments instead of summing
+    // independently scanned contributions: `END ELSE BEGIN SELECT 2` closes the
+    // block the previous fragment opened (net 0) and `END` closes it outright
+    // (net -1), so a per-fragment depth restarted at zero would keep the batch
+    // open forever and swallow every following statement.
+    let last = first;
     let openBlocks = scanSqlServerControlFlow(sql, first.from, first.to, databaseType, parameterOptions).openBlocks;
-    while (openBlocks > 0 && last + 1 < statements.length) {
-      last += 1;
-      openBlocks += scanSqlServerControlFlow(sql, statements[last].from, statements[last].to, databaseType, parameterOptions).openBlocks;
+    let closedAt: number | null = null;
+    while (openBlocks > 0 && pending.length > 0) {
+      const fragment = pending.shift()!;
+      const scan = scanSqlServerControlFlow(sql, fragment.from, fragment.to, databaseType, parameterOptions, openBlocks);
+      openBlocks = scan.openBlocks;
+      last = fragment;
+      // `END ELSE ...` continues the same IF, so only a closure that is *not*
+      // followed by ELSE ends the batch — and anything the fragment still holds
+      // after that point starts the next statement.
+      if (scan.closedAt !== null && scan.wordAfterClose !== "ELSE") {
+        closedAt = scan.closedAt;
+        break;
+      }
     }
 
-    if (last === index) {
+    const to = closedAt ?? last.to;
+    if (to > first.from) {
+      merged.push({ hitFrom: first.hitFrom, from: first.from, to, sql: sql.slice(first.from, to) });
+    } else {
       merged.push(first);
-      index += 1;
-      continue;
     }
-
-    const to = statements[last].to;
-    merged.push({ hitFrom: first.hitFrom, from: first.from, to, sql: sql.slice(first.from, to) });
-    index = last + 1;
+    if (closedAt !== null) {
+      const remainderFrom = skipSqlWhitespace(sql, closedAt, last.to);
+      if (remainderFrom < last.to) {
+        pending.unshift({ hitFrom: closedAt, from: remainderFrom, to: last.to, sql: sql.slice(remainderFrom, last.to) });
+      }
+    }
   }
 
   return merged;
+}
+
+/** First non-whitespace offset in `sql[from, to)`, clamped to `to`. */
+function skipSqlWhitespace(sql: string, from: number, to: number): number {
+  let index = from;
+  while (index < to && isSqlWhitespace(sql[index])) index += 1;
+  return index;
 }
 
 function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): Array<{ hitFrom: number; from: number; keyword: string }> {
@@ -1233,13 +1279,18 @@ function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean
 }
 
 function topLevelWordsBefore(sql: string, from: number, to: number, limit: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): string[] {
-  const words = topLevelWordsInRange(sql, from, to, databaseType, parameterOptions);
-  return words.length > limit ? words.slice(words.length - limit) : words;
+  return topLevelWordsInRange(sql, from, to, databaseType, parameterOptions, limit).words;
 }
 
-/** Top-level (paren-depth 0) keyword sequence of `sql[from, to)`, in order. */
-function topLevelWordsInRange(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): string[] {
+/** Top-level (paren-depth 0) keywords of `sql[from, to)`, in order, each paired
+ *  with the offset just after it.
+ *
+ * `tailLimit` keeps only the last N words (callers that only look at the words
+ * right before a position, e.g. `MERGE ... THEN`), so scanning a long fragment
+ * no longer allocates the whole word list. */
+function topLevelWordsInRange(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions, tailLimit?: number): { words: string[]; ends: number[] } {
   const words: string[] = [];
+  const ends: number[] = [];
   const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let dollarTag = "";
@@ -1383,7 +1434,12 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
     if (parenDepth === 0) {
       const match = /^[A-Za-z_][\w$]*/.exec(sql.slice(i));
       if (match) {
+        if (tailLimit !== undefined && words.length >= tailLimit) {
+          words.shift();
+          ends.shift();
+        }
         words.push(match[0].toUpperCase());
+        ends.push(i + match[0].length);
         i += match[0].length;
         continue;
       }
@@ -1391,7 +1447,7 @@ function topLevelWordsInRange(sql: string, from: number, to: number, databaseTyp
     i += 1;
   }
 
-  return words;
+  return { words, ends };
 }
 
 function nextNonWhitespaceChar(sql: string, pos: number): string | null {

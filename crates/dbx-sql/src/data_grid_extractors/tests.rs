@@ -934,6 +934,7 @@ fn build_data_grid_copy_update_statements_returns_empty_for_mongodb() {
         columns: vec!["id".to_string()],
         source_columns: Some(vec![Some("id".to_string())]),
         rows: vec![vec![json!(1)]],
+        include_database_name: false,
     };
     assert!(build_data_grid_copy_update_statements(options).is_empty());
 }

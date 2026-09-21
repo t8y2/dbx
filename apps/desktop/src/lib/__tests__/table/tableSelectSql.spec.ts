@@ -44,6 +44,24 @@ describe("qualifiedTableName — optional database qualification", () => {
   });
 });
 
+describe("qualifiedTableName — SQL Server three-part names", () => {
+  it("prefixes the database ahead of the schema once enabled", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema: "dbo", tableName: "gen_table" })).toBe("[dbo].[gen_table]");
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema: "dbo", tableName: "gen_table", includeDatabaseName: true })).toBe("[dbx].[dbo].[gen_table]");
+  });
+
+  it("keeps the schema-only form when the database is unknown", () => {
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema: "dbo", tableName: "gen_table", includeDatabaseName: true, quoteIdentifiers: false })).toBe("dbx.dbo.gen_table");
+    expect(qualifiedTableName({ databaseType: "sqlserver", schema: "dbo", tableName: "gen_table", includeDatabaseName: true })).toBe("[dbo].[gen_table]");
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", tableName: "gen_table", includeDatabaseName: true })).toBe("[gen_table]");
+  });
+
+  it("never stacks the local database on a linked-server schema", () => {
+    const schema = encodeSqlServerLinkedSchema({ server: "ERP", catalog: "Finance", schema: "dbo" });
+    expect(qualifiedTableName({ databaseType: "sqlserver", database: "dbx", schema, tableName: "orders", includeDatabaseName: true })).toBe("[ERP].[Finance].[dbo].[orders]");
+  });
+});
+
 describe("qualifyTableReferencesInSql", () => {
   it("qualifies FROM and JOIN sources while preserving aliases", () => {
     expect(
@@ -111,6 +129,37 @@ describe("qualifyTableReferencesInSql", () => {
 
   it("uses GoldenDB's MySQL-compatible identifier quoting", () => {
     expect(qualifyTableReferencesInSql("SELECT * FROM users", { databaseType: "goldendb", database: "aaa", includeDatabaseName: true })).toBe("SELECT * FROM `aaa`.`users`");
+  });
+});
+
+describe("qualifyTableReferencesInSql — SQL Server three-part names (#9262)", () => {
+  const options = { databaseType: "sqlserver" as const, database: "dbx", includeDatabaseName: true };
+
+  it("prefixes the database ahead of the schema already named", () => {
+    expect(qualifyTableReferencesInSql("SELECT TOP (100) * FROM [dbo].[gen_table]", options)).toBe("SELECT TOP (100) * FROM [dbx].[dbo].[gen_table]");
+  });
+
+  it("qualifies every FROM/JOIN source while keeping aliases", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbo].[orders] AS o JOIN [sales].[items] AS i ON i.order_id = o.id", options)).toBe("SELECT * FROM [dbx].[dbo].[orders] AS o JOIN [dbx].[sales].[items] AS i ON i.order_id = o.id");
+  });
+
+  it("handles unquoted and spaced qualifiers", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM dbo.gen_table", options)).toBe("SELECT * FROM [dbx].dbo.gen_table");
+  });
+
+  it("leaves already database-qualified and three-part names alone", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM [other].[dbo].[gen_table]", options)).toBe("SELECT * FROM [other].[dbo].[gen_table]");
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbx_test].[dbo].[gen_table]", options)).toBe("SELECT * FROM [dbx_test].[dbo].[gen_table]");
+  });
+
+  it("leaves schema-less names alone because `db.table` is not a SQL Server reference", () => {
+    expect(qualifyTableReferencesInSql("SELECT * FROM [gen_table]", options)).toBe("SELECT * FROM [gen_table]");
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbx]..[gen_table]", options)).toBe("SELECT * FROM [dbx]..[gen_table]");
+  });
+
+  it("skips CTEs and stays inert when the setting is off", () => {
+    expect(qualifyTableReferencesInSql("WITH cte AS (SELECT * FROM [dbo].[gen_table]) SELECT * FROM cte", options)).toBe("WITH cte AS (SELECT * FROM [dbx].[dbo].[gen_table]) SELECT * FROM cte");
+    expect(qualifyTableReferencesInSql("SELECT * FROM [dbo].[gen_table]", { ...options, includeDatabaseName: false })).toBe("SELECT * FROM [dbo].[gen_table]");
   });
 });
 

@@ -7793,7 +7793,7 @@ export default {
     prefillNewQueryWithSelect: "Prefill new query with SELECT *",
     prefillNewQueryWithSelectDescription: "When creating a new query, prefill the editor with SELECT * FROM <table> based on the active table tab or the table selected in the sidebar.",
     generateSqlIncludeDatabaseName: "Include database name in generated SQL",
-    generateSqlIncludeDatabaseNameDescription: "When supported by the database, generated table SQL uses database.table instead of only the table name.",
+    generateSqlIncludeDatabaseNameDescription: "When supported by the database, generated table SQL uses the qualified name (database.schema.table on SQL Server) instead of only the table name.",
     generateSqlQuoteIdentifiers: "Quote identifiers in generated SQL",
     generateSqlQuoteIdentifiersDescription: "When disabled, new query table references omit dialect-specific quotes. Reserved words, special characters, and case-sensitive names may require quotes to run.",
     formatSqlOnSqlFileSave: "Format SQL when saving SQL files",

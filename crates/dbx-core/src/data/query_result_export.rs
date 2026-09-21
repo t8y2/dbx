@@ -2346,7 +2346,7 @@ mod tests {
         let output = rendered_sql_insert_output(SqlInsertMode::Batch);
 
         assert_eq!(output.matches("INSERT INTO").count(), 1);
-        assert!(output.contains("VALUES (1, 'Ada'), (2, 'Lin');"));
+        assert!(output.contains("VALUES\n(1, 'Ada'),\n(2, 'Lin');"));
     }
 
     #[test]

@@ -7600,6 +7600,8 @@ mod tests {
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
+                custom_ai_skill_root: None,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             })
             .await
@@ -7621,9 +7623,51 @@ mod tests {
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
+                custom_ai_skill_root: None,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_settings_roundtrip_custom_ai_skill_root() {
+        let path = temp_db_path("desktop-settings-custom-ai-skill-root");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_root_enabled: true,
+                custom_ai_skill_root: Some("/tmp/dbx-skills".to_string()),
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        let settings = storage.load_desktop_settings().await.unwrap();
+        assert!(settings.custom_ai_skill_root_enabled);
+        assert_eq!(settings.custom_ai_skill_root.as_deref(), Some("/tmp/dbx-skills"));
+
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_root_enabled").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(raw.get("custom_ai_skill_root").and_then(|value| value.as_str()), Some("/tmp/dbx-skills"));
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_root_enabled: false,
+                custom_ai_skill_root: Some("   ".to_string()),
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        let settings = storage.load_desktop_settings().await.unwrap();
+        assert!(!settings.custom_ai_skill_root_enabled);
+        assert_eq!(settings.custom_ai_skill_root, None);
+
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_root_enabled").and_then(|value| value.as_bool()), Some(false));
+        assert_eq!(raw.get("custom_ai_skill_root"), None);
     }
 
     #[tokio::test]

@@ -1177,7 +1177,13 @@ const tableStoresCaseSensitiveIdentifiers = computed(() => {
   if (isCreateMode.value) return false;
   const databaseInfo = connection.value?.database_info;
   const requiresQuotesForIdentity = (name: string | null | undefined) => !!name && tableStructureIdentifierComparisonKey(name, databaseType.value, databaseInfo).startsWith("quoted:");
-  return [props.tableName, ...columns.value.map((column) => column.original?.name), ...indexes.value.map((index) => index.original?.name), ...foreignKeys.value.map((foreignKey) => foreignKey.original?.name), ...triggers.value.map((trigger) => trigger.original?.name)].some(requiresQuotesForIdentity);
+  // 外键的引用侧（被引用 schema/表/列）与约束名一样进入生成的 REFERENCES
+  // 子句，同样需要纳入大小写敏感扫描，否则会被折叠改写身份。
+  const foreignKeyIdentifiers = foreignKeys.value.flatMap((foreignKey) => {
+    const original = foreignKey.original;
+    return original ? [original.name, original.ref_schema, original.ref_table, original.ref_column] : [];
+  });
+  return [props.tableName, ...columns.value.map((column) => column.original?.name), ...indexes.value.map((index) => index.original?.name), ...foreignKeyIdentifiers, ...triggers.value.map((trigger) => trigger.original?.name)].some(requiresQuotesForIdentity);
 });
 const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
 const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));

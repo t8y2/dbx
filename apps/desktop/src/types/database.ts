@@ -1771,6 +1771,8 @@ export interface QueryTab {
   nacosTargetRequestId?: number;
   nacosConfigEditorViewport?: NacosConfigEditorViewport;
   structureTableName?: string;
+  /** Navigation type of the opened structure object; views matter for "view data" routing. */
+  structureTableType?: "table" | "view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;

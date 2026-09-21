@@ -972,7 +972,7 @@ function onHandleStructureViewData() {
     name: tableName,
     database: meta?.database || tab.database,
     schema: meta?.schema || tab.schema,
-    type: "table",
+    type: tab.structureTableType === "view" ? "view" : "table",
   });
 }
 

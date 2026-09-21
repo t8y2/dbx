@@ -2744,10 +2744,14 @@ function cancelShortcutEdit() {
 function resetShortcut(actionId: ShortcutActionId) {
   const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
   if (!definition) return;
-  editShortcuts.value = {
+  // The static definition default is the macOS literal for a few actions
+  // (selection-occurrence), so the reset must go through the same persisted
+  // normalization as capture — otherwise Windows drafts a key that can never
+  // save and silently flips to the platform default on apply.
+  editShortcuts.value = normalizeShortcutSettings({
     ...editShortcuts.value,
     [actionId]: definition.defaultShortcut,
-  };
+  });
 }
 
 function clearShortcut(actionId: ShortcutActionId) {

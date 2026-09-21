@@ -182,6 +182,8 @@ struct DatabaseExportObjectCounts {
     extensions: usize,
     procedures: usize,
     functions: usize,
+    triggers: usize,
+    events: usize,
 }
 
 fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
@@ -191,7 +193,21 @@ fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
 fn exports_database_routines(request: &DatabaseExportRequest) -> bool {
     // Routine export is schema-wide, so an explicit table selection must not
     // add unrelated procedures or functions to either execution or progress.
+    exports_schema_wide_objects(request)
+}
+
+/// Schema-wide objects (routines, triggers, events) are exported as a whole. An explicit
+/// table selection must not add unrelated objects to either execution or progress.
+fn exports_schema_wide_objects(request: &DatabaseExportRequest) -> bool {
     request.include_objects && request.selected_tables.is_empty()
+}
+
+/// MySQL lists triggers and events as schema-wide objects (see
+/// `crates/dbx-drivers/src/db/mysql.rs`), which is what the export writes out. Other
+/// engines either report triggers per table (PostgreSQL) or not at all, so their export
+/// stays unchanged.
+fn exports_mysql_trigger_objects(db_type: DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql)
 }
 
 fn database_export_total_objects(request: &DatabaseExportRequest, counts: &DatabaseExportObjectCounts) -> usize {
@@ -207,6 +223,9 @@ fn database_export_total_objects(request: &DatabaseExportRequest, counts: &Datab
     }
     if exports_database_routines(request) {
         total += counts.procedures + counts.functions;
+    }
+    if exports_schema_wide_objects(request) {
+        total += counts.triggers + counts.events;
     }
     total
 }
@@ -3067,8 +3086,10 @@ async fn export_database_sql_core_inner(
     // 8. Discover optional schema-wide objects before calculating workload.
     let mut procedures: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut functions: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
 
-    if exports_database_routines(request) {
+    if exports_schema_wide_objects(request) {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -3092,6 +3113,10 @@ async fn export_database_sql_core_inner(
                         procedures.push(obj.clone());
                     } else if ot.contains("FUNCTION") {
                         functions.push(obj.clone());
+                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("TRIGGER") {
+                        triggers.push(obj.clone());
+                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("EVENT") {
+                        events.push(obj.clone());
                     }
                 }
             }
@@ -3111,6 +3136,8 @@ async fn export_database_sql_core_inner(
             extensions: postgres_extensions.len(),
             procedures: procedures.len(),
             functions: functions.len(),
+            triggers: triggers.len(),
+            events: events.len(),
         },
     );
 
@@ -3792,6 +3819,71 @@ async fn export_database_sql_core_inner(
 
             object_index += 1;
         }
+
+        // Export triggers and events after routines: a trigger body may call a routine,
+        // and an event body may call one too.
+        for (trigger, object_type) in triggers
+            .iter()
+            .map(|t| (t, ObjectSourceKind::Trigger))
+            .chain(events.iter().map(|e| (e, ObjectSourceKind::Event)))
+        {
+            if is_export_cancelled(&request.export_id).await {
+                return Err("Export cancelled".to_string());
+            }
+
+            let object_name = &trigger.name;
+
+            on_progress(ExportProgress {
+                export_id: request.export_id.clone(),
+                current_object: object_name.clone(),
+                object_index,
+                total_objects,
+                rows_exported: total_rows_exported,
+                total_rows: None,
+                status: ExportStatus::Running,
+                error: None,
+                preparing: false,
+                error_count: 0,
+                error_summary: None,
+            });
+
+            let kind_label = if object_type == ObjectSourceKind::Trigger { "trigger" } else { "event" };
+            match crate::schema::get_object_source_core(
+                state,
+                &request.connection_id,
+                &request.database,
+                &request.schema,
+                object_name,
+                object_type.clone(),
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(obj_source) => {
+                    let source = build_database_export_object_source_sql(
+                        db_type,
+                        &object_type,
+                        object_name,
+                        &obj_source.source,
+                        request.drop_table_if_exists,
+                    );
+                    if !source.is_empty() {
+                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                    }
+                }
+                Err(e) => {
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting {kind_label} {object_name}: {e}"),
+                        &mut lenient_errors,
+                    )?;
+                }
+            }
+
+            object_index += 1;
+        }
     }
 
     // PostgreSQL trigger definitions reference their trigger functions. The
@@ -3863,6 +3955,8 @@ fn build_database_export_object_source_sql(
         ObjectSourceKind::View => "VIEW",
         ObjectSourceKind::Procedure => "PROCEDURE",
         ObjectSourceKind::Function => "FUNCTION",
+        ObjectSourceKind::Trigger => "TRIGGER",
+        ObjectSourceKind::Event => "EVENT",
         _ => return source,
     };
     let object_name = quote_identifier(object_name, &DatabaseType::Mysql);
@@ -3879,12 +3973,12 @@ mod tests {
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        build_export_insert_statements_excluding, build_export_sql_insert, create_database_export_writer,
-        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
-        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_extension_ddl,
-        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
+        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
+        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
+        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
+        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
@@ -4144,13 +4238,15 @@ mod tests {
             extensions: 1,
             procedures: 1,
             functions: 1,
+            triggers: 2,
+            events: 1,
         };
 
         let cases = [
             ("structure", export_request(true, false, false, Vec::new()), 5),
             ("data", export_request(false, true, false, Vec::new()), 2),
-            ("objects", export_request(false, false, true, Vec::new()), 3),
-            ("all", export_request(true, true, true, Vec::new()), 8),
+            ("objects", export_request(false, false, true, Vec::new()), 6),
+            ("all", export_request(true, true, true, Vec::new()), 11),
             ("nothing", export_request(false, false, false, Vec::new()), 0),
         ];
 
@@ -4182,10 +4278,57 @@ mod tests {
             extensions: 1,
             procedures: 4,
             functions: 5,
+            triggers: 2,
+            events: 3,
         };
         let request = export_request(true, true, true, vec!["users".to_string(), "active_users".to_string()]);
 
         assert_eq!(database_export_total_objects(&request, &counts), 4);
+    }
+
+    #[test]
+    fn mysql_database_export_drops_triggers_and_events_before_create() {
+        let trigger = "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW INSERT INTO audit_log(msg) VALUES ('x')";
+        let event =
+            "CREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0";
+
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::Trigger,
+                "trg_orders_ai",
+                trigger,
+                true
+            ),
+            format!(
+                "DROP TRIGGER IF EXISTS `trg_orders_ai`;\n{}",
+                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, trigger)
+            )
+        );
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::Event,
+                "ev_purge",
+                event,
+                true
+            ),
+            format!(
+                "DROP EVENT IF EXISTS `ev_purge`;\n{}",
+                build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Event, event)
+            )
+        );
+        // Without `dropTableIfExists` the source is written as-is.
+        assert_eq!(
+            build_database_export_object_source_sql(
+                DatabaseType::Mysql,
+                &ObjectSourceKind::Trigger,
+                "trg_orders_ai",
+                trigger,
+                false
+            ),
+            build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Trigger, trigger)
+        );
     }
 
     #[test]

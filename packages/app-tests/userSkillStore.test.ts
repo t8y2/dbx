@@ -41,7 +41,6 @@ test("refresh groups custom root first and tracks statuses", async () => {
   );
   assert.equal(store.totalCount, 3);
   assert.equal(store.metaFor("c-1")?.name, "Team Rules");
-  assert.equal(store.sourceOf("d-1"), "default");
   assert.equal(store.defaultRootStatus, "ok");
   assert.equal(store.customRootStatus, "ok");
   assert.equal(apiMock.listUserSkills.mock.calls[0][0], rootSettings);

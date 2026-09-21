@@ -56,12 +56,6 @@ export const useUserSkillStore = defineStore("userSkillStore", () => {
     return defaultRootSkills.value.find((skill) => skill.id === id) ?? customRootSkills.value.find((skill) => skill.id === id);
   }
 
-  function sourceOf(id: string): "custom" | "default" | undefined {
-    if (customRootSkills.value.some((skill) => skill.id === id)) return "custom";
-    if (defaultRootSkills.value.some((skill) => skill.id === id)) return "default";
-    return undefined;
-  }
-
   return {
     defaultRootSkills,
     customRootSkills,
@@ -74,6 +68,5 @@ export const useUserSkillStore = defineStore("userSkillStore", () => {
     totalCount,
     refresh,
     metaFor,
-    sourceOf,
   };
 });

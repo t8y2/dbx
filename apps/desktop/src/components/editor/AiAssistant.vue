@@ -64,7 +64,8 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useUserSkillStore } from "@/stores/userSkillStore";
-import type { ReadUserSkill, ReadUserSkillFailure, UserSkillFailureReason, UserSkillMeta, UserSkillRootSettings } from "@/types/userSkills";
+import { buildSelectedSkillChips, removeSkillIds } from "@/lib/ai/userSkillSelection";
+import type { ReadUserSkill, ReadUserSkillFailure, UserSkillFailureReason, UserSkillRootSettings } from "@/types/userSkills";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
@@ -508,7 +509,10 @@ const userSkillStore = useUserSkillStore();
 const selectedSkillIds = ref<string[]>([]);
 const showSkillSelector = ref(false);
 const skillFailures = ref<ReadUserSkillFailure[]>([]);
-const selectedSkillMetas = computed(() => selectedSkillIds.value.map((id) => userSkillStore.metaFor(id)).filter((meta): meta is UserSkillMeta => Boolean(meta)));
+// Chips derive from the selection truth, not from the catalog: a skill that
+// vanished from discovery must keep a removable chip (prd.md:37) instead of
+// silently becoming an id the user can no longer drop.
+const selectedSkillChips = computed(() => buildSelectedSkillChips(selectedSkillIds.value, (id) => userSkillStore.metaFor(id)));
 // Selector retry-on-open mirrors the template selector above.
 watch(showSkillSelector, (open) => {
   if (open) void userSkillStore.refresh(skillRootSettings());
@@ -533,7 +537,16 @@ function toggleSkillSelected(id: string) {
 }
 
 function removeSelectedSkill(id: string) {
-  selectedSkillIds.value = selectedSkillIds.value.filter((skillId) => skillId !== id);
+  selectedSkillIds.value = removeSkillIds(selectedSkillIds.value, [id]);
+  skillFailures.value = [];
+}
+
+/** Banner Remove: drops every failed skill from the selection, so the next send is not blocked by a stale id. */
+function removeFailedSkills() {
+  selectedSkillIds.value = removeSkillIds(
+    selectedSkillIds.value,
+    skillFailures.value.map((failure) => failure.id),
+  );
   skillFailures.value = [];
 }
 
@@ -5575,18 +5588,20 @@ async function openExternalUrl(url: string) {
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
           </div>
-          <div v-if="selectedSkillMetas.length" class="mb-1.5 flex flex-wrap gap-1">
+          <div v-if="selectedSkillChips.length" class="mb-1.5 flex flex-wrap gap-1">
             <button
-              v-for="skill in selectedSkillMetas"
-              :key="skill.id"
+              v-for="chip in selectedSkillChips"
+              :key="chip.id"
               type="button"
-              class="group inline-flex max-w-full items-center gap-1 rounded border border-border/80 bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
-              :title="skill.description"
-              @click="removeSelectedSkill(skill.id)"
+              class="group inline-flex max-w-full items-center gap-1 rounded border bg-muted/60 px-1.5 py-0.5 text-[11px] text-foreground/90 hover:bg-muted"
+              :class="chip.unavailable ? 'border-destructive/50 text-destructive' : 'border-border/80'"
+              :title="chip.description || chip.name"
+              @click="removeSelectedSkill(chip.id)"
             >
-              <Layers class="h-3 w-3 shrink-0 text-primary" />
-              <span class="truncate">{{ skill.name }}</span>
-              <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(userSkillStore.sourceOf(skill.id) === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
+              <AlertTriangle v-if="chip.unavailable" class="h-3 w-3 shrink-0" />
+              <Layers v-else class="h-3 w-3 shrink-0 text-primary" />
+              <span class="truncate">{{ chip.name }}</span>
+              <span class="shrink-0 text-[9px] text-muted-foreground">{{ t(chip.source === "custom" ? "ai.skillsGroupCustom" : "ai.skillsGroupDefault") }}</span>
               <X class="h-3 w-3 shrink-0 text-muted-foreground group-hover:text-foreground" />
             </button>
           </div>
@@ -5638,7 +5653,7 @@ async function openExternalUrl(url: string) {
             <button v-if="skillFailures.some((failure) => failure.reason === 'root_unavailable')" type="button" class="shrink-0 rounded px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground" @click="openSkillRootSettings">
               {{ t("ai.skillsOpenSettings") }}
             </button>
-            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive" :aria-label="t('common.remove')" @click="skillFailures = []">
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-destructive" :aria-label="t('common.remove')" @click="removeFailedSkills()">
               <X class="h-3 w-3" />
             </button>
           </div>

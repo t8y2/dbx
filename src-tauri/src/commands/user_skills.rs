@@ -7,6 +7,7 @@
 //! canonical relative skill directory name, so ids survive Refresh (prd.md:34).
 //! Absolute paths never leave this module (prd.md:33).
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,9 @@ const ROOT_STATUS_OK: &str = "ok";
 const ROOT_STATUS_MISSING: &str = "missing";
 const ROOT_STATUS_INVALID: &str = "invalid";
 
+/// Bounded failure vocabulary. Underlying I/O detail (which can contain
+/// absolute paths or OS-specific text) is deliberately discarded rather than
+/// forwarded, so nothing path-shaped reaches the frontend (prd.md:33).
 const REASON_NOT_FOUND: &str = "not_found";
 const REASON_ROOT_UNAVAILABLE: &str = "root_unavailable";
 const REASON_OVERSIZED: &str = "oversized";
@@ -92,11 +96,9 @@ pub async fn list_user_skills(
     custom_root_enabled: bool,
     custom_root: Option<String>,
 ) -> Result<UserSkillsListResult, String> {
-    Ok(tauri::async_runtime::spawn_blocking(move || {
-        list_user_skills_blocking(custom_root_enabled, custom_root.as_deref())
-    })
-    .await
-    .map_err(|error| error.to_string())?)
+    tauri::async_runtime::spawn_blocking(move || list_user_skills_blocking(custom_root_enabled, custom_root.as_deref()))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Reads the currently selected skills by id. Every id is resolved only
@@ -109,11 +111,11 @@ pub async fn read_user_skills(
     custom_root_enabled: bool,
     custom_root: Option<String>,
 ) -> Result<UserSkillsReadResult, String> {
-    Ok(tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         read_user_skills_blocking(&ids, custom_root_enabled, custom_root.as_deref())
     })
     .await
-    .map_err(|error| error.to_string())?)
+    .map_err(|error| error.to_string())
 }
 
 fn list_user_skills_blocking(custom_root_enabled: bool, custom_root: Option<&str>) -> UserSkillsListResult {
@@ -137,9 +139,24 @@ fn read_user_skills_blocking(
     let default_root =
         default_skills_root().and_then(|path| std::fs::canonicalize(&path).ok()).filter(|path| path.is_dir());
     let custom_root = if custom_root_enabled { enabled_custom_root(custom_root) } else { None };
+    read_user_skills_from(ids, default_root.as_deref(), custom_root.as_deref())
+}
+
+/// Root resolution is injected so tests can exercise both roots without
+/// depending on the developer home directory.
+fn read_user_skills_from(
+    ids: &[String],
+    default_root: Option<&Path>,
+    custom_root: Option<&Path>,
+) -> UserSkillsReadResult {
     let mut skills = Vec::new();
     let mut failures = Vec::new();
+    let mut seen_ids: HashSet<&str> = HashSet::new();
     for id in ids {
+        // A repeated id must not inject the same skill text twice.
+        if !seen_ids.insert(id.as_str()) {
+            continue;
+        }
         let prefix = match id.split_once('-') {
             Some((prefix, _)) if prefix == DEFAULT_ROOT_PREFIX || prefix == CUSTOM_ROOT_PREFIX => prefix,
             _ => {
@@ -148,8 +165,8 @@ fn read_user_skills_blocking(
             }
         };
         let root = match prefix {
-            DEFAULT_ROOT_PREFIX => default_root.as_deref(),
-            _ => custom_root.as_deref(),
+            DEFAULT_ROOT_PREFIX => default_root,
+            _ => custom_root,
         };
         let Some(root) = root else {
             failures.push(ReadUserSkillFailure { id: id.clone(), reason: REASON_ROOT_UNAVAILABLE.to_string() });
@@ -206,7 +223,15 @@ fn scan_root(canonical_root: &Path, prefix: &str) -> Vec<UserSkillMeta> {
         if !canonical_dir.starts_with(canonical_root) || !canonical_dir.is_dir() {
             continue;
         }
-        let Some((name, description)) = discover_skill_metadata(&canonical_dir.join(SKILL_FILE_NAME)) else { continue };
+        let skill_file = canonical_dir.join(SKILL_FILE_NAME);
+        let Ok(canonical_skill_file) = skill_file.canonicalize() else { continue };
+        // A skill directory may be linked within the allowed root, but its
+        // entry file must obey the same containment rule. Otherwise a normal
+        // directory could hide a SKILL.md symlink to an arbitrary local file.
+        if !canonical_skill_file.starts_with(canonical_root) {
+            continue;
+        }
+        let Some((name, description)) = discover_skill_metadata(&canonical_skill_file) else { continue };
         skills.push(UserSkillMeta { id: skill_id(prefix, &dir_name), name, description });
     }
     skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
@@ -225,7 +250,22 @@ fn discover_skill_metadata(path: &Path) -> Option<(String, String)> {
     let file = std::fs::File::open(path).ok()?;
     let mut bytes = Vec::new();
     file.take(FRONTMATTER_SCAN_BYTES as u64).read_to_end(&mut bytes).ok()?;
-    parse_frontmatter(&String::from_utf8_lossy(&bytes))
+    parse_frontmatter(decode_prefix(&bytes, stat.len())?)
+}
+
+/// Decodes the bounded listing prefix strictly, so an unreadable file is not
+/// offered as a choice (it would always fail at send time). A multi-byte
+/// character cut by the prefix read is not an encoding error: when the file
+/// continues past the prefix, the trailing partial character is trimmed. The
+/// bytes beyond the prefix stay unvalidated here and are checked at send time.
+fn decode_prefix(bytes: &[u8], file_len: u64) -> Option<&str> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Some(text),
+        Err(error) if error.error_len().is_none() && file_len > bytes.len() as u64 => {
+            std::str::from_utf8(&bytes[..error.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
 }
 
 /// Reads and fully validates one selected skill file. The metadata size check
@@ -242,7 +282,15 @@ fn read_skill_from_root(canonical_root: &Path, prefix: &str, id: &str) -> Result
         if !canonical_dir.starts_with(canonical_root) || !canonical_dir.is_dir() {
             return Err(REASON_NOT_FOUND.to_string());
         }
-        return read_skill_file(&canonical_dir.join(SKILL_FILE_NAME), id);
+        let skill_file = canonical_dir.join(SKILL_FILE_NAME);
+        let canonical_skill_file = skill_file.canonicalize().map_err(|_| REASON_NOT_FOUND.to_string())?;
+        // Re-check the entry file on every send, not just its parent directory:
+        // another process may have swapped SKILL.md for an escaping symlink
+        // after it was discovered.
+        if !canonical_skill_file.starts_with(canonical_root) {
+            return Err(REASON_NOT_FOUND.to_string());
+        }
+        return read_skill_file(&canonical_skill_file, id);
     }
     Err(REASON_NOT_FOUND.to_string())
 }
@@ -297,7 +345,7 @@ fn parse_frontmatter(text: &str) -> Option<(String, String)> {
             break;
         }
         block.push_str(line);
-        block.push_str("\n");
+        block.push('\n');
         if block.len() > FRONTMATTER_SCAN_BYTES {
             return None;
         }
@@ -447,19 +495,70 @@ mod tests {
 
     #[test]
     fn read_preserves_request_order_and_collects_failures() {
+        // Both roots are injected: a `d-` id resolved through the real home
+        // directory would make this test depend on the machine it runs on.
         let root = temp_skills_root("order");
         write_skill(&root, "keep", VALID_BODY);
         std::fs::write(root.join("plain.txt"), "x").unwrap();
-        let result = read_user_skills_blocking(
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let result = read_user_skills_from(
             &["d-bogus".to_string(), skill_id("d", "keep"), skill_id("d", "never-existed")],
-            false,
+            Some(&canonical),
             None,
         );
         assert_eq!(result.skills.len(), 1);
         assert_eq!(result.skills[0].id, skill_id("d", "keep"));
         assert_eq!(result.failures.len(), 2);
         assert_eq!(result.failures[0].id, "d-bogus");
+        assert_eq!(result.failures[0].reason, "not_found");
         assert_eq!(result.failures[1].reason, "not_found");
+    }
+
+    #[test]
+    fn read_skips_duplicate_ids() {
+        let root = temp_skills_root("dedupe");
+        write_skill(&root, "once", VALID_BODY);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let id = skill_id("d", "once");
+        let result = read_user_skills_from(&[id.clone(), id.clone(), id], Some(&canonical), None);
+        assert_eq!(result.skills.len(), 1);
+        assert!(result.failures.is_empty());
+        // Deduplication must not swallow a failure: a repeated bad id is
+        // still reported exactly once.
+        let duplicated_bad = ["d-bogus".to_string(), "d-bogus".to_string()];
+        let failed = read_user_skills_from(&duplicated_bad, Some(&canonical), None);
+        assert!(failed.skills.is_empty());
+        assert_eq!(failed.failures.len(), 1);
+        assert_eq!(failed.failures[0].id, "d-bogus");
+    }
+
+    #[test]
+    fn listing_omits_a_file_that_is_not_valid_utf8() {
+        let root = temp_skills_root("invalid-utf8");
+        let dir = root.join("broken");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = b"---\nname: br".to_vec();
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b"oken\ndescription: desc\n---\n\nBody.\n");
+        std::fs::write(dir.join(SKILL_FILE_NAME), &bytes).unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert!(scan_root(&canonical, "d").is_empty());
+        assert_eq!(read_skill_from_root(&canonical, "d", &skill_id("d", "broken")).unwrap_err(), "not_utf8");
+    }
+
+    #[test]
+    fn listing_tolerates_a_multibyte_character_cut_by_the_prefix_read() {
+        let root = temp_skills_root("prefix-cut");
+        let frontmatter = "---\nname: cut\ndescription: boundary\n---\n";
+        let mut body = String::from(frontmatter);
+        body.push_str(&"a".repeat(FRONTMATTER_SCAN_BYTES - frontmatter.len() - 1));
+        body.push('\u{e9}');
+        body.push_str(&"b".repeat(64));
+        write_skill(&root, "cut", &body);
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let skills = scan_root(&canonical, "d");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "cut");
     }
 
     #[cfg(unix)]
@@ -477,5 +576,24 @@ mod tests {
         let ids: Vec<String> = skills.iter().map(|skill| skill.id.clone()).collect();
         assert!(ids.contains(&skill_id("d", "inside")));
         assert!(!ids.contains(&skill_id("d", "escape")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_file_symlink_cannot_escape_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_skills_root("file-link");
+        let escape_dir = write_skill(&root, "file-escape", VALID_BODY);
+        let outside = temp_skills_root("file-link-outside");
+        let outside_file = outside.join("SKILL.md");
+        std::fs::write(&outside_file, VALID_BODY).unwrap();
+        std::fs::remove_file(escape_dir.join(SKILL_FILE_NAME)).unwrap();
+        symlink(&outside_file, escape_dir.join(SKILL_FILE_NAME)).unwrap();
+
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let id = skill_id("d", "file-escape");
+        assert!(!scan_root(&canonical, "d").iter().any(|skill| skill.id == id));
+        assert_eq!(read_skill_from_root(&canonical, "d", &id).unwrap_err(), REASON_NOT_FOUND);
     }
 }

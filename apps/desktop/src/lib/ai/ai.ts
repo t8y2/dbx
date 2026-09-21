@@ -168,7 +168,7 @@ export interface CustomPromptContext {
 function buildCustomInstructionLines(custom: CustomPromptContext | undefined, isZh: boolean): string[] {
   const global = custom?.globalInstructions?.trim() ?? "";
   const templates = (custom?.activeTemplates ?? []).filter((t) => t.content.trim());
-  const skills = (custom?.selectedSkills ?? []).filter((s) => s.content.trim());
+  const skills = (custom?.selectedSkills ?? []).filter((skill) => skill.content.trim());
   if (!global && templates.length === 0 && skills.length === 0) return [];
 
   const parts: string[] = [];
@@ -180,7 +180,7 @@ function buildCustomInstructionLines(custom: CustomPromptContext | undefined, is
         ? "## 用户选择的 Skills（补充性）\n以下为用户显式选择的外部 SKILL.md 规则文件，按原样注入；上方核心安全及方言规则优先级更高。"
         : "## Selected Skills (supplementary)\nThe following external SKILL.md rule files were explicitly selected by the user and are injected as-is. Core safety and dialect rules above take precedence.",
     );
-    parts.push(...skills.map((s) => `### Skill: ${s.name}\n<ai-skill id="${s.id}">\n${s.content}\n</ai-skill>`));
+    parts.push(...skills.map((skill) => `### Skill: ${skill.name}\n<ai-skill id="${skill.id}">\n${skill.content}\n</ai-skill>`));
   }
 
   return [

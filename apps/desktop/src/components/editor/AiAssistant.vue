@@ -1521,7 +1521,25 @@ const selectedDatabaseValues = computed(() => new Set(selectedDatabases.value));
 const selectedDatabaseLabel = computed(() => {
   if (!props.connection) return t("editor.selectDatabase");
   const labels = dbSelectOptions.value.filter((option) => selectedDatabaseValues.value.has(option.database)).map((option) => option.label);
-  return labels.length ? labels.join(", ") : t("editor.selectDatabase");
+  if (labels.length) return labels.join(", ");
+  // The options list loads asynchronously (on popover open or connection
+  // switch), so before it arrives the selection is still valid — fall back to
+  // the raw database names instead of the "select database" placeholder,
+  // which made the button look unselected while the dropdown showed a check.
+  // Format with the same helper as the option labels so the text stays
+  // identical once the options load (e.g. Redis "db0", localized defaults).
+  const raw = [...selectedDatabaseValues.value];
+  if (raw.length) {
+    return raw
+      .map((database) =>
+        formatDatabaseLabel(props.connection, database, {
+          defaultDatabase: t("editor.defaultDatabase"),
+          noDatabase: t("editor.noDatabase"),
+        }),
+      )
+      .join(", ");
+  }
+  return t("editor.selectDatabase");
 });
 
 function syncSelectedDatabases() {

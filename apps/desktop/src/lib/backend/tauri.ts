@@ -2454,6 +2454,18 @@ export async function closePluginLocalFile(pluginId: string, handleId: number): 
   return invoke("plugin_file_close", { pluginId, handleId });
 }
 
+export async function getPluginUiStorage(pluginId: string, key: string): Promise<unknown> {
+  return invoke("plugin_ui_storage_get", { pluginId, key });
+}
+
+export async function setPluginUiStorage(pluginId: string, key: string, value: unknown): Promise<void> {
+  return invoke("plugin_ui_storage_set", { pluginId, key, value });
+}
+
+export async function deletePluginUiStorage(pluginId: string, key: string): Promise<void> {
+  return invoke("plugin_ui_storage_delete", { pluginId, key });
+}
+
 export async function listPluginFilesystemEntries(pluginId: string, providerId: string, options: { connectionId?: string; uri?: string; cursor?: string; limit?: number } = {}): Promise<PluginFilesystemListResult> {
   return invoke("list_plugin_filesystem_entries", { pluginId, providerId, ...options });
 }

@@ -17,12 +17,12 @@ jobs:
   frontend-checks:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # The workspace intentionally contains platform-specific CLI/MCP packages for every release target.
       NPM_CONFIG_LOGLEVEL: error
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -30,7 +30,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -53,7 +53,7 @@ jobs:
         run: pnpm build:docs-export
 
       # continue-on-error for one cycle: every reproducibility observation
-      # so far was same-platform, and this job is ubuntu-22.04 x86_64 like
+      # so far was same-platform, and this job is ubuntu-24.04 x86_64 like
       # every contributor's toolchain is lockfile-pinned to expect. If a
       # byte ever differs cross-platform, surface it in the job summary
       # rather than reddening every PR at once on a repo we contribute to,
@@ -65,11 +65,11 @@ jobs:
   frontend-typecheck:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -77,7 +77,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -91,7 +91,7 @@ jobs:
   frontend-test:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       NPM_CONFIG_LOGLEVEL: error
     strategy:
@@ -100,7 +100,7 @@ jobs:
         shard: [1, 2]
     name: frontend-test (${{ matrix.shard }}/2)
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -108,7 +108,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -133,11 +133,11 @@ jobs:
       - frontend-typecheck
       - frontend-test
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected frontend jobs
@@ -148,12 +148,12 @@ jobs:
   github-scripts:
     needs: changes
     if: needs.changes.outputs.github_scripts == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
 
@@ -163,7 +163,7 @@ jobs:
   packages:
     needs: changes
     if: needs.changes.outputs.packages == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # Unsupported-platform package warnings are expected while validating cross-platform package metadata.
       NPM_CONFIG_LOGLEVEL: error
@@ -173,7 +173,7 @@ jobs:
       # (see rust-fmt-clippy) and lean on the rust-cache restore from main.
       RUSTC_WRAPPER: ${{ secrets.SCCACHE_S3_BUCKET != '' && 'sccache' || '' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -181,7 +181,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -191,9 +191,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
 
-      # Jammy's mold 1.0.3 (2022) mis-links the bundled duckdb C++ library
-      # (duckdb_create_config fails at runtime), so install a current static
-      # build pinned from upstream releases instead.
+      # Pin mold because runner image updates can change bundled DuckDB C++ links.
+      # The pinned build prevents duckdb_create_config runtime failures.
       - name: Install mold linker
         run: |
           curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
@@ -215,9 +214,9 @@ jobs:
           tool: cargo-nextest@0.9.137
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
@@ -286,7 +285,7 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_VERSION: windows-standard-v1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
@@ -318,7 +317,7 @@ jobs:
       SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
@@ -326,7 +325,7 @@ jobs:
           version: 10.27.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
           cache: pnpm
@@ -367,7 +366,7 @@ jobs:
 
       - name: Upload Windows 7 Cargo timings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: DBX-win7-cargo-timings
           path: target/cargo-timings/
@@ -410,7 +409,7 @@ jobs:
         run: ${SCCACHE_PATH} --show-stats
 
       - name: Upload Windows 7 test installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: DBX-win7-fixed-runtime-test
           path: target/x86_64-win7-windows-msvc/release/bundle/nsis/*.exe
@@ -433,7 +432,7 @@ jobs:
       CC: "sccache cl.exe"
       CXX: "sccache cl.exe"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
@@ -446,7 +445,7 @@ jobs:
         with:
           arch: x64
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -471,7 +470,7 @@ jobs:
       - changes
       - fast-checks
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
@@ -482,7 +481,7 @@ jobs:
       # The fast lane skips only system font discovery while retaining the other default capabilities.
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -495,9 +494,9 @@ jobs:
           components: clippy, rustfmt
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
@@ -551,7 +550,7 @@ jobs:
       - changes
       - fast-checks
     if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
@@ -565,7 +564,7 @@ jobs:
       RUST_FEATURE_MODE: ${{ github.event_name == 'pull_request' && needs.changes.outputs.rust_full != 'true' && 'fast' || 'full' }}
       RUST_TEST_GROUP: ${{ matrix.group }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -573,8 +572,8 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
         if: matrix.group != 'foundation'
 
-      # Jammy's mold 1.0.3 (2022) is too old for modern C++ links; see the
-      # packages job note for the pinned upstream install.
+      # Pin mold because runner image updates can change bundled C++ links.
+      # See the packages job note for the pinned upstream build.
       - name: Install mold linker
         run: |
           curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
@@ -585,9 +584,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
@@ -661,11 +660,11 @@ jobs:
       - rust-fmt-clippy
       - rust-test
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected rust jobs
@@ -676,14 +675,14 @@ jobs:
   jdbc:
     needs: changes
     if: needs.changes.outputs.jdbc == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -704,12 +703,12 @@ jobs:
   offline-jdbc-release:
     needs: changes
     if: needs.changes.outputs.offline_jdbc == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -744,10 +743,10 @@ jobs:
   nix-packaging:
     needs: changes
     if: needs.changes.outputs.nix == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -756,7 +755,7 @@ jobs:
         run: nix build .#dbx-pnpm-deps .#dbx-cargo-deps --no-link --print-build-logs
 
   changes:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       frontend: ${{ steps.filter.outputs.frontend }}
       packages: ${{ steps.filter.outputs.packages }}
@@ -781,7 +780,7 @@ jobs:
       agent_integration_changed: ${{ steps.plan.outputs.agent_integration_changed }}
       plan: ${{ steps.plan.outputs.plan }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -920,11 +919,11 @@ jobs:
       - agent-go
       - agent-integration
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected agents jobs
@@ -934,9 +933,9 @@ jobs:
   fast-checks:
     needs: changes
     if: needs.changes.outputs.fast == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
         with:
@@ -946,7 +945,7 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: cargo fmt --check
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: CI planner and gate tests
@@ -975,14 +974,14 @@ jobs:
   agent-checks:
     needs: changes
     if: needs.changes.outputs.agents == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Install packaging tools
@@ -998,21 +997,23 @@ jobs:
   agent-java:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_java == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: |-
             8
             21
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
       - name: Install packaging tools
         run: |
           sudo apt-get update
@@ -1024,7 +1025,7 @@ jobs:
   agent-rust:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_rust_changed == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
@@ -1035,20 +1036,20 @@ jobs:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
-      # Jammy's mold 1.0.3 (2022) mis-links the bundled duckdb C++ library;
-      # see the packages job note for the pinned upstream install.
+      # Pin mold because runner image updates can change bundled DuckDB C++ links.
+      # See the packages job note for the pinned upstream build.
       - name: Install mold linker
         run: |
           curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
             | sudo tar -C /usr/local --strip-components=1 -xz
           mold --version
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
       - name: Configure S3 sccache
         if: env.RUSTC_WRAPPER == 'sccache'
         shell: bash
@@ -1112,14 +1113,14 @@ jobs:
   agent-go:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_go_changed == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: 1.25.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
@@ -1136,20 +1137,20 @@ jobs:
   agent-integration:
     needs: [changes, fast-checks, agent-checks]
     if: needs.changes.outputs.agent_integration_changed == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: agents
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup RocketMQ server Java
         if: matrix.scenario == 'rocketmq'
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: 1.25.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
@@ -1196,11 +1197,11 @@ jobs:
       - offline-jdbc-release
       - nix-packaging
     if: always()
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22.13.0
       - name: Check selected all jobs

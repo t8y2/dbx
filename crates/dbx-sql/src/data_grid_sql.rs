@@ -97,6 +97,11 @@ pub struct DataGridSaveStatementOptions {
     pub deleted_rows: Vec<usize>,
     #[serde(default)]
     pub new_rows: Vec<Vec<Value>>,
+    /// `生成 SQL 时包含数据库名`: qualify the saved table with its database on
+    /// engines that address tables as `database.table` (MySQL family,
+    /// ClickHouse). Off by default so existing statements are unchanged.
+    #[serde(default)]
+    pub include_database_name: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +117,11 @@ pub struct DataGridCopyUpdateStatementOptions {
     pub source_columns: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
+    /// `生成 SQL 时包含数据库名`: qualify the copied table the same way the
+    /// save statements and the copy-as-INSERT statements do. Defaults to true so
+    /// callers that never strip the table metadata keep the historical shape.
+    #[serde(default = "default_include_database_name")]
+    pub include_database_name: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -423,13 +433,14 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
         return Vec::new();
     }
 
-    let table = data_grid_qualified_table_name(
+    let table = data_grid_generated_table_name(
         options.database_type,
         options.table_meta.catalog.as_deref(),
         options.table_meta.schema.as_deref(),
         options.table_meta.database.as_deref(),
         &options.table_meta.table_name,
         options.identifier_quote.as_deref(),
+        options.include_database_name,
     );
     let mut statements = Vec::new();
     for row in &options.rows {
@@ -554,19 +565,17 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             } else {
                 meta.schema.as_deref()
             };
-            // ClickHouse uses a database qualifier rather than SQL schemas.
-            if options.database_type == Some(DatabaseType::ClickHouse) {
-                if let Some(database) = schema {
-                    return format!(
-                        "{}.{}",
-                        data_grid_identifier(options.database_type, database, options.identifier_quote.as_deref()),
-                        data_grid_identifier(
-                            options.database_type,
-                            &meta.table_name,
-                            options.identifier_quote.as_deref()
-                        ),
-                    );
-                }
+            // ClickHouse (`database.table`) and SQL Server
+            // (`database.schema.table`) address tables across databases on the
+            // same connection, so the setting resolves the full name for them.
+            if let Some(qualified) = crate::sql_dialect::database_qualified_table_name(
+                options.database_type,
+                meta.catalog.as_deref(),
+                schema,
+                meta.database.as_deref(),
+                &meta.table_name,
+            ) {
+                return qualified;
             }
             data_grid_qualified_table_name(
                 options.database_type,
@@ -1463,14 +1472,7 @@ fn build_data_grid_save_statements(
         driver_profile,
         options.table_meta.schema.as_deref(),
     );
-    let table = data_grid_qualified_table_name(
-        options.database_type,
-        options.table_meta.catalog.as_deref(),
-        schema,
-        options.table_meta.database.as_deref(),
-        &options.table_meta.table_name,
-        options.identifier_quote.as_deref(),
-    );
+    let table = data_grid_save_table_name(options, schema);
     let mut statements = Vec::new();
     let primary_key_set: Vec<String> =
         options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
@@ -1668,14 +1670,7 @@ fn build_data_grid_rollback_statements(
         driver_profile,
         options.table_meta.schema.as_deref(),
     );
-    let table = data_grid_qualified_table_name(
-        options.database_type,
-        options.table_meta.catalog.as_deref(),
-        schema,
-        options.table_meta.database.as_deref(),
-        &options.table_meta.table_name,
-        options.identifier_quote.as_deref(),
-    );
+    let table = data_grid_save_table_name(options, schema);
     let mut statements = Vec::new();
 
     for row in &options.new_rows {
@@ -3507,6 +3502,56 @@ fn data_grid_identifier(database_type: Option<DatabaseType>, name: &str, identif
     crate::sql_dialect::quote_table_data_identifier(database_type, name, identifier_quote)
 }
 
+/// Table reference for every generated data-grid SQL surface that honors the
+/// `生成 SQL 时包含数据库名` setting: save / rollback / keyless-guard statements
+/// and the copy-as-INSERT/UPDATE/SELECT statements.
+///
+/// With the setting on, engines whose active database is normally omitted get a
+/// fully qualified name (`database.table`, or `database.schema.table` for SQL
+/// Server, whose tables stay addressable across databases). Every other engine —
+/// and the setting off — keeps the historical shape, so no existing SQL changes
+/// shape unless the user opted in.
+#[allow(clippy::too_many_arguments)]
+pub fn data_grid_generated_table_name(
+    database_type: Option<DatabaseType>,
+    catalog: Option<&str>,
+    schema: Option<&str>,
+    database: Option<&str>,
+    table_name: &str,
+    identifier_quote: Option<&str>,
+    include_database_name: bool,
+) -> String {
+    if include_database_name {
+        if let Some(qualified) =
+            crate::sql_dialect::database_qualified_table_name(database_type, catalog, schema, database, table_name)
+        {
+            return qualified;
+        }
+    }
+    data_grid_qualified_table_name(database_type, catalog, schema, database, table_name, identifier_quote)
+}
+
+/// Table reference for the grid's save / rollback / keyless-guard statements.
+///
+/// Mirrors the data-table SELECT label and the copy-as-INSERT statements: when
+/// `include_database_name` is on, engines addressed via `database.table`
+/// (MySQL family, ClickHouse) get the database prefix — taken from
+/// `table_meta.schema` when the table lives outside the connection's default
+/// database, otherwise from `table_meta.database` — and SQL Server gets the
+/// three-part `database.schema.table` form. Every other engine keeps the
+/// historical shape.
+fn data_grid_save_table_name(options: &DataGridSaveStatementOptions, schema: Option<&str>) -> String {
+    data_grid_generated_table_name(
+        options.database_type,
+        options.table_meta.catalog.as_deref(),
+        schema,
+        options.table_meta.database.as_deref(),
+        &options.table_meta.table_name,
+        options.identifier_quote.as_deref(),
+        options.include_database_name,
+    )
+}
+
 pub fn data_grid_qualified_table_name(
     database_type: Option<DatabaseType>,
     catalog: Option<&str>,
@@ -3766,7 +3811,152 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         }
+    }
+
+    /// A MySQL grid tab keeps its namespace in `table_meta.database` (not
+    /// `schema`), so the save statements are the one generated-SQL surface that
+    /// never picked up `生成 SQL 时包含数据库名`. It must match the data-table
+    /// SELECT label and the copy-as-INSERT statements.
+    #[test]
+    fn mysql_data_grid_save_honors_include_database_name() {
+        let mut options = mysql_people_save_options(1);
+        options.table_meta.database = Some("appdb".to_string());
+        options.table_meta.schema = None;
+        options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+
+        options.include_database_name = true;
+        let qualified = prepare_data_grid_save(options.clone());
+        assert_eq!(qualified.validation_error, None);
+        assert_eq!(qualified.statements, vec!["UPDATE `appdb`.`people` SET `status` = 'blocked' WHERE `id` = 1;"]);
+        assert_eq!(
+            qualified.rollback_statements,
+            vec!["UPDATE `appdb`.`people` SET `status` = 'active' WHERE `id` = 1 AND BINARY `status` = 'blocked';"]
+        );
+
+        options.include_database_name = false;
+        let bare = prepare_data_grid_save(options);
+        assert_eq!(bare.statements, vec!["UPDATE `people` SET `status` = 'blocked' WHERE `id` = 1;"]);
+        assert_eq!(
+            bare.rollback_statements,
+            vec!["UPDATE `people` SET `status` = 'active' WHERE `id` = 1 AND BINARY `status` = 'blocked';"]
+        );
+    }
+
+    #[test]
+    fn mysql_data_grid_save_qualifies_insert_delete_and_keyless_guard() {
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.database = Some("appdb".to_string());
+        options.table_meta.schema = None;
+        options.include_database_name = true;
+        options.new_rows = vec![vec![json!(7), json!("created")]];
+        options.deleted_rows = vec![];
+
+        let inserted = prepare_data_grid_save(options.clone());
+        assert_eq!(inserted.statements, vec!["INSERT INTO `appdb`.`people` (`id`, `status`) VALUES (7, 'created');"]);
+
+        let mut keyless = options;
+        keyless.new_rows = vec![];
+        keyless.table_meta.primary_keys = vec![];
+        keyless.deleted_rows = vec![0];
+        let deleted = prepare_data_grid_save(keyless);
+        assert!(
+            deleted.statements.iter().all(|statement| statement.contains("`appdb`.`people`")),
+            "every statement must carry the database qualifier: {:?}",
+            deleted.statements
+        );
+        assert!(
+            deleted.keyless_guards.iter().all(|guard| guard.sql.contains("`appdb`.`people`")),
+            "the keyless guard counts rows in the same table reference: {:?}",
+            deleted.keyless_guards
+        );
+    }
+
+    /// Engines that already address tables through `schema.table` keep their
+    /// shape — the flag only adds the namespace those dialects cannot express.
+    #[test]
+    fn data_grid_save_leaves_schema_qualified_engines_unchanged() {
+        let mut options = mysql_people_save_options(1);
+        options.database_type = Some(DatabaseType::Postgres);
+        options.identifier_quote = None;
+        options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+        options.include_database_name = true;
+
+        let result = prepare_data_grid_save(options);
+        assert_eq!(result.statements, vec!["UPDATE \"app\".\"people\" SET \"status\" = 'blocked' WHERE \"id\" = 1;"]);
+    }
+
+    /// A cross-database editable result (`SELECT * FROM db_9.users`) keeps its own
+    /// namespace in `schema` while `database` still holds the connection's default
+    /// database — the qualifier must follow the table, not the connection.
+    #[test]
+    fn mysql_data_grid_save_prefers_cross_database_schema() {
+        let mut options = mysql_people_save_options(1);
+        options.table_meta.schema = Some("db_9".to_string());
+        options.table_meta.database = Some("appdb".to_string());
+        options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+        options.include_database_name = true;
+
+        let result = prepare_data_grid_save(options);
+        assert_eq!(result.statements, vec!["UPDATE `db_9`.`people` SET `status` = 'blocked' WHERE `id` = 1;"]);
+        assert_eq!(result.execution_schema.as_deref(), Some("db_9"));
+    }
+
+    /// issue #9262: SQL Server tables are addressable as
+    /// `database.schema.table`, so the setting must reach the three-part form on
+    /// the save / rollback / keyless-guard statements too.
+    #[test]
+    fn sqlserver_data_grid_save_honors_include_database_name() {
+        let mut options = mysql_people_save_options(1);
+        options.database_type = Some(DatabaseType::SqlServer);
+        options.table_meta.schema = Some("dbo".to_string());
+        options.table_meta.database = Some("dbx".to_string());
+        options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+
+        options.include_database_name = true;
+        let qualified = prepare_data_grid_save(options.clone());
+        assert_eq!(qualified.validation_error, None);
+        assert_eq!(qualified.statements, vec!["UPDATE [dbx].[dbo].[people] SET [status] = N'blocked' WHERE [id] = 1;"]);
+        assert_eq!(
+            qualified.rollback_statements,
+            vec!["UPDATE [dbx].[dbo].[people] SET [status] = N'active' WHERE [id] = 1 AND [status] = N'blocked';"]
+        );
+
+        options.include_database_name = false;
+        let bare = prepare_data_grid_save(options);
+        assert_eq!(bare.statements, vec!["UPDATE [dbo].[people] SET [status] = N'blocked' WHERE [id] = 1;"]);
+    }
+
+    #[test]
+    fn sqlserver_data_grid_save_qualifies_insert_and_keyless_guard() {
+        let mut options = mysql_people_save_options(0);
+        options.database_type = Some(DatabaseType::SqlServer);
+        options.table_meta.schema = Some("dbo".to_string());
+        options.table_meta.database = Some("dbx".to_string());
+        options.include_database_name = true;
+        options.new_rows = vec![vec![json!(7), json!("created")]];
+        let inserted = prepare_data_grid_save(options.clone());
+        assert_eq!(
+            inserted.statements,
+            vec!["INSERT INTO [dbx].[dbo].[people] ([id], [status]) VALUES (7, N'created');"]
+        );
+
+        let mut keyless = options;
+        keyless.new_rows = vec![];
+        keyless.table_meta.primary_keys = vec![];
+        keyless.deleted_rows = vec![0];
+        let deleted = prepare_data_grid_save(keyless);
+        assert!(
+            deleted.statements.iter().all(|statement| statement.contains("[dbx].[dbo].[people]")),
+            "every statement must carry the three-part name: {:?}",
+            deleted.statements
+        );
+        assert!(
+            deleted.keyless_guards.iter().all(|guard| guard.sql.contains("[dbx].[dbo].[people]")),
+            "the keyless guard counts rows in the same table reference: {:?}",
+            deleted.keyless_guards
+        );
     }
 
     #[test]
@@ -3847,6 +4037,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("210101202201016555"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -3883,6 +4074,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![vec![json!(52), json!("inserted")]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -3926,6 +4118,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("after"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -3968,6 +4161,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("1"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -4030,10 +4224,71 @@ mod tests {
             columns: vec!["id".to_string(), "name".to_string(), "status".to_string()],
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada"), json!("active")]],
+            include_database_name: false,
         });
         assert_eq!(
             statements,
             vec!["UPDATE \"public\".\"users\" SET \"name\" = 'Ada', \"status\" = 'active' WHERE \"id\" = 1;"]
+        );
+    }
+
+    /// The right-click `复制 → SQL UPDATE 语句` path must honor
+    /// `生成 SQL 时包含数据库名` exactly like the copy-as-INSERT statements do
+    /// (issue #9262).
+    #[test]
+    fn copy_update_honors_include_database_name() {
+        let options = DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("appdb".to_string()),
+                schema: None,
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: None,
+            },
+            columns: vec!["id".to_string(), "status".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("blocked")]],
+            include_database_name: true,
+        };
+        assert_eq!(
+            build_data_grid_copy_update_statements(options.clone()),
+            vec!["UPDATE `appdb`.`people` SET `status` = 'blocked' WHERE `id` = 1;"]
+        );
+        // The frontend strips the metadata when the setting is off, but the
+        // option itself must also fall back to the historical bare shape.
+        assert_eq!(
+            build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+                include_database_name: false,
+                ..options
+            }),
+            vec!["UPDATE `people` SET `status` = 'blocked' WHERE `id` = 1;"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_copy_update_uses_three_part_name() {
+        let options = DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("dbx".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "player states".to_string(),
+                primary_keys: vec!["role id".to_string()],
+                columns: None,
+            },
+            columns: vec!["role id".to_string(), "state".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(42), json!("ready")]],
+            include_database_name: true,
+        };
+        assert_eq!(
+            build_data_grid_copy_update_statements(options),
+            vec!["UPDATE [dbx].[dbo].[player states] SET [state] = N'ready' WHERE [role id] = 42;"]
         );
     }
 
@@ -4259,6 +4514,7 @@ mod tests {
             columns: vec!["identifier".to_string(), "label".to_string()],
             source_columns: Some(vec![Some("id".to_string()), Some("display_name".to_string())]),
             rows: vec![vec![json!(1), json!("Ada")]],
+            include_database_name: false,
         });
         assert_eq!(statements, vec!["UPDATE `users` SET `display_name` = 'Ada' WHERE `id` = 1;"]);
     }
@@ -4487,6 +4743,7 @@ mod tests {
                 vec![json!(2), json!({"nested": [1, 2]})],
                 vec![json!(3), json!([])],
             ],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -4515,6 +4772,7 @@ mod tests {
             columns: vec!["id".to_string(), "payload".to_string()],
             source_columns: None,
             rows: vec![vec![json!(1), json!(r#"[1,2]"#)], vec![json!(2), json!(true)], vec![json!(3), Value::Null]],
+            include_database_name: false,
         });
         assert_eq!(
             json_statements,
@@ -4539,6 +4797,7 @@ mod tests {
             columns: vec!["id".to_string(), "payload".to_string()],
             source_columns: None,
             rows: vec![vec![json!(1), json!([1, 2])]],
+            include_database_name: false,
         });
         assert_eq!(generic_statements, vec!["UPDATE `arrays` SET `payload` = '{1,2}' WHERE `id` = 1;"]);
 
@@ -4681,7 +4940,7 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some(
-                "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;"
+                "SET IDENTITY_INSERT [dbx_test].[dbo].[gen_table] ON;\nINSERT INTO [dbx_test].[dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbx_test].[dbo].[gen_table] OFF;"
             )
         );
     }
@@ -4695,7 +4954,7 @@ mod tests {
         assert_eq!(
             statement.as_deref(),
             Some(
-                "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;\nSET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (2, N't_user');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;"
+                "SET IDENTITY_INSERT [dbx_test].[dbo].[gen_table] ON;\nINSERT INTO [dbx_test].[dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbx_test].[dbo].[gen_table] OFF;\nSET IDENTITY_INSERT [dbx_test].[dbo].[gen_table] ON;\nINSERT INTO [dbx_test].[dbo].[gen_table] ([table_id], [table_name]) VALUES (2, N't_user');\nSET IDENTITY_INSERT [dbx_test].[dbo].[gen_table] OFF;"
             )
         );
     }
@@ -4711,7 +4970,7 @@ mod tests {
         let statement = build_data_grid_copy_insert_statement(options);
         assert_eq!(
             statement.as_deref(),
-            Some("INSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');")
+            Some("INSERT INTO [dbx_test].[dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');")
         );
     }
 
@@ -4769,6 +5028,7 @@ mod tests {
             columns,
             source_columns: None,
             rows,
+            include_database_name: false,
         });
         assert_eq!(
             updates,
@@ -5940,6 +6200,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(4), Value::Null, Value::Null, Value::Null]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -5969,6 +6230,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Ada Lovelace"))])],
             deleted_rows: vec![1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6007,6 +6269,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(7), json!("created")]],
+            include_database_name: false,
         };
         assert_eq!(effective_columns(&hive_options), vec![Some("payload.id".to_string()), Some("name".to_string())]);
         assert!(prepare_data_grid_save(hive_options).rollback_statements[0].contains("`payload.id` = 7"));
@@ -6028,6 +6291,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         };
         assert_eq!(effective_columns(&postgres_options), vec![Some("events.id".to_string())]);
     }
@@ -6210,6 +6474,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(large_value))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6279,6 +6544,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("new"))]), (1, vec![(1, json!("new"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6310,6 +6576,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("144847503924137986"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6335,6 +6602,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(10280))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6367,6 +6635,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("02"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6404,6 +6673,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(0, json!("02"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -6438,6 +6708,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("02"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -6469,6 +6740,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("support"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6513,6 +6785,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("support-7")), (2, json!("SUPPORT")), (3, json!("support"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6570,6 +6843,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Ada Lovelace"))])],
             deleted_rows: vec![1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6609,6 +6883,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(2, json!("Ada Lovelace"))])],
             deleted_rows: vec![1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6640,6 +6915,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(2, json!("Grace"))])],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: ID")));
@@ -6666,6 +6942,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Grace"))])],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: ID")));
@@ -6696,6 +6973,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Grace"))])],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -6731,6 +7009,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(2, json!("Grace"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert!(result.validation_error.as_deref().is_some_and(|error| error.contains("missing: CKG023")));
@@ -6757,6 +7036,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("34-B-0048"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6789,6 +7069,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(googlesql.validation_error, None);
@@ -6815,6 +7096,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(postgres_dialect.validation_error, None);
@@ -6842,6 +7124,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Ada"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(no_reported_quote.validation_error, None);
@@ -6894,6 +7177,7 @@ mod tests {
             columns: vec!["id".to_string(), "event_type".to_string()],
             source_columns: None,
             rows: vec![vec![json!(1), json!("logout")]],
+            include_database_name: false,
         });
 
         assert_eq!(statements, vec!["UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;"]);
@@ -6918,6 +7202,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(0, json!("LY-SC01-260800002"))])],
             deleted_rows: vec![],
             new_rows: vec![vec![json!("dbx-insert-check"), json!(461936049002043_i64)]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -6951,6 +7236,7 @@ mod tests {
                 dirty_rows: vec![(0, vec![(1, json!("2"))])],
                 deleted_rows: vec![1],
                 new_rows: vec![vec![json!(3), json!("new")]],
+                include_database_name: false,
             },
             Some("GBASE8S"),
         );
@@ -6994,6 +7280,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("GBase 8s updated"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7028,6 +7315,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("new"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7056,6 +7344,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("new"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7085,6 +7374,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(2, json!("Ada Lovelace"))])],
             deleted_rows: vec![1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7128,6 +7418,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7156,6 +7447,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7186,6 +7478,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("0xccdd"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7219,6 +7512,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("new"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7274,6 +7568,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0, 1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7310,6 +7605,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7335,6 +7631,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -7363,6 +7660,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("早上"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         }
     }
 
@@ -7524,6 +7822,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0, 1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7672,6 +7971,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(0, json!(r#"{"name":"after"}"#))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         };
 
         let update = prepare_data_grid_save(options.clone());
@@ -7726,6 +8026,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!([]))])],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(2), json!({"nested": [1, 2]})]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7821,6 +8122,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("0"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.statements, vec!["UPDATE `public`.`flags` SET `flag` = b'0' WHERE `id` = 1;"],);
@@ -7912,6 +8214,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(r"line\n's"))])],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(2), json!(r"\n")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7947,6 +8250,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(nested_json))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -7996,6 +8300,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(r".\SQL2016"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8063,6 +8368,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(true))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8096,6 +8402,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(""))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8125,6 +8432,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(""))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8154,6 +8462,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("111\n222"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8183,6 +8492,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("ready")), (2, json!("2026-05-04"))])],
             deleted_rows: vec![0],
             new_rows: vec![vec![json!(43), json!("new"), json!("2026-05-05")]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8214,6 +8524,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8258,6 +8569,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![1],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8287,6 +8599,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8323,6 +8636,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(229.9))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8362,6 +8676,7 @@ mod tests {
             dirty_rows: vec![(1, vec![(2, json!(229.9))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8408,6 +8723,7 @@ mod tests {
                 json!(1.0),
                 json!("codex-lab"),
             ]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8452,6 +8768,7 @@ mod tests {
                 vec![json!("device_a"), json!("2026-07-10T17:48:51.000+08:00"), json!(1), json!(221.0)],
                 vec![json!("device_a"), json!("2026-07-10T17:48:51.000+08:00"), json!(2), json!(222.0)],
             ],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8484,6 +8801,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![Value::Null, json!("2026-07-10T17:48:51.000+08:00"), json!(1.0)]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8513,6 +8831,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8545,6 +8864,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(229.9))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8578,6 +8898,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!(3))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, Some("TDengine row identifier columns cannot be edited.".to_string()));
@@ -8604,6 +8925,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
             deleted_rows: vec![0],
             new_rows: vec![vec![json!(2), json!("Grace")]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8637,6 +8959,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
             deleted_rows: vec![0],
             new_rows: vec![vec![json!(2), json!("Grace")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8672,6 +8995,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(0, json!(2))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8709,6 +9033,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("2026-06-25")), (2, json!("Linus"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -8738,6 +9063,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("2026-06-25"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8766,6 +9092,7 @@ mod tests {
             columns: vec!["id".to_string(), "name".to_string()],
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")]],
+            include_database_name: false,
         });
 
         assert_eq!(statements, vec!["ALTER TABLE `people` UPDATE `name` = 'Ada' WHERE `id` = 1;"]);
@@ -8789,6 +9116,7 @@ mod tests {
             columns: vec!["id".to_string(), "status".to_string()],
             source_columns: None,
             rows: vec![vec![json!(1), json!("paid")]],
+            include_database_name: false,
         });
         assert_eq!(
             copy_updates,
@@ -8823,6 +9151,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("paid"))])],
             deleted_rows: vec![1],
             new_rows: vec![vec![json!(4), json!("new")]],
+            include_database_name: false,
         });
         assert_eq!(
             save.statements,
@@ -8854,6 +9183,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8884,6 +9214,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
             deleted_rows: vec![0],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8919,6 +9250,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(2, json!("Luxembourg City")), (3, json!(999))])],
             deleted_rows: vec![],
             new_rows: vec![vec![json!("USA"), json!(2008), json!("United States"), json!(43000)]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -8975,6 +9307,7 @@ mod tests {
             )],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -9002,6 +9335,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("18"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -9029,6 +9363,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(0, json!("S471355（0）"))])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -9062,6 +9397,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, json!("new"))])],
             deleted_rows: vec![1],
             new_rows: vec![vec![json!("3"), json!("inserted")]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -9094,6 +9430,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!("ALB"), json!(2021), json!(0.913)]],
+            include_database_name: false,
         });
 
         assert_eq!(
@@ -9140,6 +9477,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(72), json!("轻卡"), Value::Null]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9172,6 +9510,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(2, json!("new"))])],
             deleted_rows: vec![1],
             new_rows: vec![vec![Value::Null, json!(3), json!("inserted")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9207,6 +9546,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![Value::Null, json!("2026-06-12T00:00:00Z")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9235,6 +9575,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(42), json!("2026-06-12T00:00:00Z")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9266,6 +9607,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(""), json!("Ada")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9295,6 +9637,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![Value::Null, Value::Null, json!("created")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9324,6 +9667,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![Value::Null, Value::Null]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9354,6 +9698,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![json!(7), Value::Null, json!("created")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9383,6 +9728,7 @@ mod tests {
             dirty_rows: vec![(0, vec![(1, Value::Null)])],
             deleted_rows: vec![],
             new_rows: vec![],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, Some(r#"Column "trigger_value" does not allow NULL."#.to_string()));
@@ -9411,6 +9757,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![Value::Null, json!("Ada")]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, None);
@@ -9439,6 +9786,7 @@ mod tests {
             dirty_rows: vec![],
             deleted_rows: vec![],
             new_rows: vec![vec![Value::Null, Value::Null]],
+            include_database_name: false,
         });
 
         assert_eq!(result.validation_error, Some(r#"Column "LogTime" does not allow NULL."#.to_string()));

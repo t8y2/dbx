@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use super::with_connection_timeout;
 use crate::models::connection::DatabaseConnectionInfo;
-use crate::types::IndexInfo;
+use crate::types::{IndexInfo, ObjectStatistics};
 use dbx_types::document::{MongoGridFsBucketInfo, MongoGridFsFileInfo};
-use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryStreamExt};
+use futures::{io::AsyncReadExt, io::AsyncWriteExt, stream, StreamExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
 use std::{collections::HashSet, time::Duration};
 
@@ -272,6 +272,65 @@ pub async fn run_command(client: &Client, database: &str, command_json: &str) ->
         total_is_exact: true,
         next_cursor: None,
     })
+}
+
+/// Bounded `collStats` round trips for the database view's per-collection stats.
+const MONGO_OBJECT_STATISTICS_CONCURRENCY: usize = 8;
+
+/// Per-collection document counts and on-disk sizes for the database view's
+/// "rows"/"size" columns.
+///
+/// `listCollections` carries no size metadata, so every collection needs its own
+/// `collStats`. Views are skipped (they own no storage and `collStats` rejects
+/// them) and the round trips run with bounded concurrency so a database with
+/// hundreds of collections does not serialize into one long wait. A collection
+/// whose `collStats` fails is left out; the view then keeps that row blank.
+pub async fn list_object_statistics(client: &Client, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+    let database = database.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+
+    let collections = list_collection_specs(client, database).await?;
+    let handle = client.database(database);
+    let stats =
+        stream::iter(collections.into_iter().filter(|spec| spec.kind != MongoCollectionKind::View).map(|spec| {
+            let handle = handle.clone();
+            async move {
+                let result = handle.run_command(collection_stats_command_document(&spec.name, None)).await.ok()?;
+                Some(object_statistics_from_collection_stats(&spec.name, database, &result))
+            }
+        }))
+        .buffer_unordered(MONGO_OBJECT_STATISTICS_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
+    Ok(stats.into_iter().flatten().collect())
+}
+
+/// Map `collStats` onto the shared statistics shape: the document count, and the
+/// on-disk footprint (data + indexes) the SQL engines report as
+/// `DATA_LENGTH + INDEX_LENGTH`.
+fn object_statistics_from_collection_stats(name: &str, database: &str, result: &Document) -> ObjectStatistics {
+    ObjectStatistics {
+        name: name.to_string(),
+        schema: Some(database.to_string()),
+        estimated_rows: collection_stats_int(result, "count"),
+        total_bytes: match (collection_stats_int(result, "storageSize"), collection_stats_int(result, "totalIndexSize"))
+        {
+            (None, None) => None,
+            (data, index) => Some(data.unwrap_or(0).saturating_add(index.unwrap_or(0))),
+        },
+    }
+}
+
+fn collection_stats_int(result: &Document, key: &str) -> Option<i64> {
+    match result.get(key) {
+        Some(Bson::Int32(value)) => Some(i64::from(*value)),
+        Some(Bson::Int64(value)) => Some(*value),
+        Some(Bson::Double(value)) if value.is_finite() => Some(*value as i64),
+        _ => None,
+    }
 }
 
 fn server_version_from_build_info(result: &Document) -> Result<String, String> {
@@ -2437,6 +2496,116 @@ fn single_document_result(document: Option<Document>) -> MongoDocumentResult {
     }
 }
 
+/// The `findAndModify` server command behind `findOneAndUpdate()`, for drivers that only expose
+/// `runCommand` (the legacy agent). Same inputs and option validation as [`find_one_and_update`].
+pub fn find_one_and_update_command(
+    collection: &str,
+    filter_json: &str,
+    update_json: &str,
+    options_json: Option<&str>,
+) -> Result<Document, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let update_value: serde_json::Value =
+        serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let update = match json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))? {
+        UpdateModifications::Document(document) => Bson::Document(document),
+        UpdateModifications::Pipeline(stages) => Bson::Array(stages.into_iter().map(Bson::Document).collect()),
+        _ => return Err("Unsupported update modification".to_string()),
+    };
+    let options: MongoFindOneAndUpdateOptions = parse_find_and_modify_options(options_json, "findOneAndUpdate")?;
+    let mut command = doc! { "findAndModify": collection, "query": filter, "update": update };
+    if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
+        command.insert("new", true);
+    }
+    if let Some(upsert) = options.upsert {
+        command.insert("upsert", upsert);
+    }
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        command.insert("fields", projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        command.insert("sort", sort);
+    }
+    if let Some(array_filters) = find_and_modify_array_filters(options.array_filters.as_ref())? {
+        command.insert("arrayFilters", array_filters);
+    }
+    Ok(command)
+}
+
+/// A replacement document whose keys start with `$` would be silently executed as
+/// an update by the server, so both the native and legacy-agent `findOneAndReplace`
+/// paths refuse it up front with the same message.
+fn reject_update_operator_replacement(replacement: &Document) -> Result<(), String> {
+    if let Some(operator) = replacement.keys().find(|key| key.starts_with('$')) {
+        return Err(format!("Replacement document must not contain update operators such as {operator}"));
+    }
+    Ok(())
+}
+
+/// The `findAndModify` server command behind `findOneAndReplace()`. A replacement with update
+/// operators is refused here because the server would silently treat it as an update instead.
+pub fn find_one_and_replace_command(
+    collection: &str,
+    filter_json: &str,
+    replacement_json: &str,
+    options_json: Option<&str>,
+) -> Result<Document, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let replacement_value: serde_json::Value =
+        serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    reject_update_operator_replacement(&replacement)?;
+    let options: MongoFindOneAndReplaceOptions = parse_find_and_modify_options(options_json, "findOneAndReplace")?;
+    let mut command = doc! { "findAndModify": collection, "query": filter, "update": replacement };
+    if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
+        command.insert("new", true);
+    }
+    if let Some(upsert) = options.upsert {
+        command.insert("upsert", upsert);
+    }
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        command.insert("fields", projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        command.insert("sort", sort);
+    }
+    Ok(command)
+}
+
+/// The `findAndModify` server command behind `findOneAndDelete()`.
+pub fn find_one_and_delete_command(
+    collection: &str,
+    filter_json: &str,
+    options_json: Option<&str>,
+) -> Result<Document, String> {
+    let filter_value: serde_json::Value =
+        serde_json::from_str(filter_json).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+    let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
+    let options: MongoFindOneAndDeleteOptions = parse_find_and_modify_options(options_json, "findOneAndDelete")?;
+    let mut command = doc! { "findAndModify": collection, "query": filter, "remove": true };
+    if let Some(projection) = parse_optional_document(options.projection.as_ref(), "projection")? {
+        command.insert("fields", projection);
+    }
+    if let Some(sort) = parse_optional_document(options.sort.as_ref(), "sort")? {
+        command.insert("sort", sort);
+    }
+    Ok(command)
+}
+
+/// Turns a `findAndModify` response into the same shape the native helpers return: the matched
+/// document (before or after the change, as requested) or nothing.
+pub fn find_and_modify_response_result(response: &Document) -> Result<MongoDocumentResult, String> {
+    match response.get("value") {
+        Some(Bson::Document(document)) => Ok(single_document_result(Some(document.clone()))),
+        Some(Bson::Null) | None => Ok(single_document_result(None)),
+        Some(other) => Err(format!("Unexpected findAndModify value: {other:?}")),
+    }
+}
+
 pub async fn find_one_and_update(
     client: &Client,
     database: &str,
@@ -2487,6 +2656,7 @@ pub async fn find_one_and_replace(
         serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
     let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    reject_update_operator_replacement(&replacement)?;
     let options: MongoFindOneAndReplaceOptions = parse_find_and_modify_options(options_json, "findOneAndReplace")?;
     let col = client.database(database).collection::<Document>(collection);
     let mut action = col.find_one_and_replace(filter, replacement);
@@ -4696,6 +4866,66 @@ mod tests {
     }
 
     #[test]
+    fn object_statistics_maps_collstats_fields() {
+        let stats = object_statistics_from_collection_stats(
+            "orders_10k",
+            "dbx_mongo_demo",
+            &doc! {
+                "count": 10000_i64,
+                "size": 2084944_i64,
+                "storageSize": 536576_i64,
+                "totalIndexSize": 364544_i64,
+            },
+        );
+
+        assert_eq!(stats.name, "orders_10k");
+        assert_eq!(stats.schema.as_deref(), Some("dbx_mongo_demo"));
+        assert_eq!(stats.estimated_rows, Some(10000));
+        // 536576 + 364544: the on-disk data + index footprint.
+        assert_eq!(stats.total_bytes, Some(901120));
+    }
+
+    #[test]
+    fn object_statistics_accepts_int32_collstats_fields() {
+        let stats = object_statistics_from_collection_stats(
+            "stores",
+            "app",
+            &doc! {
+                "count": 50_i32,
+                "storageSize": 20480_i32,
+                "totalIndexSize": 20480_i32,
+            },
+        );
+
+        assert_eq!(stats.estimated_rows, Some(50));
+        assert_eq!(stats.total_bytes, Some(40960));
+    }
+
+    #[test]
+    fn object_statistics_keeps_missing_fields_unknown() {
+        let stats = object_statistics_from_collection_stats("empty", "app", &doc! { "ok": 1_i32 });
+
+        assert_eq!(stats.estimated_rows, None);
+        assert_eq!(stats.total_bytes, None);
+    }
+
+    #[test]
+    fn object_statistics_reports_zero_sized_collections() {
+        let stats = object_statistics_from_collection_stats(
+            "fresh",
+            "app",
+            &doc! {
+                "count": 0_i32,
+                "storageSize": 0_i64,
+                "totalIndexSize": 0_i64,
+            },
+        );
+
+        assert_eq!(stats.estimated_rows, Some(0));
+        assert_eq!(stats.total_bytes, Some(0));
+    }
+
+    #[test]
     fn collection_stats_result_reads_expected_fields() {
         let result = collection_stats_result_from_document(&doc! {
             "count": 12_i64,
@@ -4818,6 +5048,62 @@ mod tests {
         assert!(find_and_modify_returns_after(Some("after"), None, None).unwrap());
         assert!(!find_and_modify_returns_after(Some("before"), None, None).unwrap());
         assert!(find_and_modify_returns_after(Some("newest"), None, None).is_err());
+    }
+
+    #[test]
+    fn find_and_modify_commands_mirror_the_native_options() {
+        let update = find_one_and_update_command(
+            "users",
+            r#"{"_id":{"$oid":"64b1f0c2a1b2c3d4e5f60718"}}"#,
+            r#"{"$set":{"active":true}}"#,
+            Some(r#"{"returnDocument":"after","upsert":true,"projection":{"active":1},"sort":{"_id":1},"arrayFilters":[{"item.active":true}]}"#),
+        )
+        .unwrap();
+        assert_eq!(update.get_str("findAndModify"), Ok("users"));
+        assert_eq!(
+            update.get_document("query").unwrap().get_object_id("_id").unwrap().to_hex(),
+            "64b1f0c2a1b2c3d4e5f60718"
+        );
+        assert_eq!(update.get_document("update"), Ok(&doc! { "$set": { "active": true } }));
+        assert_eq!(update.get_bool("new"), Ok(true));
+        assert_eq!(update.get_bool("upsert"), Ok(true));
+        assert_eq!(update.get_document("fields"), Ok(&doc! { "active": 1i64 }));
+        assert_eq!(update.get_document("sort"), Ok(&doc! { "_id": 1i64 }));
+        assert_eq!(update.get_array("arrayFilters").unwrap().len(), 1);
+
+        // Default return is the pre-change document, and absent options stay absent.
+        let minimal = find_one_and_update_command("users", "{}", r#"{"$inc":{"n":1}}"#, None).unwrap();
+        assert_eq!(minimal.keys().collect::<Vec<_>>(), vec!["findAndModify", "query", "update"]);
+
+        // A pipeline update is passed through as an array.
+        let pipeline = find_one_and_update_command("users", "{}", r#"[{"$set":{"n":1}}]"#, None).unwrap();
+        assert!(pipeline.get_array("update").is_ok());
+
+        let replace =
+            find_one_and_replace_command("users", r#"{"_id":1}"#, r#"{"name":"Grace"}"#, Some(r#"{"new":true}"#))
+                .unwrap();
+        assert_eq!(replace.get_document("update"), Ok(&doc! { "name": "Grace" }));
+        assert_eq!(replace.get_bool("new"), Ok(true));
+        assert!(!replace.contains_key("remove"));
+        // The server would run an operator document as an update; refuse it up front instead.
+        let refused = find_one_and_replace_command("users", "{}", r#"{"$set":{"name":"Grace"}}"#, None).unwrap_err();
+        assert!(refused.contains("must not contain update operators such as $set"), "{refused}");
+
+        let delete = find_one_and_delete_command("users", r#"{"_id":1}"#, Some(r#"{"sort":{"_id":-1}}"#)).unwrap();
+        assert_eq!(delete.get_bool("remove"), Ok(true));
+        assert_eq!(delete.get_document("sort"), Ok(&doc! { "_id": -1i64 }));
+        assert!(!delete.contains_key("update"));
+    }
+
+    #[test]
+    fn find_and_modify_response_maps_value_to_zero_or_one_document() {
+        let matched =
+            find_and_modify_response_result(&doc! { "value": { "_id": 1, "name": "Ada" }, "ok": 1.0 }).unwrap();
+        assert_eq!(matched.total, 1);
+        assert_eq!(matched.documents[0]["name"], "Ada");
+        let none = find_and_modify_response_result(&doc! { "value": Bson::Null, "ok": 1.0 }).unwrap();
+        assert_eq!(none.total, 0);
+        assert!(find_and_modify_response_result(&doc! { "value": "oops", "ok": 1.0 }).is_err());
     }
 
     #[test]

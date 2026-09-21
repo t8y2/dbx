@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardList, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardList, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Rows3, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -31,7 +31,7 @@ import { useToast } from "@/composables/useToast";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
-import { formatGeneratedDdlIdentifierQuotes, omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { applyDdlDatabaseQualifier, formatGeneratedDdlIdentifierQuotes, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import DataGridCopyColumnNamesDialog from "@/components/grid/DataGridCopyColumnNamesDialog.vue";
@@ -173,6 +173,8 @@ const emit = defineEmits<{
   saved: [commentChanged: boolean];
   close: [];
   openSettings: [initialTab?: string, initialSection?: string];
+  /** Jump from the DDL view to the table's data tab (issue #6724). */
+  viewData: [];
 }>();
 
 const activeTab = ref<TableInfoTab>("columns");
@@ -371,7 +373,7 @@ function scheduleDdlEditorInit() {
  * generated from the pending structure changes.
  */
 function formatDdlForDisplay(sql: string, dialect: SqlFormatDialect, generated = false): string {
-  const unqualified = omitDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+  const unqualified = applyDdlDatabaseQualifier(sql, dialect, databaseType.value, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.database, props.catalog);
   if (settingsStore.editorSettings.generateSqlQuoteIdentifiers) return unqualified;
   return generated ? formatGeneratedDdlIdentifierQuotes(unqualified, dialect, false, { preserveCaseSensitiveIdentifiers: tableStoresCaseSensitiveIdentifiers.value }) : omitDdlIdentifierQuotes(unqualified, dialect);
 }
@@ -1177,7 +1179,13 @@ const tableStoresCaseSensitiveIdentifiers = computed(() => {
   if (isCreateMode.value) return false;
   const databaseInfo = connection.value?.database_info;
   const requiresQuotesForIdentity = (name: string | null | undefined) => !!name && tableStructureIdentifierComparisonKey(name, databaseType.value, databaseInfo).startsWith("quoted:");
-  return [props.tableName, ...columns.value.map((column) => column.original?.name), ...indexes.value.map((index) => index.original?.name), ...foreignKeys.value.map((foreignKey) => foreignKey.original?.name), ...triggers.value.map((trigger) => trigger.original?.name)].some(requiresQuotesForIdentity);
+  // 外键的引用侧（被引用 schema/表/列）与约束名一样进入生成的 REFERENCES
+  // 子句，同样需要纳入大小写敏感扫描，否则会被折叠改写身份。
+  const foreignKeyIdentifiers = foreignKeys.value.flatMap((foreignKey) => {
+    const original = foreignKey.original;
+    return original ? [original.name, original.ref_schema, original.ref_table, original.ref_column] : [];
+  });
+  return [props.tableName, ...columns.value.map((column) => column.original?.name), ...indexes.value.map((index) => index.original?.name), ...foreignKeyIdentifiers, ...triggers.value.map((trigger) => trigger.original?.name)].some(requiresQuotesForIdentity);
 });
 const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
 const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));
@@ -4406,6 +4414,10 @@ watch(
               <TabsTrigger v-if="tableMetadataCapabilities.triggers" value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
             </TabsList>
             <div class="flex shrink-0 items-center gap-1.5">
+              <Button v-if="!isCreateMode" size="sm" variant="outline" :class="structureToolbarButtonClass" data-structure-view-data @click="emit('viewData')">
+                <Rows3 :class="structureIconClass" />
+                {{ t("contextMenu.viewData") }}
+              </Button>
               <div class="flex items-center gap-1.5">
                 <SlidersHorizontal :class="[structureIconClass, 'text-muted-foreground']" />
                 <div ref="structureDensityMenuRef" class="relative">

@@ -1305,7 +1305,14 @@ impl MySqlSetupMode {
             // configuration with `@@global.group_concat_max_len`), so the built-in
             // safety default must not overwrite it.
             Self::Standard if !mysql_session_variables_override_group_concat_max_len(url) => {
-                Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}"))
+                // GREATEST keeps a server that already raises the global limit
+                // above the built-in floor (for example `SET GLOBAL
+                // group_concat_max_len = 8388608`) from being silently lowered
+                // back to the floor by every new session.
+                Some(format!(
+                    "SET SESSION group_concat_max_len = \
+                     cast(greatest(@@session.group_concat_max_len, {MYSQL_GROUP_CONCAT_MAX_LEN}) as unsigned)"
+                ))
             }
             Self::Standard | Self::Compatible => None,
         }
@@ -1361,14 +1368,25 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || lower.contains("unknown system variable")
         || lower.contains("syntax error")
         || lower.contains("not supported");
+    // SphinxQL / Manticore reject the built-in `group_concat_max_len` setup with a
+    // boolean-typed 1064 error. The quoted token after `near` depends on the exact
+    // statement text, so accept any boolean rejection from SphinxQL that mentions
+    // the variable or the built-in floor value.
     let sphinxql_setup_query_rejected = lower.contains("sphinxql")
         && lower.contains("only 0 and 1 could be used as boolean values")
-        && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
+        && (lower.contains("group_concat_max_len") || lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'")));
     // Some MySQL gateways omit the variable name and report session-variable
     // changes as a forbidden global-variable operation.
     let gateway_session_variable_rejected =
         lower.contains("error 10192 (hy000)") && lower.contains("set global variables is forbidden");
-    if (lower.contains("group_concat_max_len") && setup_query_rejected)
+    // Error echoes of the floor statement always carry the variable name — a
+    // full-statement echo contains it verbatim, and a token quote like
+    // `near 'cast(greatest(...)'` spans the rest of the statement after the
+    // failing token, so the name is still present. Matching on the name alone
+    // keeps user-supplied `sessionVariables` that merely contain `cast(` from
+    // triggering a spurious Standard→Compatible retry.
+    let floor_statement_rejected = lower.contains("group_concat_max_len");
+    if (floor_statement_rejected && setup_query_rejected)
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
     {
@@ -1578,9 +1596,11 @@ fn mysql_setup_queries_for_database_with_mode(
     }
     queries.push(format!("SET NAMES {charset}"));
     // MySQL defaults group_concat_max_len to 1024, which silently truncates
-    // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
-    // such as old StarRocks versions that reject unknown MySQL variables, and
-    // for connections that configure the variable themselves.
+    // GROUP_CONCAT results. Only raise the session value to the built-in floor:
+    // a server whose global value is already higher keeps its own limit. Skip
+    // it for MySQL protocol-compatible databases such as old StarRocks versions
+    // that reject unknown MySQL variables, and for connections that configure
+    // the variable themselves.
     if let Some(query) = setup_mode.group_concat_max_len_query(url) {
         queries.push(query);
     }
@@ -7989,12 +8009,17 @@ mod tests {
 
     #[test]
     fn mysql_cnch_group_concat_syntax_error_retries_without_session_variable() {
-        let error = "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'";
-
-        assert_eq!(
-            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
-            Some(MySqlSetupMode::Compatible)
-        );
+        for error in [
+            "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'",
+            // Gateways with a reduced parser may quote the expression instead of
+            // the variable name; the floor statement is still the rejected one.
+            "MySQL connection failed: Server error: `ERROR HY000 (1105): Syntax error: failed at position 36 ('cast'): cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned). Expected one of: EQUALS'",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible)
+            );
+        }
     }
 
     #[test]
@@ -8104,12 +8129,18 @@ mod tests {
 
     #[test]
     fn mysql_sphinxql_group_concat_boolean_error_retries_without_session_variable() {
-        let error = "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`";
-
-        assert_eq!(
-            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
-            Some(MySqlSetupMode::Compatible)
-        );
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`",
+            // The floor statement now also uses `cast(... as unsigned)`, so
+            // SphinxQL may quote a different token while reporting the same
+            // boolean rejection.
+            "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near 'group_concat_max_len'`",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible)
+            );
+        }
     }
 
     #[test]
@@ -8151,14 +8182,44 @@ mod tests {
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec![
+                "USE `app`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_group_concat_setup_never_lowers_a_higher_server_limit() {
+        // A server that already raises `SET GLOBAL group_concat_max_len` above the
+        // built-in floor (for example 8388608) must keep that value: the setup
+        // statement raises small session values only.
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
+
+        let setup = queries
+            .iter()
+            .find(|query| query.contains("group_concat_max_len"))
+            .expect("group_concat_max_len setup statement");
+        assert_eq!(
+            setup,
+            "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+        );
     }
 
     #[test]
     fn mysql_setup_queries_skip_use_when_database_missing() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec![
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
     }
 
     #[test]
@@ -8200,7 +8261,14 @@ mod tests {
     fn mysql_setup_queries_decode_database_name_from_url() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec![
+                "USE `db/name`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
     }
 
     #[test]
@@ -8209,7 +8277,11 @@ mod tests {
 
         assert_eq!(
             queries,
-            vec!["USE ` analytics `", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE ` analytics `",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8223,7 +8295,11 @@ mod tests {
 
         assert_eq!(
             queries,
-            vec!["USE `app``proxy`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `app``proxy`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8496,7 +8572,11 @@ mod tests {
     fn mysql_setup_queries_default_to_utf8mb4() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8504,11 +8584,19 @@ mod tests {
     fn mysql_setup_queries_use_safe_custom_charset() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk", &[]),
-            vec!["USE `db`", "SET NAMES gbk", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES gbk",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8521,7 +8609,7 @@ mod tests {
             vec![
                 "USE `db`",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
                 "SET ob_query_timeout = 30000000"
             ]
         );
@@ -8538,7 +8626,7 @@ mod tests {
                 "USE `db`",
                 "SET SESSION query_timeout=60,SESSION sql_mode='STRICT,TRADITIONAL',@trace_id=concat('a,b','c')",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
     }
@@ -8547,7 +8635,11 @@ mod tests {
     fn mysql_setup_queries_ignore_empty_session_variables() {
         assert_eq!(
             mysql_setup_queries("mysql://host:9030/db?sessionVariables=%20%2C%20%3B%20", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8601,7 +8693,7 @@ mod tests {
                 "USE `db`",
                 "SET @group_concat_max_len=2048",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
         assert_eq!(
@@ -8610,7 +8702,7 @@ mod tests {
                 "USE `db`",
                 "SET @@global.group_concat_max_len=512",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
     }
@@ -8623,7 +8715,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+08:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
         assert_eq!(
@@ -8632,7 +8724,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
     }
@@ -8645,7 +8737,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+08:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
         assert_eq!(
@@ -8654,7 +8746,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+00:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
     }
@@ -8667,7 +8759,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
         assert_eq!(
@@ -8676,7 +8768,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+08:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
     }
@@ -8685,7 +8777,11 @@ mod tests {
     fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8712,7 +8808,11 @@ mod tests {
     fn mysql_setup_queries_omits_catalog_when_absent() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 

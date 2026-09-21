@@ -371,7 +371,8 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `openWorkbench(contributionId, context)` — requires `host.workbench`
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
 - `getPlanCapabilities(connectionId)` / `explainPlan(request)` — reads an estimated execution plan for one connection; requires `host.plans:read`, see [Estimated execution plans](#estimated-execution-plans)
-- `capabilities` — `{ downloadFile, planApi }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
+- `storage` — `storage.get(key)` / `storage.set(key, value)` / `storage.delete(key)` persist small JSON state per plugin in `plugin-data/<id>`; requires `host.storage`; values cap at 256 KiB and the whole store at 1 MiB, bulk data belongs in the sidecar's `DBX_PLUGIN_DATA_DIR`
+- `capabilities` — `{ downloadFile, planApi, storage }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
@@ -666,7 +667,7 @@ Sidecars are shared per plugin process, not spawned per tab. Plugins own their i
 - **UI isolation:** sandboxed iframe, restrictive CSP, bounded bridge payloads, safe asset paths, plugin identity binding.
 - **Secret persistence:** plugin secrets are removed from connection JSON and stored through DBX's secret-store path. Ordinary cloud-sync snapshots always contain redacted placeholders. Secrets enter sync data only inside the encrypted payload when the user has configured a sync passphrase; without one, plugin secrets remain local and are not synchronized.
 - **Native backend trust:** a native sidecar runs with the current OS user's privileges. A signature identifies the repository that approved and published the package; it is not an OS sandbox or proof that the author is harmless. Install only plugins whose backend code you trust.
-- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans.
+- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans. `host.storage` confines the workbench UI to a small JSON store inside its own `plugin-data/<id>` directory; it grants no other filesystem reach.
 
 Custom repository public keys can be added or removed in Plugin Center. Obtain them through a channel independent from the downloaded package.
 

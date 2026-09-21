@@ -94,6 +94,13 @@ describe("query result SQL selection", () => {
     expect(queryResultBaseSql(tab)).toBe("SELECT * FROM dbo.second");
     expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM dbo.second ORDER BY id DESC");
   });
+
+  it("uses lastExecutedSql when a data tab has no editor SQL", () => {
+    const tab = queryTab({ mode: "data", sql: "", lastExecutedSql: "SELECT * FROM users", result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } });
+
+    expect(queryResultBaseSql(tab)).toBe("SELECT * FROM users");
+    expect(queryResultExecutionSql(tab)).toBe("SELECT * FROM users");
+  });
 });
 
 describe("query result labels", () => {

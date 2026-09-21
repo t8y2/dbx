@@ -6,6 +6,7 @@ import {
   findCrossScopeShortcutConflicts,
   findShortcutConflict,
   formatShortcut,
+  gotoLineDefaultShortcut,
   isReservedShortcut,
   MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
@@ -480,6 +481,48 @@ describe("shortcutRegistry editor actions", () => {
       const before = { ...shortcuts };
       findCrossScopeShortcutConflicts(shortcuts);
       expect(shortcuts).toEqual(before);
+    });
+  });
+
+  describe("gotoLine", () => {
+    it("resolves the platform default and maps it to the CodeMirror key", () => {
+      // macOS 的 ⌃G 已分配给「选中下一个相同词」（JetBrains 风格），沿用
+      // CodeMirror 搜索键位里原本就指向 gotoLine 的 ⌘⌥G；Windows/Linux 用
+      // VS Code / SSMS 惯例的 Ctrl+G。
+      expect(gotoLineDefaultShortcut("MacIntel")).toBe("Mod+Alt+G");
+      expect(gotoLineDefaultShortcut("Win32")).toBe("Mod+G");
+      expect(gotoLineDefaultShortcut("Linux x86_64")).toBe("Mod+G");
+      expect(shortcutToCodeMirrorKey(gotoLineDefaultShortcut("MacIntel"))).toBe("Mod-Alt-g");
+      expect(shortcutToCodeMirrorKey(gotoLineDefaultShortcut("Win32"))).toBe("Mod-g");
+    });
+
+    it("registers an editor-scope definition with the settings label", () => {
+      expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "gotoLine")).toMatchObject({
+        id: "gotoLine",
+        labelKey: "settings.shortcutGotoLine",
+        scope: "editor",
+      });
+      expect(DEFAULT_SHORTCUT_SETTINGS.gotoLine).toBe(gotoLineDefaultShortcut());
+    });
+
+    it("re-resolves a cloud-synced default from the other platform", () => {
+      // 云同步会把另一平台的默认值当成显式配置带过来，解析后必须回到本机平台默认。
+      expect(normalizeShortcutSettings({ gotoLine: "Mod+Alt+G" }, "Win32").gotoLine).toBe("Mod+G");
+      expect(normalizeShortcutSettings({ gotoLine: "Mod+G" }, "MacIntel").gotoLine).toBe("Mod+Alt+G");
+      // 用户真正自定义的组合原样保留，清空仍然表示「不绑定」。
+      expect(normalizeShortcutSettings({ gotoLine: "Alt+Mod+Shift+L" }, "Win32").gotoLine).toBe("Alt+Mod+Shift+L");
+      expect(normalizeShortcutSettings({ gotoLine: "" }, "Win32").gotoLine).toBe("");
+    });
+
+    it("never collides with the same-scope selection-occurrence shortcuts", () => {
+      // 非 mac 的 Mod+G 展开后是 Ctrl+G，恰好等于 mac 上
+      // addNextSelectionOccurrence 的默认键；两者分属不同平台，不能互相判为冲突。
+      for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) {
+        const shortcuts = normalizeShortcutSettings(undefined, platform);
+        expect(shortcuts.gotoLine).toBe(gotoLineDefaultShortcut(platform));
+        expect(findShortcutConflict("gotoLine", shortcuts.gotoLine, shortcuts, platform)).toBeNull();
+        expect(findShortcutConflict("addNextSelectionOccurrence", shortcuts.addNextSelectionOccurrence, shortcuts, platform)).toBeNull();
+      }
     });
   });
 

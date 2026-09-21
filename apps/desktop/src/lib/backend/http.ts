@@ -5150,3 +5150,18 @@ export async function writePluginLocalFileChunk(_pluginId: string, _handleId: nu
 export async function closePluginLocalFile(_pluginId: string, _handleId: number): Promise<void> {
   throw new Error("Plugin local file access is not available in the web backend");
 }
+
+// Plugin UI storage goes through the Rust plugin-data tree on native hosts;
+// the web workbench host keeps its localStorage fallback in the component, so
+// these only exist to satisfy the shared backend surface.
+export async function getPluginUiStorage(_pluginId: string, _key: string): Promise<unknown> {
+  throw new Error("Plugin UI storage is not available in the web backend");
+}
+
+export async function setPluginUiStorage(_pluginId: string, _key: string, _value: unknown): Promise<void> {
+  throw new Error("Plugin UI storage is not available in the web backend");
+}
+
+export async function deletePluginUiStorage(_pluginId: string, _key: string): Promise<void> {
+  throw new Error("Plugin UI storage is not available in the web backend");
+}

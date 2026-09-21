@@ -1,5 +1,6 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
+import { sqlErrorDecorationRange, sqlErrorMessagePosition } from "@/lib/sql/sqlDiagnostics";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { resultSourceRange } from "@/lib/tabs/tabPresentation";
 
@@ -9,6 +10,12 @@ export interface EditorErrorPosition {
   /** 1-based line within the statement, for display. */
   line: number;
   /** 1-based column within the statement, for display. */
+  column: number;
+}
+
+/** Row/column shown next to the error; always relative to the editor statement. */
+export interface SqlErrorDisplayPosition {
+  line: number;
   column: number;
 }
 
@@ -87,6 +94,25 @@ function logDiagnostics(stage: string, options: SqlErrorOffsetOptions, extra: Re
 }
 
 /**
+ * The user-facing error text of a result, i.e. the same string the editor
+ * underlines in red (see `QueryEditor`'s `executionError` prop).
+ */
+export function sqlErrorMessageText(result: QueryResult | undefined | null): string {
+  return String(result?.rows?.[0]?.[0] ?? "");
+}
+
+/**
+ * Whether an error message names a position DBX can resolve.
+ *
+ * Used to decide whether a synthesized single-statement error result is worth
+ * annotating with its source range: engines that report no typed position
+ * (Oracle) still carry a parseable one in the message text.
+ */
+export function sqlErrorHasMessagePosition(message: string): boolean {
+  return !!message && sqlErrorMessagePosition(message) !== null;
+}
+
+/**
  * Translate a backend-reported SQL error position into an absolute offset in the
  * current editor document.
  *
@@ -96,15 +122,36 @@ function logDiagnostics(stage: string, options: SqlErrorOffsetOptions, extra: Re
  * is first resolved inside `executedStatement` and then projected back onto the
  * user's `sourceStatement` before it is placed in the editor.
  *
- * Returns `undefined` only when the result carries no position, or when
- * {@link resultSourceRange} cannot prove the result still maps to the same
- * statement text in the editor (stale editor / different statement) — jumping
- * anywhere in that case would be wrong.
+ * Falls back to the position carried by the error text when the backend reports
+ * no typed one (Oracle: `error occur at position: N`), using the same parser the
+ * editor's red underline uses, so both surfaces always agree.
+ *
+ * Returns `undefined` only when neither the envelope nor the error text carries a
+ * position, or when {@link resultSourceRange} cannot prove the result still maps
+ * to the same statement text in the editor (stale editor / different statement) —
+ * jumping anywhere in that case would be wrong.
  */
 export function sqlErrorEditorOffset(options: SqlErrorOffsetOptions): EditorErrorPosition | undefined {
+  return resolveSqlErrorOffset(options);
+}
+
+/**
+ * The row/column to show next to the error, using the driver-reported position
+ * when the backend provides one and the position parsed from the error message
+ * otherwise. Sharing {@link resolveSqlErrorOffset} with the jump means the
+ * "locate error" button is only shown when clicking it can actually move the
+ * caret.
+ */
+export function sqlErrorDisplayPosition(options: SqlErrorOffsetOptions): SqlErrorDisplayPosition | undefined {
+  const resolved = resolveSqlErrorOffset(options);
+  return resolved ? { line: resolved.line, column: resolved.column } : undefined;
+}
+
+function resolveSqlErrorOffset(options: SqlErrorOffsetOptions): EditorErrorPosition | undefined {
   const position = options.result?.error?.errorPosition;
-  if (!position) {
-    if (isSqlErrorPositionDebugEnabled()) logDiagnostics("skip:no-error-position", options, {});
+  const messageText = position ? "" : sqlErrorMessageText(options.result);
+  if (!position && !sqlErrorHasMessagePosition(messageText)) {
+    if (isSqlErrorPositionDebugEnabled()) logDiagnostics("skip:no-error-position", options, { hasMessagePosition: false });
     return undefined;
   }
 
@@ -125,18 +172,36 @@ export function sqlErrorEditorOffset(options: SqlErrorOffsetOptions): EditorErro
   const executedStatement = options.result?.executedStatement;
   const positionBasis = executedStatement ?? range.sql;
 
-  // Walk the line/column in the text the position is relative to (scalar values,
-  // matching PostgreSQL's character-based cursor), then convert to UTF-16.
-  const basisOffset = scalarPositionToUtf16Offset(positionBasis, position.line, position.column);
+  let basisOffset: number;
+  if (position) {
+    // Walk the line/column in the text the position is relative to (scalar
+    // values, matching PostgreSQL's character-based cursor), then convert to UTF-16.
+    basisOffset = scalarPositionToUtf16Offset(positionBasis, position.line, position.column);
+  } else {
+    // Engines without a typed position report it inside the message text
+    // (Oracle's Agent offset, `LINE n:` carets). Parse against the same basis the
+    // typed position would use, and reuse the exact range the editor already
+    // underlines in red so both surfaces agree.
+    const derived = sqlErrorDecorationRange(positionBasis, messageText);
+    if (!derived) {
+      if (isSqlErrorPositionDebugEnabled()) logDiagnostics("unresolved:message-position", options, { hasMessagePosition: true });
+      return undefined;
+    }
+    basisOffset = Math.min(derived.from, positionBasis.length);
+  }
   const drifted = Boolean(executedStatement && executedStatement !== range.sql);
   const sourceOffset = drifted ? mapExecutedOffsetToSource(executedStatement!, range.sql, basisOffset) : basisOffset;
 
   // Clamp inside the resolved statement range so a residual mismatch can never
   // place the caret outside the statement it belongs to.
   const editorOffset = Math.max(range.from, Math.min(range.from + sourceOffset, range.to));
+  // Report the row/column of the *source* statement, so the label always points
+  // at the same character the caret lands on (the position itself is relative to
+  // the executed statement, which DBX may have rewritten).
+  const display = utf16OffsetToScalarPosition(range.sql, clamp(sourceOffset, 0, range.sql.length));
   if (isSqlErrorPositionDebugEnabled()) {
     logDiagnostics("resolved", options, {
-      position,
+      position: position ?? { derivedFromMessage: true },
       rangeFrom: range.from,
       rangeTo: range.to,
       rangeSql: previewText(range.sql),
@@ -145,9 +210,36 @@ export function sqlErrorEditorOffset(options: SqlErrorOffsetOptions): EditorErro
       basisOffset,
       sourceOffset,
       editorOffset,
+      display,
     });
   }
-  return { offset: editorOffset, line: position.line, column: position.column };
+  return { offset: editorOffset, line: display.line, column: display.column };
+}
+
+/**
+ * Inverse of {@link scalarPositionToUtf16Offset}: the 1-based line and column
+ * (counted in Unicode scalar values) of a UTF-16 offset. Offsets past the end
+ * clamp to the last character.
+ */
+export function utf16OffsetToScalarPosition(text: string, offset: number): { line: number; column: number } {
+  const characters = Array.from(text);
+  if (characters.length === 0) return { line: 1, column: 1 };
+  const target = Math.max(0, Math.min(Math.floor(offset), text.length - 1));
+  let consumed = 0;
+  let line = 1;
+  let column = 1;
+  for (const character of characters) {
+    const width = character.length;
+    if (consumed >= target) break;
+    consumed += width;
+    if (character === "\n") {
+      line += 1;
+      column = 1;
+    } else {
+      column += 1;
+    }
+  }
+  return { line, column };
 }
 
 /**

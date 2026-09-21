@@ -78,6 +78,15 @@ export interface PluginFileWriteResult {
 /** Chunk size the host advertises for streamed saves; fits the bridge payload cap after base64. */
 export const PLUGIN_SAVE_CHUNK_BYTES = 1024 * 1024;
 
+/**
+ * Per-value cap for `host.storage` entries. The whole store is additionally
+ * capped by the native host; both bounds keep this a UI-state store — bulk
+ * data belongs to the sidecar's data directory.
+ */
+export const MAX_PLUGIN_STORAGE_VALUE_BYTES = 256 * 1024;
+/** Longest accepted `host.storage` key, mirroring the native host's bound. */
+export const MAX_PLUGIN_STORAGE_KEY_CHARS = 256;
+
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
@@ -117,6 +126,10 @@ export interface PluginHostBridgeApi {
   finishFileSave?(pluginId: string, handleId: string): Promise<void>;
   /** Close any file handle, discarding unsaved state. */
   closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
+  /** Persistent per-plugin key-value storage for sandboxed UIs; resolves null when the key is unset. */
+  storageGet?(pluginId: string, key: string): Promise<unknown>;
+  storageSet?(pluginId: string, key: string, value: unknown): Promise<void>;
+  storageDelete?(pluginId: string, key: string): Promise<void>;
 }
 
 interface PluginRequestMessage {
@@ -231,7 +244,11 @@ export class PluginHostBridge {
       permissions: [...(this.plugin.manifest.permissions || [])],
       // Additive capability advertisement: an older host omits `planApi`, and a
       // plugin must treat the absence as "unsupported" rather than probing.
-      capabilities: { downloadFile: !!this.api.downloadFile, planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan },
+      capabilities: {
+        downloadFile: !!this.api.downloadFile,
+        planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
+        storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
+      },
       context: snapshotPluginWorkbenchContext(this.context),
     });
   }
@@ -438,6 +455,33 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.closeFileHandle params");
       if (!this.api.closeFileHandle) throw new Error("Host file handling is unavailable");
       await this.api.closeFileHandle(this.plugin.manifest.id, requireHandleId(input.handleId));
+      return null;
+    }
+    if (method === "host.storageGet") {
+      this.requirePermission("host.storage");
+      if (!this.api.storageGet) throw new Error("Host storage is unavailable");
+      const input = requireRecord(params, "host.storageGet params");
+      return this.api.storageGet(this.plugin.manifest.id, requireStorageKey(input.key));
+    }
+    if (method === "host.storageSet") {
+      this.requirePermission("host.storage");
+      if (!this.api.storageSet) throw new Error("Host storage is unavailable");
+      const input = requireRecord(params, "host.storageSet params");
+      const key = requireStorageKey(input.key);
+      // Sized before the structured clone reaches the host implementation, so
+      // the native host and the web fallback enforce the same bound.
+      const bytes = new TextEncoder().encode(JSON.stringify(input.value ?? null)).byteLength;
+      if (bytes > MAX_PLUGIN_STORAGE_VALUE_BYTES) {
+        throw new Error(`host.storage value exceeds ${MAX_PLUGIN_STORAGE_VALUE_BYTES} bytes`);
+      }
+      await this.api.storageSet(this.plugin.manifest.id, key, input.value ?? null);
+      return null;
+    }
+    if (method === "host.storageDelete") {
+      this.requirePermission("host.storage");
+      if (!this.api.storageDelete) throw new Error("Host storage is unavailable");
+      const input = requireRecord(params, "host.storageDelete params");
+      await this.api.storageDelete(this.plugin.manifest.id, requireStorageKey(input.key));
       return null;
     }
     throw new Error(`Unsupported plugin host method '${method}'`);
@@ -769,6 +813,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      // Persistent per-plugin key-value state; gate on capabilities.storage
+      // (older hosts omit it) and declare the host.storage permission.
+      storage: Object.freeze({
+        get: (key) => request('host.storageGet', { key }),
+        set: (key, value) => request('host.storageSet', { key, value: value === undefined ? null : value }),
+        delete: (key) => request('host.storageDelete', { key }),
+      }),
       fileTransfer: Object.freeze({
         pick: (options) => request('host.pickFiles', options || {}),
         read: (handleId, offset, length) => request('host.readFileChunk', { handleId, offset, length }),
@@ -934,6 +985,14 @@ function requireOffset(value: unknown): number {
 function requireChunkLength(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error("length is invalid");
   return Math.min(8 * 1024 * 1024, Math.floor(value));
+}
+
+/** A `host.storage` key: bounded, non-empty, no control characters. */
+function requireStorageKey(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > MAX_PLUGIN_STORAGE_KEY_CHARS || /[\u0000-\u001f]/.test(value)) {
+    throw new Error("storage key is invalid");
+  }
+  return value;
 }
 
 function base64ToBytes(value: string): ArrayBuffer {

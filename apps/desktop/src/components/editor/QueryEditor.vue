@@ -23,6 +23,7 @@ import type { EditorState, Text } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
+import EditorGotoLinePanel from "./EditorGotoLinePanel.vue";
 import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
@@ -48,7 +49,7 @@ import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, compressSqlText, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
-import { omitDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
+import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
@@ -136,6 +137,7 @@ import { createHoverSearch, type HoverSearchController } from "@/lib/editor/sqlH
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "@/lib/sql/sqlDiagnostics";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
+import { buildSqlServerRoutineSyntaxDiagnostics } from "@/lib/sql/sqlServerRoutineSyntaxDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
@@ -185,6 +187,7 @@ import { startsQueryEditorRectangularSelection, startsQueryEditorSelectionDrag, 
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 import { queryEditorClipboardPasteChange } from "@/lib/editor/queryEditorClipboardPaste";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
+import { needsDiagnosticCaretReanchor } from "@/lib/editor/queryEditorDiagnosticCaretAnchor";
 import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
@@ -216,6 +219,7 @@ import {
   isSqlVirtualTableReference,
   shouldRunSqlSemanticDiagnostics,
   sqlSemanticDiagnosticRangesForViewport,
+  sqlServerRoutineDefinitionRangesForViewport,
   tableReferenceKey,
   type SqlSemanticDiagnostic,
 } from "@/lib/sql/semantic/diagnostics";
@@ -522,6 +526,7 @@ const gestureStartFontSize = ref(settingsStore.editorSettings.fontSize);
 const isGestureZooming = ref(false);
 
 const searchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
+const gotoLinePanelRef = ref<InstanceType<typeof EditorGotoLinePanel>>();
 const selectedSql = ref("");
 const executableSql = ref("");
 const previewContextSql = ref("");
@@ -2557,6 +2562,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           run: toggleSelectedBatchColumnSelection,
         },
         ...binding(shortcuts.find, openSearch),
+        ...binding(shortcuts.gotoLine, openGotoLine),
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeBindings,
@@ -3558,7 +3564,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
           // the aligned column layout from reformatHoverDdl.
           const isViewObject = objectMetadataRequest.objectType === "VIEW" || objectMetadataRequest.objectType === "MATERIALIZED_VIEW";
           const formatted = isViewObject ? await formatSqlForDisplay(rawDdl, formatDialect, settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
-          const unqualified = omitDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+          const unqualified = applyDdlDatabaseQualifier(formatted, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, hoverDatabase, props.catalog);
           sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
         }
       } catch (error) {
@@ -3592,7 +3598,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         }
         if (fullColumns.length > 0) {
           sqlContent = buildHoverTableSql(quoteQualifiedName(hoverQualifiedName), fullColumns, fullIndexes, tableComment);
-          sqlContent = omitDdlDatabaseQualifier(sqlContent, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.catalog);
+          sqlContent = applyDdlDatabaseQualifier(sqlContent, formatDialect, props.databaseType, settingsStore.editorSettings.generateSqlIncludeDatabaseName, hoverDatabase, props.catalog);
           if (!settingsStore.editorSettings.generateSqlQuoteIdentifiers) sqlContent = omitDdlIdentifierQuotes(sqlContent, formatDialect);
           metadataLoadFailed = false;
         }
@@ -3690,18 +3696,49 @@ function sqlSemanticDecorationRanges(currentState: import("@codemirror/state").E
     );
 }
 
+// Mirrors CodeMirror's own root handling: shadow roots only expose
+// `getSelection` on some browsers, otherwise the owner document holds it.
+function editorRootSelection(currentView: EditorViewType): Selection | null {
+  const root = currentView.root as unknown as ShadowRoot & { getSelection?: () => Selection | null };
+  if (root.nodeType !== 11) return (root as unknown as Document).getSelection();
+  if (typeof root.getSelection === "function") return root.getSelection() ?? null;
+  return root.ownerDocument?.getSelection() ?? null;
+}
+
+// See queryEditorDiagnosticCaretAnchor.ts for why the browser caret needs re-anchoring.
+function reanchorCaretAfterDiagnostics(currentView: EditorViewType) {
+  const selection = currentView.state.selection;
+  const target = selection.ranges.length === 1 && selection.main.empty ? currentView.domAtPos(selection.main.head) : null;
+  const domSelection = editorRootSelection(currentView);
+  const reanchor = needsDiagnosticCaretReanchor({
+    hasFocus: currentView.hasFocus,
+    composing: currentView.composing,
+    domRangeCount: domSelection?.rangeCount ?? 0,
+    currentAnchorNode: domSelection?.anchorNode ?? null,
+    currentAnchorOffset: domSelection?.anchorOffset ?? 0,
+    targetNode: target?.node ?? null,
+    targetOffset: target?.offset ?? 0,
+  });
+  if (!reanchor || !domSelection || !target) return;
+  domSelection.collapse(target.node, target.offset);
+}
+
 function reconfigureDiagnostics() {
-  if (!view.value) return;
+  const currentView = view.value;
+  if (!currentView) return;
   if (setSqlDiagnosticsEffect) {
-    view.value.dispatch({
+    currentView.dispatch({
       effects: setSqlDiagnosticsEffect.of(semanticDiagnostics),
     });
-    return;
+  } else {
+    if (!diagnosticComp || !buildSqlDiagnosticExtension) return;
+    currentView.dispatch({
+      effects: diagnosticComp.reconfigure(buildSqlDiagnosticExtension()),
+    });
   }
-  if (!diagnosticComp || !buildSqlDiagnosticExtension) return;
-  view.value.dispatch({
-    effects: diagnosticComp.reconfigure(buildSqlDiagnosticExtension()),
-  });
+  // Diagnostic decorations re-parent the DOM text nodes around the caret; put the
+  // browser's insertion point back on the caret before the next keystroke (#9480).
+  reanchorCaretAfterDiagnostics(currentView);
 }
 
 function setSemanticDiagnostics(next: SqlSemanticDiagnostic[]) {
@@ -3908,7 +3945,11 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     executableStatementRangeCache = executableStatementRangeCacheForDoc(executableStatementRangeCache, currentView.state.doc, props.databaseType, sqlStatementParameterOptions());
   }
   const diagnosticRanges = sqlSemanticDiagnosticRangesForViewport(sql, visibleRanges, props.databaseType, props.databaseType === "sqlserver" ? undefined : executableStatementRangeCache?.ranges, sqlStatementParameterOptions());
-  if (diagnosticRanges.length === 0) {
+  // SQL Server routine batches are excluded from `diagnosticRanges` (see
+  // `sqlServerRoutineDefinitionRangesForViewport`), so they are recomputed here
+  // and stay part of the replaced range set below.
+  const sqlServerRoutineRanges = props.databaseType === "sqlserver" ? sqlServerRoutineDefinitionRangesForViewport(sql, visibleRanges) : [];
+  if (diagnosticRanges.length === 0 && sqlServerRoutineRanges.length === 0) {
     if (!options.preserveOutsideRanges) setSemanticDiagnostics([]);
     return;
   }
@@ -3921,6 +3962,12 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
       return !!diagnosticRange && diagnosticRanges.some((range) => rangesOverlap(diagnosticRange, range));
     }),
   );
+  // The analyzer never sees routine batches (the MsSql grammar cannot parse their
+  // parameter list), so run the token-based routine syntax rules instead of leaving
+  // a stored procedure without any check at all (dbx#9315).
+  for (const range of sqlServerRoutineRanges) {
+    nextDiagnostics.push(...offsetSqlSemanticDiagnostics(buildSqlServerRoutineSyntaxDiagnostics(range.sql, props.databaseType), range, sql));
+  }
   const mysqlRoutineAnalysis = props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
   if (mysqlRoutineAnalysis) {
     nextDiagnostics.push(
@@ -3986,7 +4033,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     }
   }
   if (options.preserveOutsideRanges) {
-    replaceSemanticDiagnosticsInRanges(nextDiagnostics, diagnosticRanges, sql);
+    replaceSemanticDiagnosticsInRanges(nextDiagnostics, [...diagnosticRanges, ...sqlServerRoutineRanges], sql);
   } else {
     setSemanticDiagnostics(nextDiagnostics.sort(compareSqlSemanticDiagnostics));
   }
@@ -8204,6 +8251,10 @@ function openSearch(): boolean {
   return searchPanelRef.value?.openSearch() ?? false;
 }
 
+function openGotoLine(): boolean {
+  return gotoLinePanelRef.value?.openGotoLine() ?? false;
+}
+
 function openReplace(): boolean {
   if (props.readOnly) return false;
   return searchPanelRef.value?.openReplace() ?? false;
@@ -8291,7 +8342,8 @@ defineExpose({
       />
     </CustomContextMenu>
     <div v-show="queryEditorDropCaret" data-query-editor-drop-caret class="pointer-events-none absolute z-20 w-0.5 rounded-full bg-primary/70" :style="queryEditorDropCaretStyle" />
-    <EditorSearchPanel ref="searchPanelRef" :view="view" />
+    <EditorSearchPanel ref="searchPanelRef" :view="view" @open="gotoLinePanelRef?.closeGotoLine()" />
+    <EditorGotoLinePanel ref="gotoLinePanelRef" :view="view" @open="searchPanelRef?.closeSearch()" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
     <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />

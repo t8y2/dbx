@@ -40,6 +40,40 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect(tab?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1", workbenchId: "wb-original" });
   });
 
+  it("refreshes a reused result-view context when explicitly requested", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 1" },
+    });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 2" },
+      refreshContextOnReuse: true,
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1", sql: "SELECT 2" });
+  });
+
+  it("refreshes a reused result-view result snapshot when explicitly requested", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", result: { columns: ["id"], rows: [[1]], truncated: false } },
+    });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", result: { columns: ["id"], rows: [[2]], truncated: false } },
+      refreshContextOnReuse: true,
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.pluginWorkbench?.context?.result).toEqual({ columns: ["id"], rows: [[2]], truncated: false });
+  });
+
   it("a different connection still opens its own workbench tab", () => {
     const queryStore = useQueryStore();
 

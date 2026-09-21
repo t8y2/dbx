@@ -158,6 +158,40 @@ async function readPluginFileChunkById(pluginId: string, handleId: string, offse
   return { dataBase64: encodeBytesBase64(bytes), length: bytes.byteLength, eof: offset + bytes.byteLength >= file.size };
 }
 
+// --- Plugin UI storage bridge ---------------------------------------------
+// Native hosts persist to `plugin-data/<id>/ui-storage.json` through Rust; the
+// web host has no plugin-data tree, so entries fall back to the top document's
+// localStorage under a per-plugin prefix (same isolation, same JSON values).
+
+function webStorageKey(pluginId: string, key: string): string {
+  return `dbx-plugin-storage:${pluginId}:${key}`;
+}
+
+async function getPluginStorage(pluginId: string, key: string): Promise<unknown> {
+  if (isTauriRuntime()) {
+    const { getPluginUiStorage } = await tauriFileApi();
+    return getPluginUiStorage(pluginId, key);
+  }
+  const raw = localStorage.getItem(webStorageKey(pluginId, key));
+  return raw === null ? null : (JSON.parse(raw) as unknown);
+}
+
+async function setPluginStorage(pluginId: string, key: string, value: unknown): Promise<void> {
+  if (isTauriRuntime()) {
+    const { setPluginUiStorage } = await tauriFileApi();
+    return setPluginUiStorage(pluginId, key, value);
+  }
+  localStorage.setItem(webStorageKey(pluginId, key), JSON.stringify(value === undefined ? null : value));
+}
+
+async function deletePluginStorage(pluginId: string, key: string): Promise<void> {
+  if (isTauriRuntime()) {
+    const { deletePluginUiStorage } = await tauriFileApi();
+    return deletePluginUiStorage(pluginId, key);
+  }
+  localStorage.removeItem(webStorageKey(pluginId, key));
+}
+
 async function beginPluginFileSave(pluginId: string, request: { name?: string; contentType?: string; size?: number }): Promise<{ handleId: string; chunkBytes: number } | null> {
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
@@ -355,6 +389,9 @@ function createBridge() {
       writeFileChunk: (pluginId, handleId, offset, bytes) => writePluginFileChunkById(pluginId, handleId, offset, bytes),
       finishFileSave: (pluginId, handleId) => finishPluginFileSave(pluginId, handleId),
       closeFileHandle: (pluginId, handleId) => closePluginFileHandleById(pluginId, handleId),
+      storageGet: (pluginId, key) => getPluginStorage(pluginId, key),
+      storageSet: (pluginId, key, value) => setPluginStorage(pluginId, key, value),
+      storageDelete: (pluginId, key) => deletePluginStorage(pluginId, key),
     },
     appLocale.value,
     currentBridgeTheme(),

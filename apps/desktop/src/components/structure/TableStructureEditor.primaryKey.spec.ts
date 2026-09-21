@@ -55,6 +55,7 @@ vi.mock("@lucide/vue", async () => {
     Maximize2: Icon,
     Plus: Icon,
     RefreshCw: Icon,
+    Rows3: Icon,
     Save: Icon,
     Search: Icon,
     Settings: Icon,
@@ -248,7 +249,7 @@ import TableStructureEditor from "@/components/structure/TableStructureEditor.vu
 
 const mountedApps: App[] = [];
 
-function draft(isPrimaryKey = false, identity?: { seed: number; increment: number }, columnName = "id") {
+function draft(isPrimaryKey = false, identity?: { seed: number; increment: number }, columnName = "id", foreignKeyRefTable?: string) {
   const isNullable = identity ? false : !isPrimaryKey;
   return {
     initialized: true,
@@ -280,7 +281,30 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
       },
     ],
     indexes: [],
-    foreignKeys: [],
+    foreignKeys: foreignKeyRefTable
+      ? [
+          {
+            id: "existing:fk",
+            name: "FK_T_9649",
+            column: columnName,
+            refSchema: "",
+            refTable: foreignKeyRefTable,
+            refColumn: "ID",
+            onUpdate: "",
+            onDelete: "",
+            original: {
+              name: "FK_T_9649",
+              column: columnName,
+              ref_schema: null,
+              ref_table: foreignKeyRefTable,
+              ref_column: "ID",
+              on_update: null,
+              on_delete: null,
+            },
+            markedForDrop: false,
+          },
+        ]
+      : [],
     triggers: [],
   };
 }
@@ -288,7 +312,7 @@ function draft(isPrimaryKey = false, identity?: { seed: number; increment: numbe
 async function mountEditor(
   databaseType: "sqlserver" | "postgres" | "sqlite" | "oracle" | "oceanbase-oracle" | "iris" | "dameng" | "duckdb" | "informix",
   isPrimaryKey = false,
-  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string } = {},
+  options: { database?: string; dynamicTypes?: string[]; identity?: { seed: number; increment: number }; tableName?: string; columnName?: string; foreignKeyRefTable?: string } = {},
 ) {
   mocks.connection.db_type = databaseType;
   mocks.connection.name = databaseType;
@@ -304,7 +328,7 @@ async function mountEditor(
     database: options.database ?? "test",
     schema: "SYSDBA",
     tableName: options.tableName ?? "users",
-    draft: draft(isPrimaryKey, options.identity, options.columnName),
+    draft: draft(isPrimaryKey, options.identity, options.columnName, options.foreignKeyRefTable),
   });
   mountedApps.push(app);
   app.mount(root);
@@ -626,6 +650,20 @@ describe("TableStructureEditor primary key editing", () => {
 
     await vi.waitFor(() => expect(root.textContent).toContain('ALTER TABLE DBX_TEST."t_9649_lower" MODIFY (ID NUMBER(12))'));
     expect(root.textContent).not.toContain("T_9649_LOWER");
+  });
+
+  it("keeps case-sensitive foreign key referenced names quoted when quoting is disabled (#9649)", async () => {
+    mocks.editorSettings.generateSqlQuoteIdentifiers = false;
+    const root = await mountEditor("oracle", false, { tableName: "T_9649", columnName: "ID", foreignKeyRefTable: "cRefTab" });
+    mocks.buildTableStructureChangeSql.mockResolvedValueOnce({
+      statements: ['ALTER TABLE "DBX_TEST"."T_9649" ADD CONSTRAINT "FK_T_9649" FOREIGN KEY ("ID") REFERENCES "DBX_TEST"."cRefTab"("ID")'],
+      warnings: [],
+    });
+
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(root.textContent).toContain('REFERENCES DBX_TEST."cRefTab"(ID)'));
+    expect(root.textContent).not.toContain("CREFTAB");
   });
 
   it("still folds plain Oracle identifiers when quoting is disabled (#8997)", async () => {

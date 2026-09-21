@@ -1253,10 +1253,15 @@ pub fn build_export_insert_statements_excluding(
                 is_identity_column_extra(options.column_extras.get(*index).and_then(|value| value.as_deref()))
             });
 
-    let statement_prefix = format!("INSERT INTO {table} ({columns}) VALUES ");
+    // Multi-row batches are written one tuple per line (issue #9814) so exported
+    // `.sql` files stay readable in plain text editors. Statements that hold a
+    // single tuple keep the compact `VALUES (..);` form, which also preserves
+    // the "one INSERT per row" output of the single-row insert mode.
+    let statement_head = format!("INSERT INTO {table} ({columns}) VALUES");
+    let statement_prefix = format!("{statement_head} ");
     let statement_overhead_bytes = export_sql_statement_bytes(options.database_type, &statement_prefix) + 1;
     let target_statement_bytes = DATABASE_EXPORT_TARGET_STATEMENT_BYTES;
-    let separator_bytes = export_sql_statement_bytes(options.database_type, ", ");
+    let separator_bytes = export_sql_statement_bytes(options.database_type, ",\n");
     let mut current_values = String::new();
     let mut current_values_bytes = 0usize;
     let mut current_row_count = 0usize;
@@ -1267,7 +1272,8 @@ pub fn build_export_insert_statements_excluding(
                 return;
             }
             let mut insert_sql = String::with_capacity(statement_prefix.len() + values.len() + 1);
-            insert_sql.push_str(&statement_prefix);
+            insert_sql.push_str(&statement_head);
+            insert_sql.push(if *row_count > 1 { '\n' } else { ' ' });
             insert_sql.push_str(values);
             insert_sql.push(';');
             if needs_identity_insert_wrapper {
@@ -1316,7 +1322,9 @@ pub fn build_export_insert_statements_excluding(
             flush_values(&mut statements, &mut current_values, &mut current_values_bytes, &mut current_row_count);
         }
         if current_row_count > 0 {
-            current_values.push_str(", ");
+            // A separator is only ever written once a statement holds at least
+            // two tuples, so it can always use the multi-row layout.
+            current_values.push_str(",\n");
             current_values_bytes += separator_bytes;
         }
         current_values.push_str(&rendered_row);
@@ -4736,8 +4744,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(statements.len(), 2);
-        assert_eq!(statements[0].matches("), (").count(), 999);
-        assert_eq!(statements[1].matches("), (").count(), 0);
+        assert_eq!(statements[0].matches("),\n(").count(), 999);
+        assert_eq!(statements[1].matches("),\n(").count(), 0);
     }
 
     #[test]
@@ -5026,8 +5034,59 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'O''Hara');",
+                "INSERT INTO `users` (`id`, `name`) VALUES\n(1, 'Ada'),\n(2, 'O''Hara');",
                 "INSERT INTO `users` (`id`, `name`) VALUES (3, 'Linus');",
+            ]
+        );
+    }
+
+    #[test]
+    fn batched_insert_statements_write_each_row_on_its_own_line() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("users".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("O'Hara")], vec![json!(3), json!("Linus")]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["INSERT INTO `users` (`id`, `name`) VALUES\n(1, 'Ada'),\n(2, 'O''Hara'),\n(3, 'Linus');"]
+        );
+    }
+
+    #[test]
+    fn single_row_batches_keep_the_compact_insert_layout() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            schema: None,
+            table_name: Some("users".to_string()),
+            qualified_table_name: None,
+            columns: vec!["id".to_string(), "name".to_string()],
+            column_types: Vec::new(),
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
+            batch_size: Some(1),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');",
+                "INSERT INTO `users` (`id`, `name`) VALUES (2, 'Linus');",
             ]
         );
     }
@@ -5274,7 +5333,9 @@ mod tests {
 
         assert_eq!(
             statements,
-            vec!["INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES (b'1', b'1010', '1010'), (b'0', 3, 'off');"]
+            vec![
+                "INSERT INTO `flags` (`enabled`, `mask`, `label`) VALUES\n(b'1', b'1010', '1010'),\n(b'0', 3, 'off');"
+            ]
         );
     }
 
@@ -5370,7 +5431,7 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                "INSERT INTO `t_test_01` (`id`, `f_blob`, `note`) VALUES (1, 0x68656c6c6f, '0x68656c6c6f'), (2, X'', '1');"
+                "INSERT INTO `t_test_01` (`id`, `f_blob`, `note`) VALUES\n(1, 0x68656c6c6f, '0x68656c6c6f'),\n(2, X'', '1');"
             ]
         );
     }

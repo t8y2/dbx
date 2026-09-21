@@ -119,6 +119,8 @@ export interface UseDataGridEditorOptions {
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
   confirmDangerousRowDeletion?: ComputedRef<boolean>;
+  /** `生成 SQL 时包含数据库名` — qualify saved tables with their database. */
+  includeDatabaseNameInSaveSql?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
   /** Converts a grid value to the text presented by the cell editor. */
   cellEditorText?: (value: CellValue, columnIndex: number) => string;
@@ -246,6 +248,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     rowStatusFilter,
     dataGridQuickEntryEnabled = computed(() => false),
     confirmDangerousRowDeletion = computed(() => true),
+    includeDatabaseNameInSaveSql = computed(() => false),
     initialEditColumn,
     cellEditorText,
     normalizeEditorInput,
@@ -1572,6 +1575,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows: [...snapshot.dirtyRows.entries()].map(([rowIndex, changes]) => [rowIndex, [...changes.entries()]] as [number, Array<[number, CellValue]>]),
       deletedRows: [...snapshot.deletedRows],
       newRows: snapshot.newRows,
+      includeDatabaseName: includeDatabaseNameInSaveSql.value,
     };
   }
 

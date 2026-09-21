@@ -79,6 +79,14 @@ describe("component update orchestration", () => {
     expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: true, hasComponentUpdates: true })).toBe("defer-components");
   });
 
+  it("persists the selected component categories when the DBX package is already prepared", () => {
+    const action = resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: true, appUpdatePrepared: true, hasComponentUpdates: true });
+    expect(action).toBe("defer-components");
+
+    expect(markPendingComponentUpdatesAfterAppUpdate("0.6.16", "0.6.17", { kind: "manual", categories: ["drivers", "mcp"] })).toBe(true);
+    expect(takePendingComponentUpdatesAfterAppRestart("0.6.17")?.plan).toEqual({ kind: "manual", categories: ["drivers", "mcp"] });
+  });
+
   it("updates components immediately when no DBX update exists or the package cannot be installed", () => {
     expect(resolveUpdateAllAction({ hasAppUpdate: false, appUpdateCanInstall: true, appUpdatePrepared: false, hasComponentUpdates: true })).toBe("update-components");
     expect(resolveUpdateAllAction({ hasAppUpdate: true, appUpdateCanInstall: false, appUpdatePrepared: false, hasComponentUpdates: true })).toBe("update-components");

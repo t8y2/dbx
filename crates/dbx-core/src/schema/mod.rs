@@ -6348,6 +6348,7 @@ async fn list_object_statistics_once(
         PoolKind::ClickHouse(client) => {
             db::clickhouse_driver::list_object_statistics(client, clickhouse_metadata_database(database, schema)).await
         }
+        PoolKind::MongoDb(client) => db::mongo_driver::list_object_statistics(client, database).await,
         _ => Ok(vec![]),
     }
 }

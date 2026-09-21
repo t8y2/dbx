@@ -883,6 +883,83 @@ describe("PluginHostBridge", () => {
     expect(messages[0]).toMatchObject({ id: "nocopy", error: "Host clipboard is unavailable" });
   });
 
+  it("routes host.storage through the owning plugin, caps values, and needs the declared permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const storageGet = vi.fn().mockResolvedValue({ mode: "dark" });
+    const storageSet = vi.fn().mockResolvedValue(undefined);
+    const storageDelete = vi.fn().mockResolvedValue(undefined);
+    const send = (bridge: PluginHostBridge, id: string, method: string, params: unknown) => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id, method, params } } as MessageEvent);
+
+    // No declared host.storage permission: every call is refused up front.
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      storageGet,
+      storageSet,
+      storageDelete,
+    });
+    send(denied, "denied", "host.storageGet", { key: "theme" });
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "denied", error: "Plugin has not declared permission 'host.storage'" });
+    expect(storageGet).not.toHaveBeenCalled();
+
+    const bridge = new PluginHostBridge(plugin(["host.storage"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      storageGet,
+      storageSet,
+      storageDelete,
+    });
+    bridge.sendInit();
+    expect((messages[1] as { capabilities?: { storage?: boolean } }).capabilities?.storage).toBe(true);
+
+    send(bridge, "get", "host.storageGet", { key: "theme" });
+    await vi.waitFor(() => expect(storageGet).toHaveBeenCalledWith("sample", "theme"));
+    await vi.waitFor(() => expect(messages[2]).toMatchObject({ id: "get", result: { mode: "dark" } }));
+
+    send(bridge, "set", "host.storageSet", { key: "theme", value: { mode: "light" } });
+    await vi.waitFor(() => expect(storageSet).toHaveBeenCalledWith("sample", "theme", { mode: "light" }));
+    await vi.waitFor(() => expect(messages[3]).toMatchObject({ id: "set", result: null }));
+
+    send(bridge, "delete", "host.storageDelete", { key: "theme" });
+    await vi.waitFor(() => expect(storageDelete).toHaveBeenCalledWith("sample", "theme"));
+
+    // `undefined` values normalize to null so the entry round-trips as JSON.
+    send(bridge, "nullish", "host.storageSet", { key: "empty", value: null });
+    await vi.waitFor(() => expect(storageSet).toHaveBeenLastCalledWith("sample", "empty", null));
+
+    send(bridge, "badkey", "host.storageGet", { key: "" });
+    send(bridge, "bigvalue", "host.storageSet", { key: "blob", value: "x".repeat(256 * 1024 + 1) });
+    await vi.waitFor(() => expect(messages).toHaveLength(8));
+    const byId = new Map(messages.map((message) => [(message as { id?: string }).id, message]));
+    expect(byId.get("badkey")).toMatchObject({ id: "badkey", error: "storage key is invalid" });
+    expect(String((byId.get("bigvalue") as { error?: string }).error)).toMatch(/value exceeds/);
+  });
+
+  it("does not advertise or serve host.storage without the host implementation", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(["host.storage"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    bridge.sendInit();
+    expect((messages[0] as { capabilities?: { storage?: boolean } }).capabilities?.storage).toBe(false);
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "nostorage", method: "host.storageGet", params: { key: "theme" } },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(messages[1]).toMatchObject({ id: "nostorage", error: "Host storage is unavailable" });
+  });
+
   it("rejects host.saveFile without payload or host support", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

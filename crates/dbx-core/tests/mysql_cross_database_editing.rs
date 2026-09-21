@@ -86,6 +86,7 @@ fn mysql_cross_database_query_flow_preserves_target_database() {
         dirty_rows: vec![(0, vec![(1, json!("after"))])],
         deleted_rows: vec![],
         new_rows: vec![],
+        include_database_name: false,
     });
 
     assert_eq!(save.execution_schema.as_deref(), Some("db_9"));

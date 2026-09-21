@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
+import { parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorMessagePosition, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
 
 test("locates the Oracle invalid identifier reported by the Agent", () => {
   const sql = "select x.* from si_price_adjust_task t;";
@@ -47,6 +47,22 @@ test("keeps existing line-column and PostgreSQL caret parsing", () => {
   assert.deepEqual(parseSqlErrorLocation("ERROR 1064: syntax error near 'LIMIT 100' at line 3"), { line: 2, column: 0 });
   assert.deepEqual(parseSqlErrorLocation('ERROR: column "bad" does not exist\nLINE 3: SELECT bad\n               ^'), { line: 2, column: 15 });
   assert.deepEqual(sqlErrorDecorationRange("SELECT 1\nFROM bad", "syntax error at line 2, column 2"), { from: 10, to: 11 });
+});
+
+test("parses the Oracle Agent offset without needing the SQL it refers to", () => {
+  assert.deepEqual(sqlErrorMessagePosition('ORA-00904: "NOPE_COL": invalid identifier error occur at position: 2270'), { kind: "offset", offset: 2270 });
+  assert.deepEqual(sqlErrorMessagePosition("error occurred at position: 0"), { kind: "offset", offset: 0 });
+});
+
+test("prefers a textual location over the Oracle Agent offset", () => {
+  assert.deepEqual(sqlErrorMessagePosition("syntax error at line 2, column 4 error occur at position: 9"), { kind: "location", location: { line: 1, column: 3 } });
+  assert.deepEqual(sqlErrorMessagePosition('ERROR: column "bad" does not exist\nLINE 3: SELECT bad\n               ^'), { kind: "location", location: { line: 2, column: 15 } });
+});
+
+test("returns null when the message carries no usable position", () => {
+  assert.equal(sqlErrorMessagePosition("ERROR 1054 (42S22): Unknown column 'nope_col' in 'field list'"), null);
+  assert.equal(sqlErrorMessagePosition("error occur at position: nope"), null);
+  assert.equal(sqlErrorMessagePosition('ORA-00904: "X": invalid identifier'), null);
 });
 
 test("matches DBX pagination rewrites without accepting unrelated stale SQL", () => {

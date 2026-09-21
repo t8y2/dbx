@@ -22,7 +22,7 @@ pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
 pub const PLUGIN_CONNECTION_DISCONNECT_METHOD: &str = "connection/disconnect";
 pub const PLUGIN_CONNECTION_ACTION_METHOD: &str = "connection/action";
 pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] =
-    &["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read"];
+    &["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.storage"];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.

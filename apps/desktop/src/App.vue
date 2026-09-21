@@ -1317,6 +1317,15 @@ async function updateAllAvailable() {
       reportComponentUpdateResult(await componentUpdates.installCategories(categories));
       return;
     }
+    if (action === "defer-components") {
+      const remembered = await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
+      if (remembered) {
+        toast(t("settings.updateRestartHint"), 6000);
+        return;
+      }
+      reportComponentUpdateResult(await componentUpdates.installCategories(categories));
+      return;
+    }
     if (action === "download-app") await downloadUpdateInBackground();
     if (updateDownloaded.value || updateReady.value) await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
   } finally {

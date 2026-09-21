@@ -103,6 +103,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.filesystem",
     "host.binary",
     "host.plans:read",
+    "host.storage",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -119,6 +120,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
+- `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -295,8 +297,9 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `capabilities` | `{ downloadFile, planApi }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `capabilities` | `{ downloadFile, planApi, storage }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
+| `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
 | `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
@@ -392,6 +395,27 @@ const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
 
 Desktop only: the whole namespace is `undefined` in the web host, so feature-detect before use. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
 
+### Persistent UI State
+
+The sandbox has an opaque origin, so `localStorage` throws there. Workbenches that need to survive a reload or an app restart — last visited folder, panel sizes, drafts — use `window.dbxPlugin.storage` instead. It requires the `host.storage` permission and is advertised as `capabilities.storage` in the init message; gate on both before use.
+
+```js
+if (window.dbxPlugin.capabilities.storage) {
+  const storage = window.dbxPlugin.storage;
+  await storage.set("layout", { sidebar: "collapsed", sort: "name" });
+  const layout = await storage.get("layout"); // { sidebar: "collapsed", sort: "name" }, or null when unset
+  await storage.delete("layout");
+}
+```
+
+| API | Purpose |
+| --- | --- |
+| `get(key)` | Resolves the stored JSON value, or `null` when the key is unset. |
+| `set(key, value)` | Persists any JSON value (`undefined` normalizes to `null`). |
+| `delete(key)` | Removes one key; deleting an unset key succeeds. |
+
+Keys are strings up to 256 characters; values are capped at 256 KiB serialized and the whole store at 1 MiB — this is UI state, not a data sink. Entries live in the plugin's own `plugin-data/<id>` directory, isolated per plugin, and survive upgrades and uninstall. Bulk data, caches, and anything the sidecar produces belong in the sidecar's data directory instead (see [Native Sidecars and RPC](#native-sidecars-and-rpc)). On the web host the same API is backed by the browser profile, so identical code works in both hosts.
+
 ### Themes, Layout, and Static Assets
 
 DBX injects theme tokens on the document root and updates `data-dbx-theme`. Custom libraries, including Svelte and shadcn-svelte, should consume these variables; parent-page CSS does not cross the iframe:
@@ -470,6 +494,8 @@ fn main() -> std::io::Result<()> {
 ```
 
 Sidecar rules: reserve stdout for protocol messages and write logs to stderr; correlate concurrent requests by ID; make connect/disconnect idempotent; design timeouts, cancellation, and chunk acknowledgements for long tasks; never expose secrets through events, context, or error messages.
+
+Every sidecar starts with `DBX_PLUGIN_DATA_DIR` set to a persistent directory reserved for this plugin (`plugin-data/<id>`, a sibling of the installed package). It survives version upgrades and uninstall, is shared by all of the plugin's sidecar runs, and is the right home for caches, tokens, and databases the backend manages — create it before the first write; the host does not pre-create it. The Go SDK exposes it as `dbxpluginsdk.DataDir()` / `EnsureDataDir()`. Workbench UIs reach a small JSON-backed store inside the same directory through `host.storage` instead of touching these files (see [Persistent UI State](#persistent-ui-state)).
 
 The example can replace the Rust template's `backend/src/main.rs`; keep its Cargo package version equal to the Manifest. Go templates use `dbxpluginsdk.NewServer(metadata, handler).Serve()`. The current Go SDK supports JSONL; the Rust SDK also supports framed transport. Changing a Go Manifest's transport alone does not implement binary framing. See the [Rust SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/rust/dbx-plugin-sdk) and [Go SDK](https://github.com/t8y2/dbx/tree/main/plugins/sdk/go/dbx-plugin-sdk) for complete interfaces.
 

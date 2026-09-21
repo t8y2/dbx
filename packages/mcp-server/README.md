@@ -314,6 +314,7 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | Variable | Purpose |
 | --- | --- |
 | `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_SESSION_IDLE_TTL_SECS` | Stateful session idle timeout in positive whole seconds (default: `1800`). Invalid, zero, negative or unrepresentable values use the default. Applies to transaction-owned connections too; restart the MCP host after changing it. |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to the DBX Web backend |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
@@ -658,6 +659,7 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | 变量 | 用途 |
 | --- | --- |
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
+| `DBX_SESSION_IDLE_TTL_SECS` | 有状态会话空闲超时，单位为正整数秒，默认 `1800`。非法值、零、负数或无法表示的时长回退默认值；同样适用于事务专属连接。修改后需重启 MCP 宿主进程。 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | DBX Web 登录密码 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |

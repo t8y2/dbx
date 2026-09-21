@@ -1380,7 +1380,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_open_session",
-        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes."
+        description = "Open a stateful query session pinned to a single backend connection. Returns a session ID for dbx_execute_query: USE, SET CATALOG, session variables and temporary tables persist across calls within the session. Close with dbx_close_session when done; idle sessions expire after 30 minutes by default (configurable with DBX_SESSION_IDLE_TTL_SECS)."
     )]
     async fn open_session_tool(
         &self,

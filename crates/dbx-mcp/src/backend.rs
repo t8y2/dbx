@@ -675,7 +675,7 @@ impl LocalBackend {
             state,
             data_dir,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
-            transaction_owner_config: TransactionOwnerConfig::default(),
+            transaction_owner_config: TransactionOwnerConfig::from_env(),
         }
     }
 
@@ -710,7 +710,7 @@ impl LocalBackend {
             state,
             data_dir,
             transaction_owners: Arc::new(TransactionOwnerRegistry::default()),
-            transaction_owner_config: TransactionOwnerConfig::default(),
+            transaction_owner_config: TransactionOwnerConfig::from_env(),
         })
     }
 

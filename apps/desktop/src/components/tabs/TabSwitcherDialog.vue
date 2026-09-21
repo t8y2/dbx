@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import { hexToRgba } from "@/lib/common/color";
-import { connectionColor, connectionDisplayName, tabDisplayTitle, tabModeLabel } from "@/lib/tabs/tabPresentation";
+import { connectionColor, connectionDisplayName, tabDisplayTitle, tabDisplayTitles, tabModeLabel } from "@/lib/tabs/tabPresentation";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -21,6 +21,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const listRef = ref<HTMLElement>();
+const tabTitles = computed(() => tabDisplayTitles(props.tabs, t));
 
 function tabColor(tab: QueryTab): string {
   return connectionColor(tab.connectionId);
@@ -64,7 +65,7 @@ watch(
           >
             <TabModeIcon :tab="tab" class="h-4 w-4 shrink-0" />
             <div class="min-w-0 flex-1">
-              <div class="truncate text-sm font-medium">{{ tabDisplayTitle(tab, t) }}</div>
+              <div class="truncate text-sm font-medium">{{ tabTitles.get(tab.id) ?? tabDisplayTitle(tab, t) }}</div>
               <div class="truncate text-xs text-muted-foreground">
                 {{ connectionDisplayName(tab.connectionId) }}<template v-if="tab.database"> · {{ tab.database }}</template>
               </div>

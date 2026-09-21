@@ -78,6 +78,37 @@ export function isEventObjectBrowserTab(tab: QueryTab): boolean {
   return tab.mode === "objects" && (tab.objectBrowser?.initialObjectFilter === "events" || tab.objectBrowser?.eventName !== undefined || tab.objectBrowser?.eventCreateRequestId !== undefined);
 }
 
+/**
+ * Display titles for a whole tab list.
+ *
+ * Tabs whose plain title collides (most obviously several query tabs on the
+ * same connection and database, which all render `connection@database`) get a
+ * 1-based numeric suffix so the strip stays readable, the way DataGrip numbers
+ * its consoles. The first tab keeps no suffix when its title is unique, so
+ * single-tab windows look exactly as before.
+ */
+export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, string> {
+  const titles = new Map<string, string>();
+  for (const tab of tabs) titles.set(tab.id, tabDisplayTitle(tab, t));
+
+  const collisions = new Map<string, number>();
+  for (const tab of tabs) {
+    if (isPreviewTab(tab)) continue;
+    const title = titles.get(tab.id) ?? "";
+    collisions.set(title, (collisions.get(title) ?? 0) + 1);
+  }
+
+  const seen = new Map<string, number>();
+  for (const tab of tabs) {
+    const title = titles.get(tab.id) ?? "";
+    if (isPreviewTab(tab) || (collisions.get(title) ?? 0) < 2) continue;
+    const index = (seen.get(title) ?? 0) + 1;
+    seen.set(title, index);
+    titles.set(tab.id, `${title} ${index}`);
+  }
+  return titles;
+}
+
 export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   const database = databaseDisplayNameForTab(tab.connectionId, tab.database, t);
   const settingsStore = useSettingsStore();

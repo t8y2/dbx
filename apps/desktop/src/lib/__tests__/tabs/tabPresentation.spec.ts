@@ -15,6 +15,7 @@ import {
   tabColorStyle,
   tabDatabaseIconType,
   tabDisplayTitle,
+  tabDisplayTitles,
   tabIconClass,
   tabTooltipLines,
   tabularResultItems,
@@ -191,6 +192,48 @@ describe("query result grid identity", () => {
 });
 
 describe("tab group presentation", () => {
+  it("numbers colliding query tab titles so several tabs stay distinguishable", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [queryTab({ id: "tab-1" }), queryTab({ id: "tab-2" }), queryTab({ id: "tab-3" })];
+
+    const titles = tabDisplayTitles(tabs, translate);
+    expect([...titles.values()]).toEqual(["PostgreSQL@db 1", "PostgreSQL@db 2", "PostgreSQL@db 3"]);
+  });
+
+  it("leaves tab titles untouched while they are unique", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+    const tabs = [
+      queryTab({ id: "tab-1" }),
+      queryTab({ id: "tab-2", database: "other" }),
+      queryTab({ id: "tab-3", customTitle: true, title: "orders.sql", savedSqlId: "sql-1" }),
+    ];
+
+    const titles = tabDisplayTitles(tabs, translate);
+    expect(titles.get("tab-1")).toBe("PostgreSQL@db");
+    expect(titles.get("tab-2")).toBe("PostgreSQL@other");
+    expect(titles.get("tab-3")).toBe("orders.sql");
+  });
+
+  it("numbers duplicate custom titles in strip order and skips preview tabs", () => {
+    const store = useConnectionStore();
+    store.connections = [
+      { id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig,
+      { id: "conn-preview", name: "[Preview] PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig,
+    ];
+    const tabs = [
+      queryTab({ id: "tab-1", customTitle: true, title: "orders.sql", savedSqlId: "sql-1" }),
+      queryTab({ id: "tab-preview", connectionId: "conn-preview" }),
+      queryTab({ id: "tab-2", customTitle: true, title: "orders.sql", savedSqlId: "sql-2" }),
+    ];
+
+    const titles = tabDisplayTitles(tabs, translate);
+    expect(titles.get("tab-1")).toBe("orders.sql 1");
+    expect(titles.get("tab-2")).toBe("orders.sql 2");
+    expect(titles.get("tab-preview")).toBe("SQL");
+  });
+
   it("does not expose the internal objects mode in object browser tab titles", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];

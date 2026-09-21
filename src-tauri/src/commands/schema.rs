@@ -546,6 +546,17 @@ pub async fn list_invalid_indexes(
 }
 
 #[tauri::command]
+pub async fn get_table_partitioning(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<dbx_core::db::PgTablePartitioning, String> {
+    dbx_core::schema::get_table_partitioning_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn list_subpartitions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

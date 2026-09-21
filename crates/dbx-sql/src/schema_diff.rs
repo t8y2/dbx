@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use log;
 use rayon::prelude::*;
@@ -5514,6 +5514,153 @@ pub fn generate_schema_sync_sql_plan(
     SchemaSyncSqlPlan { sync_sql, rollback_sync_sql, rollback_completeness, missing_rollback_objects }
 }
 
+/// Names of the objects a diff's own statements reference.
+///
+/// Foreign keys are read from the side that owns the definition: an `added`
+/// object only has the source side, a `removed` object only the target side.
+/// View definitions have no foreign keys, so their DDL is scanned for table
+/// references — the same fallback `DependencyGraph::build_*` uses.
+fn diff_referenced_objects(diff: &TableDiff, known: &HashSet<&str>) -> Vec<String> {
+    fn push_unique(names: &mut Vec<String>, name: &str) {
+        if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+
+    let mut names: Vec<String> = Vec::new();
+    for foreign_key in diff.foreign_keys.as_deref().unwrap_or_default() {
+        let info = match diff.diff_type.as_str() {
+            "removed" => foreign_key.target.as_ref().or(foreign_key.source.as_ref()),
+            _ => foreign_key.source.as_ref().or(foreign_key.target.as_ref()),
+        };
+        if let Some(info) = info {
+            push_unique(&mut names, info.ref_table.as_str());
+        }
+    }
+
+    if diff.object_type.as_deref() == Some("view") {
+        if let Some(ddl) = diff.ddl.as_deref().or(diff.target_ddl.as_deref()) {
+            // Identifier quoting would hide the reference from the keyword scan.
+            let unquoted: String = ddl.chars().filter(|ch| !matches!(ch, '`' | '"' | '[' | ']')).collect();
+            for name in extract_ddl_references(&unquoted, known) {
+                push_unique(&mut names, name.as_str());
+            }
+        }
+    }
+
+    names
+}
+
+/// Orders table diffs so the generated script runs top-to-bottom on the target.
+///
+/// A `CREATE TABLE` fails when its foreign key points at a table that does not
+/// exist yet, and a `DROP TABLE` fails while another table still references it.
+/// Comparison order comes from the object list (alphabetical), so a child table
+/// can precede its parent: the batch then aborts halfway and the target ends up
+/// partially synced (#9761). Parents are therefore emitted before the tables
+/// that reference them, and dropped after them.
+///
+/// Only diffs with a real dependency move; entries without one keep their
+/// relative order, so plans without dependencies are unchanged.
+fn order_diffs_for_execution(diffs: &[TableDiff]) -> Vec<&TableDiff> {
+    let mut added: HashMap<&str, usize> = HashMap::new();
+    let mut removed: HashMap<&str, usize> = HashMap::new();
+    for (index, diff) in diffs.iter().enumerate() {
+        match diff.diff_type.as_str() {
+            "added" => {
+                added.insert(diff.name.as_str(), index);
+            }
+            "removed" => {
+                removed.insert(diff.name.as_str(), index);
+            }
+            _ => {}
+        }
+    }
+    if added.is_empty() && removed.is_empty() {
+        return diffs.iter().collect();
+    }
+
+    let known: HashSet<&str> = diffs.iter().map(|diff| diff.name.as_str()).collect();
+    let references: Vec<Vec<String>> = diffs.iter().map(|diff| diff_referenced_objects(diff, &known)).collect();
+
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); diffs.len()];
+    let mut in_degree = vec![0usize; diffs.len()];
+    let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+    let mut add_edge = |from: usize, to: usize, successors: &mut Vec<Vec<usize>>, in_degree: &mut Vec<usize>| {
+        if from != to && seen_edges.insert((from, to)) {
+            successors[from].push(to);
+            in_degree[to] += 1;
+        }
+    };
+
+    for (index, diff) in diffs.iter().enumerate() {
+        match diff.diff_type.as_str() {
+            // Parents before children.
+            "added" => {
+                for dependency in &references[index] {
+                    if let Some(&parent) = added.get(dependency.as_str()) {
+                        add_edge(parent, index, &mut successors, &mut in_degree);
+                    }
+                }
+            }
+            // Children before parents, so no table is dropped while still referenced.
+            "removed" => {
+                for dependency in &references[index] {
+                    if let Some(&parent) = removed.get(dependency.as_str()) {
+                        add_edge(index, parent, &mut successors, &mut in_degree);
+                    }
+                }
+            }
+            // Modified tables emit `ALTER TABLE ... ADD/DROP FOREIGN KEY` inline,
+            // so an FK added on a modified table still needs the referenced
+            // table's CREATE first, and an FK dropped on a modified table must
+            // run before the referenced table's DROP.
+            _ => {
+                for foreign_key in diff.foreign_keys.as_deref().unwrap_or_default() {
+                    let info = foreign_key.source.as_ref().or(foreign_key.target.as_ref());
+                    let Some(info) = info else { continue };
+                    match foreign_key.diff_type.as_str() {
+                        "added" => {
+                            if let Some(&parent) = added.get(info.ref_table.as_str()) {
+                                add_edge(parent, index, &mut successors, &mut in_degree);
+                            }
+                        }
+                        "removed" => {
+                            if let Some(&parent) = removed.get(info.ref_table.as_str()) {
+                                add_edge(index, parent, &mut successors, &mut in_degree);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let mut ready: BTreeSet<usize> = (0..diffs.len()).filter(|index| in_degree[*index] == 0).collect();
+    let mut ordered: Vec<usize> = Vec::with_capacity(diffs.len());
+    let mut placed = vec![false; diffs.len()];
+    while let Some(&index) = ready.iter().next() {
+        ready.remove(&index);
+        ordered.push(index);
+        placed[index] = true;
+        for &next in &successors[index] {
+            in_degree[next] -= 1;
+            if in_degree[next] == 0 {
+                ready.insert(next);
+            }
+        }
+    }
+    // A dependency cycle cannot be ordered; keep the caller's order for it.
+    for (index, was_placed) in placed.iter().enumerate() {
+        if !was_placed {
+            ordered.push(index);
+        }
+    }
+
+    ordered.into_iter().map(|index| &diffs[index]).collect()
+}
+
 fn generate_schema_sync_sql_inner(
     diffs: &[TableDiff],
     function_diffs: &[FunctionDiff],
@@ -5548,7 +5695,7 @@ fn generate_schema_sync_sql_inner(
         diff_type == "added"
     });
 
-    for diff in diffs {
+    for diff in order_diffs_for_execution(diffs) {
         let target_name = target_table_name(diff);
         let table = qualified_name(target_name, db_type, schema);
 
@@ -13787,5 +13934,221 @@ mod tests {
         let sql = generate_schema_sync_sql(&[], &[fn_diff], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
         assert!(sql.contains("-- Skip function f1"), "{sql}");
         assert!(!sql.contains("CREATE FUNCTION"), "{sql}");
+    }
+
+    fn added_table_diff(name: &str) -> TableDiff {
+        TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("table".into()),
+            name: name.into(),
+            ddl: Some(format!("CREATE TABLE `{name}` (\n  `id` int NOT NULL\n)")),
+            ..Default::default()
+        }
+    }
+
+    fn added_table_diff_referencing(name: &str, parent: &str) -> TableDiff {
+        TableDiff {
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "added".into(),
+                name: format!("fk_{name}"),
+                source: Some(ForeignKeyInfo {
+                    name: format!("fk_{name}"),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: parent.into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                target: None,
+                changes: Vec::new(),
+            }]),
+            ..added_table_diff(name)
+        }
+    }
+
+    fn removed_table_diff_referencing(name: &str, parent: &str) -> TableDiff {
+        TableDiff {
+            diff_type: "removed".into(),
+            object_type: Some("table".into()),
+            name: name.into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "removed".into(),
+                name: format!("fk_{name}"),
+                source: None,
+                target: Some(ForeignKeyInfo {
+                    name: format!("fk_{name}"),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: parent.into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                changes: Vec::new(),
+            }]),
+            target_ddl: Some(format!("CREATE TABLE `{name}` (`id` int NOT NULL, `parent_id` int)")),
+            ..Default::default()
+        }
+    }
+
+    fn statement_position(sql: &str, marker: &str) -> usize {
+        sql.find(marker).unwrap_or_else(|| panic!("missing {marker} in:\n{sql}"))
+    }
+
+    #[test]
+    fn added_foreign_key_child_is_deployed_after_its_parent() {
+        let diffs = vec![added_table_diff_referencing("child9761", "parent9761"), added_table_diff("parent9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: parent9761")
+                < statement_position(&sql, "-- Create table: child9761"),
+            "parents must be created before the tables that reference them:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn removed_foreign_key_child_is_dropped_before_its_parent() {
+        let diffs = vec![
+            removed_table_diff_referencing("zzz_child9761", "aaa_parent9761"),
+            TableDiff {
+                diff_type: "removed".into(),
+                object_type: Some("table".into()),
+                name: "aaa_parent9761".into(),
+                target_ddl: Some("CREATE TABLE `aaa_parent9761` (`id` int NOT NULL)".into()),
+                ..Default::default()
+            },
+        ];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, true, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Drop table: zzz_child9761")
+                < statement_position(&sql, "-- Drop table: aaa_parent9761"),
+            "referencing tables must be dropped first:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn added_view_is_created_after_the_table_it_reads() {
+        let view = TableDiff {
+            diff_type: "added".into(),
+            object_type: Some("view".into()),
+            name: "aaa_view9761".into(),
+            ddl: Some("CREATE VIEW `aaa_view9761` AS SELECT `id` FROM `zzz_table9761`".into()),
+            ..Default::default()
+        };
+        let diffs = vec![view, added_table_diff("zzz_table9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: zzz_table9761")
+                < statement_position(&sql, "-- Create view: aaa_view9761"),
+            "views must be created after the tables they read:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn independent_diffs_keep_their_original_statement_order() {
+        let diffs = vec![added_table_diff("bbb9761"), added_table_diff("aaa9761"), added_table_diff("ccc9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: bbb9761") < statement_position(&sql, "-- Create table: aaa9761")
+                && statement_position(&sql, "-- Create table: aaa9761")
+                    < statement_position(&sql, "-- Create table: ccc9761"),
+            "plans without dependencies must keep the caller's order:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn modified_table_fk_added_to_new_table_waits_for_its_create() {
+        let modified = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "aaa_child_mod9761".into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "added".into(),
+                name: "fk_aaa_child_mod9761".into(),
+                source: Some(ForeignKeyInfo {
+                    name: "fk_aaa_child_mod9761".into(),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: "zzz_parent9761".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                target: None,
+                changes: Vec::new(),
+            }]),
+            ..Default::default()
+        };
+        let diffs = vec![modified, added_table_diff("zzz_parent9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: zzz_parent9761")
+                < statement_position(&sql, "ALTER TABLE `aaa_child_mod9761` ADD CONSTRAINT"),
+            "an ALTER on a modified table adding an FK to a new table must follow that table's CREATE:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn modified_table_fk_dropped_runs_before_referenced_table_drop() {
+        let modified = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "aaa_child_mod9761".into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "removed".into(),
+                name: "fk_aaa_child_mod9761".into(),
+                source: None,
+                target: Some(ForeignKeyInfo {
+                    name: "fk_aaa_child_mod9761".into(),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: "zzz_parent9761".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                changes: Vec::new(),
+            }]),
+            ..Default::default()
+        };
+        let removed_parent = TableDiff {
+            diff_type: "removed".into(),
+            object_type: Some("table".into()),
+            name: "zzz_parent9761".into(),
+            ..Default::default()
+        };
+        let diffs = vec![modified, removed_parent];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "ALTER TABLE `aaa_child_mod9761` DROP FOREIGN KEY")
+                < statement_position(&sql, "-- Drop table: zzz_parent9761"),
+            "an ALTER dropping an FK must run before the referenced table's DROP:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn circular_foreign_keys_still_emit_every_create_statement() {
+        let diffs = vec![
+            added_table_diff_referencing("loop_a9761", "loop_b9761"),
+            added_table_diff_referencing("loop_b9761", "loop_a9761"),
+        ];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(sql.contains("-- Create table: loop_a9761"), "{sql}");
+        assert!(sql.contains("-- Create table: loop_b9761"), "{sql}");
     }
 }

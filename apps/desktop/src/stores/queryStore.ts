@@ -213,6 +213,17 @@ interface OpenPendingObjectSourceTabOptions {
  */
 const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind[] = ["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"];
 
+/**
+ * 「查看」与「编辑」拿到的文本本就不同的对象类型：OceanBase Oracle 的序列在查看态
+ * 展示原生 `CREATE SEQUENCE`（信息量更大），编辑态才是可执行的 `ALTER SEQUENCE`，
+ * 所以查看态不能落成可保存的源码 tab —— 否则 Ctrl+S 会把 `CREATE SEQUENCE` 当增量
+ * 修改执行。其余类型（存储过程/函数/视图等）查看态与编辑态文本一致，查看态沿用
+ * v0.6.17 行为，仍是带 objectSource 的可保存源码 tab。
+ */
+function isViewOnlySourceWithoutEditablePayload(initialEditing: boolean | undefined, objectType: ObjectSourceKind): boolean {
+  return initialEditing === false && objectType === "SEQUENCE";
+}
+
 interface UpdateExecutionTargetOptions {
   persistSavedSqlTarget?: boolean;
 }
@@ -2741,18 +2752,17 @@ export const useQueryStore = defineStore("query", () => {
     // 两条弯路都要避开 —— 再建一个 pending tab 会让界面上多出一个转圈 tab，
     // 随后又被交接逻辑关掉；而只切过去不校验，会让重开看到的是旧 DDL
     // （改动前每次打开都会重新取源，源码 tab 没有其它刷新入口）。
-    const loaded =
-      options.initialEditing === false
-        ? undefined
-        : findMatchingObjectSourceTab({
-            connectionId: options.connectionId,
-            database: options.database,
-            title: options.title,
-            schema: options.schema,
-            catalog: options.catalog,
-            sql: "",
-            objectSource: { schema: options.schema, name: options.request.name, objectType: options.request.objectType, signature: options.request.signature },
-          });
+    const loaded = isViewOnlySourceWithoutEditablePayload(options.initialEditing, options.request.objectType)
+      ? undefined
+      : findMatchingObjectSourceTab({
+          connectionId: options.connectionId,
+          database: options.database,
+          title: options.title,
+          schema: options.schema,
+          catalog: options.catalog,
+          sql: "",
+          objectSource: { schema: options.schema, name: options.request.name, objectType: options.request.objectType, signature: options.request.signature },
+        });
     if (loaded) {
       loaded.sourceView = true;
       switchTab(loaded.id);
@@ -2887,7 +2897,7 @@ export const useQueryStore = defineStore("query", () => {
     // 加载期间 tab 被关掉（用户放弃）或连接被断开：静默丢弃，不重建、不写库
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab?.sourceLoad) return;
-    const sourceIsEditable = loaded.initialEditing !== false && loaded.raw.editable !== false && (!OBJECT_SOURCE_READ_ONLY_TYPES.includes(loaded.resolvedType) || (loaded.databaseType === "oceanbase-oracle" && loaded.resolvedType === "SEQUENCE"));
+    const sourceIsEditable = !isViewOnlySourceWithoutEditablePayload(loaded.initialEditing, loaded.resolvedType) && loaded.raw.editable !== false && (!OBJECT_SOURCE_READ_ONLY_TYPES.includes(loaded.resolvedType) || (loaded.databaseType === "oceanbase-oracle" && loaded.resolvedType === "SEQUENCE"));
     if (sourceIsEditable) {
       const options: OpenObjectSourceTabOptions = {
         connectionId: loaded.connectionId,

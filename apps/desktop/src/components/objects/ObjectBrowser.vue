@@ -69,9 +69,10 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
+import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
@@ -79,6 +80,7 @@ import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSq
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { PARTITION_TREE_INDENT_PX } from "@/lib/table/pgPartitionPresentation";
 import {
   buildDropObjectSql,
   buildDropTableSql,
@@ -144,6 +146,7 @@ import {
   initialObjectBrowserSortDirection,
   objectBrowserRowLegacyPinnedTreeNodeIds,
   objectBrowserRowMatchesPinnedTreeNode,
+  groupObjectBrowserRows,
   objectBrowserRowPinnedTreeNodeIdentity,
   sortObjectBrowserRows,
   summarizeObjectBrowserSearch,
@@ -265,6 +268,13 @@ const tableTriggersLoaded = ref(false);
 const tableConstraints = ref<ConstraintInfo[]>([]);
 const tableConstraintsLoading = ref(false);
 const tableConstraintsLoaded = ref(false);
+const tablePartitions = ref<PgTablePartitioning | null>(null);
+const tablePartitionsLoading = ref(false);
+const tablePartitionsLoaded = ref(false);
+// Only tables that actually are partitioned get the Partitions tab; the cheap
+// partition-status probe decides before the full tree is fetched.
+const tableIsPartitioned = ref(false);
+const tablePartitionStatusResolved = ref(false);
 // The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
 // is also shown, mirroring DataGrid/TableStructureEditor.
 const tableConstraintsForTab = computed(() => constraintsForConstraintsTab(tableConstraints.value, tableMetadataCapabilities.value.foreignKeys));
@@ -275,6 +285,7 @@ const activeTableInfoLoading = computed(() => {
   if (tableInfoTab.value === "columns") return tableColumnsLoading.value;
   if (tableInfoTab.value === "indexes") return tableIndexesLoading.value;
   if (tableInfoTab.value === "foreignKeys") return tableForeignKeysLoading.value;
+  if (tableInfoTab.value === "partitions") return tablePartitionsLoading.value;
   return tableInfoTab.value === "triggers" && tableTriggersLoading.value;
 });
 const SIDE_PANEL_MIN_WIDTH = 280;
@@ -624,17 +635,14 @@ const gridTemplateColumns = computed(() => {
 const objectGridMinWidth = computed(() => {
   return objectBrowserColumns.value.reduce((total, key) => total + objectColumnWidths.value[key], 0) + Math.max(0, objectBrowserColumns.value.length - 1) * 12 + 24;
 });
-const partitionRowsByParentId = computed(() => {
-  const groups = new Map<string, ObjectBrowserRow[]>();
-  for (const row of rows.value) {
-    if (!row.partitionParentId) continue;
-    const group = groups.get(row.partitionParentId) ?? [];
-    group.push(row);
-    groups.set(row.partitionParentId, group);
-  }
-  return groups;
-});
-const filteredRows = computed(() => groupedFilteredRows());
+
+const groupedRows = computed(() => groupedFilteredRows());
+const filteredRows = computed(() => groupedRows.value.rows);
+
+/** Nesting level of a partition row (0 for a top-level object). */
+function partitionRowDepth(row: ObjectBrowserRow): number {
+  return groupedRows.value.depths.get(row.id) ?? 0;
+}
 const selectableRows = computed(() => rows.value.filter((row) => row.type === "TABLE"));
 
 // ---- Grid (tile) view virtualization ----
@@ -924,32 +932,13 @@ function removePinnedObjectBrowserRows(rows: readonly ObjectBrowserRow[]) {
 }
 
 function groupedFilteredRows() {
-  const query = search.value.trim();
-  const candidateRows = rows.value.filter(rowMatchesObjectFilter);
-  const candidateIds = new Set(candidateRows.map((row) => row.id));
-  const matchingRows = objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter);
-  const matchingIds = new Set(matchingRows.map((row) => row.id));
-  const parentIdsWithMatchingPartitions = new Set(matchingRows.flatMap((row) => (row.partitionParentId ? [row.partitionParentId] : [])));
-  const rootRows = candidateRows.filter((row) => {
-    if (row.partitionParentId) return false;
-    if (!query) return true;
-    return matchingIds.has(row.id) || parentIdsWithMatchingPartitions.has(row.id);
+  return groupObjectBrowserRows({
+    rows: rows.value.filter(rowMatchesObjectFilter),
+    matchingRows: objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter),
+    query: search.value.trim(),
+    expandedPartitionParentIds: expandedPartitionParentIds.value,
+    sortRows: sortObjectBrowserRowsWithPins,
   });
-  const sortedRoots = sortObjectBrowserRowsWithPins(rootRows);
-  const result: ObjectBrowserRow[] = [];
-
-  for (const row of sortedRoots) {
-    result.push(row);
-    const partitions = partitionRowsByParentId.value.get(row.id)?.filter((partition) => candidateIds.has(partition.id));
-    if (!partitions?.length) continue;
-    const parentMatches = matchingIds.has(row.id);
-    const shouldShowPartitions = expandedPartitionParentIds.value.has(row.id) || !!query;
-    if (!shouldShowPartitions) continue;
-    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id)) : partitions;
-    result.push(...sortObjectBrowserRowsWithPins(visiblePartitions));
-  }
-
-  return result;
 }
 
 function iconClass(type: ObjectBrowserRow["type"]) {
@@ -1092,6 +1081,9 @@ const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   if (tableMetadataCapabilities.value.triggers) {
     tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
   }
+  if (tableMetadataCapabilities.value.partitions && tableIsPartitioned.value) {
+    tabs.push({ id: "partitions", label: t("structureEditor.partitions"), icon: Network, count: tablePartitions.value?.partitions.length });
+  }
   return tabs;
 });
 
@@ -1153,6 +1145,11 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableForeignKeys.value = [];
   tableTriggers.value = [];
   tableConstraints.value = [];
+  tablePartitions.value = null;
+  tablePartitionsLoaded.value = false;
+  tablePartitionsLoading.value = false;
+  tableIsPartitioned.value = false;
+  tablePartitionStatusResolved.value = false;
   tableColumnsLoaded.value = false;
   tableDdlLoaded.value = false;
   tableIndexesLoaded.value = false;
@@ -1160,12 +1157,18 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableTriggersLoaded.value = false;
   tableConstraintsLoaded.value = false;
   tableInfoSearchQuery.value = "";
-  // Determine initial tab: explicit request > previously activated
+  // Determine initial tab: explicit request > previously activated. Resolve the
+  // partition status first so a persisted `partitions` tab is not rejected (and
+  // overwritten) before the probe lands.
+  await probeTablePartitionStatus();
   const firstTab = initialTab ?? tableInfoTab.value;
   await selectTableInfoTab(firstTab);
 }
 
 async function selectTableInfoTab(tab: TableInfoTab) {
+  // The panel can be re-selected (or restored) without `openTableInfo`, so make
+  // sure the partition status has been probed before the tab list is consulted.
+  if (!tablePartitionStatusResolved.value) await probeTablePartitionStatus();
   const nextTab = tableInfoTabs.value.some((item) => item.id === tab) ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
   tableInfoTab.value = nextTab;
@@ -1176,6 +1179,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
   else if (nextTab === "constraints") await fetchTableConstraints();
   else if (nextTab === "triggers") await fetchTableTriggers();
+  else if (nextTab === "partitions") await fetchTablePartitions();
 }
 
 function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
@@ -1309,6 +1313,53 @@ async function fetchTableTriggers(force = false) {
   }
 }
 
+async function probeTablePartitionStatus() {
+  const row = sidePanelRow.value;
+  if (!row || !tableMetadataCapabilities.value.partitions) {
+    tableIsPartitioned.value = false;
+    tablePartitionStatusResolved.value = true;
+    return;
+  }
+  const epoch = sidePanelGuard.capture();
+  try {
+    const request = tableMetadataRequest(row);
+    const status = await api.getTablePartitionStatus(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIsPartitioned.value = status.isPartitionedParent || status.isPartition;
+  } catch {
+    // Fail closed: hide the tab rather than offering one that cannot load.
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableIsPartitioned.value = false;
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) tablePartitionStatusResolved.value = true;
+  }
+}
+
+async function fetchTablePartitions(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (tablePartitionsLoaded.value && !force)) return;
+  const epoch = sidePanelGuard.capture();
+  tablePartitionsLoading.value = true;
+  let loadedSuccessfully = false;
+  try {
+    const request = tableMetadataRequest(row);
+    // Live catalog read: partition metadata has no persisted cache facet.
+    const value = await api.getTablePartitioning(request.connectionId, request.database, request.schema || request.database, request.tableName);
+    if (sidePanelGuard.isStale(epoch)) return;
+    tablePartitions.value = value;
+    loadedSuccessfully = true;
+  } catch (error) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tablePartitions.value = null;
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) {
+      tablePartitionsLoaded.value = loadedSuccessfully;
+      tablePartitionsLoading.value = false;
+    }
+  }
+}
+
 async function fetchTableConstraints(force = false) {
   const row = sidePanelRow.value;
   if (!row || (tableConstraintsLoaded.value && !force)) return;
@@ -1361,6 +1412,10 @@ async function refreshActiveTableInfo() {
     tableTriggers.value = [];
     tableTriggersLoaded.value = false;
     await fetchTableTriggers(true);
+  } else if (tableInfoTab.value === "partitions") {
+    tablePartitions.value = null;
+    tablePartitionsLoaded.value = false;
+    await fetchTablePartitions(true);
   }
 }
 
@@ -3665,6 +3720,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <Square v-else class="h-3.5 w-3.5" />
                   </button>
                   <div class="flex min-w-0 items-center gap-2">
+                    <span v-if="partitionRowDepth(item) > 0" :data-partition-depth="partitionRowDepth(item)" :style="{ width: `${partitionRowDepth(item) * PARTITION_TREE_INDENT_PX}px` }" class="h-5 shrink-0" aria-hidden="true" />
                     <button
                       v-if="item.partitionCount"
                       type="button"
@@ -3675,7 +3731,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
                       <ChevronRight v-else class="h-3.5 w-3.5" />
                     </button>
-                    <span v-else-if="item.partitionParentId" class="ml-4 h-5 w-5 shrink-0" />
+                    <span v-else-if="item.partitionParentId" class="h-5 w-5 shrink-0" />
                     <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
                     <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
                     <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
@@ -3943,6 +3999,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </div>
           </div>
+          <TablePartitionsPanel v-else-if="tableInfoTab === 'partitions'" :partitioning="tablePartitions" :loading="tablePartitionsLoading" :error="''" :search-query="tableInfoSearchQuery" />
           <pre
             v-else-if="tableInfoTab === 'ddl' && !tableDdlLoading"
             ref="tableInfoDdlPreRef"

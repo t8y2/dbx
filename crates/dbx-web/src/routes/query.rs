@@ -75,6 +75,9 @@ pub struct ExecuteBatchRequest {
     pub catalog: Option<String>,
     pub timeout_secs: Option<u64>,
     pub destructive_confirmed: Option<bool>,
+    /// Opt-in single transaction for the whole batch (see
+    /// [`dbx_core::query::execute_statements_with_transaction_option`]).
+    pub use_transaction: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +274,19 @@ pub struct BuildTableStructureSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct BuildTableOwnerChangeSqlRequest {
     pub options: dbx_core::table_structure_sql::TableOwnerChangeSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildTablePartitionOperationSqlRequest {
+    pub options: dbx_core::table_structure_sql::TablePartitionSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildCreatePartitionedTableSqlRequest {
+    pub options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    pub partitioning: dbx_core::table_structure_sql::TablePartitionDefinition,
 }
 
 #[derive(Deserialize)]
@@ -625,12 +641,13 @@ pub async fn execute_batch(
         super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
-    let result = dbx_core::query::execute_statements(
+    let result = dbx_core::query::execute_statements_with_transaction_option(
         &state.app,
         &req.connection_id,
         &database,
         &req.statements,
         req.schema.as_deref(),
+        req.use_transaction == Some(true),
         req.timeout_secs,
     )
     .await
@@ -1027,6 +1044,18 @@ pub async fn build_table_owner_change_sql(
     Json(dbx_core::table_structure_sql::build_table_owner_change_sql(req.options))
 }
 
+pub async fn build_table_partition_operation_sql(
+    Json(req): Json<BuildTablePartitionOperationSqlRequest>,
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+    Json(dbx_core::table_structure_sql::build_table_partition_operation_sql(req.options))
+}
+
+pub async fn build_create_partitioned_table_sql(
+    Json(req): Json<BuildCreatePartitionedTableSqlRequest>,
+) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
+    Json(dbx_core::table_structure_sql::build_create_partitioned_table_sql(req.options, req.partitioning))
+}
+
 pub async fn preview_sqlite_table_structure_change(
     State(state): State<Arc<WebState>>,
     Json(req): Json<PreviewSqliteTableStructureChangeRequest>,
@@ -1267,6 +1296,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1292,6 +1322,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
@@ -1314,6 +1345,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1338,6 +1370,7 @@ mod tests {
             catalog: None,
             timeout_secs: None,
             destructive_confirmed: None,
+            use_transaction: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))

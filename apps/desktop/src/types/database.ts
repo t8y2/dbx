@@ -1525,7 +1525,43 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "ddl";
+export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "ddl";
+
+/** PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`). */
+export type PgPartitionKind = "range" | "list" | "hash";
+
+/** Structured form of a partition's `pg_get_expr(relpartbound)` definition. Values are the SQL literal text PostgreSQL reported (`'2024-01-01'`, `MINVALUE`, `0`). */
+export type PgPartitionBound = { kind: "range"; from: string[]; to: string[] } | { kind: "list"; values: string[] } | { kind: "hash"; modulus: number; remainder: number } | { kind: "default" };
+
+export interface PgPartitionNode {
+  schema: string;
+  name: string;
+  strategy?: PgPartitionKind;
+  keyDefinition?: string;
+  bound?: PgPartitionBound;
+  boundDefinition?: string;
+  isLeaf: boolean;
+  rowEstimate?: number;
+  totalBytes?: number;
+  children: PgPartitionNode[];
+}
+
+export interface PgTablePartitioning {
+  isPartitioned: boolean;
+  isPartition: boolean;
+  parent?: string;
+  parentSchema?: string;
+  parentTable?: string;
+  ownBound?: PgPartitionBound;
+  strategy?: PgPartitionKind;
+  keyDefinition?: string;
+  keyColumns: string[];
+  keyExpression?: string;
+  defaultPartition?: string;
+  partitions: PgPartitionNode[];
+  /** `server_version_num`, used to gate `DETACH PARTITION CONCURRENTLY` (14+). */
+  serverVersionNum?: number;
+}
 
 export interface TableStructureEditorTarget {
   kind: "column" | "index";
@@ -1558,6 +1594,13 @@ export interface TableStructureEditorDraft {
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
+  /** Pending PostgreSQL partition operations (create/attach/detach/drop). */
+  partitionOperations?: import("@/lib/table/tableStructureEditorSql").TablePartitionOperation[];
+  /** Create-mode `PARTITION BY` declaration. */
+  createPartitioningEnabled?: boolean;
+  createPartitioningKind?: import("@/types/database").PgPartitionKind;
+  createPartitioningColumns?: string[];
+  createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */

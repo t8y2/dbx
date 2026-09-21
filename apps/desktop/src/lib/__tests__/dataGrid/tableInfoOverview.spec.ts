@@ -22,6 +22,16 @@ describe("findTableStatistics", () => {
     expect(findTableStatistics(stats, "orders")?.estimated_rows).toBe(100);
   });
 
+  it("matches case-insensitively when drivers report inconsistent casing", () => {
+    const mixed: ObjectStatistics[] = [
+      { name: "Orders", schema: "PUBLIC", estimated_rows: 7, total_bytes: 512 },
+      { name: "Orders", schema: "reporting", estimated_rows: 9, total_bytes: 256 },
+    ];
+    expect(findTableStatistics(mixed, "orders", "public")?.estimated_rows).toBe(7);
+    expect(findTableStatistics(mixed, "ORDERS", "REPORTING")?.estimated_rows).toBe(9);
+    expect(findTableStatistics(mixed, "orders")?.estimated_rows).toBe(7);
+  });
+
   it("returns undefined when the table has no statistics", () => {
     expect(findTableStatistics(stats, "missing", "public")).toBeUndefined();
     expect(findTableStatistics([], "orders")).toBeUndefined();

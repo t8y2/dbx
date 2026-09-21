@@ -413,7 +413,7 @@ watch(
       <DialogHeader>
         <DialogTitle>{{ t("meilisearch.createIndex") }}</DialogTitle>
       </DialogHeader>
-      <div class="grid gap-3">
+      <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-3">
         <label class="grid gap-1.5 text-sm font-medium">
           {{ t("meilisearch.createIndexUid") }}
           <Input v-model="meilisearchCreateIndexUid" :disabled="meilisearchCreateIndexLoading" :placeholder="t('meilisearch.createIndexUidPlaceholder')" @keydown.enter.prevent="confirmCreateMeilisearchIndex" />
@@ -423,7 +423,7 @@ watch(
           <Input v-model="meilisearchCreateIndexPrimaryKey" :disabled="meilisearchCreateIndexLoading" :placeholder="t('meilisearch.createIndexPrimaryKeyPlaceholder')" />
           <span class="text-xs font-normal text-muted-foreground">{{ t("meilisearch.createIndexPrimaryKeyHelp") }}</span>
         </label>
-        <p v-if="meilisearchCreateIndexError" class="text-sm text-destructive">{{ meilisearchCreateIndexError }}</p>
+        <p v-if="meilisearchCreateIndexError" class="min-w-0 max-w-full whitespace-pre-wrap break-all text-sm text-destructive">{{ meilisearchCreateIndexError }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" :disabled="meilisearchCreateIndexLoading" @click="showCreateMeilisearchIndexDialog = false">{{ t("dangerDialog.cancel") }}</Button>

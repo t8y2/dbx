@@ -518,4 +518,26 @@ describe("TDengine table hierarchy", () => {
 
     expect(nodes[0].children?.[0]).toMatchObject({ label: "tree.partitions", isExpanded: false });
   });
+
+  it("nests second-level partitions under Kingbase-style lowercase parent names", () => {
+    // KingbaseES returns lowercase relation names and a direct `parent_name`;
+    // a partition that is itself a partitioned parent must nest recursively.
+    const nodes = buildTableTreeNodes({
+      ...context,
+      schema: "partition_demo",
+      tables: [
+        { name: "catalog_nested", table_type: "BASE TABLE", comment: null },
+        { name: "catalog_nested_2024", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested" },
+        { name: "catalog_nested_2024_asia", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested_2024" },
+        { name: "catalog_nested_2024_eu", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested_2024" },
+        { name: "catalog_nested_2025", table_type: "BASE TABLE", comment: null, parent_schema: "partition_demo", parent_name: "catalog_nested" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.label)).toEqual(["catalog_nested"]);
+    const level1 = tablePartitionGroups(nodes[0])[0].children ?? [];
+    expect(level1.map((node) => node.label)).toEqual(["catalog_nested_2024", "catalog_nested_2025"]);
+    const yearPartition = level1.find((node) => node.label === "catalog_nested_2024");
+    expect(tablePartitionGroups(yearPartition!)[0].children?.map((node) => node.label)).toEqual(["catalog_nested_2024_asia", "catalog_nested_2024_eu"]);
+  });
 });

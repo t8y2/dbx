@@ -703,6 +703,19 @@ pub async fn get_table_partition_status(
         .map_err(AppError::from)
 }
 
+pub async fn get_table_partitioning(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::PgTablePartitioning>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::get_table_partitioning_core(&state.app, &q.connection_id, database, schema, table)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
 pub async fn list_invalid_indexes(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

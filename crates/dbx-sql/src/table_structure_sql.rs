@@ -8,6 +8,7 @@ mod foreign_keys;
 mod indexes;
 mod mysql_engine;
 mod owner;
+mod partitions;
 mod triggers;
 mod types;
 mod util;
@@ -19,6 +20,7 @@ mod tests;
 pub use column_alter::build_single_column_alter_sql;
 pub use create_table::build_create_table_sql;
 pub use owner::build_table_owner_change_sql;
+pub use partitions::{build_create_partitioned_table_sql, build_table_partition_operation_sql};
 pub use types::*;
 
 pub use column_alter::{

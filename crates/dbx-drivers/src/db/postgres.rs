@@ -11,7 +11,7 @@ use rustls::server::ParsedCertificate;
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
@@ -37,8 +37,8 @@ use crate::types::{
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, ConstraintInfo,
     CustomTypeDdl, CustomTypeDetails, CustomTypeDomainConstraint, CustomTypeKind, CustomTypeMember,
     CustomTypeProperties, DatabaseInfo, DatabaseStorageInfo, ExtensionInfo, ForeignKeyInfo, FunctionInfo, IndexInfo,
-    ObjectInfo, ObjectStatistics, OwnerInfo, QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo,
-    SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ObjectInfo, ObjectStatistics, OwnerInfo, PgPartitionBound, PgPartitionKind, PgPartitionNode, PgTablePartitioning,
+    QueryMessage, QueryResult, RuleInfo, SchemaInfo, SequenceInfo, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 pub const GAUSSDB_COMPATIBILITY_SQL: &str =
@@ -3949,6 +3949,390 @@ pub async fn get_table_partition_info(
 
 pub async fn get_table_partition_key(pool: &Pool, schema: &str, table: &str) -> Result<Option<String>, String> {
     Ok(get_table_partition_info(pool, schema, table).await?.key)
+}
+
+/// The partitioning strategy of a single PostgreSQL partitioned parent, read
+/// from `pg_partitioned_table` so expression keys and multi-column keys come
+/// back structured instead of as concatenated `pg_get_partkeydef` text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresPartitionStrategy {
+    pub kind: PgPartitionKind,
+    pub key_definition: String,
+    /// Key columns, in key order. Empty for a pure-expression key.
+    pub columns: Vec<String>,
+    /// `pg_get_expr(partexprs)` text, set only for expression keys.
+    pub expression: Option<String>,
+}
+
+fn postgres_partition_strategy_sql() -> &'static str {
+    "SELECT p.partstrat::text, \
+            pg_catalog.pg_get_partkeydef(c.oid) AS key_def, \
+            COALESCE(ARRAY( \
+              SELECT a.attname::text \
+              FROM unnest(p.partattrs) WITH ORDINALITY AS u(attnum, ord) \
+              JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = u.attnum \
+              WHERE u.attnum > 0 \
+              ORDER BY u.ord \
+            ), '{}') AS key_columns, \
+            pg_catalog.pg_get_expr(p.partexprs, c.oid) AS key_expression \
+     FROM pg_catalog.pg_partitioned_table p \
+     JOIN pg_catalog.pg_class c ON c.oid = p.partrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2"
+}
+
+/// Pre-10 servers have no `pg_partitioned_table`; return no row so the caller
+/// sees `None` (the relation is a plain table there).
+fn postgres_partition_strategy_compat_sql() -> &'static str {
+    "SELECT NULL::text, NULL::text, '{}'::text[], NULL::text WHERE false"
+}
+
+pub async fn get_table_partition_strategy(
+    pool: &Pool,
+    schema: &str,
+    table: &str,
+) -> Result<Option<PostgresPartitionStrategy>, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&schema, &table];
+    let rows = query_with_compat_fallback(
+        "get_table_partition_strategy",
+        &[postgres_partition_strategy_sql(), postgres_partition_strategy_compat_sql()],
+        |sql| postgres_query_cached(&client, sql, &params),
+    )
+    .await?;
+    Ok(rows.first().and_then(|row| {
+        let strategy = row.try_get::<_, Option<String>>(0).ok().flatten()?;
+        let kind = pg_partition_kind_from_strategy(&strategy)?;
+        let key_definition = row.try_get::<_, Option<String>>(1).ok().flatten().unwrap_or_default();
+        let columns = row.try_get::<_, Option<Vec<String>>>(2).ok().flatten().unwrap_or_default();
+        let expression = row.try_get::<_, Option<String>>(3).ok().flatten().filter(|value| !value.trim().is_empty());
+        Some(PostgresPartitionStrategy { kind, key_definition, columns, expression })
+    }))
+}
+
+/// `pg_partitioned_table.partstrat`: `r` = range, `l` = list, `h` = hash.
+pub fn pg_partition_kind_from_strategy(strategy: &str) -> Option<PgPartitionKind> {
+    match strategy.trim() {
+        "r" => Some(PgPartitionKind::Range),
+        "l" => Some(PgPartitionKind::List),
+        "h" => Some(PgPartitionKind::Hash),
+        _ => None,
+    }
+}
+
+/// Derives the strategy kind from `pg_get_partkeydef` output (`RANGE (col)`, …).
+/// Used for descendants in a partition tree, where the full strategy query is
+/// unnecessary (the kind is the only thing a nested node needs to render).
+pub fn pg_partition_kind_from_keydef(definition: &str) -> Option<PgPartitionKind> {
+    let definition = definition.trim_start();
+    let head = definition.split(|ch: char| ch.is_whitespace() || ch == '(').next()?;
+    match head.to_ascii_uppercase().as_str() {
+        "RANGE" => Some(PgPartitionKind::Range),
+        "LIST" => Some(PgPartitionKind::List),
+        "HASH" => Some(PgPartitionKind::Hash),
+        _ => None,
+    }
+}
+
+/// Parses the text PostgreSQL renders for `pg_get_expr(relpartbound, oid, true)`.
+///
+/// Returns `None` for an unrecognized shape so callers can fall back to the raw
+/// definition. Recognized forms:
+///   * `DEFAULT`
+///   * `FOR VALUES FROM (...) TO (...)` — RANGE, including `MINVALUE`/`MAXVALUE`
+///   * `FOR VALUES IN (...)` — LIST
+///   * `FOR VALUES WITH (MODULUS n, REMAINDER m)` — HASH (the catalog renders
+///     this lowercase, e.g. `modulus 2, remainder 0`)
+///
+/// Values are kept as SQL literal text so they round-trip byte-for-byte.
+pub fn parse_pg_partition_bound(definition: &str) -> Option<PgPartitionBound> {
+    let definition = definition.trim();
+    if definition.eq_ignore_ascii_case("DEFAULT") {
+        return Some(PgPartitionBound::Default);
+    }
+    let rest = strip_ascii_prefix_ci(definition, "FOR VALUES")?.trim_start();
+    if let Some(body) = strip_ascii_prefix_ci(rest, "FROM") {
+        let (from, after_from) = take_paren_group(body.trim_start())?;
+        let after_from = strip_ascii_prefix_ci(after_from.trim_start(), "TO")?;
+        let (to, _) = take_paren_group(after_from.trim_start())?;
+        return Some(PgPartitionBound::Range { from: split_bound_items(&from), to: split_bound_items(&to) });
+    }
+    if let Some(body) = strip_ascii_prefix_ci(rest, "IN") {
+        let (values, _) = take_paren_group(body.trim_start())?;
+        return Some(PgPartitionBound::List { values: split_bound_items(&values) });
+    }
+    if let Some(body) = strip_ascii_prefix_ci(rest, "WITH") {
+        let (options, _) = take_paren_group(body.trim_start())?;
+        let mut modulus = None;
+        let mut remainder = None;
+        for option in split_top_level_commas(&options) {
+            let mut parts = option.split_whitespace();
+            let key = parts.next()?.to_ascii_lowercase();
+            let value: i32 = parts.next()?.parse().ok()?;
+            match key.as_str() {
+                "modulus" => modulus = Some(value),
+                "remainder" => remainder = Some(value),
+                _ => {}
+            }
+        }
+        return Some(PgPartitionBound::Hash { modulus: modulus?, remainder: remainder? });
+    }
+    None
+}
+
+/// Case-insensitive prefix strip that also requires a token boundary, so
+/// `IN` never matches the start of `INTO` and `TO` never matches `TOAST`.
+fn strip_ascii_prefix_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = input.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let rest = &input[prefix.len()..];
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(ch) if ch.is_whitespace() || ch == '(' => Some(rest),
+        _ => None,
+    }
+}
+
+/// Splits `( ... )` off the front of `input`, honoring single quotes, double
+/// quotes, `''` escapes, and nested parentheses. Returns the inner text and
+/// the remainder after the closing paren.
+fn take_paren_group(input: &str) -> Option<(String, &str)> {
+    let input = input.trim_start();
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut close_index = None;
+    let mut chars = input.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek().map(|(_, next)| *next) == Some('\'') {
+                    chars.next();
+                    continue;
+                }
+                in_single = !in_single;
+            }
+            '"' if !in_single => in_double = !in_double,
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 {
+                    close_index = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close_index = close_index?;
+    Some((input[1..close_index].to_string(), &input[close_index + 1..]))
+}
+
+fn split_bound_items(input: &str) -> Vec<String> {
+    split_top_level_commas(input).into_iter().filter(|item| !item.is_empty()).collect()
+}
+
+/// Splits on top-level commas only; commas inside quotes, nested parentheses,
+/// or `''` escapes stay in the item.
+fn split_top_level_commas(input: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double => {
+                if in_single && chars.peek() == Some(&'\'') {
+                    current.push('\'');
+                    current.push('\'');
+                    chars.next();
+                    continue;
+                }
+                in_single = !in_single;
+                current.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                current.push(ch);
+            }
+            '(' if !in_single && !in_double => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if !in_single && !in_double && depth == 0 => {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    items.push(current.trim().to_string());
+    items
+}
+
+/// Cheap per-relation size/count estimates for a set of relation oids.
+/// Best-effort: an empty map on failure just means the UI omits the columns.
+fn postgres_partition_relation_stats_sql() -> &'static str {
+    "SELECT c.oid::bigint, \
+            CASE WHEN c.relkind = 'f' THEN NULL ELSE c.reltuples::bigint END, \
+            CASE WHEN c.relkind = 'f' THEN NULL ELSE pg_catalog.pg_total_relation_size(c.oid) END \
+     FROM pg_catalog.pg_class c \
+     WHERE c.oid::bigint = ANY($1)"
+}
+
+pub async fn get_partition_relation_stats(
+    pool: &Pool,
+    oids: &[i64],
+) -> Result<HashMap<i64, (Option<i64>, Option<i64>)>, String> {
+    if oids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let owned: Vec<i64> = oids.to_vec();
+    let rows = postgres_query_cached(&client, postgres_partition_relation_stats_sql(), &[&owned])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let oid = row.try_get::<_, i64>(0).ok()?;
+            let rows = row.try_get::<_, Option<i64>>(1).ok().flatten().filter(|value| *value >= 0);
+            let bytes = row.try_get::<_, Option<i64>>(2).ok().flatten().filter(|value| *value >= 0);
+            Some((oid, (rows, bytes)))
+        })
+        .collect())
+}
+
+/// `current_setting('server_version_num')` as an integer (e.g. 140019 for
+/// 14.19), or `None` when the server does not report it.
+pub async fn get_server_version_num(pool: &Pool) -> Result<Option<i32>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let rows = postgres_query_cached(&client, "SELECT current_setting('server_version_num')::int", &[])
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rows.first().and_then(|row| row.try_get::<_, i32>(0).ok()))
+}
+
+/// Full structured partitioning view of one relation, rooted at it. Returns a
+/// default (all-false/empty) value for a plain, non-partitioned table.
+pub async fn get_table_partitioning(pool: &Pool, schema: &str, table: &str) -> Result<PgTablePartitioning, String> {
+    let schema = if schema.is_empty() { "public" } else { schema };
+    let tree = fetch_postgres_partition_tree(pool, schema, table).await?;
+    let tree_oids: HashSet<i64> = tree.iter().map(|node| node.oid).collect();
+    // The requested relation is the root: the only tree node whose parent (if
+    // any) is not also in this tree. An empty tree means the relation is not a
+    // table/partition at all (view, sequence, missing).
+    let Some(root) = tree.iter().find(|node| !node.parent_oid.is_some_and(|parent| tree_oids.contains(&parent))) else {
+        return Ok(PgTablePartitioning::default());
+    };
+    let is_partitioned = root.partition_info.key.is_some();
+    let is_partition = root.partition_info.is_partition;
+    if !is_partitioned && !is_partition {
+        return Ok(PgTablePartitioning::default());
+    }
+
+    let strategy =
+        if is_partitioned { get_table_partition_strategy(pool, &root.schema, &root.table).await? } else { None };
+
+    let oids: Vec<i64> = tree.iter().map(|node| node.oid).collect();
+    let stats = get_partition_relation_stats(pool, &oids).await.unwrap_or_default();
+
+    let nodes_by_oid: HashMap<i64, &PostgresPartitionTreeNode> = tree.iter().map(|node| (node.oid, node)).collect();
+    let mut children_by_parent: HashMap<i64, Vec<i64>> = HashMap::new();
+    for node in &tree {
+        if let Some(parent_oid) = node.parent_oid {
+            if tree_oids.contains(&parent_oid) {
+                children_by_parent.entry(parent_oid).or_default().push(node.oid);
+            }
+        }
+    }
+    for child_oids in children_by_parent.values_mut() {
+        child_oids.sort_by(|left, right| {
+            let left = nodes_by_oid.get(left).map(|node| node.table.as_str()).unwrap_or_default();
+            let right = nodes_by_oid.get(right).map(|node| node.table.as_str()).unwrap_or_default();
+            left.cmp(right)
+        });
+    }
+
+    let mut visited: HashSet<i64> = HashSet::new();
+    visited.insert(root.oid);
+    let partitions = build_partition_nodes(root.oid, &nodes_by_oid, &children_by_parent, &stats, &mut visited);
+    let default_partition =
+        partitions.iter().find(|node| node.bound == Some(PgPartitionBound::Default)).map(|node| node.name.clone());
+    // Best effort: a missing version just hides the CONCURRENTLY option.
+    let server_version_num = get_server_version_num(pool).await.unwrap_or(None);
+
+    Ok(PgTablePartitioning {
+        is_partitioned,
+        is_partition,
+        parent: match (root.partition_info.parent_schema.as_deref(), root.partition_info.parent_table.as_deref()) {
+            (Some(schema), Some(table)) => Some(format!("{schema}.{table}")),
+            _ => None,
+        },
+        parent_schema: root.partition_info.parent_schema.clone(),
+        parent_table: root.partition_info.parent_table.clone(),
+        own_bound: root.partition_info.bound.as_deref().and_then(parse_pg_partition_bound),
+        strategy: strategy.as_ref().map(|strategy| strategy.kind),
+        key_definition: strategy
+            .as_ref()
+            .map(|strategy| strategy.key_definition.clone())
+            .or_else(|| root.partition_info.key.clone()),
+        key_columns: strategy.as_ref().map(|strategy| strategy.columns.clone()).unwrap_or_default(),
+        key_expression: strategy.and_then(|strategy| strategy.expression),
+        default_partition,
+        partitions,
+        server_version_num,
+    })
+}
+
+/// Recursively materializes the children of `parent_oid`. `visited` guards
+/// against a corrupted catalog (or a non-PostgreSQL fork) whose `pg_inherits`
+/// data forms a cycle, which would otherwise recurse forever.
+fn build_partition_nodes(
+    parent_oid: i64,
+    nodes_by_oid: &HashMap<i64, &PostgresPartitionTreeNode>,
+    children_by_parent: &HashMap<i64, Vec<i64>>,
+    stats: &HashMap<i64, (Option<i64>, Option<i64>)>,
+    visited: &mut HashSet<i64>,
+) -> Vec<PgPartitionNode> {
+    let Some(child_oids) = children_by_parent.get(&parent_oid) else {
+        return Vec::new();
+    };
+    let mut nodes = Vec::with_capacity(child_oids.len());
+    for child_oid in child_oids {
+        if !visited.insert(*child_oid) {
+            continue;
+        }
+        let Some(node) = nodes_by_oid.get(child_oid) else {
+            continue;
+        };
+        let children = build_partition_nodes(*child_oid, nodes_by_oid, children_by_parent, stats, visited);
+        let (row_estimate, total_bytes) = stats.get(child_oid).copied().unwrap_or((None, None));
+        let bound_definition = node.partition_info.bound.clone();
+        let strategy = node.partition_info.key.as_deref().and_then(pg_partition_kind_from_keydef);
+        nodes.push(PgPartitionNode {
+            schema: node.schema.clone(),
+            name: node.table.clone(),
+            strategy,
+            key_definition: node.partition_info.key.clone(),
+            bound: bound_definition.as_deref().and_then(parse_pg_partition_bound),
+            bound_definition,
+            is_leaf: children.is_empty(),
+            row_estimate,
+            total_bytes,
+            children,
+        });
+    }
+    nodes
 }
 
 /// Classifies one row of `postgres_table_partition_local_objects_sql` (or its
@@ -14760,5 +15144,88 @@ mod tests {
         let visible_sql = postgres_schema_infos_sql(true);
         assert!(!visible_sql.contains("NOT IN"));
         assert!(!visible_sql.contains("NOT LIKE"));
+    }
+
+    #[test]
+    fn pg_partition_kind_from_strategy_maps_catalog_letters() {
+        assert_eq!(pg_partition_kind_from_strategy("r"), Some(PgPartitionKind::Range));
+        assert_eq!(pg_partition_kind_from_strategy("l"), Some(PgPartitionKind::List));
+        assert_eq!(pg_partition_kind_from_strategy("h"), Some(PgPartitionKind::Hash));
+        assert_eq!(pg_partition_kind_from_strategy("x"), None);
+    }
+
+    #[test]
+    fn pg_partition_kind_from_keydef_uses_the_leading_keyword() {
+        assert_eq!(pg_partition_kind_from_keydef("RANGE (sold_on)"), Some(PgPartitionKind::Range));
+        assert_eq!(pg_partition_kind_from_keydef("LIST (region)"), Some(PgPartitionKind::List));
+        assert_eq!(pg_partition_kind_from_keydef("HASH (id)"), Some(PgPartitionKind::Hash));
+        assert_eq!(pg_partition_kind_from_keydef("RANGE (abs(v))"), Some(PgPartitionKind::Range));
+        assert_eq!(pg_partition_kind_from_keydef("UNKNOWN (x)"), None);
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_reads_range_bounds() {
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')"),
+            Some(PgPartitionBound::Range {
+                from: vec!["'2024-01-01'".to_string()],
+                to: vec!["'2025-01-01'".to_string()],
+            })
+        );
+        // MINVALUE / MAXVALUE are keywords, kept verbatim without quoting.
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM (MINVALUE) TO (0)"),
+            Some(PgPartitionBound::Range { from: vec!["MINVALUE".to_string()], to: vec!["0".to_string()] })
+        );
+        // Multi-column range keeps each tuple position separate.
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM ('a', 'a') TO ('b', MAXVALUE)"),
+            Some(PgPartitionBound::Range {
+                from: vec!["'a'".to_string(), "'a'".to_string()],
+                to: vec!["'b'".to_string(), "MAXVALUE".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_reads_list_and_hash_and_default() {
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES IN ('a', 'b')"),
+            Some(PgPartitionBound::List { values: vec!["'a'".to_string(), "'b'".to_string()] })
+        );
+        // The catalog renders hash options lowercase.
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES WITH (modulus 2, remainder 1)"),
+            Some(PgPartitionBound::Hash { modulus: 2, remainder: 1 })
+        );
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES WITH (MODULUS 4, REMAINDER 3)"),
+            Some(PgPartitionBound::Hash { modulus: 4, remainder: 3 })
+        );
+        assert_eq!(parse_pg_partition_bound("DEFAULT"), Some(PgPartitionBound::Default));
+        assert_eq!(parse_pg_partition_bound(" default "), Some(PgPartitionBound::Default));
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_keeps_commas_inside_quotes_and_calls() {
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES IN ('a,b', 'c')"),
+            Some(PgPartitionBound::List { values: vec!["'a,b'".to_string(), "'c'".to_string()] })
+        );
+        assert_eq!(
+            parse_pg_partition_bound("FOR VALUES FROM (lower('A''B')) TO (lower('C'))"),
+            Some(PgPartitionBound::Range {
+                from: vec!["lower('A''B')".to_string()],
+                to: vec!["lower('C')".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_pg_partition_bound_rejects_unrecognized_input() {
+        assert_eq!(parse_pg_partition_bound(""), None);
+        assert_eq!(parse_pg_partition_bound("NOT A BOUND"), None);
+        // `IN` must not match the start of `INTO`.
+        assert_eq!(parse_pg_partition_bound("FOR VALUES INTO (1)"), None);
     }
 }

@@ -3015,7 +3015,25 @@ pub async fn list_foreign_keys(
     schema: &str,
     table: &str,
 ) -> Result<Vec<ForeignKeyInfo>, String> {
-    let sql = format!(
+    let sql = sqlserver_foreign_keys_sql(schema, table);
+    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
+    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .iter()
+        .map(|row| ForeignKeyInfo {
+            name: row.get::<&str, _>(0).unwrap_or("").to_string(),
+            column: row.get::<&str, _>(1).unwrap_or("").to_string(),
+            ref_schema: Some(row.get::<&str, _>(2).unwrap_or("").to_string()),
+            ref_table: row.get::<&str, _>(3).unwrap_or("").to_string(),
+            ref_column: row.get::<&str, _>(4).unwrap_or("").to_string(),
+            on_update: sqlserver_referential_action_from_row(row, 6),
+            on_delete: sqlserver_referential_action_from_row(row, 5),
+        })
+        .collect())
+}
+
+fn sqlserver_foreign_keys_sql(schema: &str, table: &str) -> String {
+    format!(
         "SELECT fk.name, c.name, SCHEMA_NAME(rt.schema_id), rt.name, rc.name, \
          fk.delete_referential_action, fk.update_referential_action \
          FROM sys.foreign_keys fk \
@@ -3027,21 +3045,36 @@ pub async fn list_foreign_keys(
          ORDER BY fk.name, fkc.constraint_column_id",
         s = schema.replace('\'', "''"),
         t = table.replace('\'', "''")
-    );
-    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
-    let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
-    Ok(rows
-        .iter()
-        .map(|row| ForeignKeyInfo {
-            name: row.get::<&str, _>(0).unwrap_or("").to_string(),
-            column: row.get::<&str, _>(1).unwrap_or("").to_string(),
-            ref_schema: Some(row.get::<&str, _>(2).unwrap_or("").to_string()),
-            ref_table: row.get::<&str, _>(3).unwrap_or("").to_string(),
-            ref_column: row.get::<&str, _>(4).unwrap_or("").to_string(),
-            on_update: sqlserver_referential_action(row.get::<i32, _>(6).unwrap_or(0)),
-            on_delete: sqlserver_referential_action(row.get::<i32, _>(5).unwrap_or(0)),
-        })
-        .collect())
+    )
+}
+
+/// `sys.foreign_keys.delete_referential_action` and `update_referential_action`
+/// are `tinyint`. tiberius picks the integer width from the received byte length
+/// rather than the declared type, so those columns arrive as `ColumnData::U8` and
+/// `row.get::<i32, _>` panics on the failed conversion (the whole process aborts
+/// under `panic = "abort"`). Read through the narrow integer widths instead.
+fn sqlserver_referential_action_from_row(row: &Row, index: usize) -> Option<String> {
+    sqlserver_referential_action(sqlserver_narrow_i32(
+        row.try_get::<i32, _>(index),
+        row.try_get::<i16, _>(index),
+        row.try_get::<u8, _>(index),
+    ))
+}
+
+/// Collapses the `int` / `smallint` / `tinyint` reads of one column into a single
+/// value. A failed or null conversion falls through to the narrower widths, so
+/// `tinyint` columns (decoded as `U8`) are read correctly instead of panicking.
+fn sqlserver_narrow_i32(
+    as_i32: tiberius::Result<Option<i32>>,
+    as_i16: tiberius::Result<Option<i16>>,
+    as_u8: tiberius::Result<Option<u8>>,
+) -> i32 {
+    as_i32
+        .ok()
+        .flatten()
+        .or_else(|| as_i16.ok().flatten().map(i32::from))
+        .or_else(|| as_u8.ok().flatten().map(i32::from))
+        .unwrap_or(0)
 }
 
 /// sys.foreign_keys referential actions: 0 = NO ACTION (default, omitted),
@@ -3806,17 +3839,17 @@ mod tests {
         restore_sqlserver_spatial_column_types, restore_sqlserver_unsafe_column_types, server_messages_query_result,
         sqlserver_batch_can_use_execute, sqlserver_bulk_token_row, sqlserver_cell_to_json, sqlserver_columns_sql,
         sqlserver_completion_assistant_sql, sqlserver_constraints_sql, sqlserver_dml_output_returns_rows,
-        sqlserver_done_trace_event, sqlserver_filter_definition_error, sqlserver_hidden_schema_names,
-        sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
-        sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
-        sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
-        sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
-        sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_split_name_list,
-        sqlserver_supports_session_database_switch, sqlserver_table_comment_sql, sqlserver_table_objects_sql,
-        sqlserver_triggers_sql, sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column,
-        SqlServerDescribedColumn, SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn,
-        SqlServerResultSet, SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL,
-        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        sqlserver_done_trace_event, sqlserver_filter_definition_error, sqlserver_foreign_keys_sql,
+        sqlserver_hidden_schema_names, sqlserver_indexes_sql, sqlserver_legacy_indexes_sql, sqlserver_legacy_probe,
+        sqlserver_legacy_probe_with_nonce, sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql,
+        sqlserver_list_schemas_sql, sqlserver_list_tables_sql, sqlserver_narrow_i32, sqlserver_probe_explicit_alias,
+        sqlserver_query_messages, sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
+        sqlserver_referential_action, sqlserver_schema_name_predicate, sqlserver_spatial_marker,
+        sqlserver_split_name_list, sqlserver_supports_session_database_switch, sqlserver_table_comment_sql,
+        sqlserver_table_objects_sql, sqlserver_triggers_sql, sqlserver_visible_object_predicate,
+        strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn, SqlServerProbeOutputNameOverride,
+        SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
+        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -4656,6 +4689,71 @@ mod tests {
         assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
         assert!(sql.contains("ORDER BY t.name"));
         assert!(!sql.contains("STRING_AGG"));
+    }
+
+    #[test]
+    fn sqlserver_foreign_keys_sql_selects_referential_actions_and_escapes_names() {
+        let sql = sqlserver_foreign_keys_sql("d'bo", "t'able");
+
+        assert!(sql.contains("fk.delete_referential_action"));
+        assert!(sql.contains("fk.update_referential_action"));
+        assert!(sql.contains("sys.foreign_keys fk"));
+        assert!(sql.contains("OBJECT_ID('d''bo.t''able')"));
+        assert!(sql.contains("ORDER BY fk.name, fkc.constraint_column_id"));
+    }
+
+    #[test]
+    fn sqlserver_tinyint_referential_actions_decode_as_u8_not_i32() {
+        // sys.foreign_keys.delete_referential_action / update_referential_action
+        // are tinyint, and tiberius derives the integer width from the received
+        // byte length rather than the declared type, so the value arrives as
+        // ColumnData::U8.
+        let tinyint = ColumnData::U8(Some(1));
+
+        assert_eq!(<u8 as tiberius::FromSql>::from_sql(&tinyint).unwrap(), Some(1));
+        // row.get::<i32, _>() panics on this conversion error, which aborts the
+        // release build (`panic = "abort"`), so the reader must tolerate the
+        // narrow widths instead.
+        assert!(<i32 as tiberius::FromSql>::from_sql(&tinyint).is_err());
+        assert!(<i16 as tiberius::FromSql>::from_sql(&tinyint).is_err());
+    }
+
+    #[test]
+    fn sqlserver_narrow_i32_falls_back_to_tinyint_without_panicking() {
+        let conversion_error: tiberius::Result<Option<i32>> =
+            <i32 as tiberius::FromSql>::from_sql(&ColumnData::U8(Some(1)));
+        assert!(conversion_error.is_err());
+
+        // A tinyint CASCADE arrives as U8 while the wider reads fail; the value
+        // must survive instead of aborting the process.
+        let cascade: tiberius::Result<Option<i16>> = <i16 as tiberius::FromSql>::from_sql(&ColumnData::U8(Some(1)));
+        let as_u8: tiberius::Result<Option<u8>> = <u8 as tiberius::FromSql>::from_sql(&ColumnData::U8(Some(1)));
+        assert_eq!(sqlserver_narrow_i32(conversion_error, cascade, as_u8), 1);
+    }
+
+    #[test]
+    fn sqlserver_narrow_i32_prefers_wider_widths_and_defaults_to_zero() {
+        assert_eq!(sqlserver_narrow_i32(Ok(Some(2)), Ok(Some(9)), Ok(Some(9))), 2);
+        assert_eq!(sqlserver_narrow_i32(Ok(None), Ok(Some(3)), Ok(Some(9))), 3);
+        // Null or unreadable values fall back to 0, which maps to no action.
+        assert_eq!(sqlserver_narrow_i32(Ok(None), Ok(None), Ok(None)), 0);
+        assert_eq!(
+            sqlserver_narrow_i32(
+                Err(tiberius::error::Error::Conversion("boom".into())),
+                Err(tiberius::error::Error::Conversion("boom".into())),
+                Err(tiberius::error::Error::Conversion("boom".into()))
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn sqlserver_referential_action_maps_tinyint_codes() {
+        assert_eq!(sqlserver_referential_action(0), None);
+        assert_eq!(sqlserver_referential_action(1).as_deref(), Some("CASCADE"));
+        assert_eq!(sqlserver_referential_action(2).as_deref(), Some("SET NULL"));
+        assert_eq!(sqlserver_referential_action(3).as_deref(), Some("SET DEFAULT"));
+        assert_eq!(sqlserver_referential_action(4), None);
     }
 
     #[test]

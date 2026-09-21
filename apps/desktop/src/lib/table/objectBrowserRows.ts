@@ -244,6 +244,78 @@ function markPartitionRows(rows: ObjectBrowserRow[], fallbackSchema: string) {
   }
 }
 
+export type ObjectBrowserRowSorter = (rows: ObjectBrowserRow[]) => ObjectBrowserRow[];
+
+/**
+ * Flattens the object rows into render order: roots first, each followed by its
+ * partition children — recursively, because a PostgreSQL partition can itself be
+ * a partitioned parent (a second-level sub-partitioned table).
+ *
+ * `depths` carries each partition row's nesting level so the caller can indent
+ * it; roots are 0.
+ *
+ * `rows`/`matchingRows` are expected to be pre-filtered by the caller's type
+ * filter. When `query` is non-empty the tree is force-expanded so a deep match
+ * and the ancestors leading to it stay visible even while collapsed.
+ */
+export function groupObjectBrowserRows(options: { rows: readonly ObjectBrowserRow[]; matchingRows: readonly ObjectBrowserRow[]; query: string; expandedPartitionParentIds: ReadonlySet<string>; sortRows: ObjectBrowserRowSorter }): { rows: ObjectBrowserRow[]; depths: Map<string, number> } {
+  const { rows, matchingRows, query, expandedPartitionParentIds, sortRows } = options;
+  const candidateIds = new Set(rows.map((row) => row.id));
+  const matchingIds = new Set(matchingRows.map((row) => row.id));
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+
+  const partitionRowsByParentId = new Map<string, ObjectBrowserRow[]>();
+  for (const row of rows) {
+    if (!row.partitionParentId) continue;
+    const group = partitionRowsByParentId.get(row.partitionParentId) ?? [];
+    group.push(row);
+    partitionRowsByParentId.set(row.partitionParentId, group);
+  }
+
+  // A deep match must be reachable: pull in every ancestor that leads to it, or
+  // the match would be filtered out as an orphaned sub-partition.
+  const ancestorIdsWithMatchingPartitions = new Set<string>();
+  if (query) {
+    for (const row of matchingRows) {
+      let ancestorId = row.partitionParentId;
+      while (ancestorId && !ancestorIdsWithMatchingPartitions.has(ancestorId)) {
+        ancestorIdsWithMatchingPartitions.add(ancestorId);
+        ancestorId = rowById.get(ancestorId)?.partitionParentId;
+      }
+    }
+  }
+
+  const rootRows = rows.filter((row) => {
+    if (row.partitionParentId) return false;
+    if (!query) return true;
+    return matchingIds.has(row.id) || ancestorIdsWithMatchingPartitions.has(row.id);
+  });
+  const result: ObjectBrowserRow[] = [];
+  const depths = new Map<string, number>();
+
+  const appendPartitions = (parent: ObjectBrowserRow, depth: number) => {
+    const partitions = partitionRowsByParentId.get(parent.id)?.filter((partition) => candidateIds.has(partition.id));
+    if (!partitions?.length) return;
+    // Search force-expands the tree so every match (and its ancestor chain) is visible.
+    if (!query && !expandedPartitionParentIds.has(parent.id)) return;
+    const parentMatches = matchingIds.has(parent.id);
+    const visiblePartitions = query && !parentMatches ? partitions.filter((partition) => matchingIds.has(partition.id) || ancestorIdsWithMatchingPartitions.has(partition.id)) : partitions;
+    for (const partition of sortRows(visiblePartitions)) {
+      result.push(partition);
+      depths.set(partition.id, depth);
+      appendPartitions(partition, depth + 1);
+    }
+  };
+
+  for (const row of sortRows(rootRows)) {
+    result.push(row);
+    depths.set(row.id, 0);
+    appendPartitions(row, 1);
+  }
+
+  return { rows: result, depths };
+}
+
 function objectKey(row: Pick<ObjectBrowserRow, "schema" | "name" | "type">, fallbackSchema: string) {
   return `${row.type}\0${(row.schema || fallbackSchema).toLowerCase()}\0${row.name.toLowerCase()}`;
 }

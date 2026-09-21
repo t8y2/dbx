@@ -345,9 +345,18 @@ pub async fn execute_batch(
     statements: Vec<String>,
     schema: Option<String>,
     timeout_secs: Option<u64>,
+    use_transaction: Option<bool>,
 ) -> Result<db::QueryResult, String> {
-    dbx_core::query::execute_statements(&state, &connection_id, &database, &statements, schema.as_deref(), timeout_secs)
-        .await
+    dbx_core::query::execute_statements_with_transaction_option(
+        &state,
+        &connection_id,
+        &database,
+        &statements,
+        schema.as_deref(),
+        use_transaction == Some(true),
+        timeout_secs,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -778,6 +787,21 @@ pub fn build_create_table_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
     Ok(dbx_core::table_structure_sql::build_create_table_sql(options))
+}
+
+#[tauri::command]
+pub fn build_create_partitioned_table_sql(
+    options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    partitioning: dbx_core::table_structure_sql::TablePartitionDefinition,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_create_partitioned_table_sql(options, partitioning))
+}
+
+#[tauri::command]
+pub fn build_table_partition_operation_sql(
+    options: dbx_core::table_structure_sql::TablePartitionSqlOptions,
+) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {
+    Ok(dbx_core::table_structure_sql::build_table_partition_operation_sql(options))
 }
 
 #[tauri::command]

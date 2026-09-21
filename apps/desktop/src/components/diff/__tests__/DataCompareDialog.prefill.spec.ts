@@ -486,3 +486,26 @@ describe("DataCompareDialog session restore", () => {
     expect(session.syncPlan.syncSql).toBe("INSERT 2;");
   });
 });
+
+describe("DataCompareDialog results layout", () => {
+  it("scrolls results in a plain container so the footer cannot overlap them", async () => {
+    // Chromium cannot scroll or clip a <fieldset> that owns `overflow-auto`
+    // (see issue #9839), so the scroll region must be a plain element and the
+    // fieldset may only stay in the tree as the disabled-state provider.
+    mountSessionDialog(completedSession());
+    await flushAsyncSetup();
+
+    const fieldset = document.querySelector("fieldset");
+    expect(fieldset).not.toBeNull();
+    expect(fieldset?.className).not.toContain("overflow-auto");
+
+    const scroller = fieldset?.parentElement;
+    expect(scroller?.tagName).toBe("DIV");
+    expect(scroller?.className).toContain("overflow-auto");
+    expect(scroller?.className).toContain("min-h-0");
+
+    const dialogFooter = document.querySelector('[data-slot="dialog-footer"]');
+    expect(dialogFooter).not.toBeNull();
+    expect(scroller?.contains(dialogFooter)).toBe(false);
+  });
+});

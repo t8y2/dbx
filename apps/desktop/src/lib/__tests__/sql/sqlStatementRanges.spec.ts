@@ -210,6 +210,31 @@ WHEN NOT MATCHED THEN
   INSERT (user_id, restyp_code, res_id, appcde)
   VALUES (b.userid, b.restyp_code, b.res_id, b.appcde);`;
 
+// Issue #8979: a GaussDB/openGauss instance in Oracle (A) compatibility mode reached through a
+// PostgreSQL/openGauss connection. The routine body is Oracle style and the definition is closed
+// by a standalone `/` line, so splitting at the body semicolons sent a truncated procedure and the
+// server answered `ERROR: subprogram body is not ended correctly at end of input`.
+const postgresFamilyIssue8979ProcedureScript = `CREATE OR REPLACE PROCEDURE sync_yxdyurl_probe() AS
+DECLARE
+BEGIN
+    update test_xm_20260913 set a = '23' where a = '1';
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+END;
+/
+SELECT 1 AS after_procedure;`;
+
+const postgresFamilyDollarQuotedFunctionScript = `CREATE OR REPLACE FUNCTION dbx_issue_8979_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql;
+/
+SELECT dbx_issue_8979_pg();`;
+
 const xuguProgrammableObjectFixtures = [
   `CREATE OR REPLACE PROCEDURE dbx_xugu_procedure AS
   v_value INTEGER;
@@ -692,6 +717,46 @@ END pkg_utils_without_replace;`;
     expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpec}\n/\nSELECT 1;`, "xugu"))).toEqual([packageSpec, "SELECT 1"]);
     expect(rangeSqlTexts(splitSqlStatementRanges(`${forcePackageSpec}\nSELECT 1;`, "xugu"))).toEqual([forcePackageSpec, "SELECT 1"]);
     expect(rangeSqlTexts(splitSqlStatementRanges(`${packageSpecWithoutReplace}\nSELECT 1;`, "xugu"))).toEqual([packageSpecWithoutReplace, "SELECT 1"]);
+  });
+
+  it("keeps an Oracle-style procedure body together for PostgreSQL-family connections", () => {
+    const procedureBody = postgresFamilyIssue8979ProcedureScript.slice(0, postgresFamilyIssue8979ProcedureScript.indexOf("\n/"));
+    const cases = [
+      { databaseType: "postgres" as const, options: undefined },
+      { databaseType: "opengauss" as const, options: { compatibilityMode: "PG" } },
+    ];
+
+    for (const { databaseType, options } of cases) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(postgresFamilyIssue8979ProcedureScript, databaseType, options))).toEqual([procedureBody, "SELECT 1 AS after_procedure"]);
+      expect(statementRangeAtCursor(postgresFamilyIssue8979ProcedureScript, indexOf(postgresFamilyIssue8979ProcedureScript, "ROLLBACK"), databaseType, options)?.sql.trim()).toBe(procedureBody);
+      expect(statementRangeAtCursor(postgresFamilyIssue8979ProcedureScript, postgresFamilyIssue8979ProcedureScript.length - 1, databaseType, options)?.sql.trim()).toBe("SELECT 1 AS after_procedure");
+    }
+  });
+
+  it("does not treat PostgreSQL dollar-quoted routines as Oracle-style bodies", () => {
+    const functionSql = `CREATE OR REPLACE FUNCTION dbx_issue_8979_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql`;
+
+    for (const databaseType of ["postgres", "opengauss"] as const) {
+      expect(rangeSqlTexts(splitSqlStatementRanges(postgresFamilyDollarQuotedFunctionScript, databaseType))).toEqual([functionSql, "SELECT dbx_issue_8979_pg()"]);
+      expect(statementRangeAtCursor(postgresFamilyDollarQuotedFunctionScript, indexOf(postgresFamilyDollarQuotedFunctionScript, "RETURN 1"), databaseType)?.sql.trim()).toBe(functionSql);
+    }
+  });
+
+  it("still splits ordinary PostgreSQL statements around a bare slash line", () => {
+    const script = `BEGIN;
+SELECT 1;
+COMMIT;
+/
+CREATE FUNCTION dbx_issue_8979_sql() RETURNS int AS 'SELECT 1' LANGUAGE sql;
+CREATE TRIGGER dbx_issue_8979_trg AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f();
+
+SELECT 2;`;
+
+    expect(rangeSqlTexts(splitSqlStatementRanges(script, "postgres"))).toEqual(["BEGIN", "SELECT 1", "COMMIT", "CREATE FUNCTION dbx_issue_8979_sql() RETURNS int AS 'SELECT 1' LANGUAGE sql", "CREATE TRIGGER dbx_issue_8979_trg AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION f()", "SELECT 2"]);
   });
 
   it("keeps openGauss packages together while compatibility metadata is unknown", () => {

@@ -295,6 +295,11 @@ const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 // ranges must stay whole instead of splitting at every body semicolon.
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+// PostgreSQL/openGauss are also the connection types users pick for GaussDB/openGauss instances
+// running in Oracle (A) compatibility mode, where a routine body is written in Oracle style
+// (`CREATE PROCEDURE p AS DECLARE ... BEGIN ... END;`) and closed by a standalone `/` line.
+// Mirrors SqlDialectProfile::postgres_family in dbx-sql — keep both in sync.
+const POSTGRES_FAMILY_DATABASES: ReadonlySet<DatabaseType> = new Set(["postgres", "opengauss"]);
 // Backslash escaping inside '...'/"..." strings is a MySQL-family extension; in standard SQL '\'
 // is a complete one-char string and quotes are escaped by doubling (''). Treating backslash as an
 // escape unconditionally makes ESCAPE '\' swallow its closing quote and the following statement
@@ -517,7 +522,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         continue;
       }
     }
-    if (isOracleLikeDatabase(databaseType, parameterOptions) && isAtLineStart(sql, i) && isSlashLine(sql, i)) {
+    if ((isOracleLikeDatabase(databaseType, parameterOptions) || isPostgresFamilyDatabase(databaseType)) && isAtLineStart(sql, i) && isSlashLine(sql, i)) {
       const lineEnd = findLineEnd(sql, i);
       flush(i);
       i = nextLineStart(sql, lineEnd);
@@ -627,7 +632,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         // Internal semicolons remain part of the routine body.
         flush();
       } else {
-        if (oraclePlSqlStatementEnd === undefined && isOracleLikeDatabase(databaseType, parameterOptions) && !postgresDollarQuotedRoutine && statementStart !== -1) {
+        if (oraclePlSqlStatementEnd === undefined && !postgresDollarQuotedRoutine && statementStart !== -1 && keepsOracleStyleBlockTogether(sql.slice(statementStart, i), databaseType, parameterOptions)) {
           const statementSoFar = sql.slice(statementStart, i);
           oraclePlSqlStatementEnd = startsWithOraclePlSqlBlock(statementSoFar) ? statementStart + (oraclePlSqlBlockEnd(sql.slice(statementStart)) ?? sql.length - statementStart) : null;
         }
@@ -766,7 +771,7 @@ function rangeForCursorInSoftRanges(sql: string, ranges: RawStatement[], pos: nu
 }
 
 function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
-  if (isOraclePlSqlStatement(statement.sql, databaseType, parameterOptions)) return [statement];
+  if (keepsOracleStyleBlockTogether(statement.sql, databaseType, parameterOptions)) return [statement];
   if (isSapHanaScriptBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
@@ -1647,6 +1652,20 @@ export function isOracleLikeDatabase(databaseType?: DatabaseType, options?: SqlP
   return !!databaseType && (ORACLE_LIKE_PL_SQL_DATABASES.has(databaseType) || isOpenGaussOracleCompatibility(databaseType, options));
 }
 
+function isPostgresFamilyDatabase(databaseType?: DatabaseType): boolean {
+  return !!databaseType && POSTGRES_FAMILY_DATABASES.has(databaseType);
+}
+
+/**
+ * Whether a statement must stay a single statement instead of being cut at its inner semicolons:
+ * Oracle PL/SQL blocks on Oracle-like dialects, and the Oracle-style routine bodies that a
+ * PostgreSQL-family connection reaches on a GaussDB/openGauss Oracle-compatibility server.
+ */
+export function keepsOracleStyleBlockTogether(sql: string, databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
+  if (isOraclePlSqlStatement(sql, databaseType, options)) return true;
+  return isPostgresFamilyDatabase(databaseType) && startsWithOracleStyleRoutineBody(sql);
+}
+
 export function isOraclePlSqlStatement(sql: string, databaseType?: DatabaseType, options?: SqlParameterOptions): boolean {
   return isOracleLikeDatabase(databaseType, options) && startsWithOraclePlSqlBlock(sql);
 }
@@ -1914,6 +1933,65 @@ function startsWithOraclePlSqlBlockWords(words: readonly string[]): boolean {
   // Plain CREATE TYPE ... AS OBJECT (...); is ordinary SQL terminated by ';'.
   if (words[index] === "TYPE") return false;
   return ORACLE_PL_SQL_CREATE_OBJECT_TYPES.has(words[index] ?? "");
+}
+
+/**
+ * Whether the statement is a routine whose body is written in Oracle PL/SQL syntax
+ * (`CREATE [OR REPLACE] PROCEDURE|FUNCTION ... { AS | IS } { DECLARE | BEGIN }`, plus the
+ * Oracle-only `PACKAGE BODY` / `TYPE BODY` forms).
+ *
+ * This is deliberately narrower than `startsWithOraclePlSqlBlock`: a PostgreSQL connection only
+ * sees this shape when the server is a GaussDB/openGauss instance in Oracle (A) compatibility
+ * mode, because PostgreSQL itself requires a dollar-quoted or string body (`AS $$ ... $$`,
+ * `AS 'body'`) and has no `PACKAGE`/`TYPE BODY`.
+ */
+function startsWithOracleStyleRoutineBody(sql: string): boolean {
+  const words = oraclePlSqlWords(sql);
+  if (words[0] !== "CREATE") return false;
+
+  const index = skipOraclePlSqlCreateModifiers(words, 1);
+  if ((words[index] === "PACKAGE" || words[index] === "TYPE") && words[index + 1] === "BODY") return true;
+  if (words[index] !== "FUNCTION" && words[index] !== "PROCEDURE") return false;
+  return routineBodyStartsAtPlsqlKeyword(sql);
+}
+
+/**
+ * The body introducer of an Oracle-style routine has to be the DECLARE/BEGIN keyword itself.
+ * Declarations may follow `AS`/`IS` with or without the optional `DECLARE`, while a PostgreSQL
+ * body opens with `$$`, `$tag$` or a quoted string there, so only a bare identifier matches.
+ */
+function routineBodyStartsAtPlsqlKeyword(sql: string): boolean {
+  const tokens = oraclePlSqlTokens(sql);
+  for (const token of tokens) {
+    if (token.kind !== "word" || (token.value !== "AS" && token.value !== "IS")) continue;
+    return nextWordAtPlsqlBodyKeyword(sql, token.to);
+  }
+  return false;
+}
+
+function nextWordAtPlsqlBodyKeyword(sql: string, from: number): boolean {
+  let i = from;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (isSqlWhitespace(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      const newline = sql.indexOf("\n", i);
+      i = newline === -1 ? sql.length : newline + 1;
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      const close = sql.indexOf("*/", i + 2);
+      i = close === -1 ? sql.length : close + 2;
+      continue;
+    }
+    break;
+  }
+  const word = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(i, i + 16))?.[0];
+  const upper = word?.toUpperCase();
+  return upper === "DECLARE" || upper === "BEGIN";
 }
 
 function startsWithPostgresDollarQuotedRoutinePrefix(sql: string): boolean {

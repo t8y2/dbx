@@ -132,6 +132,7 @@ pub struct SqlFileImportStatement {
 struct SqlDialectProfile {
     supports_hash_line_comments: bool,
     supports_oracle_plsql_blocks: bool,
+    supports_oracle_style_routine_bodies: bool,
     supports_slash_line_block_delimiter: bool,
     supports_custom_delimiter_commands: bool,
     supports_mysql_routine_blocks: bool,
@@ -150,6 +151,7 @@ impl Default for SqlDialectProfile {
         Self {
             supports_hash_line_comments: false,
             supports_oracle_plsql_blocks: false,
+            supports_oracle_style_routine_bodies: false,
             supports_slash_line_block_delimiter: false,
             supports_custom_delimiter_commands: true,
             supports_mysql_routine_blocks: false,
@@ -178,6 +180,10 @@ impl SqlDialectProfile {
 
         if matches!(db_type, DatabaseType::Gaussdb) {
             return Self::gaussdb();
+        }
+
+        if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
+            return Self::postgres_family();
         }
 
         if Self::is_oracle_like_database(db_type) {
@@ -210,6 +216,20 @@ impl SqlDialectProfile {
 
     fn oracle_like() -> Self {
         Self { supports_oracle_plsql_blocks: true, supports_slash_line_block_delimiter: true, ..Self::default() }
+    }
+
+    /// PostgreSQL and openGauss, which are also the connection types users pick for a
+    /// GaussDB/openGauss instance running in Oracle (A) compatibility mode. GaussDB PL/SQL
+    /// bodies are Oracle-style (`CREATE PROCEDURE p AS DECLARE ... BEGIN ... END;`) and are
+    /// terminated by a standalone `/` line, while the surrounding script syntax is still
+    /// PostgreSQL, so the profile keeps those constructs whole without enabling the full
+    /// Oracle PL/SQL dialect.
+    fn postgres_family() -> Self {
+        Self {
+            supports_oracle_style_routine_bodies: true,
+            supports_slash_line_block_delimiter: true,
+            ..Self::default()
+        }
     }
 
     fn gaussdb() -> Self {
@@ -556,9 +576,8 @@ impl SqlStatementSplitter {
                         } else {
                             self.buffer.push(ch);
                         }
-                    } else if self.options.profile.supports_oracle_plsql_blocks
-                        && !self.postgres_dollar_quoted_routine
-                        && starts_with_oracle_plsql_block(&self.buffer)
+                    } else if !self.postgres_dollar_quoted_routine
+                        && keeps_oracle_style_block_together(self.options, &self.buffer)
                     {
                         self.buffer.push(ch);
                         if oracle_plsql_block_is_complete(&self.buffer) {
@@ -884,7 +903,7 @@ fn split_statement_range_at_blank_lines(
     statement: &SqlStatementRange,
     options: SqlParsingOptions,
 ) -> Vec<SqlStatementRange> {
-    if options.profile.supports_oracle_plsql_blocks && starts_with_oracle_plsql_block(&statement.text) {
+    if keeps_oracle_style_block_together(options, &statement.text) {
         return vec![statement.clone()];
     }
     if options.profile.supports_hana_do_blocks && starts_with_hana_do_block(&statement.text) {
@@ -1100,9 +1119,8 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     }
                     push_statement_range(&mut ranges, sql, start, i, options);
                 } else {
-                    let is_oracle_plsql = options.profile.supports_oracle_plsql_blocks
-                        && !postgres_dollar_quoted_routine
-                        && starts_with_oracle_plsql_block(&sql[start..i]);
+                    let is_oracle_plsql =
+                        !postgres_dollar_quoted_routine && keeps_oracle_style_block_together(options, &sql[start..i]);
                     if is_oracle_plsql {
                         if !oracle_plsql_block_is_complete(&sql[start..i + ch.len_utf8()]) {
                             i += ch.len_utf8();
@@ -2412,6 +2430,20 @@ fn starts_with_oracle_plsql_block(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).starts_block()
 }
 
+/// Whether a statement must stay a single statement instead of being cut at its inner
+/// semicolons: Oracle PL/SQL blocks for Oracle-like dialects, and the Oracle-style routine bodies
+/// that PostgreSQL-family connections reach on a GaussDB/openGauss Oracle-compatibility server.
+fn keeps_oracle_style_block_together(options: SqlParsingOptions, statement_head: &str) -> bool {
+    if options.profile.supports_oracle_plsql_blocks {
+        return starts_with_oracle_plsql_block(statement_head);
+    }
+    options.profile.supports_oracle_style_routine_bodies && starts_with_oracle_style_routine_body(statement_head)
+}
+
+fn starts_with_oracle_style_routine_body(sql: &str) -> bool {
+    OraclePlSqlBlock::parse(sql).starts_oracle_style_routine_body()
+}
+
 fn starts_with_postgres_dollar_quoted_routine_prefix(sql: &str) -> bool {
     let block = OraclePlSqlBlock::parse(sql);
     let Some(first) = block.tokens.first() else {
@@ -2513,6 +2545,48 @@ impl OraclePlSqlBlock {
             [first, rest @ ..] if first.is_word("CREATE") => Self::starts_create_plsql_object(rest),
             _ => false,
         }
+    }
+
+    /// Whether the statement is a routine whose body is written in Oracle PL/SQL syntax
+    /// (`CREATE [OR REPLACE] PROCEDURE|FUNCTION ... { AS | IS } { DECLARE | BEGIN }`, plus the
+    /// Oracle-only `PACKAGE BODY` / `TYPE BODY` forms).
+    ///
+    /// This is deliberately narrower than [`Self::starts_block`]. A PostgreSQL connection only
+    /// sees this shape when the server is a GaussDB/openGauss instance in Oracle (A) compatibility
+    /// mode, because PostgreSQL itself requires a dollar-quoted or string body
+    /// (`AS $$ ... $$`, `AS 'body'`) and has no `PACKAGE`/`TYPE BODY`. Keeping the narrow test at
+    /// the entry point lets [`Self::is_complete`] end such a body at its outer `END;` while
+    /// ordinary PostgreSQL routines, `CREATE TRIGGER ... EXECUTE FUNCTION` statements and
+    /// transaction `BEGIN;` blocks keep splitting at their own statement terminator.
+    fn starts_oracle_style_routine_body(&self) -> bool {
+        let [first, rest @ ..] = self.tokens.as_slice() else {
+            return false;
+        };
+        if !first.is_word("CREATE") {
+            return false;
+        }
+        let rest = Self::skip_create_modifiers(rest);
+        match rest {
+            [object, body, ..] if object.is_any_word(&["PACKAGE", "TYPE"]) && body.is_word("BODY") => true,
+            [object, ..] if object.is_any_word(&["FUNCTION", "PROCEDURE"]) => {
+                Self::routine_body_starts_with_plsql_keyword(rest)
+            }
+            _ => false,
+        }
+    }
+
+    /// The body introducer of an Oracle-style routine. Declarations may follow `AS`/`IS` either
+    /// directly or after the optional `DECLARE` keyword, so only the `DECLARE`/`BEGIN` forms are
+    /// recognized; a dollar-quoted or string body is never a word token, so PostgreSQL routines
+    /// cannot match here.
+    fn routine_body_starts_with_plsql_keyword(tokens: &[OraclePlSqlToken]) -> bool {
+        for (index, token) in tokens.iter().enumerate() {
+            if !token.is_any_word(&["AS", "IS"]) {
+                continue;
+            }
+            return tokens.get(index + 1).is_some_and(|next| next.is_any_word(&["DECLARE", "BEGIN"]));
+        }
+        false
     }
 
     fn is_complete(&self) -> bool {
@@ -2924,8 +2998,8 @@ mod tests {
         find_statement_at_cursor_for_database, fuzzy_filter_enabled, fuzzy_like_pattern_with_escape,
         fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_script,
         split_sql_statement_ranges_with_options, split_sql_statements_for_database, starts_with_executable_sql_keyword,
-        starts_with_executable_sql_keyword_for_database, SqlDialectProfile, SqlFileStatementAction, SqlParsingOptions,
-        SqlStatementSplitter,
+        starts_with_executable_sql_keyword_for_database, starts_with_oracle_style_routine_body, SqlDialectProfile,
+        SqlFileStatementAction, SqlParsingOptions, SqlStatementSplitter,
     };
 
     #[test]
@@ -3772,18 +3846,26 @@ SELECT 2;";
 
     #[test]
     fn sql_dialect_profiles_map_database_types_to_parser_capabilities() {
-        let default = SqlDialectProfile::for_database_type(DatabaseType::Postgres);
-        assert_eq!(default, SqlDialectProfile::default());
+        let default = SqlDialectProfile::default();
         assert!(default.supports_custom_delimiter_commands);
         assert!(default.supports_dollar_quoted_strings);
         assert!(!default.supports_hash_line_comments);
         assert!(!default.supports_mysql_routine_blocks);
         assert!(!default.supports_oracle_plsql_blocks);
+        assert!(!default.supports_oracle_style_routine_bodies);
         assert!(!default.supports_hana_do_blocks);
         assert!(!default.supports_slash_line_block_delimiter);
         assert!(!default.supports_go_batch_separator);
         assert!(!default.keeps_sqlserver_module_batch_at_cursor);
         assert!(!default.preserves_tdsql_leading_directives);
+
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+            let profile = SqlDialectProfile::for_database_type(db_type);
+            assert_eq!(profile, SqlDialectProfile::postgres_family());
+            assert!(!profile.supports_oracle_plsql_blocks);
+            assert!(profile.supports_oracle_style_routine_bodies);
+            assert!(profile.supports_slash_line_block_delimiter);
+        }
 
         let mysql = SqlDialectProfile::for_database_type(DatabaseType::Mysql);
         assert!(mysql.supports_hash_line_comments);
@@ -4218,6 +4300,183 @@ SELECT 2 AS final_statement;";
         assert!(statements[0].ends_with("END;"));
         assert_eq!(statements[1], "SELECT 1 AS after_procedure");
         assert_eq!(statements[2], "SELECT 2 AS final_statement");
+    }
+
+    const POSTGRES_FAMILY_PROCEDURE_SCRIPT: &str = "\
+CREATE OR REPLACE PROCEDURE sync_yxdyurl_and_flag()
+AS  DECLARE
+BEGIN
+
+    update test_xm_20260913 set a = '23' where a = '1';
+
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+END;
+/
+SELECT 1;";
+
+    const POSTGRES_FAMILY_PROCEDURE_BODY: &str = "\
+CREATE OR REPLACE PROCEDURE sync_yxdyurl_and_flag()
+AS  DECLARE
+BEGIN
+
+    update test_xm_20260913 set a = '23' where a = '1';
+
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE;
+END;";
+
+    /// Issue #8979: a GaussDB/openGauss Oracle-compatibility server reached through the plain
+    /// PostgreSQL connection type must not split the PL/SQL body at its inner semicolons, or the
+    /// server only receives an incomplete routine and answers with
+    /// `subprogram body is not ended correctly at end of input`.
+    #[test]
+    fn postgres_family_keeps_oracle_style_procedure_body_in_one_statement() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+            assert_eq!(
+                split_sql_statements_for_database(POSTGRES_FAMILY_PROCEDURE_SCRIPT, db_type),
+                vec![POSTGRES_FAMILY_PROCEDURE_BODY.to_string(), "SELECT 1".to_string()],
+                "{db_type:?} must keep the procedure body whole and drop the slash terminator"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_family_current_statement_keeps_oracle_style_procedure_body_together() {
+        let sql = POSTGRES_FAMILY_PROCEDURE_SCRIPT;
+        let body_cursors =
+            [sql.find("update test_xm").unwrap(), sql.find("COMMIT").unwrap(), sql.find("RAISE").unwrap()];
+
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+            for cursor in body_cursors {
+                assert_eq!(
+                    find_statement_at_cursor_for_database(sql, cursor, db_type),
+                    POSTGRES_FAMILY_PROCEDURE_BODY,
+                    "{db_type:?} must resolve the cursor inside the body to the whole procedure"
+                );
+            }
+            assert_eq!(find_statement_at_cursor_for_database(sql, sql.len(), db_type), "SELECT 1");
+        }
+    }
+
+    /// The reported scripts end with a bare `/` on the last line without a trailing newline, so the
+    /// terminator has to be recognized at end of input too.
+    #[test]
+    fn postgres_family_drops_trailing_slash_line_without_trailing_newline() {
+        for suffix in ["", "\n"] {
+            let sql = format!("{POSTGRES_FAMILY_PROCEDURE_BODY}\n/{suffix}");
+            for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+                assert_eq!(
+                    split_sql_statements_for_database(&sql, db_type),
+                    vec![POSTGRES_FAMILY_PROCEDURE_BODY.to_string()],
+                    "{db_type:?} must drop the trailing slash line (suffix {suffix:?})"
+                );
+                assert_eq!(
+                    find_statement_at_cursor_for_database(&sql, sql.len(), db_type),
+                    POSTGRES_FAMILY_PROCEDURE_BODY
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_family_keeps_slash_terminated_routine_body_whole() {
+        let sql = "\
+CREATE OR REPLACE FUNCTION f_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql;
+/
+SELECT f_pg();";
+
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+            assert_eq!(
+                split_sql_statements_for_database(sql, db_type),
+                vec![
+                    "CREATE OR REPLACE FUNCTION f_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql",
+                    "SELECT f_pg()",
+                ],
+                "{db_type:?} must treat the standalone slash line as a statement terminator"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_family_current_statement_keeps_dollar_quoted_routine_whole() {
+        let sql = "\
+CREATE OR REPLACE FUNCTION f_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql;
+/
+SELECT f_pg();";
+
+        for db_type in [DatabaseType::Postgres, DatabaseType::OpenGauss] {
+            let statement = find_statement_at_cursor_for_database(sql, sql.find("RETURN 1").unwrap(), db_type);
+            assert!(statement.contains("LANGUAGE plpgsql"), "{db_type:?} resolved {statement:?}");
+            assert!(!statement.contains("SELECT f_pg()"), "{db_type:?} resolved {statement:?}");
+        }
+    }
+
+    #[test]
+    fn postgres_family_still_splits_ordinary_postgres_statements() {
+        let sql = "\
+CREATE OR REPLACE FUNCTION f_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql;
+CREATE FUNCTION f_sql() RETURNS int AS 'SELECT 1' LANGUAGE sql;
+CREATE TRIGGER t_pg AFTER INSERT ON t_pg FOR EACH ROW EXECUTE FUNCTION f_pg();
+BEGIN;
+SELECT f_pg();
+COMMIT;";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec![
+                "CREATE OR REPLACE FUNCTION f_pg() RETURNS int AS $$
+BEGIN
+    RETURN 1;
+END;
+$$ LANGUAGE plpgsql",
+                "CREATE FUNCTION f_sql() RETURNS int AS 'SELECT 1' LANGUAGE sql",
+                "CREATE TRIGGER t_pg AFTER INSERT ON t_pg FOR EACH ROW EXECUTE FUNCTION f_pg()",
+                "BEGIN",
+                "SELECT f_pg()",
+                "COMMIT",
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_family_does_not_enable_full_oracle_plsql_blocks() {
+        assert!(!starts_with_oracle_style_routine_body("CREATE PROCEDURE p() LANGUAGE sql AS 'SELECT 1';"));
+        assert!(!starts_with_oracle_style_routine_body(
+            "CREATE TRIGGER t AFTER INSERT ON x FOR EACH ROW EXECUTE FUNCTION f();"
+        ));
+        assert!(!starts_with_oracle_style_routine_body("DECLARE c CURSOR FOR SELECT 1;"));
+        assert!(!starts_with_oracle_style_routine_body(
+            "CREATE FUNCTION f_pg() RETURNS int AS $$\nBEGIN\n    RETURN 1;\nEND;\n$$ LANGUAGE plpgsql;"
+        ));
+        assert!(!starts_with_oracle_style_routine_body(
+            "CREATE OR REPLACE FUNCTION f_tag() RETURNS int AS $body$ BEGIN RETURN 1; END; $body$ LANGUAGE plpgsql"
+        ));
+        assert!(starts_with_oracle_style_routine_body("CREATE OR REPLACE PROCEDURE p()\nAS  DECLARE\nBEGIN"));
+        assert!(starts_with_oracle_style_routine_body("CREATE PROCEDURE p() IS BEGIN"));
+        assert!(starts_with_oracle_style_routine_body("CREATE OR REPLACE PACKAGE BODY pkg AS"));
     }
 
     #[test]

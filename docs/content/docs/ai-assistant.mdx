@@ -119,7 +119,7 @@ Templates enter model context. Do not put passwords, tokens, or unnecessary busi
 
 ## Skills (SKILL.md)
 
-Desktop can attach read-only [Codex-compatible](https://developers.openai.com/codex/skills) `SKILL.md` rule files to a request as supplementary instructions. Skills are discovered in the user-level Codex directory `~/.agents/skills`; Settings → AI can additionally enable one custom directory. Each directory is validated independently, same names are kept side by side and labeled by source (`Default directory` / `Custom directory`), and custom-directory skills sort first.
+Desktop can attach read-only [`SKILL.md`](https://developers.openai.com/codex/skills) rule files to a request as supplementary instructions. Skills are always discovered in `~/.agents/skills`; Settings → AI can additionally enable one custom directory. Each directory is validated independently, same names are kept side by side and labeled by source (`Default directory` / `Custom directory`), and custom-directory skills sort first.
 
 Select skills from the composer `Skills` entry (or type `/skill`) and remove them from the chips above the input. The selection lives for the lifetime of one open AI panel — conversation switches and new conversations keep it; closing the panel or restarting DBX clears it. Nothing is persisted, and DBX never writes to skill files.
 

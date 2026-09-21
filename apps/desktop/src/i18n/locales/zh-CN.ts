@@ -7303,7 +7303,7 @@ export default withEnglishFallback({
     syncTab: "同步",
     aiTab: "AI",
     aiSkillRoot: "自定义 Skill 目录",
-    aiSkillRootDesc: "在默认 Codex 用户目录之外，额外扫描一个 SKILL.md 技能目录。",
+    aiSkillRootDesc: "额外扫描一个 SKILL.md 技能目录。~/.agents/skills 目录始终会被扫描。",
     aiSkillRootPath: "目录路径",
     aiSkillRootBrowse: "浏览",
     mcpTab: "MCP",

@@ -6919,7 +6919,7 @@ export default withEnglishFallback({
     syncTab: "同期",
     aiTab: "AI",
     aiSkillRoot: "カスタム Skill ディレクトリ",
-    aiSkillRootDesc: "既定の Codex ユーザーディレクトリに加えて、SKILL.md スキルのディレクトリを 1 件スキャンします。",
+    aiSkillRootDesc: "SKILL.md スキルのディレクトリを追加で 1 件スキャンします。~/.agents/skills は常にスキャンされます。",
     aiSkillRootPath: "ディレクトリパス",
     aiSkillRootBrowse: "参照",
     mcpTab: "MCP",

@@ -117,7 +117,7 @@ AI 上下文可以包含：
 
 ## Skills（SKILL.md）
 
-Desktop 可以把只读的 [Codex 兼容](https://developers.openai.com/codex/skills) `SKILL.md` 规则文件作为补充性指令附加到请求中。技能默认从 Codex 用户级目录 `~/.agents/skills` 发现；设置 → AI 中还可以额外启用一个自定义目录。两个目录独立校验，同名技能并列保留并标注来源（`默认目录` / `自定义目录`），自定义目录的技能排在前面。
+Desktop 可以把只读的 [`SKILL.md`](https://developers.openai.com/codex/skills) 规则文件作为补充性指令附加到请求中。技能始终从 `~/.agents/skills` 发现；设置 → AI 中还可以额外启用一个自定义目录。两个目录独立校验，同名技能并列保留并标注来源（`默认目录` / `自定义目录`），自定义目录的技能排在前面。
 
 在输入区的 `Skills` 入口（或输入 `/skill`）选择技能，选中项以芯片形式显示在输入框上方，可随时移除。选择的生命周期是一个打开的 AI 面板：切换会话、新建会话都会保留；关闭面板或重启 DBX 即清空。选择不会持久化，DBX 也绝不写入技能文件。
 

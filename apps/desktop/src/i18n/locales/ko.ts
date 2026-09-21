@@ -6652,7 +6652,7 @@ export default withEnglishFallback({
     syncTab: "동기화",
     aiTab: "AI",
     aiSkillRoot: "사용자 지정 Skill 디렉터리",
-    aiSkillRootDesc: "기본 Codex 사용자 디렉터리 외에 SKILL.md 스킬 디렉터리를 하나 더 스캔합니다.",
+    aiSkillRootDesc: "SKILL.md 스킬 디렉터리를 하나 더 스캔합니다. ~/.agents/skills 는 항상 스캔됩니다.",
     aiSkillRootPath: "디렉터리 경로",
     aiSkillRootBrowse: "찾아보기",
     mcpTab: "MCP",

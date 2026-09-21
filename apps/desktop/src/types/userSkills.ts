@@ -1,5 +1,5 @@
 /**
- * Read-only user-level SKILL.md skills (Codex-compatible, prd 09-21-public-skill-loader).
+ * Read-only user-level SKILL.md skills (prd 09-21-public-skill-loader).
  * Ids are opaque and deterministic (root source + canonical relative skill path);
  * absolute filesystem paths never cross this boundary.
  */

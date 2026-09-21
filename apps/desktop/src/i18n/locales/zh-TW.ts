@@ -6166,7 +6166,7 @@ export default withEnglishFallback({
     syncTab: "同步",
     aiTab: "AI",
     aiSkillRoot: "自訂 Skill 目錄",
-    aiSkillRootDesc: "在預設 Codex 使用者目錄之外，額外掃描一個 SKILL.md 技能目錄。",
+    aiSkillRootDesc: "額外掃描一個 SKILL.md 技能目錄。~/.agents/skills 目錄始終會被掃描。",
     aiSkillRootPath: "目錄路徑",
     aiSkillRootBrowse: "瀏覽",
     jdbcTab: "JDBC 驅動程式",

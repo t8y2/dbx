@@ -6884,7 +6884,7 @@ export default withEnglishFallback({
     syncTab: "Eşitle",
     aiTab: "Yapay Zekâ",
     aiSkillRoot: "Özel skill dizini",
-    aiSkillRootDesc: "Varsayılan Codex kullanıcı dizinine ek olarak bir SKILL.md skill dizinini daha tarar.",
+    aiSkillRootDesc: "Bir SKILL.md skill dizinini daha tarar. ~/.agents/skills her zaman taranır.",
     aiSkillRootPath: "Dizin yolu",
     aiSkillRootBrowse: "Gözat",
     mcpTab: "MCP",

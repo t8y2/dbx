@@ -6883,7 +6883,7 @@ export default withEnglishFallback({
     syncTab: "Sync",
     aiTab: "IA",
     aiSkillRoot: "Directorio de skills personalizado",
-    aiSkillRootDesc: "Analiza un directorio adicional de skills SKILL.md junto al directorio de usuario predeterminado de Codex.",
+    aiSkillRootDesc: "Analiza un directorio adicional de skills SKILL.md. ~/.agents/skills siempre se analiza.",
     aiSkillRootPath: "Ruta del directorio",
     aiSkillRootBrowse: "Examinar",
     mcpTab: "MCP",

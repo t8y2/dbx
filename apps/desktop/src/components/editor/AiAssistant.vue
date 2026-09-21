@@ -502,7 +502,7 @@ watch(
   },
 );
 
-// User skills (read-only Codex-compatible SKILL.md). Selection is panel-session
+// User skills (read-only SKILL.md files). Selection is panel-session
 // scope like activeTemplateIds above: closing the panel or restarting clears it,
 // conversation switches keep it (prd.md:30).
 const userSkillStore = useUserSkillStore();

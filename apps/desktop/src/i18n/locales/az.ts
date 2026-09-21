@@ -7002,7 +7002,7 @@ export default withEnglishFallback({
     syncTab: "Sinxronlaşdırma",
     aiTab: "AI",
     aiSkillRoot: "Xüsusi skill kataloğu",
-    aiSkillRootDesc: "Standart Codex istifadəçi kataloğu ilə yanaşı əlavə bir SKILL.md skill kataloğunu tarayır.",
+    aiSkillRootDesc: "Əlavə bir SKILL.md skill kataloqunu tarayır. ~/.agents/skills həmişə taranır.",
     aiSkillRootPath: "Kataloq yolu",
     aiSkillRootBrowse: "Göz at",
     mcpTab: "MCP",

@@ -1,6 +1,6 @@
 //! Read-only discovery and reading of user-level SKILL.md skills.
 //!
-//! Two roots are scanned: the Codex user-level root (HOME/.agents/skills) and
+//! Two roots are scanned: the default user-level root (HOME/.agents/skills) and
 //! an optional user-configured custom root (Settings > AI). The service is
 //! strictly read-only: there is no create/write/delete API. Skills are
 //! identified by deterministic opaque ids derived from the root source and the

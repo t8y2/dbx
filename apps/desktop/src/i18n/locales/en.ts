@@ -7331,7 +7331,7 @@ export default {
     syncTab: "Sync",
     aiTab: "AI",
     aiSkillRoot: "Custom skill directory",
-    aiSkillRootDesc: "Scan one extra directory for SKILL.md skills alongside the default Codex user directory.",
+    aiSkillRootDesc: "Scan one extra directory for SKILL.md skills. The ~/.agents/skills directory is always scanned.",
     aiSkillRootPath: "Directory path",
     aiSkillRootBrowse: "Browse",
     mcpTab: "MCP",

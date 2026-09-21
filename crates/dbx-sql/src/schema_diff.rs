@@ -5576,7 +5576,7 @@ fn order_diffs_for_execution(diffs: &[TableDiff]) -> Vec<&TableDiff> {
             _ => {}
         }
     }
-    if added.len() < 2 && removed.len() < 2 {
+    if added.is_empty() && removed.is_empty() {
         return diffs.iter().collect();
     }
 
@@ -5611,7 +5611,29 @@ fn order_diffs_for_execution(diffs: &[TableDiff]) -> Vec<&TableDiff> {
                     }
                 }
             }
-            _ => {}
+            // Modified tables emit `ALTER TABLE ... ADD/DROP FOREIGN KEY` inline,
+            // so an FK added on a modified table still needs the referenced
+            // table's CREATE first, and an FK dropped on a modified table must
+            // run before the referenced table's DROP.
+            _ => {
+                for foreign_key in diff.foreign_keys.as_deref().unwrap_or_default() {
+                    let info = foreign_key.source.as_ref().or(foreign_key.target.as_ref());
+                    let Some(info) = info else { continue };
+                    match foreign_key.diff_type.as_str() {
+                        "added" => {
+                            if let Some(&parent) = added.get(info.ref_table.as_str()) {
+                                add_edge(parent, index, &mut successors, &mut in_degree);
+                            }
+                        }
+                        "removed" => {
+                            if let Some(&parent) = removed.get(info.ref_table.as_str()) {
+                                add_edge(index, parent, &mut successors, &mut in_degree);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 
@@ -14040,6 +14062,80 @@ mod tests {
                 && statement_position(&sql, "-- Create table: aaa9761")
                     < statement_position(&sql, "-- Create table: ccc9761"),
             "plans without dependencies must keep the caller's order:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn modified_table_fk_added_to_new_table_waits_for_its_create() {
+        let modified = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "aaa_child_mod9761".into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "added".into(),
+                name: "fk_aaa_child_mod9761".into(),
+                source: Some(ForeignKeyInfo {
+                    name: "fk_aaa_child_mod9761".into(),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: "zzz_parent9761".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                target: None,
+                changes: Vec::new(),
+            }]),
+            ..Default::default()
+        };
+        let diffs = vec![modified, added_table_diff("zzz_parent9761")];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "-- Create table: zzz_parent9761")
+                < statement_position(&sql, "ALTER TABLE `aaa_child_mod9761` ADD CONSTRAINT"),
+            "an ALTER on a modified table adding an FK to a new table must follow that table's CREATE:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn modified_table_fk_dropped_runs_before_referenced_table_drop() {
+        let modified = TableDiff {
+            diff_type: "modified".into(),
+            object_type: Some("table".into()),
+            name: "aaa_child_mod9761".into(),
+            foreign_keys: Some(vec![ForeignKeyDiff {
+                diff_type: "removed".into(),
+                name: "fk_aaa_child_mod9761".into(),
+                source: None,
+                target: Some(ForeignKeyInfo {
+                    name: "fk_aaa_child_mod9761".into(),
+                    column: "parent_id".into(),
+                    ref_schema: None,
+                    ref_table: "zzz_parent9761".into(),
+                    ref_column: "id".into(),
+                    on_update: None,
+                    on_delete: None,
+                }),
+                changes: Vec::new(),
+            }]),
+            ..Default::default()
+        };
+        let removed_parent = TableDiff {
+            diff_type: "removed".into(),
+            object_type: Some("table".into()),
+            name: "zzz_parent9761".into(),
+            ..Default::default()
+        };
+        let diffs = vec![modified, removed_parent];
+
+        let sql = generate_schema_sync_sql(&diffs, &[], &[], &[], &[], DatabaseType::Mysql, None, false, None, &[]);
+
+        assert!(
+            statement_position(&sql, "ALTER TABLE `aaa_child_mod9761` DROP FOREIGN KEY")
+                < statement_position(&sql, "-- Drop table: zzz_parent9761"),
+            "an ALTER dropping an FK must run before the referenced table's DROP:\n{sql}"
         );
     }
 

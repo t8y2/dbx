@@ -34,11 +34,11 @@ afterEach(() => {
 });
 
 describe("PluginReleaseInfo", () => {
-  it("shows the date and opens release notes in a plain-text dialog on demand", async () => {
+  it("shows the date and opens markdown release notes on demand", async () => {
     const container = await mountReleaseInfo(
       release({
         releasedAt: "2026-07-28T00:00:00Z",
-        releaseNotes: "First line\nSecond line\n<b>not HTML</b>",
+        releaseNotes: "# What's new\n\nFirst line\nSecond line\n\n**Bold change**\n\n- Faster startup\n- Better errors\n\n`plugin-cli`\n\n<b>not HTML</b>",
       }),
     );
 
@@ -52,8 +52,14 @@ describe("PluginReleaseInfo", () => {
     await nextTick();
 
     expect(toggle?.getAttribute("aria-expanded")).toBe("true");
-    expect(document.body.querySelector("[data-plugin-release-notes]")?.textContent).toContain("First line\nSecond line\n<b>not HTML</b>");
-    expect(document.body.querySelector("[data-plugin-release-notes] b")).toBeNull();
+    const notes = document.body.querySelector<HTMLElement>("[data-plugin-release-notes]");
+    expect(notes?.querySelector("h1")?.textContent).toBe("What's new");
+    expect(notes?.querySelector("strong")?.textContent).toBe("Bold change");
+    expect(notes?.querySelectorAll("ul li")).toHaveLength(2);
+    expect(notes?.querySelector("code")?.textContent).toBe("plugin-cli");
+    expect(notes?.innerHTML).toContain("<br>");
+    expect(notes?.querySelector("script, img, b")).toBeNull();
+    expect(notes?.textContent).toContain("<b>not HTML</b>");
     expect(document.body.textContent).toContain("Release notes");
     expect(document.body.textContent).toContain("Version 1.1.0");
 

@@ -293,21 +293,17 @@ pub async fn list_object_statistics(client: &Client, database: &str) -> Result<V
 
     let collections = list_collection_specs(client, database).await?;
     let handle = client.database(database);
-    let stats = stream::iter(
-        collections
-            .into_iter()
-            .filter(|spec| spec.kind != MongoCollectionKind::View)
-            .map(|spec| {
-                let handle = handle.clone();
-                async move {
-                    let result = handle.run_command(collection_stats_command_document(&spec.name, None)).await.ok()?;
-                    Some(object_statistics_from_collection_stats(&spec.name, database, &result))
-                }
-            }),
-    )
-    .buffer_unordered(MONGO_OBJECT_STATISTICS_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await;
+    let stats =
+        stream::iter(collections.into_iter().filter(|spec| spec.kind != MongoCollectionKind::View).map(|spec| {
+            let handle = handle.clone();
+            async move {
+                let result = handle.run_command(collection_stats_command_document(&spec.name, None)).await.ok()?;
+                Some(object_statistics_from_collection_stats(&spec.name, database, &result))
+            }
+        }))
+        .buffer_unordered(MONGO_OBJECT_STATISTICS_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
 
     Ok(stats.into_iter().flatten().collect())
 }
@@ -320,7 +316,8 @@ fn object_statistics_from_collection_stats(name: &str, database: &str, result: &
         name: name.to_string(),
         schema: Some(database.to_string()),
         estimated_rows: collection_stats_int(result, "count"),
-        total_bytes: match (collection_stats_int(result, "storageSize"), collection_stats_int(result, "totalIndexSize")) {
+        total_bytes: match (collection_stats_int(result, "storageSize"), collection_stats_int(result, "totalIndexSize"))
+        {
             (None, None) => None,
             (data, index) => Some(data.unwrap_or(0).saturating_add(index.unwrap_or(0))),
         },

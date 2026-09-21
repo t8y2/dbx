@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import { hexToRgba } from "@/lib/common/color";
 import { connectionColor, connectionDisplayName, tabDisplayTitle, tabDisplayTitles, tabModeLabel } from "@/lib/tabs/tabPresentation";
+import { useQueryStore } from "@/stores/queryStore";
 import type { QueryTab } from "@/types/database";
 
 const props = defineProps<{
@@ -21,7 +22,10 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const listRef = ref<HTMLElement>();
-const tabTitles = computed(() => tabDisplayTitles(props.tabs, t));
+// Number from the canonical tab order, not the switcher's most-recent-first
+// list, so suffixes match the tab strip and stay stable while cycling.
+const queryStore = useQueryStore();
+const tabTitles = computed(() => tabDisplayTitles(queryStore.tabs, t));
 
 function tabColor(tab: QueryTab): string {
   return connectionColor(tab.connectionId);

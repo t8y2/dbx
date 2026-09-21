@@ -83,9 +83,9 @@ export function isEventObjectBrowserTab(tab: QueryTab): boolean {
  *
  * Tabs whose plain title collides (most obviously several query tabs on the
  * same connection and database, which all render `connection@database`) get a
- * 1-based numeric suffix so the strip stays readable, the way DataGrip numbers
- * its consoles. The first tab keeps no suffix when its title is unique, so
- * single-tab windows look exactly as before.
+ * 1-based numeric suffix so the strip stays readable. The first tab keeps no
+ * suffix when its title is unique, so single-tab windows look exactly as
+ * before.
  */
 export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, string> {
   const titles = new Map<string, string>();

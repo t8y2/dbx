@@ -237,6 +237,101 @@ describe("NacosContentReplaceDialog", () => {
     expect(configs.get("public/DEFAULT_GROUP/application.yaml")?.content).toContain("mysql-old:3306");
   });
 
+  it("selects every preview result by default and switches the inline diff from the result list", async () => {
+    const configs = new Map([
+      ["public/DEFAULT_GROUP/application.yaml", { namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml", content: "primary=mysql-old", md5: "app-before" }],
+      ["public/DEFAULT_GROUP/orders.yaml", { namespace: "public", group: "DEFAULT_GROUP", dataId: "orders.yaml", content: "replica=mysql-old", md5: "orders-before" }],
+    ]);
+    api.nacosSearchConfigContent.mockResolvedValue({
+      matches: [
+        { namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml" },
+        { namespace: "public", group: "DEFAULT_GROUP", dataId: "orders.yaml" },
+      ],
+      failures: [],
+      truncated: false,
+      cancelled: false,
+      incomplete: false,
+    });
+    api.nacosGetConfig.mockImplementation(async (_connectionId: string, key: { namespace: string; group: string; dataId: string }) => configs.get(`${key.namespace}/${key.group}/${key.dataId}`));
+
+    await mountDialog();
+    input("nacos-replace-search", "mysql-old");
+    input("nacos-replace-value", "mysql-new");
+    await click("nacos-replace-preview");
+
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-select-all]")).not.toBeNull());
+    expect((document.body.querySelector("[data-testid=nacos-replace-select-all]") as HTMLInputElement).checked).toBe(true);
+    expect((document.body.querySelector("[data-testid=nacos-replace-select-0]") as HTMLInputElement).checked).toBe(true);
+    expect((document.body.querySelector("[data-testid=nacos-replace-select-1]") as HTMLInputElement).checked).toBe(true);
+    expect(document.body.querySelector("[data-testid=nacos-replace-inline-diff]")?.textContent).toContain("primary=mysql-new");
+
+    await click("nacos-replace-item-1");
+    expect(document.body.querySelector("[data-testid=nacos-replace-inline-diff]")?.textContent).toContain("replica=mysql-new");
+    expect(document.body.querySelector("[data-testid=nacos-replace-inline-diff]")?.textContent).not.toContain("primary=mysql-new");
+  });
+
+  it("publishes and stores history for only the selected preview results", async () => {
+    const configs = new Map([
+      ["public/DEFAULT_GROUP/application.yaml", { namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml", content: "primary=mysql-old", md5: "app-before" }],
+      ["public/DEFAULT_GROUP/orders.yaml", { namespace: "public", group: "DEFAULT_GROUP", dataId: "orders.yaml", content: "replica=mysql-old", md5: "orders-before" }],
+    ]);
+    api.nacosSearchConfigContent.mockResolvedValue({
+      matches: [
+        { namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml" },
+        { namespace: "public", group: "DEFAULT_GROUP", dataId: "orders.yaml" },
+      ],
+      failures: [],
+      truncated: false,
+      cancelled: false,
+      incomplete: false,
+    });
+    api.nacosGetConfig.mockImplementation(async (_connectionId: string, key: { namespace: string; group: string; dataId: string }) => configs.get(`${key.namespace}/${key.group}/${key.dataId}`));
+    api.nacosPublishConfig.mockImplementation(async (_connectionId: string, request: { namespace: string; group: string; dataId: string; content: string }) => {
+      const key = `${request.namespace}/${request.group}/${request.dataId}`;
+      configs.set(key, { ...configs.get(key)!, ...request, md5: `${request.dataId}-after` });
+    });
+
+    await mountDialog();
+    input("nacos-replace-search", "mysql-old");
+    input("nacos-replace-value", "mysql-new");
+    await click("nacos-replace-preview");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-select-1]")).not.toBeNull());
+    await click("nacos-replace-select-1");
+
+    expect(document.body.querySelector("[data-testid=nacos-replace-apply]")?.textContent).toContain("1");
+    await click("nacos-replace-apply");
+
+    await vi.waitFor(() => expect(api.nacosPublishConfig).toHaveBeenCalledTimes(1));
+    expect(api.nacosPublishConfig).toHaveBeenCalledWith("nacos-main", expect.objectContaining({ dataId: "application.yaml", content: "primary=mysql-new" }));
+    expect(configs.get("public/DEFAULT_GROUP/orders.yaml")?.content).toBe("replica=mysql-old");
+    const saved = [...history.values()][0] as NacosReplaceHistoryEntry;
+    expect(saved.plan.items.map((item) => item.dataId)).toEqual(["application.yaml"]);
+    expect(saved.plan.totalReplacements).toBe(1);
+    expect(saved.report.items.map((item) => item.dataId)).toEqual(["application.yaml"]);
+  });
+
+  it("disables replacement when every preview result is deselected", async () => {
+    api.nacosSearchConfigContent.mockResolvedValue({
+      matches: [{ namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml" }],
+      failures: [],
+      truncated: false,
+      cancelled: false,
+      incomplete: false,
+    });
+    api.nacosGetConfig.mockResolvedValue({ namespace: "public", group: "DEFAULT_GROUP", dataId: "application.yaml", content: "mysql-old", md5: "before" });
+
+    await mountDialog();
+    input("nacos-replace-search", "mysql-old");
+    input("nacos-replace-value", "mysql-new");
+    await click("nacos-replace-preview");
+    await vi.waitFor(() => expect(document.body.querySelector("[data-testid=nacos-replace-select-all]")).not.toBeNull());
+    await click("nacos-replace-select-all");
+
+    expect((document.body.querySelector("[data-testid=nacos-replace-apply]") as HTMLButtonElement).disabled).toBe(true);
+    await click("nacos-replace-apply");
+    expect(api.nacosPublishConfig).not.toHaveBeenCalled();
+  });
+
   it("blocks apply when the global search result is incomplete", async () => {
     api.nacosSearchConfigContent.mockResolvedValue({ operationId: "replace-search", scanned: 10_000, matches: [], failures: [], truncated: true, cancelled: false, incomplete: true });
 

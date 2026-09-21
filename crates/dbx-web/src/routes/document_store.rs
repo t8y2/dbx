@@ -441,17 +441,6 @@ pub async fn elasticsearch_delete_all_documents(
     Ok(Json(result))
 }
 
-pub async fn solr_delete_all_documents(
-    State(state): State<Arc<WebState>>,
-    Json(req): Json<SolrCoreRequest>,
-) -> Result<Json<()>, AppError> {
-    ensure_writable(&state.app, &req.connection_id, "Delete all documents").await?;
-    dbx_core::document_ops::solr_delete_all_documents_core(&state.app, &req.connection_id, &req.core)
-        .await
-        .map_err(AppError::from)?;
-    Ok(Json(()))
-}
-
 pub async fn insert_document(
     State(state): State<Arc<WebState>>,
     Json(req): Json<DocumentInsertRequest>,

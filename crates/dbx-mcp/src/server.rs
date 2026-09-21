@@ -6138,10 +6138,7 @@ mod tests {
             DatabaseType::Solr
         ));
         // A REST request is never a forbidden database switch.
-        assert!(!mcp_sql_has_forbidden_database_switch(
-            "GET /mycore/select?q=*:*",
-            DatabaseType::Solr
-        ));
+        assert!(!mcp_sql_has_forbidden_database_switch("GET /mycore/select?q=*:*", DatabaseType::Solr));
     }
 
     #[test]

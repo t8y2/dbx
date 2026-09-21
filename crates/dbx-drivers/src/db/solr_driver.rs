@@ -122,7 +122,11 @@ impl SolrClient {
 fn normalize_solr_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
     let has_context_path = reqwest::Url::parse(trimmed).map(|u| u.path().trim_matches('/').len() > 0).unwrap_or(false);
-    if has_context_path { trimmed.to_string() } else { format!("{trimmed}/solr") }
+    if has_context_path {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/solr")
+    }
 }
 
 pub fn solr_accept_invalid_certs(tls_enabled: bool, url_params: Option<&str>) -> bool {
@@ -337,7 +341,10 @@ fn solr_term_value(value: &Value) -> Result<String, String> {
 fn solr_escape_wildcard_literal(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for ch in text.chars() {
-        if matches!(ch, '\\' | '+' | '-' | '=' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~' | ':' | '/') {
+        if matches!(
+            ch,
+            '\\' | '+' | '-' | '=' | '&' | '|' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~' | ':' | '/'
+        ) {
             escaped.push('\\');
         }
         escaped.push(ch);
@@ -615,7 +622,9 @@ fn solr_query_body(
             return Err("Solr cursor pagination requires a uniqueKey field in the schema".to_string());
         };
         let uk = unique_key.to_string();
-        let has_uk = sort.as_deref().is_some_and(|s| s.split(',').any(|item| item.trim_start().starts_with(&format!("{uk} ")) || item.trim() == uk));
+        let has_uk = sort.as_deref().is_some_and(|s| {
+            s.split(',').any(|item| item.trim_start().starts_with(&format!("{uk} ")) || item.trim() == uk)
+        });
         sort = Some(match sort {
             Some(s) if has_uk => s,
             Some(s) => format!("{s},{uk} asc"),
@@ -738,10 +747,7 @@ pub async fn find_documents_with_cursor(
         None => "*".to_string(),
         Some(raw) => {
             let decoded = decode_solr_cursor(raw)?;
-            if decoded.collection != core
-                || decoded.filter.as_deref() != filter
-                || decoded.sort.as_deref() != sort
-            {
+            if decoded.collection != core || decoded.filter.as_deref() != filter || decoded.sort.as_deref() != sort {
                 return Err("Solr cursor cannot be reused after the collection, filter, or sort changed".to_string());
             }
             decoded.mark
@@ -777,8 +783,17 @@ pub async fn count_documents(client: &SolrClient, core: &str, filter: Option<&st
 }
 
 fn solr_update_body_doc(client_doc: &mut serde_json::Map<String, Value>, unique_key: Option<&str>, id: Option<&str>) {
-    // `_id`/`_routing` 是前端文档编辑器侧的元字段，不写入 Solr。
-    if let (Some(uk), Some(id)) = (unique_key, id.map(str::to_string).or_else(|| client_doc.get("_id").and_then(|v| v.as_str().map(str::to_string)))) {
+    // `_id`/`_routing` 是前端文档编辑器侧的元字段，不写入 Solr。数值/布尔型
+    // `_id`（数值 uniqueKey 的 core）序列化为字符串写入，避免静默丢失文档标识。
+    let id_value = id.map(str::to_string).or_else(|| {
+        client_doc.get("_id").and_then(|v| match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        })
+    });
+    if let (Some(uk), Some(id)) = (unique_key, id_value) {
         client_doc.insert(uk.to_string(), Value::String(id));
     }
     client_doc.remove("_id");
@@ -824,12 +839,6 @@ pub async fn update_document(client: &SolrClient, core: &str, id: &str, doc_json
 pub async fn delete_document(client: &SolrClient, core: &str, id: &str) -> Result<u64, String> {
     solr_post_update(client, core, &serde_json::json!({ "delete": { "id": id } })).await?;
     Ok(1)
-}
-
-/// 清空 core 里的全部文档（delete-by-query `*:*`），保留 core 本体与 schema。
-/// Solr delete-by-query 不返回删除计数，返回受影响行数固定为 0。
-pub async fn delete_all_documents(client: &SolrClient, core: &str) -> Result<(), String> {
-    solr_post_update(client, core, &serde_json::json!({ "delete": { "query": "*:*" } })).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,11 +1050,14 @@ fn parse_solr_rest_response(status: u16, body_text: &str, start: std::time::Inst
                 result.elasticsearch_raw_body = Some(body_text.to_string());
                 return Ok(result);
             }
-            Ok(solr_raw_json_response_result(status, serde_json::to_string_pretty(&body).unwrap_or_else(|_| body_text.to_string()), start))
+            Ok(solr_raw_json_response_result(
+                status,
+                serde_json::to_string_pretty(&body).unwrap_or_else(|_| body_text.to_string()),
+                start,
+            ))
         }
         Err(_) => {
-            let rows: Vec<Vec<Value>> =
-                body_text.lines().map(|line| vec![Value::String(line.to_string())]).collect();
+            let rows: Vec<Vec<Value>> = body_text.lines().map(|line| vec![Value::String(line.to_string())]).collect();
             let mut result = solr_table_result(vec!["response".to_string()], Vec::new(), rows, start);
             result.affected_rows = result.rows.len() as u64;
             Ok(result)
@@ -1106,7 +1118,10 @@ mod tests {
 
     #[test]
     fn sort_translation_matches_solr_syntax() {
-        assert_eq!(solr_sort_from_document_sort(Some(r#"{"created_at":-1}"#)).unwrap().as_deref(), Some("created_at desc"));
+        assert_eq!(
+            solr_sort_from_document_sort(Some(r#"{"created_at":-1}"#)).unwrap().as_deref(),
+            Some("created_at desc")
+        );
         assert_eq!(solr_sort_from_document_sort(None).unwrap(), None);
     }
 

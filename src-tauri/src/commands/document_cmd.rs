@@ -153,16 +153,6 @@ pub async fn elasticsearch_delete_all_documents(
 }
 
 #[tauri::command]
-pub async fn solr_delete_all_documents(
-    state: State<'_, Arc<AppState>>,
-    connection_id: String,
-    core: String,
-) -> Result<(), String> {
-    ensure_connection_writable(&state, &connection_id, "Delete all documents").await?;
-    dbx_core::document_ops::solr_delete_all_documents_core(&state, &connection_id, &core).await
-}
-
-#[tauri::command]
 pub async fn document_insert_document(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

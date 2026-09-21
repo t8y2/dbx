@@ -640,19 +640,6 @@ pub async fn elasticsearch_delete_all_documents_core(
     }
 }
 
-/// 清空 Solr core 中的全部文档（保留 core 与 schema）。
-pub async fn solr_delete_all_documents_core(state: &AppState, connection_id: &str, core: &str) -> Result<(), String> {
-    ensure_document_pool(state, connection_id).await?;
-    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
-        PoolKind::Solr(client) => {
-            let client = client.clone();
-            solr_driver::delete_all_documents(&client, core).await
-        }
-        _ => Err("Not a Solr connection".to_string()),
-    }
-}
-
 fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains(method) && (lower.contains("unknown method") || lower.contains("method not found"))

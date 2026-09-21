@@ -2338,7 +2338,6 @@ pub fn run() {
             commands::document_cmd::elasticsearch_count_documents,
             commands::document_cmd::elasticsearch_get_index_metadata,
             commands::document_cmd::elasticsearch_delete_all_documents,
-            commands::document_cmd::solr_delete_all_documents,
             commands::document_cmd::document_list_gridfs_buckets,
             commands::document_cmd::document_create_gridfs_bucket,
             commands::document_cmd::document_delete_gridfs_bucket,

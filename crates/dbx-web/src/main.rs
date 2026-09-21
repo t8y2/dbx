@@ -916,7 +916,6 @@ async fn main() {
             "/document-store/elasticsearch/documents/delete-all",
             post(routes::document_store::elasticsearch_delete_all_documents),
         )
-        .route("/document-store/solr/documents/delete-all", post(routes::document_store::solr_delete_all_documents))
         .route("/document-store/list-gridfs-buckets", post(routes::document_store::list_gridfs_buckets))
         .route("/document-store/create-gridfs-bucket", post(routes::document_store::create_gridfs_bucket))
         .route("/document-store/delete-gridfs-bucket", post(routes::document_store::delete_gridfs_bucket))

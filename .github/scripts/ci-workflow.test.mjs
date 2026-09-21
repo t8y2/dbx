@@ -144,6 +144,12 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   assert.ok(win7.includes("--timings"));
   assert.ok(win7.includes("name: DBX-win7-cargo-timings"));
   assert.ok(win7.includes("path: target/cargo-timings/"));
+  assert.ok(win7.includes("name: Profile the DBX Rust frontend"));
+  assert.ok(win7.includes('RUSTC_WRAPPER: ""'));
+  assert.ok(win7.includes('"-Zself-profile-events=default,query-blocked"'));
+  assert.ok(win7.includes('"-Zthreads=4"'));
+  assert.ok(win7.includes("name: DBX-win7-rustc-self-profiles"));
+  assert.ok(win7.includes("path: ${{ runner.temp }}/rustc-self-profile/"));
   assert.doesNotMatch(win7, /^\s+(?:CC|CXX):/m);
 });
 

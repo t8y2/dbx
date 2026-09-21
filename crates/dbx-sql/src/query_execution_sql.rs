@@ -378,8 +378,22 @@ pub fn classify_search_engine_query_risk(source: &str, database_type: DatabaseTy
 /// collection/core 管理）一律按 Dangerous 处理。
 fn classify_solr_query_risk(source: &str) -> Option<SearchEngineQueryRisk> {
     const READ_ONLY_POST_ENDPOINTS: &[&str] = &[
-        "select", "query", "get", "export", "terms", "suggest", "spell", "mlt", "sql", "graph", "clustering", "tvrh",
-        "luke", "elevate", "browse", "debug",
+        "select",
+        "query",
+        "get",
+        "export",
+        "terms",
+        "suggest",
+        "spell",
+        "mlt",
+        "sql",
+        "graph",
+        "clustering",
+        "tvrh",
+        "luke",
+        "elevate",
+        "browse",
+        "debug",
     ];
     let source = strip_leading_search_engine_comments(source);
     let request_line = source.lines().next()?.trim();
@@ -394,16 +408,16 @@ fn classify_solr_query_risk(source: &str) -> Option<SearchEngineQueryRisk> {
     let endpoint = segments.last().copied().unwrap_or("");
     // update handler 的变体（/update/json、/update/json/docs、/update/csv）在
     // update 段之后还有子路径，所以不能只检查末段。
-    let is_update_path = segments
-        .iter()
-        .any(|segment| segment.starts_with("update") || *segment == "commit");
+    let is_update_path = segments.iter().any(|segment| segment.starts_with("update") || *segment == "commit");
 
     match method.as_str() {
         // Solr 的 update handler 也响应 GET（commit/optimize/stream.body 都能
         // 改数据），所以 update 路径对任何方法都算写，不能只放行 POST。
         _ if is_update_path => Some(SearchEngineQueryRisk::Write),
         "GET" | "HEAD" | "OPTIONS" => {
-            if solr_admin_request_is_mutation(raw_path, &segments) {
+            if solr_admin_request_is_mutation(raw_path, &segments)
+                || solr_replication_request_is_mutation(raw_path, &segments)
+            {
                 Some(SearchEngineQueryRisk::Dangerous)
             } else {
                 Some(SearchEngineQueryRisk::ReadOnly)
@@ -428,14 +442,41 @@ fn solr_admin_request_is_mutation(raw_path: &str, segments: &[&str]) -> bool {
     }
     let Some(query) = raw_path.split('?').nth(1) else { return false };
     let action = query.split('&').find_map(|param| {
-        param
-            .split_once('=')
-            .filter(|(key, _)| key.eq_ignore_ascii_case("action"))
-            .map(|(_, value)| value)
+        param.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("action")).map(|(_, value)| value)
     });
     match action {
         None => false,
         Some(action) => !matches!(action.to_ascii_uppercase().as_str(), "STATUS" | "REQUESTSTATUS" | "LIST"),
+    }
+}
+
+/// ReplicationHandler 也接受 GET 触发的变更
+///（`GET /{core}/replication?command=disablereplication` 会真实停用复制），
+/// 只有显式只读的 command 才算 ReadOnly；不带 command 时 handler 默认返回
+/// 详情，按只读处理。
+fn solr_replication_request_is_mutation(raw_path: &str, segments: &[&str]) -> bool {
+    if !segments.last().is_some_and(|segment| segment.eq_ignore_ascii_case("replication")) {
+        return false;
+    }
+    const READ_ONLY_COMMANDS: &[&str] = &[
+        "details",
+        "restorestatus",
+        "filelist",
+        "filecontent",
+        "filedownload",
+        "filemtime",
+        "indexversion",
+        "showversion",
+    ];
+    let Some(query) = raw_path.split('?').nth(1) else {
+        return false;
+    };
+    let command = query.split('&').find_map(|param| {
+        param.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("command")).map(|(_, value)| value)
+    });
+    match command {
+        None => false,
+        Some(command) => !READ_ONLY_COMMANDS.iter().any(|readonly| readonly.eq_ignore_ascii_case(command)),
     }
 }
 
@@ -2045,11 +2086,11 @@ mod tests {
 
         // Document writes hit the update handlers, including the `/update/...`
         // variants whose last path segment is not literally `update`.
-        assert!(is_write_sql_for_database("POST /mycore/update\n{\"add\":{\"doc\":{\"id\":\"1\"}}}", DatabaseType::Solr));
         assert!(is_write_sql_for_database(
-            "POST /mycore/update/json/docs\n{\"id\":\"1\"}",
+            "POST /mycore/update\n{\"add\":{\"doc\":{\"id\":\"1\"}}}",
             DatabaseType::Solr
         ));
+        assert!(is_write_sql_for_database("POST /mycore/update/json/docs\n{\"id\":\"1\"}", DatabaseType::Solr));
         assert!(is_write_sql_for_database("GET /mycore/update?commit=true", DatabaseType::Solr));
 
         // CoreAdmin actions mutate over GET too; only the read whitelist stays safe.
@@ -2066,13 +2107,46 @@ mod tests {
             Some(SearchEngineQueryRisk::ReadOnly)
         );
 
+        // Replication commands mutate over GET too; only the read whitelist stays safe.
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=details", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=restorestatus", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=filelist", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=disablereplication", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=enablereplication", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+        assert_eq!(
+            classify_search_engine_query_risk("GET /mycore/replication?command=fetchindex", DatabaseType::Solr),
+            Some(SearchEngineQueryRisk::Dangerous)
+        );
+
         // Core/schema/admin operations are dangerous.
         assert_eq!(
             classify_search_engine_query_risk("POST /admin/cores?action=CREATE&name=x", DatabaseType::Solr),
             Some(SearchEngineQueryRisk::Dangerous)
         );
         assert_eq!(
-            classify_search_engine_query_risk("POST /mycore/schema\n{\"add-field\":{\"name\":\"x\",\"type\":\"string\"}}", DatabaseType::Solr),
+            classify_search_engine_query_risk(
+                "POST /mycore/schema\n{\"add-field\":{\"name\":\"x\",\"type\":\"string\"}}",
+                DatabaseType::Solr
+            ),
             Some(SearchEngineQueryRisk::Dangerous)
         );
 

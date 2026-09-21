@@ -6,9 +6,10 @@
  * backend read-only gate instead of treating every request as unrecognized.
  *
  * Solr write traffic funnels through `/{core}/update*` (plus `commit`) — for
- * every HTTP method, since Solr update handlers also answer GET commits; and
- * CoreAdmin/Collections actions ride on GET too, so `action=` values outside
- * the read whitelist are dangerous. Read-only POST handlers are the query
+ * every HTTP method, since Solr update handlers also answer GET commits.
+ * CoreAdmin/Collections actions and ReplicationHandler commands ride on GET
+ * too, so `action=`/`command=` values outside the read whitelists are
+ * dangerous. Read-only POST handlers are the query
  * endpoints (select/query/get/export/...). Any other mutating method/path —
  * `/admin/*`, `/schema`, `/config`, core management — is classified dangerous.
  */
@@ -17,6 +18,7 @@ export type SolrRequestRisk = "read" | "write" | "dangerous";
 
 const REQUEST_LINE = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\S+)/i;
 const READ_ONLY_POST_ENDPOINTS = new Set(["select", "query", "get", "export", "terms", "suggest", "spell", "mlt", "sql", "graph", "clustering", "tvrh", "luke", "elevate", "browse", "debug"]);
+const READ_ONLY_REPLICATION_COMMANDS = new Set(["details", "restorestatus", "filelist", "filecontent", "filedownload", "filemtime", "indexversion", "showversion"]);
 const RISK_ORDER: Record<SolrRequestRisk, number> = { read: 0, write: 1, dangerous: 2 };
 
 function parseRequestLine(line: string): { method: string; rawPath: string; endpoint: string; isUpdatePath: boolean; segments: string[] } | null {
@@ -52,12 +54,30 @@ function solrAdminRequestIsMutation(rawPath: string, segments: string[]): boolea
   return !["STATUS", "REQUESTSTATUS", "LIST"].includes(action.toUpperCase());
 }
 
+/**
+ * The replication handler also takes GET-triggered mutations
+ * (`GET /{core}/replication?command=disablereplication` really stops
+ * replication). Only the explicitly read-only commands stay "read"; a missing
+ * command falls back to the handler's default details response.
+ */
+function solrReplicationRequestIsMutation(rawPath: string, segments: string[]): boolean {
+  if (segments[segments.length - 1]?.toLowerCase() !== "replication") return false;
+  const query = rawPath.split("?")[1];
+  if (!query) return false;
+  const command = query
+    .split("&")
+    .map((param) => param.split("=", 2))
+    .find(([key]) => key.toLowerCase() === "command")?.[1];
+  if (command === undefined) return false;
+  return !READ_ONLY_REPLICATION_COMMANDS.has(command.toLowerCase());
+}
+
 function classifyParsedRequest({ method, rawPath, endpoint, isUpdatePath, segments }: { method: string; rawPath: string; endpoint: string; isUpdatePath: boolean; segments: string[] }): SolrRequestRisk {
   // Solr update handlers also answer GET (commit/optimize/stream.body all
   // mutate), so update paths count as writes for every method, not just POST.
   if (isUpdatePath) return "write";
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
-    return solrAdminRequestIsMutation(rawPath, segments) ? "dangerous" : "read";
+    return solrAdminRequestIsMutation(rawPath, segments) || solrReplicationRequestIsMutation(rawPath, segments) ? "dangerous" : "read";
   }
   if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
     return method === "POST" && READ_ONLY_POST_ENDPOINTS.has(endpoint) ? "read" : "dangerous";
@@ -109,7 +129,7 @@ export function isDangerousSolrRequest(method: string, path: string): boolean {
   // gate — for every method, including GET-driven commits.
   if (isUpdatePath) return false;
   if (upperMethod === "GET" || upperMethod === "HEAD" || upperMethod === "OPTIONS") {
-    return solrAdminRequestIsMutation(path, segments);
+    return solrAdminRequestIsMutation(path, segments) || solrReplicationRequestIsMutation(path, segments);
   }
   if (upperMethod === "POST" || upperMethod === "PUT" || upperMethod === "PATCH" || upperMethod === "DELETE") {
     return !(upperMethod === "POST" && READ_ONLY_POST_ENDPOINTS.has(endpoint));

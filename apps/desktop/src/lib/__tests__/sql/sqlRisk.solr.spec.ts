@@ -35,6 +35,16 @@ describe("Solr request risk", () => {
     expect(classifySqlRisk("GET /solr/admin/info/system", { dialect: "solr" }).risk).toBe("read");
   });
 
+  it("treats GET replication commands outside the read whitelist as dangerous", () => {
+    expect(classifySqlRisk("GET /solr/mycore/replication?command=details", { dialect: "solr" }).risk).toBe("read");
+    expect(classifySqlRisk("GET /solr/mycore/replication?command=restorestatus", { dialect: "solr" }).risk).toBe("read");
+    expect(classifySqlRisk("GET /solr/mycore/replication?command=filelist", { dialect: "solr" }).risk).toBe("read");
+    expect(classifySqlRisk("GET /solr/mycore/replication", { dialect: "solr" }).risk).toBe("read");
+    expect(classifySqlRisk("GET /solr/mycore/replication?command=disablereplication", { dialect: "solr" }).risk).toBe("ddl");
+    expect(classifySqlRisk("GET /solr/mycore/replication?command=enablereplication", { dialect: "solr" }).risk).toBe("ddl");
+    expect(classifySqlRisk("GET /solr/mycore/replication?command=fetchindex", { dialect: "solr" }).risk).toBe("ddl");
+  });
+
   it("reports the highest risk across every request in the editor text", () => {
     const source = `${SEARCH_REQUEST}\n\nPOST /solr/admin/cores?action=UNLOAD&core=mycore`;
     expect(classifySqlRisk(source, { dialect: "solr" }).risk).toBe("ddl");

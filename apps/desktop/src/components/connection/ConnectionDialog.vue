@@ -7941,6 +7941,35 @@ function openExternalUrl(url: string) {
                     <CloudflareD1ConnectionFields v-model:account-id="form.host" v-model:database-id="form.database" v-model:api-token="form.password" />
                   </template>
 
+                  <!-- Salesforce: instance URL + access token (SOQL) -->
+                  <template v-else-if="form.db_type === 'salesforce'">
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.salesforceInstanceUrl") }}</Label>
+                      <div class="col-span-3 space-y-1.5">
+                        <div class="flex gap-2">
+                          <Input v-model="form.host" class="flex-1" :placeholder="t('connection.salesforceInstanceUrlPlaceholder')" />
+                          <Input v-model.number="form.port" type="number" class="w-24 shrink-0" />
+                        </div>
+                        <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceInstanceUrlHint") }}</p>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <span />
+                      <label class="col-span-3 flex items-center gap-2 text-sm">
+                        <input type="checkbox" v-model="form.ssl" />
+                        <span>{{ t("connection.sslEnable") }}</span>
+                      </label>
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.salesforceAccessToken") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" :placeholder="t('connection.salesforceAccessTokenPlaceholder')" />
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.salesforceAccessTokenHint") }}</p>
+                    </div>
+                  </template>
+
                   <!-- MySQL / PostgreSQL: host, port, user, password, database -->
                   <template v-else>
                     <div v-if="form.db_type === 'ignite' || form.db_type === 'ignite3'" class="grid grid-cols-4 items-start gap-4">

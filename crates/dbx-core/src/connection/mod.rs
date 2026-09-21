@@ -111,6 +111,7 @@ pub enum PoolKind {
     Elasticsearch(db::elasticsearch_driver::EsClient),
     Easysearch(db::easysearch_driver::EasysearchClient),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
+    Salesforce(db::salesforce_driver::SfClient),
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
@@ -2754,6 +2755,16 @@ impl AppState {
                 db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::Meilisearch(client)
             }
+            DatabaseType::Salesforce => {
+                let client = db::salesforce_driver::SfClient::from_config(
+                    &url,
+                    Some(&db_config.password),
+                    db_config.external_config.as_ref(),
+                    connect_timeout,
+                )?;
+                db::salesforce_driver::SfClient::test_connection(&client, connect_timeout).await?;
+                PoolKind::Salesforce(client)
+            }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
                     &url,
@@ -4095,6 +4106,17 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::Salesforce(client) => {
+                    let client = client.clone();
+                    let timeout = crate::db::connection_timeout();
+                    match db::salesforce_driver::SfClient::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("Salesforce connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::HBase(client) => {
                     let client = client.clone();
                     let timeout = crate::db::connection_timeout();
@@ -5208,6 +5230,16 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::Salesforce(client) => {
+                    let client = client.clone();
+                    match db::salesforce_driver::SfClient::test_connection(&client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("Salesforce connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::HBase(client) => match db::hbase_driver::test_connection(client, timeout).await {
                     Ok(_) => true,
                     Err(e) => {
@@ -5599,6 +5631,7 @@ enum KeepaliveTarget {
     SqlServer(Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>),
     Elasticsearch(db::elasticsearch_driver::EsClient),
     Easysearch(db::easysearch_driver::EasysearchClient),
+    Salesforce(db::salesforce_driver::SfClient),
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
@@ -5700,6 +5733,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::SqlServer(client) => Some(KeepaliveTarget::SqlServer(client.clone())),
         PoolKind::Elasticsearch(client) => Some(KeepaliveTarget::Elasticsearch(client.clone())),
         PoolKind::Easysearch(client) => Some(KeepaliveTarget::Easysearch(client.clone())),
+        PoolKind::Salesforce(client) => Some(KeepaliveTarget::Salesforce(client.clone())),
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
@@ -5741,6 +5775,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         }
         KeepaliveTarget::Easysearch(client) => {
             db::easysearch_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::Salesforce(client) => {
+            db::salesforce_driver::SfClient::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::HBase(client) => {
             db::hbase_driver::test_connection(client, timeout).await.map(|_| ()).map_err(Into::into)
@@ -6163,6 +6200,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Elasticsearch(client) => PoolKind::Elasticsearch(client.clone()),
         PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
         PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
+        PoolKind::Salesforce(client) => PoolKind::Salesforce(client.clone()),
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
@@ -6222,6 +6260,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             drop(client);
         }
         PoolKind::Meilisearch(client) => {
+            drop(client);
+        }
+        PoolKind::Salesforce(client) => {
             drop(client);
         }
         PoolKind::HBase(client) => {
@@ -6323,6 +6364,7 @@ fn base_pool_key_for_with_catalog(
                         | DatabaseType::Milvus
                         | DatabaseType::Weaviate
                         | DatabaseType::ChromaDb
+                        | DatabaseType::Salesforce
                 ));
         is_single && (!database_capabilities::is_agent_type(db_type) || shares_database_pool_with_connection(db_type))
     });
@@ -8713,6 +8755,7 @@ mod tests {
             DatabaseType::SqlServer,
             DatabaseType::Elasticsearch,
             DatabaseType::Easysearch,
+            DatabaseType::Salesforce,
             DatabaseType::Kwdb,
         ] {
             let mut config = mysql_config(Some("app"));

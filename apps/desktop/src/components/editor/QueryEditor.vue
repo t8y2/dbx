@@ -270,7 +270,7 @@ function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
 
 function queryEditorSelectionLanguage(): "sql" | "text" {
   const databaseType = props.databaseType;
-  return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
+  return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" || databaseType === "salesforce" ? "text" : "sql";
 }
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
@@ -3760,7 +3760,7 @@ function invalidateSemanticDiagnosticsForDocumentChange() {
 }
 
 function shouldSkipSqlSemanticDiagnostics() {
-  return props.databaseType === "victoriametrics" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
+  return props.databaseType === "victoriametrics" || props.databaseType === "salesforce" || (props.databaseType !== "redis" && props.databaseType !== "mongodb" && !settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 }
 
 function rangesOverlap(left: { from: number; to: number }, right: { from: number; to: number }): boolean {
@@ -3902,7 +3902,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     setSemanticDiagnostics([]);
     return;
   }
-  if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "victoriametrics") {
+  if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch" || props.databaseType === "meilisearch" || props.databaseType === "victoriametrics" || props.databaseType === "salesforce") {
     setSemanticDiagnostics([]);
     return;
   }
@@ -4955,7 +4955,7 @@ function localCompletionSchemasForDatabaseDisambiguation(completionContext: Retu
 }
 
 function shouldInsertSqlCompletionSpace(): boolean {
-  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "meilisearch" && props.databaseType !== "victoriametrics";
+  return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "meilisearch" && props.databaseType !== "victoriametrics" && props.databaseType !== "salesforce";
 }
 
 // Snippet expansion normally follows from the item type; a provider can also
@@ -5206,6 +5206,7 @@ async function provideSqlCompletions(context: CompletionContext) {
     return provideRedisCompletions(currentState, position, explicit);
   }
   if (props.databaseType === "victoriametrics") return null;
+  if (props.databaseType === "salesforce") return null;
   const hasDatabase = props.database != null;
   const sequenceLiteralContext = getPostgresSequenceLiteralCompletionContext(fullDoc, position, props.databaseType);
   const databaseLinkContext = oracleDatabaseLinkCompletionContext(fullDoc, position, props.databaseType);
@@ -5571,7 +5572,7 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
-  if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch") return false;
+  if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch" || props.databaseType === "salesforce") return false;
   if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
     // Preserve old character-based checks for non-SQL providers.
     if (!insertedText && removedText) {
@@ -8029,7 +8030,7 @@ watch(
 watch(
   () => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled,
   (enabled) => {
-    if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "victoriametrics") return;
+    if (props.databaseType === "redis" || props.databaseType === "mongodb" || props.databaseType === "victoriametrics" || props.databaseType === "salesforce") return;
     if (!shouldSkipSqlSemanticDiagnostics() && enabled) {
       scheduleSemanticDiagnostics(0);
       return;

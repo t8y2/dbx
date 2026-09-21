@@ -1979,6 +1979,23 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::Salesforce(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result = wait_for_query_opt(cancel_token, query_timeout, async move {
+                if let Some(cursor) = options.result_session_id.as_deref() {
+                    client.fetch_more(cursor).await
+                } else {
+                    client.execute_query(&sql, max_rows).await
+                }
+            })
+            .await;
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -4215,6 +4232,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
@@ -4618,6 +4636,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::Elasticsearch(_)
         | PoolKind::Easysearch(_)
         | PoolKind::Meilisearch(_)
+        | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)

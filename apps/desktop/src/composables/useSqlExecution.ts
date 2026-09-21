@@ -923,7 +923,7 @@ export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig,
   if (!connection) return false;
   if (connection.db_type === "meilisearch") return false;
   if (connection.db_type === "elasticsearch" || connection.db_type === "easysearch") return !isElasticsearchRestRequestText(sql);
-  return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "victoriametrics";
+  return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "victoriametrics" && connection.db_type !== "salesforce";
 }
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, _sql = ""): boolean {

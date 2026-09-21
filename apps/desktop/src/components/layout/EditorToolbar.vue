@@ -218,7 +218,8 @@ const supportsExplain = computed(() => {
     dbType !== "consul" &&
     dbType !== "mq" &&
     dbType !== "nacos" &&
-    dbType !== "victoriametrics"
+    dbType !== "victoriametrics" &&
+    dbType !== "salesforce"
   );
 });
 const isSingleDb = computed(() => isSingleDatabase(props.activeConnection?.db_type));
@@ -257,7 +258,7 @@ const sqlSemanticDiagnosticsEnabled = computed(() => settingsStore.editorSetting
 const sqlSemanticDiagnosticsToggleTooltip = computed(() => (sqlSemanticDiagnosticsEnabled.value ? t("toolbar.sqlSemanticDiagnosticsToggleOn") : t("toolbar.sqlSemanticDiagnosticsToggleOff")));
 const supportsSqlSemanticDiagnosticsToggle = computed(() => {
   const dbType = props.activeConnection?.db_type;
-  return dbType !== "redis" && dbType !== "victoriametrics";
+  return dbType !== "redis" && dbType !== "victoriametrics" && dbType !== "salesforce";
 });
 function toggleSqlSemanticDiagnostics() {
   settingsStore.updateEditorSettings({

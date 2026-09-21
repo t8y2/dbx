@@ -53,7 +53,7 @@ export interface SolrAdminViewDef {
   /** REST 路径模板；core scope 中 {core} 会被替换。 */
   path: string;
   /** 需要专用渲染而非通用 JSON 树。 */
-  view: "generic" | "dashboard" | "properties" | "logging" | "coreAdmin" | "overview" | "ping" | "schema" | "analysis" | "segments" | "action";
+  view: "generic" | "dashboard" | "properties" | "logging" | "coreAdmin" | "overview" | "ping" | "schema" | "analysis" | "segments" | "queryForm" | "action";
 }
 
 export type SolrAdminViewId = "dashboard" | "logging" | "javaProps" | "threads" | "coreAdmin" | "metrics" | "overview" | "analysis" | "documents" | "paramsets" | "files" | "ping" | "plugins" | "query" | "replication" | "schema" | "segments";
@@ -75,7 +75,7 @@ export const SOLR_ADMIN_CORE_VIEWS: readonly SolrAdminViewDef[] = [
   { id: "files", scope: "core", path: "/{core}/admin/file", view: "generic" },
   { id: "ping", scope: "core", path: "/{core}/admin/ping", view: "ping" },
   { id: "plugins", scope: "core", path: "/{core}/admin/mbeans?stats=true", view: "generic" },
-  { id: "query", scope: "core", path: "", view: "action" },
+  { id: "query", scope: "core", path: "", view: "queryForm" },
   { id: "replication", scope: "core", path: "/{core}/replication?command=details", view: "generic" },
   { id: "schema", scope: "core", path: "/{core}/schema", view: "schema" },
   { id: "segments", scope: "core", path: "/{core}/admin/segments", view: "segments" },
@@ -230,4 +230,173 @@ export function solrAnalysisPath(core: string, fieldName: string, fieldValue: st
   params.set("analysis.fieldvalue", fieldValue);
   if (queryValue) params.set("analysis.query", queryValue);
   return `/${encodeURIComponent(core)}/analysis/field?${params.toString()}`;
+}
+
+/* ---------- Query Builder（对标官方 Admin UI Query 表单） ---------- */
+
+export interface SolrQueryParam {
+  key: string;
+  value: string;
+}
+
+export interface SolrQueryFormState {
+  /** Request-Handler，如 /select、/query */
+  handler: string;
+  q: string;
+  qop: "" | "AND" | "OR";
+  fq: string[];
+  sort: string;
+  start: string;
+  rows: string;
+  fl: string;
+  df: string;
+  /** paramset 名（useParams 参数，逗号拼接） */
+  useParams: string[];
+  wt: string;
+  indent: boolean;
+  debugQuery: boolean;
+  defType: string;
+  hl: { enabled: boolean; fl: string; snippets: string; fragsize: string; simplePre: string; simplePost: string; requireFieldMatch: boolean; mergeContiguous: boolean };
+  facet: { enabled: boolean; queries: string[]; fields: string[]; prefix: string; sort: string; limit: string; offset: string; mincount: string; missing: boolean };
+  spatial: { enabled: boolean; pt: string; sfield: string; d: string; geofilt: boolean; bbox: boolean };
+  spellcheck: { enabled: boolean; q: string; build: boolean; collate: boolean; count: string; dictionary: string; onlyMorePopular: boolean };
+  rawParams: SolrQueryParam[];
+  /** 非空时改用 JSON Request DSL：POST {handler} + body，与参数表单互斥 */
+  jsonQuery: string;
+}
+
+export function defaultSolrQueryForm(): SolrQueryFormState {
+  return {
+    handler: "/select",
+    q: "*:*",
+    qop: "",
+    fq: [],
+    sort: "",
+    start: "0",
+    rows: "10",
+    fl: "",
+    df: "",
+    useParams: [],
+    wt: "json",
+    indent: true,
+    debugQuery: false,
+    defType: "",
+    hl: { enabled: false, fl: "", snippets: "", fragsize: "", simplePre: "", simplePost: "", requireFieldMatch: false, mergeContiguous: false },
+    facet: { enabled: false, queries: [], fields: [], prefix: "", sort: "", limit: "", offset: "", mincount: "", missing: false },
+    spatial: { enabled: false, pt: "", sfield: "", d: "", geofilt: false, bbox: false },
+    spellcheck: { enabled: false, q: "", build: false, collate: false, count: "", dictionary: "", onlyMorePopular: false },
+    rawParams: [],
+    jsonQuery: "",
+  };
+}
+
+export interface SolrBuiltQuery {
+  /** REST 控制台可执行文本："GET /path?qs" 或 "POST /path\n{json}" */
+  text: string;
+  jsonMode: boolean;
+}
+
+const nonEmpty = (v: string) => v.trim() !== "";
+
+/** 表单 → REST 文本。重复参数（fq/facet.field…）经 URLSearchParams.append 保留多值。 */
+export function buildSolrQuery(core: string, state: SolrQueryFormState): SolrBuiltQuery {
+  const handler = state.handler.trim() || "/select";
+  const base = `/${encodeURIComponent(core)}${handler.startsWith("/") ? handler : `/${handler}`}`;
+
+  if (nonEmpty(state.jsonQuery)) {
+    return { text: `POST ${base}\n${state.jsonQuery.trim()}`, jsonMode: true };
+  }
+
+  const params = new URLSearchParams();
+  const set = (key: string, value: string | undefined) => {
+    if (value != null && nonEmpty(value)) params.set(key, value.trim());
+  };
+  const appendEach = (key: string, values: string[]) => {
+    for (const v of values) if (nonEmpty(v)) params.append(key, v.trim());
+  };
+
+  set("q", state.q || "*:*");
+  set("q.op", state.qop);
+  appendEach("fq", state.fq);
+  set("sort", state.sort);
+  set("start", state.start);
+  set("rows", state.rows);
+  set("fl", state.fl);
+  set("df", state.df);
+  if (state.useParams.length) params.set("useParams", state.useParams.join(","));
+  set("wt", state.wt);
+  if (state.indent) params.set("indent", "on");
+  if (state.debugQuery) params.set("debugQuery", "true");
+  set("defType", state.defType);
+
+  const hl = state.hl;
+  if (hl.enabled) {
+    params.set("hl", "true");
+    set("hl.fl", hl.fl);
+    set("hl.snippets", hl.snippets);
+    set("hl.fragsize", hl.fragsize);
+    set("hl.simple.pre", hl.simplePre);
+    set("hl.simple.post", hl.simplePost);
+    if (hl.requireFieldMatch) params.set("hl.requireFieldMatch", "true");
+    if (hl.mergeContiguous) params.set("hl.mergeContiguous", "true");
+  }
+
+  const facet = state.facet;
+  if (facet.enabled) {
+    params.set("facet", "true");
+    appendEach("facet.query", facet.queries);
+    appendEach("facet.field", facet.fields);
+    set("facet.prefix", facet.prefix);
+    set("facet.sort", facet.sort);
+    set("facet.limit", facet.limit);
+    set("facet.offset", facet.offset);
+    set("facet.mincount", facet.mincount);
+    if (facet.missing) params.set("facet.missing", "true");
+  }
+
+  const spatial = state.spatial;
+  if (spatial.enabled) {
+    set("pt", spatial.pt);
+    set("sfield", spatial.sfield);
+    set("d", spatial.d);
+    // 官方 UI 的 geofilt/bbox 以 fq 函数查询注入
+    if (spatial.geofilt) params.append("fq", "{!geofilt}");
+    if (spatial.bbox) params.append("fq", "{!bbox}");
+  }
+
+  const sc = state.spellcheck;
+  if (sc.enabled) {
+    params.set("spellcheck", "true");
+    set("spellcheck.q", sc.q);
+    if (sc.build) params.set("spellcheck.build", "true");
+    if (sc.collate) params.set("spellcheck.collate", "true");
+    set("spellcheck.count", sc.count);
+    set("spellcheck.dictionary", sc.dictionary);
+    if (sc.onlyMorePopular) params.set("spellcheck.onlyMorePopular", "true");
+  }
+
+  for (const rp of state.rawParams) {
+    if (nonEmpty(rp.key) && nonEmpty(rp.value)) params.append(rp.key.trim(), rp.value.trim());
+  }
+
+  return { text: `GET ${base}?${params.toString()}`, jsonMode: false };
+}
+
+/** /{core}/config/params 响应 → paramset 名列表，供 useParams 选择。 */
+export function parseParamsetNames(body: unknown): string[] {
+  const params = (body as Record<string, unknown> | null)?.response as Record<string, unknown> | undefined;
+  const named = params?.params;
+  if (!named || typeof named !== "object" || Array.isArray(named)) return [];
+  return Object.keys(named as Record<string, unknown>).sort();
+}
+
+/** select 响应体 → numFound；非 select/出错为 null。 */
+export function parseSolrNumFound(rawBody: string): number | null {
+  try {
+    const body = parseJsonPreservingLargeNumbers(rawBody) as Record<string, unknown> | null;
+    const num = (body?.response as Record<string, unknown> | undefined)?.numFound;
+    return typeof num === "number" ? num : null;
+  } catch {
+    return null;
+  }
 }

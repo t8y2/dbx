@@ -4265,6 +4265,16 @@ export default {
       newName: "New core name",
       swapWith: "Swap with core",
     },
+    queryForm: {
+      defaultParser: "default parser",
+      paramsets: "paramset(s)",
+      jsonHint: "non-empty switches to POST JSON DSL",
+      execute: "Execute Query",
+      openInConsole: "Open in console",
+      rowsReturned: "rows",
+      tableView: "Table",
+      rawJson: "Raw JSON",
+    },
   },
   userAdmin: {
     title: "Users & Privileges",

@@ -12,9 +12,15 @@ import JsonTree from "@/components/common/JsonTree.vue";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { executeQuery } from "@/lib/backend/api";
+import type { QueryResult } from "@/types/database";
 import {
+  buildSolrQuery,
+  defaultSolrQueryForm,
   parseAnalysisResponse,
   parseCoreStatus,
+  parseParamsetNames,
+  parseSolrNumFound,
   parseSolrSchema,
   solrAdminErrorMessage,
   solrAdminGet,
@@ -29,6 +35,7 @@ import {
   type SolrAdminViewId,
   type SolrAnalysisResult,
   type SolrCoreStatus,
+  type SolrQueryParam,
 } from "@/lib/solr/solrAdmin";
 
 const props = defineProps<{
@@ -164,6 +171,12 @@ async function loadCores() {
 async function load() {
   const view = activeView.value;
   if (view.view === "action") return;
+  if (view.view === "queryForm") {
+    // core 切换后 paramset 列表过期，结果属于旧 core，一并清掉
+    queryResult.value = null;
+    await loadParamsets();
+    return;
+  }
   if (view.scope === "core" && !selectedCore.value) {
     response.value = null;
     return;
@@ -185,11 +198,11 @@ function selectView(id: SolrAdminViewId) {
     openDocuments();
     return;
   }
+  activeViewId.value = id;
   if (id === "query") {
-    openQuery();
+    loadParamsets();
     return;
   }
-  activeViewId.value = id;
   load();
 }
 
@@ -199,10 +212,88 @@ function openDocuments() {
   queryStore.updateSql(tab, selectedCore.value);
 }
 
-function openQuery() {
+/* ---------- Query Builder（对标官方 Admin UI Query 表单） ---------- */
+
+const queryForm = ref(defaultSolrQueryForm());
+const paramsetNames = ref<string[]>([]);
+const queryRunning = ref(false);
+const queryError = ref("");
+const queryResult = ref<QueryResult | null>(null);
+const queryShowRaw = ref(false);
+
+const builtQuery = computed(() => buildSolrQuery(selectedCore.value, queryForm.value));
+const queryNumFound = computed(() => parseSolrNumFound(queryResult.value?.elasticsearch_raw_body ?? ""));
+const queryRawBody = computed(() => queryResult.value?.elasticsearch_raw_body ?? "");
+const queryRawParsed = computed(() => {
+  if (!queryRawBody.value) return null;
+  try {
+    return JSON.parse(queryRawBody.value);
+  } catch {
+    return queryRawBody.value;
+  }
+});
+
+async function loadParamsets() {
+  if (!selectedCore.value) {
+    paramsetNames.value = [];
+    return;
+  }
+  try {
+    const res = await solrAdminGet(props.connectionId, `/${encodeURIComponent(selectedCore.value)}/config/params`);
+    paramsetNames.value = parseParamsetNames(res.body);
+  } catch {
+    paramsetNames.value = [];
+  }
+}
+
+function toggleParamset(name: string) {
+  const list = queryForm.value.useParams;
+  const i = list.indexOf(name);
+  if (i >= 0) list.splice(i, 1);
+  else list.push(name);
+}
+
+function addQueryRow(list: string[] | SolrQueryParam[], empty: string | SolrQueryParam) {
+  (list as Array<string | SolrQueryParam>).push(empty);
+}
+
+function removeQueryRow(list: unknown[], index: number) {
+  list.splice(index, 1);
+}
+
+async function runQueryForm() {
+  if (!selectedCore.value) return;
+  // JSON 模式先本地校验，非法 JSON 直接提示不发请求
+  if (builtQuery.value.jsonMode) {
+    try {
+      JSON.parse(queryForm.value.jsonQuery);
+    } catch (e) {
+      queryError.value = `Invalid JSON: ${String((e as Error)?.message ?? e)}`;
+      return;
+    }
+  }
+  queryRunning.value = true;
+  queryError.value = "";
+  try {
+    queryResult.value = await executeQuery(props.connectionId, "", builtQuery.value.text);
+    queryShowRaw.value = false;
+  } catch (e: any) {
+    queryError.value = String(e?.message ?? e);
+    queryResult.value = null;
+  } finally {
+    queryRunning.value = false;
+  }
+}
+
+function openQueryInConsole() {
   const core = selectedCore.value;
-  const initial = core ? `GET /${core}/select?q=*:*&rows=20` : "GET /admin/cores?action=STATUS";
-  queryStore.createTab(props.connectionId, "default", core ? `${core} - query` : "solr query", "query", undefined, initial);
+  queryStore.createTab(props.connectionId, "default", core ? `${core} - query` : "solr query", "query", undefined, builtQuery.value.text);
+}
+
+function queryCellText(value: unknown): string {
+  if (value == null) return "null";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
 }
 
 /* ---------- Analysis ---------- */
@@ -580,6 +671,250 @@ onMounted(async () => {
               </div>
               <div v-if="!analysisResult.index.length && !analysisResult.query.length" class="text-sm text-muted-foreground">{{ t("solrAdmin.analysis.empty") }}</div>
             </template>
+          </template>
+
+          <!-- Query Builder（对标官方 Admin UI Query 表单） -->
+          <template v-else-if="activeView.view === 'queryForm'">
+            <div class="space-y-3 text-sm">
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <Label class="text-xs">Request-Handler (qt)</Label>
+                  <Input v-model="queryForm.handler" class="h-8 font-mono text-xs" placeholder="/select" />
+                </div>
+                <div>
+                  <Label class="text-xs">defType</Label>
+                  <Select v-model="queryForm.defType">
+                    <SelectTrigger class="h-8 w-full text-xs"><SelectValue :placeholder="t('solrAdmin.queryForm.defaultParser')" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="lucene">lucene</SelectItem>
+                      <SelectItem value="dismax">dismax</SelectItem>
+                      <SelectItem value="edismax">edismax</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div>
+                <Label class="text-xs">q</Label>
+                <Input v-model="queryForm.q" class="h-8 font-mono text-xs" placeholder="*:*" />
+              </div>
+
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <Label class="text-xs">q.op</Label>
+                  <Select v-model="queryForm.qop">
+                    <SelectTrigger class="h-8 w-full text-xs"><SelectValue placeholder="OR / AND" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="OR">OR</SelectItem>
+                      <SelectItem value="AND">AND</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label class="text-xs">sort</Label>
+                  <Input v-model="queryForm.sort" class="h-8 font-mono text-xs" placeholder="field asc/desc" />
+                </div>
+              </div>
+
+              <div>
+                <Label class="text-xs">fq</Label>
+                <div v-for="(_, i) in queryForm.fq" :key="i" class="mb-1 flex items-center gap-1">
+                  <Input v-model="queryForm.fq[i]" class="h-8 font-mono text-xs" />
+                  <Button size="sm" variant="outline" class="h-8 w-8 shrink-0 px-0" @click="removeQueryRow(queryForm.fq, i)">−</Button>
+                </div>
+                <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" @click="addQueryRow(queryForm.fq, '')">+ fq</Button>
+              </div>
+
+              <div class="grid grid-cols-4 gap-2">
+                <div>
+                  <Label class="text-xs">start</Label>
+                  <Input v-model="queryForm.start" class="h-8 font-mono text-xs" placeholder="0" />
+                </div>
+                <div>
+                  <Label class="text-xs">rows</Label>
+                  <Input v-model="queryForm.rows" class="h-8 font-mono text-xs" placeholder="10" />
+                </div>
+                <div>
+                  <Label class="text-xs">fl</Label>
+                  <Input v-model="queryForm.fl" class="h-8 font-mono text-xs" />
+                </div>
+                <div>
+                  <Label class="text-xs">df</Label>
+                  <Input v-model="queryForm.df" class="h-8 font-mono text-xs" />
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2">
+                <div v-if="paramsetNames.length">
+                  <Label class="text-xs">{{ t("solrAdmin.queryForm.paramsets") }}</Label>
+                  <div class="flex flex-wrap gap-1 pt-1">
+                    <Badge v-for="name in paramsetNames" :key="name" :variant="queryForm.useParams.includes(name) ? 'default' : 'outline'" class="cursor-pointer text-xs" @click="toggleParamset(name)">
+                      {{ name }}
+                    </Badge>
+                  </div>
+                </div>
+                <div>
+                  <Label class="text-xs">wt</Label>
+                  <Select v-model="queryForm.wt">
+                    <SelectTrigger class="h-8 w-full text-xs"><SelectValue placeholder="json" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="json">json</SelectItem>
+                      <SelectItem value="xml">xml</SelectItem>
+                      <SelectItem value="csv">csv</SelectItem>
+                      <SelectItem value="python">python</SelectItem>
+                      <SelectItem value="ruby">ruby</SelectItem>
+                      <SelectItem value="php">php</SelectItem>
+                      <SelectItem value="raw">raw</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <label class="mt-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.indent" type="checkbox" /> indent on</label>
+                  <label class="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.debugQuery" type="checkbox" /> debugQuery</label>
+                </div>
+              </div>
+
+              <!-- hl -->
+              <div class="rounded border p-2">
+                <label class="flex items-center gap-1.5 text-xs font-medium"><input v-model="queryForm.hl.enabled" type="checkbox" /> hl</label>
+                <div v-if="queryForm.hl.enabled" class="mt-2 grid grid-cols-3 gap-2">
+                  <div><Label class="text-xs">hl.fl</Label><Input v-model="queryForm.hl.fl" class="h-8 font-mono text-xs" /></div>
+                  <div><Label class="text-xs">hl.snippets</Label><Input v-model="queryForm.hl.snippets" class="h-8 font-mono text-xs" /></div>
+                  <div><Label class="text-xs">hl.fragsize</Label><Input v-model="queryForm.hl.fragsize" class="h-8 font-mono text-xs" /></div>
+                  <div><Label class="text-xs">hl.simple.pre</Label><Input v-model="queryForm.hl.simplePre" class="h-8 font-mono text-xs" placeholder="&lt;em&gt;" /></div>
+                  <div><Label class="text-xs">hl.simple.post</Label><Input v-model="queryForm.hl.simplePost" class="h-8 font-mono text-xs" placeholder="&lt;/em&gt;" /></div>
+                  <div class="flex items-end gap-3 pb-1.5">
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.hl.requireFieldMatch" type="checkbox" /> hl.requireFieldMatch</label>
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.hl.mergeContiguous" type="checkbox" /> hl.mergeContiguous</label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- facet -->
+              <div class="rounded border p-2">
+                <label class="flex items-center gap-1.5 text-xs font-medium"><input v-model="queryForm.facet.enabled" type="checkbox" /> facet</label>
+                <div v-if="queryForm.facet.enabled" class="mt-2 space-y-2">
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label class="text-xs">facet.field</Label>
+                      <div v-for="(_, i) in queryForm.facet.fields" :key="i" class="mb-1 flex items-center gap-1">
+                        <Input v-model="queryForm.facet.fields[i]" class="h-8 font-mono text-xs" />
+                        <Button size="sm" variant="outline" class="h-8 w-8 shrink-0 px-0" @click="removeQueryRow(queryForm.facet.fields, i)">−</Button>
+                      </div>
+                      <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" @click="addQueryRow(queryForm.facet.fields, '')">+ facet.field</Button>
+                    </div>
+                    <div>
+                      <Label class="text-xs">facet.query</Label>
+                      <div v-for="(_, i) in queryForm.facet.queries" :key="i" class="mb-1 flex items-center gap-1">
+                        <Input v-model="queryForm.facet.queries[i]" class="h-8 font-mono text-xs" />
+                        <Button size="sm" variant="outline" class="h-8 w-8 shrink-0 px-0" @click="removeQueryRow(queryForm.facet.queries, i)">−</Button>
+                      </div>
+                      <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" @click="addQueryRow(queryForm.facet.queries, '')">+ facet.query</Button>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-4 gap-2">
+                    <div><Label class="text-xs">facet.prefix</Label><Input v-model="queryForm.facet.prefix" class="h-8 font-mono text-xs" /></div>
+                    <div><Label class="text-xs">facet.sort</Label><Input v-model="queryForm.facet.sort" class="h-8 font-mono text-xs" placeholder="count/index" /></div>
+                    <div><Label class="text-xs">facet.limit</Label><Input v-model="queryForm.facet.limit" class="h-8 font-mono text-xs" /></div>
+                    <div><Label class="text-xs">facet.offset</Label><Input v-model="queryForm.facet.offset" class="h-8 font-mono text-xs" /></div>
+                    <div><Label class="text-xs">facet.mincount</Label><Input v-model="queryForm.facet.mincount" class="h-8 font-mono text-xs" /></div>
+                    <div class="flex items-end pb-1.5">
+                      <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.facet.missing" type="checkbox" /> facet.missing</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- spatial -->
+              <div class="rounded border p-2">
+                <label class="flex items-center gap-1.5 text-xs font-medium"><input v-model="queryForm.spatial.enabled" type="checkbox" /> spatial</label>
+                <div v-if="queryForm.spatial.enabled" class="mt-2 grid grid-cols-4 gap-2">
+                  <div><Label class="text-xs">pt</Label><Input v-model="queryForm.spatial.pt" class="h-8 font-mono text-xs" placeholder="lat,lng" /></div>
+                  <div><Label class="text-xs">sfield</Label><Input v-model="queryForm.spatial.sfield" class="h-8 font-mono text-xs" /></div>
+                  <div><Label class="text-xs">d</Label><Input v-model="queryForm.spatial.d" class="h-8 font-mono text-xs" placeholder="km" /></div>
+                  <div class="flex items-end gap-3 pb-1.5">
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.spatial.geofilt" type="checkbox" /> geofilt</label>
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.spatial.bbox" type="checkbox" /> bbox</label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- spellcheck -->
+              <div class="rounded border p-2">
+                <label class="flex items-center gap-1.5 text-xs font-medium"><input v-model="queryForm.spellcheck.enabled" type="checkbox" /> spellcheck</label>
+                <div v-if="queryForm.spellcheck.enabled" class="mt-2 grid grid-cols-4 gap-2">
+                  <div><Label class="text-xs">spellcheck.q</Label><Input v-model="queryForm.spellcheck.q" class="h-8 font-mono text-xs" /></div>
+                  <div><Label class="text-xs">spellcheck.count</Label><Input v-model="queryForm.spellcheck.count" class="h-8 font-mono text-xs" /></div>
+                  <div><Label class="text-xs">spellcheck.dictionary</Label><Input v-model="queryForm.spellcheck.dictionary" class="h-8 font-mono text-xs" /></div>
+                  <div class="flex items-end gap-3 pb-1.5">
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.spellcheck.build" type="checkbox" /> build</label>
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.spellcheck.collate" type="checkbox" /> collate</label>
+                    <label class="flex items-center gap-1.5 text-xs text-muted-foreground"><input v-model="queryForm.spellcheck.onlyMorePopular" type="checkbox" /> onlyMorePopular</label>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Raw Query Parameters -->
+              <div>
+                <Label class="text-xs">Raw Query Parameters</Label>
+                <div v-for="(rp, i) in queryForm.rawParams" :key="i" class="mb-1 flex items-center gap-1">
+                  <Input v-model="rp.key" class="h-8 w-48 font-mono text-xs" placeholder="key" />
+                  <Input v-model="rp.value" class="h-8 font-mono text-xs" placeholder="value" />
+                  <Button size="sm" variant="outline" class="h-8 w-8 shrink-0 px-0" @click="removeQueryRow(queryForm.rawParams, i)">−</Button>
+                </div>
+                <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" @click="addQueryRow(queryForm.rawParams, { key: '', value: '' })">+ param</Button>
+              </div>
+
+              <!-- JSON Query -->
+              <div>
+                <Label class="text-xs"
+                  >JSON Query <span class="text-muted-foreground">({{ t("solrAdmin.queryForm.jsonHint") }})</span></Label
+                >
+                <textarea v-model="queryForm.jsonQuery" rows="4" class="w-full rounded border bg-background p-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring" placeholder='{"query":"code:BLOMUS*","limit":20}'></textarea>
+              </div>
+
+              <!-- 预览 + 执行 -->
+              <div class="rounded border bg-muted/40 p-2 font-mono text-[11px] break-all">{{ builtQuery.text }}</div>
+              <div class="flex items-center gap-2">
+                <Button size="sm" class="h-8" :disabled="queryRunning || !selectedCore" @click="runQueryForm">
+                  <Loader2 v-if="queryRunning" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  {{ t("solrAdmin.queryForm.execute") }}
+                </Button>
+                <Button size="sm" variant="outline" class="h-8" @click="openQueryInConsole">{{ t("solrAdmin.queryForm.openInConsole") }}</Button>
+              </div>
+              <div v-if="queryError" class="flex items-start gap-2 text-sm text-destructive">
+                <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+                <pre class="whitespace-pre-wrap font-mono text-xs">{{ queryError }}</pre>
+              </div>
+
+              <!-- 结果 -->
+              <div v-if="queryResult" class="space-y-2 border-t pt-2">
+                <div class="flex flex-wrap items-center gap-2 text-xs">
+                  <Badge v-if="queryNumFound != null" variant="secondary">numFound: {{ queryNumFound }}</Badge>
+                  <Badge variant="outline">{{ queryResult.rows?.length ?? 0 }} {{ t("solrAdmin.queryForm.rowsReturned") }}</Badge>
+                  <span class="text-muted-foreground">{{ queryResult.execution_time_ms }} ms</span>
+                  <Button v-if="queryRawBody" size="sm" variant="ghost" class="h-6 px-2 text-xs" @click="queryShowRaw = !queryShowRaw">
+                    {{ queryShowRaw ? t("solrAdmin.queryForm.tableView") : t("solrAdmin.queryForm.rawJson") }}
+                  </Button>
+                </div>
+                <div v-if="queryResult.execution_error" class="text-sm text-destructive">{{ queryResult.error?.messageKey }}</div>
+                <JsonTree v-else-if="queryShowRaw && queryRawParsed" :value="queryRawParsed" :initial-expanded-depth="2" virtualized />
+                <div v-else-if="queryResult.columns?.length" class="overflow-x-auto rounded border">
+                  <table class="w-full text-sm">
+                    <thead>
+                      <tr class="border-b bg-muted/40 text-left text-xs text-muted-foreground">
+                        <th v-for="col in queryResult.columns" :key="col" class="whitespace-nowrap px-2 py-1 font-medium">{{ col }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(row, ri) in queryResult.rows" :key="ri" class="border-b last:border-0">
+                        <td v-for="(cell, ci) in row" :key="ci" class="max-w-80 truncate px-2 py-1 font-mono text-xs" :title="queryCellText(cell)">{{ queryCellText(cell) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <JsonTree v-else-if="queryRawParsed" :value="queryRawParsed" :initial-expanded-depth="2" virtualized />
+                <div v-else class="text-sm text-muted-foreground">{{ t("solrAdmin.emptyBody") }}</div>
+              </div>
+            </div>
           </template>
 
           <!-- Segments -->

@@ -4241,6 +4241,16 @@ export default withEnglishFallback({
       newName: "新 core 名称",
       swapWith: "与 core 交换",
     },
+    queryForm: {
+      defaultParser: "默认解析器",
+      paramsets: "paramset(s)",
+      jsonHint: "非空时改用 JSON DSL 提交",
+      execute: "执行查询",
+      openInConsole: "在控制台打开",
+      rowsReturned: "行",
+      tableView: "表格",
+      rawJson: "原始 JSON",
+    },
   },
   userAdmin: {
     title: "用户与权限",

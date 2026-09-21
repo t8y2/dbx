@@ -441,7 +441,11 @@ fn default_time_series_predicate(database_type: Option<DatabaseType>) -> Option<
 /// Returns a `database.table` reference for engines whose active database is
 /// normally omitted from table-data SQL. Doris and StarRocks retain an external
 /// catalog prefix when one is selected.
-fn database_qualified_table_name(
+///
+/// Shared by every "generated table SQL" surface that honors the
+/// `生成 SQL 时包含数据库名` setting, so the grid label, the copy-as-INSERT
+/// statements and the data-grid save statements stay in sync.
+pub fn database_qualified_table_name(
     database_type: Option<DatabaseType>,
     catalog: Option<&str>,
     database: Option<&str>,

@@ -7170,6 +7170,10 @@ export default {
     syncSuccess: "Data sync executed successfully",
   },
   settings: {
+    historyRetentionLimit: "Query history retention",
+    historyRetentionDescription: "Lowering the limit removes older records the next time query history is recorded. Increasing the limit or choosing Unlimited does not restore deleted records. The limit applies to all connections and execution sources.",
+    historyRetentionUnlimited: "Unlimited",
+    historyRetentionLoadFailed: "Could not load history retention: {error}",
     tableOpenSortMode: "Default table sort",
     tableDatabaseSortDirection: "Default database sort direction",
     tableLocalSortDirection: "Default current page sort direction",

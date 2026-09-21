@@ -7142,6 +7142,10 @@ export default withEnglishFallback({
     syncSuccess: "数据同步执行成功",
   },
   settings: {
+    historyRetentionLimit: "查询历史保留条数",
+    historyRetentionDescription: "调小上限后，下次记录查询历史时将删除超过上限的旧记录。提高上限或选择“不限”不会恢复已删除记录。此上限适用于所有连接及执行来源。",
+    historyRetentionUnlimited: "不限",
+    historyRetentionLoadFailed: "无法加载历史保留设置：{error}",
     tableOpenSortMode: "打开表默认排序",
     tableDatabaseSortDirection: "全表默认排序方向",
     tableLocalSortDirection: "当前页默认排序方向",

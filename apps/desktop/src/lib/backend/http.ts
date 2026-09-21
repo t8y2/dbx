@@ -2109,6 +2109,19 @@ export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
   if (!res.ok) throw await backendResponseError(res);
 }
 
+export async function loadHistoryRetentionLimit(): Promise<number> {
+  return get("/api/app-settings/history-retention-limit");
+}
+
+export async function saveHistoryRetentionLimit(limit: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/history-retention-limit"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ limit }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
 export async function loadMaxRetries(): Promise<number> {
   return get("/api/app-settings/max-retries");
 }

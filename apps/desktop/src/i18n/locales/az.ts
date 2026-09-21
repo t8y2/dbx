@@ -6841,6 +6841,10 @@ export default withEnglishFallback({
     syncSuccess: "Verilənlərin sinxronlaşdırılması uğurla icra edildi",
   },
   settings: {
+    historyRetentionLimit: "Sorğu tarixçəsinin saxlanma həddi",
+    historyRetentionDescription: "Hədd azaldıldıqda köhnə qeydlər növbəti sorğu tarixçəsi yazıldıqda silinir. Həddi artırmaq və ya Limitsiz seçmək silinmiş qeydləri bərpa etmir. Bütün bağlantılara və icra mənbələrinə tətbiq olunur.",
+    historyRetentionUnlimited: "Limitsiz",
+    historyRetentionLoadFailed: "Tarixçənin saxlanma ayarı yüklənmədi: {error}",
     tableOpenSortMode: "Cədvəli açarkən sıralama",
     tableDatabaseSortDirection: "Verilənlər bazası sıralama istiqaməti",
     tableLocalSortDirection: "Cari səhifənin sıralama istiqaməti",

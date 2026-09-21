@@ -6045,6 +6045,10 @@ export default withEnglishFallback({
     syncSuccess: "資料同步執行成功",
   },
   settings: {
+    historyRetentionLimit: "查詢歷史保留筆數",
+    historyRetentionDescription: "調小上限後，下次記錄查詢歷史時將刪除超過上限的舊記錄。提高上限或選擇「不限」不會還原已刪除的記錄。此上限適用於所有連線及執行來源。",
+    historyRetentionUnlimited: "不限",
+    historyRetentionLoadFailed: "無法載入歷史保留設定：{error}",
     tableOpenSortMode: "開啟表格預設排序",
     tableDatabaseSortDirection: "全表預設排序方向",
     tableLocalSortDirection: "目前頁面預設排序方向",

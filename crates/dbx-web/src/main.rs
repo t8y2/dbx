@@ -1141,6 +1141,11 @@ async fn main() {
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
         )
         .route(
+            "/app-settings/history-retention-limit",
+            get(routes::app_settings::load_history_retention_limit)
+                .put(routes::app_settings::save_history_retention_limit),
+        )
+        .route(
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
         )

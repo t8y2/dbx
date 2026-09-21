@@ -6721,6 +6721,10 @@ export default withEnglishFallback({
     syncSuccess: "Sincronizzazione dei dati eseguita con successo",
   },
   settings: {
+    historyRetentionLimit: "Limite della cronologia query",
+    historyRetentionDescription: "Riducendo il limite, i record più vecchi verranno eliminati al prossimo salvataggio nella cronologia. Aumentare il limite o scegliere Illimitato non ripristina i record eliminati. Si applica a tutte le connessioni e origini di esecuzione.",
+    historyRetentionUnlimited: "Illimitato",
+    historyRetentionLoadFailed: "Impossibile caricare il limite della cronologia: {error}",
     tableOpenSortMode: "Ordinamento predefinito delle tabelle",
     tableDatabaseSortDirection: "Direzione nel database",
     tableLocalSortDirection: "Direzione nella pagina corrente",

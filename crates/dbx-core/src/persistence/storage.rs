@@ -45,6 +45,7 @@ const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
@@ -1516,11 +1517,36 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
     })
 }
 
+fn history_retention_limit_from_settings(settings: &serde_json::Map<String, serde_json::Value>) -> u32 {
+    settings
+        .get(HISTORY_RETENTION_LIMIT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| crate::history::validate_history_retention_limit(*value).is_ok())
+        .unwrap_or(MAX_HISTORY as u32)
+}
+
+fn load_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, String> {
+    let current: Option<String> = conn
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let settings = match current {
+        Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+        None => serde_json::Map::new(),
+    };
+    Ok(history_retention_limit_from_settings(&settings))
+}
+
 impl Storage {
     pub async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let entry = entry.clone();
         self.with_conn(move |conn| {
-            conn.execute(
+            let tx =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let limit = load_history_retention_limit_from_conn(&tx)?;
+            tx.execute(
                 "INSERT OR REPLACE INTO history \
                  (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
                   activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
@@ -1545,13 +1571,15 @@ impl Storage {
             )
             .map_err(|e| e.to_string())?;
 
-            conn.execute(
-                "DELETE FROM history WHERE id NOT IN \
-                 (SELECT id FROM history ORDER BY executed_at DESC LIMIT ?1)",
-                [MAX_HISTORY as i64],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(())
+            if limit != 0 {
+                tx.execute(
+                    "DELETE FROM history WHERE id NOT IN \
+                     (SELECT id FROM history ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                    [i64::from(limit)],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
@@ -2071,7 +2099,8 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY];
+            let dedicated_keys =
+                [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY, HISTORY_RETENTION_LIMIT_KEY];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -2652,6 +2681,33 @@ impl Storage {
             .and_then(serde_json::Value::as_u64)
             .map(|value| crate::agent_loop::clamp_max_agent_turns(value.min(u32::MAX as u64) as u32))
             .unwrap_or(crate::agent_loop::DEFAULT_MAX_AGENT_TURNS))
+    }
+
+    pub async fn load_history_retention_limit(&self) -> Result<u32, String> {
+        self.with_conn(|conn| load_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn save_history_retention_limit(&self, limit: u32) -> Result<(), String> {
+        crate::history::validate_history_retention_limit(limit)?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(HISTORY_RETENTION_LIMIT_KEY.to_string(), serde_json::Value::from(limit));
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                [serde_json::Value::Object(settings).to_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     pub async fn save_max_retries(&self, max_retries: u32) -> Result<(), String> {
@@ -5871,6 +5927,147 @@ mod tests {
         assert!(loaded[0].queued_input.is_none());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    // Seed a backlog efficiently, then exercise the production write path that
+    // applies retention. Settings must affect every caller of that path.
+    async fn seed_history_backlog(storage: &Storage, count: usize) {
+        storage.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            for index in 0..count {
+                tx.execute(
+                    "INSERT INTO history (id, connection_name, database, sql_text, executed_at, execution_time_ms, success) VALUES (?1, 'Main', 'app', 'select 1', '2026-07-18T12:00:00Z', 1, 1)",
+                    [format!("{index:05}")],
+                ).map_err(|error| error.to_string())?;
+            }
+            tx.commit().map_err(|error| error.to_string())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_retention_uses_persisted_limit_on_the_next_write() {
+        for (limit, expected) in [(200, 200), (5000, 1002), (10000, 1002), (0, 1002)] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            seed_history_backlog(&storage, 1001).await;
+            storage
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [serde_json::json!({"history_retention_limit": limit}).to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap();
+            // Changing the setting alone must not evict existing history.
+            assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 1001);
+            storage
+                .save_history_entry(&history_entry(
+                    "newest",
+                    "conn",
+                    "Main",
+                    "app",
+                    "select 2",
+                    "2026-07-19T00:00:00Z",
+                    true,
+                ))
+                .await
+                .unwrap();
+            let result = storage.search_history_entries(HistorySearchRequest::default()).await.unwrap();
+            assert_eq!(result.total, expected, "retention limit {limit}");
+            assert_eq!(result.entries[0].id, "newest");
+            if limit == 200 {
+                let remaining = storage.load_history_entries(500, 0, None).await.unwrap();
+                assert!(remaining.iter().all(|entry| entry.id == "newest" || entry.id.as_str() >= "00802"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn history_retention_defaults_validates_and_survives_stale_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.load_history_retention_limit().await.unwrap(), 1000);
+        let stale = storage.load_app_settings_json().await.unwrap();
+        for limit in [200, 1000, 5000, 10000, 0] {
+            storage.save_history_retention_limit(limit).await.unwrap();
+            assert_eq!(storage.load_history_retention_limit().await.unwrap(), limit);
+        }
+        for invalid in [1, 199, 201, 10001, u32::MAX] {
+            assert!(storage.save_history_retention_limit(invalid).await.is_err());
+            assert_eq!(storage.load_history_retention_limit().await.unwrap(), 0);
+        }
+        storage.save_app_settings_json(&stale).await.unwrap();
+        assert_eq!(storage.load_history_retention_limit().await.unwrap(), 0);
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_history_retention_limit().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn history_retention_invalid_persisted_values_use_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1),
+            serde_json::json!("200"),
+            serde_json::json!(u64::MAX),
+            serde_json::Value::Null,
+        ] {
+            storage
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [serde_json::json!({"history_retention_limit": value}).to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap();
+            assert_eq!(storage.load_history_retention_limit().await.unwrap(), 1000);
+        }
+        seed_history_backlog(&storage, 1001).await;
+        storage
+            .save_history_entry(&history_entry(
+                "newest",
+                "conn",
+                "Main",
+                "app",
+                "select 2",
+                "2026-07-19T00:00:00Z",
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 1000);
+    }
+
+    #[tokio::test]
+    async fn history_retention_setting_changes_do_not_prune_until_next_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        storage.save_history_retention_limit(0).await.unwrap();
+        seed_history_backlog(&storage, 1001).await;
+        storage.save_history_retention_limit(200).await.unwrap();
+        assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 1001);
+        storage
+            .save_history_entry(&history_entry(
+                "newest",
+                "conn",
+                "Main",
+                "app",
+                "select 2",
+                "2026-07-19T00:00:00Z",
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 200);
     }
 
     #[tokio::test]

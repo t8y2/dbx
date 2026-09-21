@@ -6722,6 +6722,10 @@ export default withEnglishFallback({
     syncSuccess: "Sincronización de datos ejecutada exitosamente",
   },
   settings: {
+    historyRetentionLimit: "Límite del historial de consultas",
+    historyRetentionDescription: "Al reducir el límite, los registros antiguos se eliminarán la próxima vez que se guarde una consulta. Aumentarlo o elegir Sin límite no recupera registros eliminados. Se aplica a todas las conexiones y fuentes de ejecución.",
+    historyRetentionUnlimited: "Sin límite",
+    historyRetentionLoadFailed: "No se pudo cargar el límite del historial: {error}",
     tableOpenSortMode: "Orden predeterminado de tablas",
     tableDatabaseSortDirection: "Dirección del orden en la base de datos",
     tableLocalSortDirection: "Dirección del orden de la página actual",

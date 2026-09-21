@@ -6723,6 +6723,10 @@ export default withEnglishFallback({
     syncSuccess: "Veri eşitlemesi başarıyla çalıştırıldı",
   },
   settings: {
+    historyRetentionLimit: "Sorgu geçmişi saklama sınırı",
+    historyRetentionDescription: "Sınır düşürüldüğünde eski kayıtlar bir sonraki sorgu geçmişi kaydında silinir. Sınırı artırmak veya Sınırsız seçmek silinen kayıtları geri getirmez. Tüm bağlantılar ve yürütme kaynakları için geçerlidir.",
+    historyRetentionUnlimited: "Sınırsız",
+    historyRetentionLoadFailed: "Geçmiş saklama ayarı yüklenemedi: {error}",
     tableOpenSortMode: "Varsayılan tablo sıralaması",
     tableDatabaseSortDirection: "Varsayılan veritabanı sıralama yönü",
     tableLocalSortDirection: "Geçerli sayfanın varsayılan sıralama yönü",

@@ -6758,6 +6758,10 @@ export default withEnglishFallback({
     syncSuccess: "データ同期が正常に実行されました",
   },
   settings: {
+    historyRetentionLimit: "クエリ履歴の保持件数",
+    historyRetentionDescription: "上限を減らすと、次回のクエリ履歴の記録時に古い履歴が削除されます。上限の増加や「無制限」の選択で削除済みの履歴は復元されません。すべての接続と実行元に適用されます。",
+    historyRetentionUnlimited: "無制限",
+    historyRetentionLoadFailed: "履歴の保持設定を読み込めませんでした: {error}",
     tableOpenSortMode: "テーブルの既定の並び順",
     tableDatabaseSortDirection: "データベースの既定のソート方向",
     tableLocalSortDirection: "現在のページの既定のソート方向",

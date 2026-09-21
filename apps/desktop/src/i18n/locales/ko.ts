@@ -6481,6 +6481,10 @@ export default withEnglishFallback({
     syncSuccess: "데이터 동기화를 성공적으로 실행했습니다",
   },
   settings: {
+    historyRetentionLimit: "쿼리 기록 보관 개수",
+    historyRetentionDescription: "한도를 낮추면 다음 쿼리 기록을 저장할 때 오래된 기록이 삭제됩니다. 한도를 높이거나 무제한을 선택해도 삭제된 기록은 복원되지 않습니다. 모든 연결과 실행 경로에 적용됩니다.",
+    historyRetentionUnlimited: "무제한",
+    historyRetentionLoadFailed: "기록 보관 설정을 불러오지 못했습니다: {error}",
     tableOpenSortMode: "테이블 기본 정렬",
     tableDatabaseSortDirection: "데이터베이스 기본 정렬 방향",
     tableLocalSortDirection: "현재 페이지 기본 정렬 방향",

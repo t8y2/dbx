@@ -786,6 +786,14 @@ export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
   return invoke("save_max_agent_turns", { maxAgentTurns });
 }
 
+export async function loadHistoryRetentionLimit(): Promise<number> {
+  return invoke("load_history_retention_limit");
+}
+
+export async function saveHistoryRetentionLimit(limit: number): Promise<void> {
+  return invoke("save_history_retention_limit", { limit });
+}
+
 export async function loadMaxRetries(): Promise<number> {
   return invoke("load_max_retries");
 }

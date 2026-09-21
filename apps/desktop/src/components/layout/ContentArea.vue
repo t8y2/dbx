@@ -139,7 +139,7 @@ import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGr
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
-import { sqlErrorEditorOffset, logSqlErrorPosition } from "@/lib/sql/errorPosition";
+import { sqlErrorDisplayPosition, sqlErrorEditorOffset, logSqlErrorPosition } from "@/lib/sql/errorPosition";
 import {
   databaseDisplayNameForTab,
   executionSummaryItems,
@@ -349,8 +349,14 @@ const activeResultExecutionTarget = computed(() => queryStore.activeResultExecut
 const activeResultConnection = computed(() => (activeResultExecutionTarget.value ? connectionStore.getConfig(activeResultExecutionTarget.value.connectionId) : props.activeConnection));
 const activeResultConnectionId = computed(() => activeResultExecutionTarget.value?.connectionId ?? props.activeTab.connectionId);
 // Row/column locate only makes sense for SQL editor tabs: data/preview tabs have
-// no user statement to map the backend position onto.
-const activeResultErrorPosition = computed(() => (props.activeTab.mode === "query" ? props.activeTab.result?.error?.errorPosition : undefined));
+// no user statement to map the backend position onto. Engines without a typed
+// position (Oracle) report it in the error text, so the label falls back to the
+// same resolver the jump uses — the button never appears when clicking it could
+// not move the caret.
+const activeResultErrorPosition = computed(() => {
+  if (props.activeTab.mode !== "query") return undefined;
+  return sqlErrorDisplayPosition(activeResultErrorOffsetOptions());
+});
 const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.database ?? props.activeTab.database);
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
@@ -1376,6 +1382,17 @@ function focusErrorPosition(offset: number): boolean {
  * to a cross-surface event when this surface only renders the shared result pane
  * (the editor lives in another group).
  */
+function activeResultErrorOffsetOptions() {
+  const result = props.activeTab.result;
+  return {
+    editorSql: props.activeTab.sql,
+    result,
+    resultIndex: result?.statement_index ?? props.activeTab.activeResultIndex,
+    databaseType: activeEffectiveDatabaseType.value,
+    parameterOptions: activeSqlStatementParameterOptions.value,
+  };
+}
+
 function locateActiveResultError() {
   const result = props.activeTab.result;
   logSqlErrorPosition("locate:invoke", {
@@ -1389,13 +1406,7 @@ function locateActiveResultError() {
     editorLength: props.activeTab.sql.length,
     resultIsError: Boolean(result && isQueryExecutionErrorResult(result)),
   });
-  const mapped = sqlErrorEditorOffset({
-    editorSql: props.activeTab.sql,
-    result,
-    resultIndex: result?.statement_index ?? props.activeTab.activeResultIndex,
-    databaseType: activeEffectiveDatabaseType.value,
-    parameterOptions: activeSqlStatementParameterOptions.value,
-  });
+  const mapped = sqlErrorEditorOffset(activeResultErrorOffsetOptions());
   if (!mapped) {
     logSqlErrorPosition("locate:unavailable", {
       tabId: props.activeTab.id,

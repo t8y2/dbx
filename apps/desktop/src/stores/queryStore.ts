@@ -11,7 +11,7 @@ import type { DeletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionT
 import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, ObjectSource, ObjectSourceKind, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
-import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition } from "@/lib/sql/errorPosition";
+import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition, sqlErrorHasMessagePosition, sqlErrorMessageText } from "@/lib/sql/errorPosition";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracleExplainText, sqlServerExplainResult, type BuildExplainSqlResult, type ExplainPlanDatabaseType } from "@/lib/diagram/explainPlan";
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, resolveMetadataColumnName, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
@@ -425,11 +425,12 @@ function annotateQueryResultSources(
  * The core returns per-statement error results for batches, but a
  * single-statement failure aborts the whole execute-multi command, leaving the
  * frontend to synthesize the error result here. Only annotated when the error
- * actually carries a position and the submission is a single statement (a
- * multi-statement thrown error's position cannot be attributed to one statement).
+ * actually carries a position — either typed (PostgreSQL) or parseable from the
+ * message text (Oracle's Agent offset) — and the submission is a single statement
+ * (a multi-statement thrown error's position cannot be attributed to one statement).
  */
 function annotateSingleStatementErrorResult(errorResult: QueryResult, sourceSql: string, databaseType: DatabaseType | undefined, sourceOffset: number | undefined, parameterOptions: SqlParameterOptions | undefined, executedSql: string | undefined): void {
-  if (!errorResult.error?.errorPosition) return;
+  if (!errorResult.error?.errorPosition && !sqlErrorHasMessagePosition(sqlErrorMessageText(errorResult))) return;
   if (splitSqlStatementRanges(sourceSql, databaseType, parameterOptions).length !== 1) return;
   annotateQueryResultSources([errorResult], sourceSql, undefined, databaseType, sourceOffset, parameterOptions, executedSql);
 }

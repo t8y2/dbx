@@ -545,8 +545,11 @@ pub async fn mongo_distinct_core(
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
         PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
-        // The legacy agent protocol has no distinct method and no read that could stand in for it.
-        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support distinct".to_string()),
+        PoolKind::Agent(client) => {
+            let command = mongo_driver::distinct_command(collection, field, filter)?;
+            let response = agent_run_command_document(client, database, command, "distinct").await?;
+            mongo_driver::distinct_response_result(&response)
+        }
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

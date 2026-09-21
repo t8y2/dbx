@@ -1689,6 +1689,48 @@ fn aggregate_options_explain(options: &Document) -> Result<bool, String> {
 /// array fields contribute their elements rather than the whole array, and the server may
 /// answer from an index with a DISTINCT_SCAN. Values are returned in the `documents` slot as
 /// bare scalars, which `mongoDocumentsToQueryResult` already renders as a single column.
+fn distinct_filter_document(filter: Option<&str>) -> Result<Document, String> {
+    match filter {
+        Some(f) if !f.trim().is_empty() => {
+            let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
+            json_filter_to_document(&json)
+        }
+        _ => Ok(doc! {}),
+    }
+}
+
+fn distinct_values_result(values: Vec<Bson>) -> MongoDocumentResult {
+    let documents = values.iter().map(bson_to_json).collect::<Vec<_>>();
+    let extended_documents = values.into_iter().map(|value| value.into_relaxed_extjson()).collect::<Vec<_>>();
+    let total = documents.len() as u64;
+    MongoDocumentResult {
+        documents,
+        raw_documents: None,
+        extended_documents: Some(extended_documents),
+        total,
+        total_is_exact: true,
+        next_cursor: None,
+    }
+}
+
+/// The `distinct` server command behind `distinct()`, for drivers that only expose `runCommand`
+/// (the legacy agent). Same field and filter validation as [`distinct`].
+pub fn distinct_command(collection: &str, field: &str, filter: Option<&str>) -> Result<Document, String> {
+    if field.trim().is_empty() {
+        return Err("Distinct field name is required".to_string());
+    }
+    let query = distinct_filter_document(filter)?;
+    Ok(doc! { "distinct": collection, "key": field, "query": query })
+}
+
+/// Turns a `distinct` response (`{ values: [...] }`) into the same result shape as [`distinct`].
+pub fn distinct_response_result(response: &Document) -> Result<MongoDocumentResult, String> {
+    match response.get("values") {
+        Some(Bson::Array(values)) => Ok(distinct_values_result(values.clone())),
+        other => Err(format!("Unexpected distinct values: {other:?}")),
+    }
+}
+
 pub async fn distinct(
     client: &Client,
     database: &str,
@@ -1699,29 +1741,10 @@ pub async fn distinct(
     if field.trim().is_empty() {
         return Err("Distinct field name is required".to_string());
     }
-
-    let filter_doc: Document = match filter {
-        Some(f) if !f.trim().is_empty() => {
-            let json: serde_json::Value = serde_json::from_str(f).map_err(|e| format!("Invalid filter JSON: {e}"))?;
-            json_filter_to_document(&json)?
-        }
-        _ => doc! {},
-    };
-
+    let filter_doc = distinct_filter_document(filter)?;
     let col = client.database(database).collection::<Document>(collection);
     let values = col.distinct(field, filter_doc).await.map_err(|e| e.to_string())?;
-    let documents = values.iter().map(bson_to_json).collect::<Vec<_>>();
-    let extended_documents = values.into_iter().map(|value| value.into_relaxed_extjson()).collect::<Vec<_>>();
-    let total = documents.len() as u64;
-
-    Ok(MongoDocumentResult {
-        documents,
-        raw_documents: None,
-        extended_documents: Some(extended_documents),
-        total,
-        total_is_exact: true,
-        next_cursor: None,
-    })
+    Ok(distinct_values_result(values))
 }
 
 pub async fn create_index(
@@ -5093,6 +5116,22 @@ mod tests {
         assert_eq!(delete.get_bool("remove"), Ok(true));
         assert_eq!(delete.get_document("sort"), Ok(&doc! { "_id": -1i64 }));
         assert!(!delete.contains_key("update"));
+    }
+
+    #[test]
+    fn distinct_command_and_response_mirror_the_native_helper() {
+        let command = distinct_command("users", "status", Some(r#"{"age":{"$gte":18}}"#)).unwrap();
+        assert_eq!(command.get_str("distinct"), Ok("users"));
+        assert_eq!(command.get_str("key"), Ok("status"));
+        assert_eq!(command.get_document("query"), Ok(&doc! { "age": { "$gte": 18i64 } }));
+        assert_eq!(distinct_command("users", "status", None).unwrap().get_document("query"), Ok(&doc! {}));
+        assert!(distinct_command("users", "  ", None).unwrap_err().contains("field name is required"));
+        assert!(distinct_command("users", "status", Some("{not json")).unwrap_err().contains("Invalid filter JSON"));
+
+        let result = distinct_response_result(&doc! { "values": ["a", 2i64, Bson::Null], "ok": 1.0 }).unwrap();
+        assert_eq!(result.total, 3);
+        assert_eq!(result.documents, vec![serde_json::json!("a"), serde_json::json!(2), serde_json::Value::Null]);
+        assert!(distinct_response_result(&doc! { "ok": 1.0 }).is_err());
     }
 
     #[test]

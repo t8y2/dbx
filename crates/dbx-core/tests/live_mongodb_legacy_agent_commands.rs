@@ -1,4 +1,4 @@
-//! `findOneAndUpdate` / `findOneAndReplace` / `findOneAndDelete` over the MongoDB Legacy Agent,
+//! Shell commands that reach the MongoDB Legacy Agent through its generic `runCommand`,
 //! driven through the same parse → dispatch path the query tab uses.
 use dbx_core::{
     connection::{AppState, PoolKind},
@@ -149,6 +149,55 @@ async fn find_and_modify_commands_run_over_the_legacy_agent() {
     assert_eq!(deleted.rows.len(), 1);
     assert!(format!("{:?}", deleted.rows[0]).contains("Linus"), "highest _id deleted first: {:?}", deleted.rows[0]);
     assert_eq!(find_all(&state, id, &database, "users").await.len(), 2);
+
+    command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
+}
+
+#[tokio::test]
+#[ignore = "opt-in: DBX_MONGO_LEGACY_DUMP_TEST_HOST (host:port, MongoDB 3.6+ without auth) and an installed MongoDB Legacy Agent; creates a temporary database"]
+async fn distinct_runs_over_the_legacy_agent() {
+    let endpoint = std::env::var("DBX_MONGO_LEGACY_DUMP_TEST_HOST").expect("DBX_MONGO_LEGACY_DUMP_TEST_HOST");
+    let (host, port) = endpoint.split_once(':').expect("host:port");
+    let files = tempfile::tempdir().unwrap();
+    let database = format!("dbx_legacy_distinct_{}", uuid::Uuid::new_v4().simple());
+    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let id = "legacy-distinct-test";
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy distinct test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
+    state.configs.write().await.insert(id.into(), config);
+    let key = state.get_or_create_pool(id, Some(&database)).await.unwrap();
+    assert!(matches!(state.pool_handle(&key).await, Some(PoolKind::Agent(_))), "test must run over the legacy agent");
+
+    command(
+        &state,
+        id,
+        &database,
+        doc! { "insert": "orders", "documents": [
+            { "_id": 1, "status": "open", "tags": ["a", "b"], "meta": { "region": "eu" } },
+            { "_id": 2, "status": "closed", "tags": ["b"], "meta": { "region": "us" } },
+            { "_id": 3, "status": "open", "tags": [], "meta": { "region": "eu" } },
+        ] },
+    )
+    .await;
+
+    let statuses = shell(&state, id, &database, r#"db.orders.distinct("status")"#).await.unwrap();
+    let mut shown: Vec<String> = statuses.rows.iter().map(|row| format!("{:?}", row[0])).collect();
+    shown.sort();
+    assert_eq!(shown.len(), 2, "{statuses:?}");
+    assert!(shown[0].contains("closed") && shown[1].contains("open"), "{shown:?}");
+
+    // Array fields are flattened and a filter narrows the input, as the native helper does.
+    let tags = shell(&state, id, &database, r#"db.orders.distinct("tags", {status: "open"})"#).await.unwrap();
+    let mut tags: Vec<String> = tags.rows.iter().map(|row| format!("{:?}", row[0])).collect();
+    tags.sort();
+    assert_eq!(tags.len(), 2, "{tags:?}");
+
+    // Dotted paths reach nested fields.
+    let regions = shell(&state, id, &database, r#"db.orders.distinct("meta.region")"#).await.unwrap();
+    assert_eq!(regions.rows.len(), 2, "{regions:?}");
+
+    // No matches: empty result, not an error.
+    let none = shell(&state, id, &database, r#"db.orders.distinct("status", {status: "missing"})"#).await.unwrap();
+    assert_eq!(none.rows.len(), 0);
 
     command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
 }

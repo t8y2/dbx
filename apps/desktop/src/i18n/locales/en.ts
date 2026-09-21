@@ -6309,6 +6309,9 @@ export default {
   },
   tableImport: {
     title: "Import Table Data",
+    selectedTasks: "{selected} / {total} import items selected",
+    selectTask: "Import {name}",
+    noTasksSelected: "Select at least one item to import.",
     target: "Target table",
     selectFile: "Select File",
     changeFile: "Change File",

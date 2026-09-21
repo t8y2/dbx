@@ -6282,6 +6282,9 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "导入表数据",
+    selectedTasks: "已选择 {selected} / {total} 个导入项",
+    selectTask: "导入 {name}",
+    noTasksSelected: "请至少选择一个导入项。",
     target: "目标表",
     selectFile: "选择文件",
     changeFile: "更换文件",

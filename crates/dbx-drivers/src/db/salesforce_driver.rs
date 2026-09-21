@@ -53,6 +53,9 @@ pub struct SfClient {
     /// Per-sObject describe bodies, cached in memory for the connection's
     /// lifetime. Describes are large and rarely change within a session.
     describe_cache: Arc<Mutex<HashMap<String, Value>>>,
+    /// Resolved organization display name (one SOQL call, cached; falls back
+    /// to the instance host label without caching on failure).
+    org_name_cache: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for SfClient {
@@ -123,6 +126,7 @@ impl SfClient {
             timeout,
             sobject_cache: Arc::new(Mutex::new(None)),
             describe_cache: Arc::new(Mutex::new(HashMap::new())),
+            org_name_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -329,6 +333,35 @@ impl SfClient {
             }
         }
         Ok(info)
+    }
+
+    /// Display name of the org for the synthesized single database node
+    /// (`singleDatabase` trait). One cached `SELECT Name FROM Organization`;
+    /// falls back to the instance host's first label (e.g. `acme--qas1`)
+    /// when that query is unavailable. Fallbacks are NOT cached so a transient
+    /// failure does not stick.
+    pub async fn org_display_name(&self) -> String {
+        if let Some(name) = self.org_name_cache.lock().ok().and_then(|guard| guard.clone()) {
+            return name;
+        }
+        let url = format!("{}/query?q={}", self.api_base(), urlencoded("SELECT Name FROM Organization LIMIT 1"));
+        if let Ok(value) = self.api_get(&url).await {
+            let name =
+                value.pointer("/records/0/Name").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty());
+            if let Some(name) = name {
+                if let Ok(mut guard) = self.org_name_cache.lock() {
+                    *guard = Some(name.to_string());
+                }
+                return name.to_string();
+            }
+        }
+        self.instance_host_fallback_name()
+    }
+
+    fn instance_host_fallback_name(&self) -> String {
+        let host = self.instance_url.split_once("://").map(|(_, rest)| rest).unwrap_or(self.instance_url.as_str());
+        let label = host.split(['/', ':']).next().unwrap_or("");
+        label.split('.').next().filter(|part| !part.is_empty()).unwrap_or("Salesforce").to_string()
     }
 }
 
@@ -649,6 +682,20 @@ mod tests {
         assert_eq!(normalize_instance_url("https://login.salesforce.com").unwrap(), "https://login.salesforce.com");
         assert!(normalize_instance_url("ftp://x").is_err());
         assert!(normalize_instance_url("  ").is_err());
+    }
+
+    #[test]
+    fn org_name_fallback_uses_first_host_label() {
+        let client = SfClient::from_config(
+            "https://acme--qas1.sandbox.my.salesforce.com",
+            Some("tok"),
+            None,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(client.instance_host_fallback_name(), "acme--qas1");
+        let plain = SfClient::from_config("na1.salesforce.com", Some("tok"), None, Duration::from_secs(5)).unwrap();
+        assert_eq!(plain.instance_host_fallback_name(), "na1");
     }
 
     #[test]

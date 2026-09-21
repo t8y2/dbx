@@ -673,6 +673,12 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         if let Some(client) = extract_pool!(pool_handle.as_ref(), VictoriaMetrics) {
             return db::victoriametrics_driver::list_databases(&client).await;
         }
+        if let Some(client) = extract_pool!(pool_handle.as_ref(), Salesforce) {
+            // singleDatabase trait: the whole org is one synthesized database
+            // node; sObjects are listed as its tables.
+            let name = client.org_display_name().await;
+            return Ok(vec![db::DatabaseInfo { name, ..Default::default() }]);
+        }
         try_sqlserver!(pool_handle, list_databases);
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let is_mongo = db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb);

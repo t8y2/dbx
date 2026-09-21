@@ -129,6 +129,7 @@ const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/Dam
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
+const SolrAdmin = defineAsyncComponent(() => import("@/components/solr/SolrAdmin.vue"));
 const PluginFilesystemTab = defineAsyncComponent(() => import("@/components/plugins/PluginFilesystemTab.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
@@ -2821,6 +2822,12 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'nacos-dashboard'">
       <div class="min-h-0 flex-1">
         <NacosDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'solr-admin'">
+      <div class="min-h-0 flex-1">
+        <SolrAdmin :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

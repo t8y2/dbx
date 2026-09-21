@@ -1461,6 +1461,23 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Solr => {
+                let mut client = db::solr_driver::SolrClient::from_config(
+                    &url,
+                    Some(&config.username),
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    config.external_config.as_ref(),
+                    connect_timeout,
+                    Some(config.ca_cert_path.as_str()),
+                    Some(config.client_cert_path.as_str()),
+                    Some(config.client_key_path.as_str()),
+                )?;
+                db::solr_driver::test_connection(&mut client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Meilisearch => {
                 let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                     &url,
@@ -1920,6 +1937,22 @@ pub async fn connect_db(
             )?;
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
+        }
+        DatabaseType::Solr => {
+            let mut client = db::solr_driver::SolrClient::from_config(
+                &url,
+                Some(&db_config.username),
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                db_config.external_config.as_ref(),
+                connect_timeout,
+                Some(db_config.ca_cert_path.as_str()),
+                Some(db_config.client_cert_path.as_str()),
+                Some(db_config.client_key_path.as_str()),
+            )?;
+            db::solr_driver::test_connection(&mut client, connect_timeout).await?;
+            PoolKind::Solr(client)
         }
         DatabaseType::Meilisearch => {
             let client = db::meilisearch_driver::MeilisearchClient::new_for_config(

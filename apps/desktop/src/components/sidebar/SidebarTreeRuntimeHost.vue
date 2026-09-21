@@ -1826,6 +1826,8 @@ async function openServerDashboard() {
     connectionStore.activeConnectionId = node.connectionId;
     if (currentDatabaseType() === "nacos") {
       queryStore.openNacosDashboard(node.connectionId);
+    } else if (currentDatabaseType() === "solr") {
+      queryStore.openSolrAdmin(node.connectionId);
     } else if (connectionSupportsXuguServerDashboard(connectionStore.getConfig(node.connectionId))) {
       queryStore.openXuguDashboard(node.connectionId);
     } else if (connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId))) {
@@ -5597,7 +5599,11 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     if (
       node.connectionId &&
-      (currentDatabaseType() === "nacos" || connectionSupportsXuguServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))
+      (currentDatabaseType() === "nacos" ||
+        currentDatabaseType() === "solr" ||
+        connectionSupportsXuguServerDashboard(connectionStore.getConfig(node.connectionId)) ||
+        connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) ||
+        connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))
     ) {
       items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }

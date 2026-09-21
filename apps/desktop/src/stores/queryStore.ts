@@ -3265,6 +3265,29 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  function openSolrAdmin(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "solr-admin" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: conn?.name ? `${conn.name} - ${t("solrAdmin.title")}` : t("solrAdmin.title"),
+      connectionId,
+      database: "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "solr-admin",
+    };
+    return registerOpenTab(tab);
+  }
+
   function openDamengJobAdmin(connectionId: string) {
     const existing = tabs.value.find((tab) => tab.mode === "dameng-jobs" && tab.connectionId === connectionId);
     if (existing) {
@@ -8940,6 +8963,7 @@ export const useQueryStore = defineStore("query", () => {
     openPostgresDashboard,
     openXuguDashboard,
     openNacosDashboard,
+    openSolrAdmin,
     openDamengUsers,
     openDamengRoles,
     openDamengJobAdmin,

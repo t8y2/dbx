@@ -2993,6 +2993,17 @@ pub(super) struct TableStatusMeta {
 
 const MYSQL_FRESH_TABLE_STATUS_SESSION_SQL: &str = "/*!80000 SET SESSION information_schema_stats_expiry = 0 */";
 
+/// MySQL 8 caches `information_schema.TABLES` statistics per session for
+/// `information_schema_stats_expiry` seconds (86400 by default), so a table
+/// that was read while still empty keeps reporting its old `TABLE_ROWS`
+/// estimate long after rows were inserted (#9736). The version comment turns
+/// the directive into a no-op on MySQL 5.7.
+async fn enable_fresh_table_statistics(conn: &mut mysql_async::Conn, context: &str) {
+    if let Err(error) = conn.query_drop(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL).await {
+        log::debug!("Failed to disable cached MySQL table statistics before {context}: {error}");
+    }
+}
+
 async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
     query_table_status_show(pool, database, None).await
 }
@@ -3058,9 +3069,7 @@ pub async fn get_table_auto_increment(pool: &MySqlPool, database: &str, table: &
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     // MySQL 8 caches SHOW TABLE STATUS statistics by default, including the
     // counter after ALTER TABLE. The version comment is a no-op on MySQL 5.7.
-    if let Err(error) = conn.query_drop(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL).await {
-        log::debug!("Failed to disable cached MySQL table statistics before reading AUTO_INCREMENT: {error}");
-    }
+    enable_fresh_table_statistics(&mut conn, "reading AUTO_INCREMENT").await;
     let status = query_table_status_sql_with_conn(&mut conn, &show_table_status_exact_sql(database, table)).await?;
     Ok(status.into_values().next().and_then(|meta| meta.auto_increment))
 }
@@ -3700,6 +3709,9 @@ pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<
         quote_value(database),
     );
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    // The session-scoped statistics cache is what makes the tree keep showing
+    // a stale row count for tables written after the first read (#9736).
+    enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     Ok(rows

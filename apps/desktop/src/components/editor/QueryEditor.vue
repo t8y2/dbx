@@ -51,6 +51,7 @@ import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, compressSqlText, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
+import { sqlForParameterAnalysis } from "@/lib/sql/sqlParameters";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
 import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisible } from "@/lib/editor/queryEditorExecutionViewport";
@@ -895,6 +896,7 @@ function sqlCompletionDialectOptions() {
   return {
     databaseType: props.databaseType,
     dialect: sqlBehaviorDialect(),
+    enabledSyntaxes: sqlStatementParameterOptions().enabledSyntaxes,
     editorState: view.value?.state,
   };
 }
@@ -918,6 +920,7 @@ function getEditorSqlCompletionContext(sql: string, position: number, editorStat
   const context = getSqlCompletionContext(sql, position, {
     databaseType: props.databaseType,
     dialect,
+    enabledSyntaxes: sqlStatementParameterOptions().enabledSyntaxes,
     editorState,
   });
   if (doc) {
@@ -955,6 +958,7 @@ function getEditorSemanticModel(sql: string, position: number, editorState = vie
   const model = buildSqlSemanticModel(sql, position, {
     databaseType: props.databaseType,
     dialect,
+    enabledSyntaxes: sqlStatementParameterOptions().enabledSyntaxes,
     editorState,
   });
   if (doc) {
@@ -3981,7 +3985,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
     if (mysqlRoutineAnalysis?.routineRanges.some((routineRange) => rangesOverlap(routineRange, range))) continue;
     try {
       const analysis = await api.analyzeSqlReferences(
-        range.sql,
+        sqlForParameterAnalysis(range.sql, sqlStatementParameterOptions()),
         sqlReferenceAnalysisDialectFor({
           databaseType: props.databaseType,
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
@@ -3995,6 +3999,7 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
         ? buildSqlSemanticModel(range.sql, semanticCursor, {
             databaseType: props.databaseType,
             dialect: sqlBehaviorDialect(),
+            enabledSyntaxes: sqlStatementParameterOptions().enabledSyntaxes,
           })
         : null;
       const semanticAnalysis = semanticModel ? mergeSqlSemanticReferenceAnalysis(analysis, semanticModel) : analysis;
@@ -6767,7 +6772,7 @@ onMounted(async () => {
   const shellLineCommentHighlightPlugin = createShellLineCommentHighlight({ ViewPlugin, Decoration, highlightingFor, syntaxTree });
   buildSqlLanguageExtension = () => [
     langSql.sql({
-      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value),
+      dialect: createDbxCodeMirrorSqlDialect(langSql, props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value, sqlStatementParameterOptions()),
     }),
     // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
     // comment marker that toggleLineComment reads from language data.
@@ -6781,7 +6786,7 @@ onMounted(async () => {
   const SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS = 100;
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
   buildSqlSemanticHighlightExtension = () => [
-    createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
+    createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabledSyntaxes: sqlStatementParameterOptions().enabledSyntaxes, enabled: queryEditorSelectionLanguage() === "sql" }),
     ViewPlugin.fromClass(
       class {
         decorations: import("@codemirror/view").DecorationSet;
@@ -6893,6 +6898,7 @@ onMounted(async () => {
                 spans: sqlSemanticTableNameSpansForSyntaxTree(sql, window, tree, {
                   databaseType: props.databaseType,
                   dialect: sqlBehaviorDialect(),
+                  enabledSyntaxes: sqlStatementParameterOptions().enabledSyntaxes,
                 }),
               };
               this.cachedWindows.push(entry);
@@ -7884,14 +7890,18 @@ watch([() => props.clientSessionId, () => props.completionContextVersion], () =>
   scheduleSemanticDiagnostics();
 });
 
-watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile], () => {
+watch([() => props.databaseType, () => props.dialect, () => props.syntaxDialect, sqlDriverProfile, () => sqlStatementParameterOptions().enabledSyntaxes.join(",")], () => {
   executableStatementRangeCache = null;
+  editorCompletionContextCache = null;
+  editorSemanticModelCache = null;
   statementBoundariesGeneration += 1;
   if (!view.value || !sqlLanguageComp || !buildSqlLanguageExtension || !sqlSemanticHighlightComp || !buildSqlSemanticHighlightExtension || !sqlSignatureComp || !buildSqlSignatureExtension) return;
   // Signature tooltips depend on the external dialect, so refresh them even when the document and selection stay unchanged.
   view.value.dispatch({
     effects: [sqlLanguageComp.reconfigure(buildSqlLanguageExtension()), sqlSemanticHighlightComp.reconfigure(buildSqlSemanticHighlightExtension()), sqlSignatureComp.reconfigure(buildSqlSignatureExtension())],
   });
+  setSemanticDiagnostics([]);
+  scheduleSemanticDiagnostics(0);
 });
 
 // openGauss compatibility mode is loaded asynchronously from the backend into a

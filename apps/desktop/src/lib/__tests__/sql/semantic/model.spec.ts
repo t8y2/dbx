@@ -578,3 +578,14 @@ describe("CTE 富化边界与熔断", () => {
     expect(neighbor?.bodySources?.map((source) => source.name)).toEqual(["orders"]);
   });
 });
+
+describe("MyBatis completion context (#9878)", () => {
+  it("offers columns after a placeholder instead of treating the cursor as a comment", () => {
+    const sql = "SELECT * FROM users u WHERE u.id = #{params.id} AND u.";
+    const enabled = buildSqlSemanticModel(sql, sql.length, { databaseType: "mysql", enabledSyntaxes: ["mybatis"] });
+    expect(enabled.cursorIntent.kind).toBe("alias_column");
+    expect(enabled.cursorIntent.qualifierParts).toEqual(["u"]);
+    const disabled = buildSqlSemanticModel(sql, sql.length, { databaseType: "mysql", enabledSyntaxes: [] });
+    expect(disabled.cursorIntent.kind).toBe("suppressed");
+  });
+});

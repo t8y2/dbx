@@ -1,3 +1,4 @@
+import { readSqlBracedParameterAt } from "@/lib/sql/sqlParameters";
 import { Cassandra, MariaSQL, MSSQL, MySQL, PLSQL, PostgreSQL, SQLite, StandardSQL } from "@codemirror/lang-sql";
 import type { Completion, CompletionInfo } from "@codemirror/autocomplete";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
@@ -2149,8 +2150,10 @@ function getSqlLexicalContext(sql: string, cursor: number, options: SqlSemanticB
     if (ch === "-" && next === "-") {
       inLineComment = true;
       index += 1;
-    } else if (ch === "#" && dialectId === "mysql") {
-      inLineComment = true;
+    } else if (ch === "#" && (dialectId === "mysql" || dialectId === "doris")) {
+      const parameter = readSqlBracedParameterAt(sql, index, options);
+      if (parameter) index = parameter.end - 1;
+      else inLineComment = true;
     } else if (ch === "/" && next === "*") {
       inBlockComment = true;
       index += 1;
@@ -2202,7 +2205,7 @@ function activeSqlCompletionStatementSpan(sql: string, cursor: number, options: 
   const window = resolveSqlStatementWindow(sql, safeCursor, options.editorState, dialectId);
   const windowSql = sql.slice(window.from, window.to);
   const windowCursor = safeCursor - window.from;
-  const tokens = tokenizeSqlSemantic(windowSql, dialectId);
+  const tokens = tokenizeSqlSemantic(windowSql, dialectId, options);
   const statementSpan = findActiveSqlStatementSpan(windowSql, tokens, windowCursor);
   const firstStatementToken = tokens.find((token) => token.kind !== "comment" && token.span.end > statementSpan.start && token.span.start < statementSpan.end);
   const result = firstStatementToken ? { start: firstStatementToken.span.start, end: statementSpan.end } : statementSpan;

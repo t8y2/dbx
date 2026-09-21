@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractSqlParameterDescriptors, extractSqlParameters, readSqlBracedParameterAt, sqlParameterLiteral, substituteSqlParameters } from "@/lib/sql/sqlParameters";
+import { extractSqlParameterDescriptors, extractSqlParameters, readSqlBracedParameterAt, sqlForParameterAnalysis, sqlParameterLiteral, substituteSqlParameters } from "@/lib/sql/sqlParameters";
 
 describe("extractSqlParameters", () => {
   it("shares strict braced-placeholder validation", () => {
@@ -1170,5 +1170,27 @@ describe("enabledSyntaxes option", () => {
 describe("sqlParameterLiteral", () => {
   it("falls back to quoted strings for invalid boolean input", () => {
     expect(sqlParameterLiteral({ kind: "boolean", value: "maybe" })).toBe("'maybe'");
+  });
+});
+
+describe("MyBatis reference analysis input", () => {
+  it("keeps the real SQL following a placeholder available to the backend parser", () => {
+    const sql = "SELECT * FROM t WHERE id = #{工厂编号}\nLIMIT 100";
+    expect(sqlForParameterAnalysis(sql, { databaseType: "mysql" })).toBe("SELECT * FROM t WHERE id = ' 工厂编号'\nLIMIT 100");
+  });
+
+  it("preserves code point columns and UTF-16 offsets for diagnostic spans", () => {
+    const sql = "SELECT * FROM t WHERE id = #{𠀀.编号} AND missing = 1";
+    const analysisSql = sqlForParameterAnalysis(sql, { databaseType: "mysql" });
+    expect(analysisSql).toBe("SELECT * FROM t WHERE id = ' 𠀀.编号' AND missing = 1");
+    expect(analysisSql.length).toBe(sql.length);
+    expect(Array.from(analysisSql).length).toBe(Array.from(sql).length);
+    expect(analysisSql.indexOf("missing")).toBe(sql.indexOf("missing"));
+  });
+
+  it("leaves disabled placeholders and literal/comment occurrences alone", () => {
+    const sql = "SELECT '#{literal}' FROM t WHERE id = #{id} # real #{comment}";
+    expect(sqlForParameterAnalysis(sql, { enabledSyntaxes: [] })).toBe(sql);
+    expect(sqlForParameterAnalysis(sql, { enabledSyntaxes: ["mybatis"] })).toBe("SELECT '#{literal}' FROM t WHERE id = ' id' # real #{comment}");
   });
 });

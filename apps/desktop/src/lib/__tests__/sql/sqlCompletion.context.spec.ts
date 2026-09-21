@@ -6,6 +6,7 @@ import {
   buildSqlCompletionItemsFromContext,
   getPostgresSequenceLiteralCompletionContext,
   getSqlCompletionContext,
+  isSqlCommentContext,
   prepareSqlCompletionReplacement,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
@@ -1667,5 +1668,13 @@ describe("line block statement boundary", () => {
     const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
 
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
+  });
+});
+
+describe("MyBatis completion fallback", () => {
+  it("does not hide the rest of the line when no editor syntax tree is available", () => {
+    const sql = "SELECT * FROM t WHERE id = #{工厂编号} AND t.";
+    expect(isSqlCommentContext(sql, sql.length, { databaseType: "mysql", enabledSyntaxes: ["mybatis"] })).toBe(false);
+    expect(isSqlCommentContext(sql, sql.length, { databaseType: "mysql", enabledSyntaxes: [] })).toBe(true);
   });
 });

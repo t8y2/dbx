@@ -164,6 +164,23 @@ export function readSqlBracedParameterAt(sql: string, start: number, options?: S
   return { key: name, name, syntax, token: sql.slice(start, closeBrace + 1), start, end: closeBrace + 1 };
 }
 
+/** SQL sent only to the reference analyzer, never to database execution. */
+export function sqlForParameterAnalysis(sql: string, options?: SqlParameterOptions): string {
+  const parameters = findSqlParameterOccurrences(sql, options).filter((parameter) => parameter.syntax === "mybatis" && parameter.replacement === undefined);
+  if (parameters.length === 0) return sql;
+  let position = 0;
+  let result = "";
+  for (const parameter of parameters) {
+    result += sql.slice(position, parameter.start);
+    // A quoted stand-in is a valid expression without inventing column names.
+    // Keep every interior code point (including astral letters and newlines),
+    // so both Rust's character columns and CodeMirror's UTF-16 offsets match.
+    result += `' ${parameter.token.slice(2, -1)}'`;
+    position = parameter.end;
+  }
+  return result + sql.slice(position);
+}
+
 export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
   return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
 }

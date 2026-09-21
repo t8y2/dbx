@@ -25,6 +25,7 @@ import {
 } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
 import { collectSidebarRegexIndexScopes, resolveSidebarRemoteSearchQuery, resolveSidebarSearchDispatchMode } from "@/lib/sidebar/sidebarRegexSearchIndex";
+import { needsSidebarObjectGroupDiscovery } from "@/lib/sidebar/sidebarSearchDiscovery";
 import { createSidebarSearchExpansionState } from "@/lib/sidebar/sidebarSearchExpansionState";
 import { createSidebarSearchLoadingTracker } from "@/lib/sidebar/sidebarSearchLoadingTracker";
 import { isCancelSearchShortcut, isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut, isViewTableDdlShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -405,7 +406,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     }
     return;
   }
-  if (refreshedNodeIds && isSidebarSearchContainer(node) && !node.children?.length && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
+  if (refreshedNodeIds && isSidebarSearchContainer(node) && needsSidebarObjectGroupDiscovery(node, searchableObjectGroupTypes) && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
     scheduledNodeIds?.add(node.id);
     const wasCollapsed = node.isExpanded !== true;
     searchExpansionState.markFiltered(node.id, wasCollapsed);

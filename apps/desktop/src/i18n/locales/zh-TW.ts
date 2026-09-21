@@ -2067,6 +2067,8 @@ export default withEnglishFallback({
     localFiltersActive: "{count} 個本機值篩選",
     localFilterMoreValues: "，還有 {count} 個",
     columnVisibility: "欄位篩選",
+    autoFitColumnWidths: "自動適配欄寬",
+    autoFitColumnWidthsHint: "依儲存格內容調整所有可見欄的寬度；之後仍可拖曳欄邊界手動微調。",
     columnVisibilityHint: "至少保留一欄可見。",
     columnReorderHint: "拖曳可調整欄位順序。",
     columnReorderSearchHint: "清除搜尋後可調整欄位順序。",

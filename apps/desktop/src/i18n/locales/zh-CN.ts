@@ -2122,6 +2122,8 @@ export default withEnglishFallback({
     localFiltersActive: "{count} 个本地值筛选",
     localFilterMoreValues: "，还有 {count} 个",
     columnVisibility: "字段筛选",
+    autoFitColumnWidths: "自动适配列宽",
+    autoFitColumnWidthsHint: "按单元格内容调整所有可见列的宽度；之后仍可拖拽列边界手动微调。",
     columnVisibilityHint: "至少保留一列可见。",
     columnReorderHint: "拖动可调整字段顺序。",
     columnReorderSearchHint: "清除搜索后可调整字段顺序。",

@@ -2070,6 +2070,8 @@ export default withEnglishFallback({
     localFiltersActive: "{count} filtros locales de valores",
     localFilterMoreValues: " +{count} más",
     columnVisibility: "Columnas",
+    autoFitColumnWidths: "Ajustar al contenido",
+    autoFitColumnWidthsHint: "Ajusta cada columna visible al contenido de sus celdas. Después puedes arrastrar el borde de la columna.",
     columnVisibilityHint: "Al menos una columna permanece visible.",
     columnReorderHint: "Arrastra para reordenar las columnas.",
     columnReorderSearchHint: "Borra la búsqueda para reordenar las columnas.",

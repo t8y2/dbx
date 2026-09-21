@@ -2019,6 +2019,8 @@ export default withEnglishFallback({
     localFiltersActive: "{count} yerel değer filtresi",
     localFilterMoreValues: " +{count} tane daha",
     columnVisibility: "Sütunlar",
+    autoFitColumnWidths: "İçeriğe sığdır",
+    autoFitColumnWidthsHint: "Görünen tüm sütunları hücre içeriğine göre ayarlar. Ardından sütun kenarını yine sürükleyebilirsiniz.",
     columnVisibilityHint: "En az bir sütun görünür kalır.",
     columnReorderHint: "Sütunları yeniden sıralamak için sürükleyin.",
     columnReorderSearchHint: "Sütunları yeniden sıralamak için aramayı temizleyin.",

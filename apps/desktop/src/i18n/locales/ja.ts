@@ -2078,6 +2078,8 @@ export default withEnglishFallback({
     localFiltersActive: "{count}件のローカル値フィルター",
     localFilterMoreValues: " +{count}件以上",
     columnVisibility: "列",
+    autoFitColumnWidths: "内容に合わせて調整",
+    autoFitColumnWidthsHint: "表示中のすべての列をセルの内容に合わせて調整します。その後も列の境界をドラッグできます。",
     columnVisibilityHint: "少なくとも1列は表示されます。",
     columnReorderHint: "ドラッグして列の順序を変更します。",
     columnReorderSearchHint: "列の順序を変更するには検索をクリアしてください。",

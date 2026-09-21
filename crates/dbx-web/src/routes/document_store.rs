@@ -107,13 +107,6 @@ pub struct ElasticsearchIndexRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SolrCoreRequest {
-    pub connection_id: String,
-    pub core: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ElasticsearchIndexMetadataRequest {
     pub connection_id: String,
     pub index: String,

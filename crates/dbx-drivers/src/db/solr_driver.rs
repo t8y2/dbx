@@ -121,7 +121,8 @@ impl SolrClient {
 /// `http://host:8983` 需要补 `/solr` 上下文路径；反向代理或显式带路径的 URL 原样保留。
 fn normalize_solr_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    let has_context_path = reqwest::Url::parse(trimmed).map(|u| u.path().trim_matches('/').len() > 0).unwrap_or(false);
+    let has_context_path =
+        reqwest::Url::parse(trimmed).map(|u| !u.path().trim_matches('/').is_empty()).unwrap_or(false);
     if has_context_path {
         trimmed.to_string()
     } else {

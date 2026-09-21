@@ -1379,11 +1379,13 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // changes as a forbidden global-variable operation.
     let gateway_session_variable_rejected =
         lower.contains("error 10192 (hy000)") && lower.contains("set global variables is forbidden");
-    // The floor statement is the only built-in setup query using `greatest(` /
-    // `cast(`, so a parser that quotes those tokens instead of the variable name
-    // still identifies it as the rejected statement.
-    let floor_statement_rejected =
-        lower.contains("group_concat_max_len") || lower.contains("greatest(") || lower.contains("cast(");
+    // Error echoes of the floor statement always carry the variable name — a
+    // full-statement echo contains it verbatim, and a token quote like
+    // `near 'cast(greatest(...)'` spans the rest of the statement after the
+    // failing token, so the name is still present. Matching on the name alone
+    // keeps user-supplied `sessionVariables` that merely contain `cast(` from
+    // triggering a spurious Standard→Compatible retry.
+    let floor_statement_rejected = lower.contains("group_concat_max_len");
     if (floor_statement_rejected && setup_query_rejected)
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected

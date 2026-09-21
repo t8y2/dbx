@@ -695,6 +695,7 @@ fn server_messages_query_result(messages: Vec<String>, start: Instant) -> Option
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -767,6 +768,7 @@ async fn collect_first_result_limited(
         rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -1686,6 +1688,7 @@ fn push_sqlserver_result_set(results: &mut Vec<QueryResult>, result: Option<SqlS
             rows: result.rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: result.truncated,
             session_id: None,
             has_more: false,
@@ -1744,6 +1747,7 @@ fn push_sqlserver_ordered_events(
                         rows: vec![],
                         affected_rows,
                         execution_time_ms: start.elapsed().as_millis(),
+                        server_execute_time_us: None,
                         truncated: false,
                         session_id: None,
                         has_more: false,
@@ -3012,7 +3016,8 @@ pub async fn list_foreign_keys(
     table: &str,
 ) -> Result<Vec<ForeignKeyInfo>, String> {
     let sql = format!(
-        "SELECT fk.name, c.name, SCHEMA_NAME(rt.schema_id), rt.name, rc.name \
+        "SELECT fk.name, c.name, SCHEMA_NAME(rt.schema_id), rt.name, rc.name, \
+         fk.delete_referential_action, fk.update_referential_action \
          FROM sys.foreign_keys fk \
          JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
          JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id \
@@ -3033,10 +3038,21 @@ pub async fn list_foreign_keys(
             ref_schema: Some(row.get::<&str, _>(2).unwrap_or("").to_string()),
             ref_table: row.get::<&str, _>(3).unwrap_or("").to_string(),
             ref_column: row.get::<&str, _>(4).unwrap_or("").to_string(),
-            on_update: None,
-            on_delete: None,
+            on_update: sqlserver_referential_action(row.get::<i32, _>(6).unwrap_or(0)),
+            on_delete: sqlserver_referential_action(row.get::<i32, _>(5).unwrap_or(0)),
         })
         .collect())
+}
+
+/// sys.foreign_keys referential actions: 0 = NO ACTION (default, omitted),
+/// 1 = CASCADE, 2 = SET NULL, 3 = SET DEFAULT.
+fn sqlserver_referential_action(code: i32) -> Option<String> {
+    match code {
+        1 => Some("CASCADE".to_string()),
+        2 => Some("SET NULL".to_string()),
+        3 => Some("SET DEFAULT".to_string()),
+        _ => None,
+    }
 }
 
 pub async fn get_table_comment(
@@ -3369,6 +3385,7 @@ async fn execute_query_with_max_rows_inner(
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3414,6 +3431,7 @@ pub async fn execute_batch_with_max_rows_metadata(
                 rows: vec![],
                 affected_rows: result.rows_affected().iter().sum::<u64>(),
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3508,6 +3526,7 @@ pub async fn execute_simple_batch_with_max_rows_metadata(
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3934,6 +3953,7 @@ mod tests {
             rows: vec![],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -3958,6 +3978,7 @@ mod tests {
                 rows: vec![],
                 affected_rows: 0,
                 execution_time_ms: 1,
+                server_execute_time_us: None,
                 truncated: false,
                 session_id: None,
                 has_more: false,
@@ -3977,6 +3998,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(1)]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4729,6 +4751,7 @@ mod tests {
             rows: vec![vec![serde_json::json!("app_user"), serde_json::json!("8")]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5101,6 +5124,7 @@ mod tests {
             rows: vec![vec![serde_json::json!(42), serde_json::json!(101)]],
             affected_rows: 0,
             execution_time_ms: 1,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

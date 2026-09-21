@@ -1214,6 +1214,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        export_column_extras: None,
         column_comments: None,
         auto_filter: None,
         identifier_quote: None,
@@ -1291,6 +1292,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
          GO"
     );
     let request = SqlFileRequest {
+        txn_session_id: None,
         execution_id: format!("live-sqlserver-file-{suffix}"),
         connection_id: connection_id.to_string(),
         database: database.clone(),

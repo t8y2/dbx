@@ -6721,6 +6721,59 @@ test("redis multi-command execution records source statements for each result", 
   }
 });
 
+test("redis execution skips comment lines and keeps results aligned with their source ranges", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const sentCommands: string[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("redis-1"),
+    db_type: "redis",
+    port: 6379,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/redis/execute-command") {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      sentCommands.push(body.command);
+      return new Response(JSON.stringify({ command: body.command, safety: "allowed", value: "OK" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const sql = "# warm the cache\nGET user:1\n-- then check\n  PING  ";
+    const tabId = store.createTab("redis-1", "0", "Redis", "query", sql);
+    await store.executeTabSql(tabId, sql, { sourceOffset: 0 });
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    // A note is never sent to the server as a command.
+    assert.deepEqual(sentCommands, ["GET user:1", "PING"]);
+    assert.deepEqual(
+      tab?.results?.map((result) => result.sourceStatement),
+      ["GET user:1", "PING"],
+    );
+    // Each result points at its own line, not the line of the comment above it.
+    assert.deepEqual(
+      tab?.results?.map((result) => [result.sourceFrom, result.sourceTo]),
+      [
+        [sql.indexOf("GET"), sql.indexOf("GET") + "GET user:1".length],
+        [sql.indexOf("PING"), sql.indexOf("PING") + "PING".length],
+      ],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo multi-command execution records source statements for error results", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

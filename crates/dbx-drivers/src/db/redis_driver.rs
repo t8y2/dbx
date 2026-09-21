@@ -689,10 +689,11 @@ async fn connect_client_with_timeout(
         .map_err(|_| format!("{label} connection timed out ({}s)", timeout.as_secs()))?
         .map_err(|e| format!("{label} connection failed: {e}"))?;
 
-    tokio::time::timeout(timeout, redis::cmd("PING").query_async::<String>(&mut con))
-        .await
-        .map_err(|_| format!("{label} ping timed out ({}s)", timeout.as_secs()))?
-        .map_err(|e| format!("{label} authentication failed or command rejected: {e}"))?;
+    // Credentials are applied while the connection is being established, so reaching this point
+    // already proves AUTH succeeded. The PING below is only a liveness probe: an account that may
+    // not run PING (for example a managed Redis behind a restrictive ACL) is still a usable
+    // connection, so a denied PING must not fail it (issue #9394).
+    redis_ping(&mut con, label, timeout).await?;
 
     Ok(con)
 }
@@ -788,11 +789,17 @@ pub async fn connect_cluster(config: &ConnectionConfig) -> Result<RedisClusterPo
             Err(err) => return Err(err),
         };
 
-        match tokio::time::timeout(super::connection_timeout(), redis::cmd("PING").query_async::<String>(&mut con))
-            .await
-            .map_err(|_| format!("Redis cluster ping timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
-            .map_err(|e| format!("Redis cluster authentication failed or command rejected: {e}"))
-        {
+        let cluster_ping =
+            match tokio::time::timeout(super::connection_timeout(), redis::cmd("PING").query_async::<String>(&mut con))
+                .await
+            {
+                Ok(Ok(_)) => Ok(()),
+                // Reachable and authenticated, only the PING privilege is missing (issue #9394).
+                Ok(Err(error)) if is_redis_command_denied_error(&error.to_string()) => Ok(()),
+                Ok(Err(error)) => Err(format!("Redis cluster ping failed: {error}")),
+                Err(_) => Err(format!("Redis cluster ping timed out ({}s)", super::CONNECTION_TIMEOUT_SECS)),
+            };
+        match cluster_ping {
             Ok(_) => {
                 let seed_routes = identity_routes(&seed_nodes);
                 let slot_ranges = cluster_slot_ranges_from_routes(
@@ -890,7 +897,7 @@ pub async fn connect_routed_cluster(
     }
     {
         let mut con = cluster_any_connection(&pool).await?;
-        redis_ping(&mut con, "Redis cluster").await?;
+        redis_ping(&mut con, "Redis cluster", super::connection_timeout()).await?;
     }
     Ok(pool)
 }
@@ -899,11 +906,11 @@ pub async fn test_connection(connection: &RedisConnection) -> Result<(), String>
     match connection {
         RedisConnection::Direct(con) => {
             let mut con = con.lock().await;
-            redis_ping(&mut *con, "Redis").await
+            redis_ping(&mut *con, "Redis", super::connection_timeout()).await
         }
         RedisConnection::Cluster(cluster) => {
             let mut con = cluster_any_connection(cluster).await?;
-            redis_ping(&mut con, "Redis cluster").await
+            redis_ping(&mut con, "Redis cluster", super::connection_timeout()).await
         }
     }
 }
@@ -927,11 +934,22 @@ async fn redis_database_connection_info<C>(con: &mut C) -> Result<DatabaseConnec
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let info =
-        tokio::time::timeout(super::connection_timeout(), redis::cmd("INFO").arg("server").query_async::<String>(con))
-            .await
-            .map_err(|_| format!("Redis INFO command timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
-            .map_err(|error| format!("Redis INFO command failed: {error}"))?;
+    let info = match tokio::time::timeout(
+        super::connection_timeout(),
+        redis::cmd("INFO").arg("server").query_async::<String>(con),
+    )
+    .await
+    {
+        Ok(Ok(info)) => info,
+        // Managed Redis accounts and proxies frequently allow connecting but not `INFO`. The
+        // connection is still usable, so report the identity we do know instead of failing all
+        // server metadata (issue #9394).
+        Ok(Err(error)) if is_redis_command_denied_error(&error.to_string()) => String::new(),
+        Ok(Err(error)) => return Err(format!("Redis INFO command failed: {error}")),
+        Err(_) => {
+            return Err(format!("Redis INFO command timed out ({}s)", super::CONNECTION_TIMEOUT_SECS));
+        }
+    };
     let product_version = info.lines().find_map(|line| {
         let (key, value) = line.trim().split_once(':')?;
         (key.eq_ignore_ascii_case("redis_version") && !value.trim().is_empty()).then(|| value.trim().to_string())
@@ -943,15 +961,18 @@ where
     })
 }
 
-async fn redis_ping<C>(con: &mut C, label: &str) -> Result<(), String>
+async fn redis_ping<C>(con: &mut C, label: &str, timeout: std::time::Duration) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    tokio::time::timeout(super::connection_timeout(), redis::cmd("PING").query_async::<String>(con))
-        .await
-        .map_err(|_| format!("{label} ping timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
-        .map(|_| ())
-        .map_err(|e| format!("{label} ping failed: {e}"))
+    match tokio::time::timeout(timeout, redis::cmd("PING").query_async::<String>(con)).await {
+        Ok(Ok(_)) => Ok(()),
+        // The server is reachable and the credentials were accepted; only the PING privilege is
+        // missing, which does not make the connection unusable (issue #9394).
+        Ok(Err(error)) if is_redis_command_denied_error(&error.to_string()) => Ok(()),
+        Ok(Err(error)) => Err(format!("{label} ping failed: {error}")),
+        Err(_) => Err(format!("{label} ping timed out ({}s)", timeout.as_secs())),
+    }
 }
 
 fn redis_sentinel_nodes(config: &ConnectionConfig) -> Result<Vec<ConnectionInfo>, String> {
@@ -1094,6 +1115,20 @@ fn is_redis_auth_error(error: &str) -> bool {
     error.contains("auth") || error.contains("wrongpass") || error.contains("invalid username-password")
 }
 
+/// True when the server rejected a command because the account may not run it, rather than because
+/// the connection or the credentials are broken. Redis reports this as `NOPERM`; managed Redis
+/// endpoints and proxies in front of them use "not support" / "unknown command" phrasing for the
+/// same situation, which is what issue #9394 hit when its account was denied `PING`.
+fn is_redis_command_denied_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("noperm")
+        || error.contains("no permissions")
+        || error.contains("permission denied")
+        || error.contains("not support")
+        || error.contains("unknown command")
+        || error.contains("unsupported command")
+}
+
 fn non_empty_string(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1139,10 +1174,7 @@ async fn connect_client(client: redis::Client) -> Result<redis::aio::Multiplexed
         .map_err(|_| format!("Redis connection timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
         .map_err(|e| format!("Redis connection failed: {e}"))?;
 
-    tokio::time::timeout(super::connection_timeout(), redis::cmd("PING").query_async::<String>(&mut con))
-        .await
-        .map_err(|_| format!("Redis ping timed out ({}s)", super::CONNECTION_TIMEOUT_SECS))?
-        .map_err(|e| format!("Redis authentication failed or command rejected: {e}"))?;
+    redis_ping(&mut con, "Redis", super::connection_timeout()).await?;
 
     Ok(con)
 }
@@ -4431,17 +4463,17 @@ mod tests {
     };
 
     use super::{
-        classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
-        parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
-        parse_stream_consumers, parse_stream_entries, parse_stream_groups, parse_stream_pending_entries,
-        redis_auth_candidates, redis_blob_display_text, redis_blob_from_bytes, redis_cluster_slot,
-        redis_command_raw_to_json, redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw,
-        redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
-        redis_value_matches_query, redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob,
-        RedisBlobEncoding, RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem,
-        RedisListItem, RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer,
-        RedisStreamEntry, RedisStreamField, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData,
-        RedisZsetItem,
+        classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_auth_error,
+        is_redis_command_denied_error, is_redis_json_type, parse_cluster_slots, parse_command_argv,
+        parse_database_count, parse_redis_endpoint, parse_scan_keys, parse_stream_consumers, parse_stream_entries,
+        parse_stream_groups, parse_stream_pending_entries, redis_auth_candidates, redis_blob_display_text,
+        redis_blob_from_bytes, redis_cluster_slot, redis_command_raw_to_json, redis_database_index,
+        redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query, redis_key_raw_to_bytes,
+        redis_key_value_preview, redis_sentinel_master_endpoint, redis_value_matches_query, redis_value_to_bytes,
+        standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding, RedisClusterSlotRange,
+        RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisListItem, RedisNodeEndpoint, RedisNodeRoute,
+        RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamField, RedisStreamGroup,
+        RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -7231,6 +7263,24 @@ mod tests {
 
         assert_eq!(info.redis.username.as_deref(), Some("app-user"));
         assert_eq!(info.redis.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn redis_command_denied_errors_are_not_auth_errors() {
+        // Issue #9394: a managed Redis account that may connect but may not run PING.
+        let noperm = "NOPERM User noping has no permissions to run the 'ping' command";
+        assert!(is_redis_command_denied_error(noperm));
+        assert!(is_redis_command_denied_error("ERR unknown command 'PING'"));
+        assert!(is_redis_command_denied_error("ERR command 'PING' not supported"));
+        assert!(is_redis_command_denied_error("command 'PING' not support for your account"));
+        assert!(!is_redis_command_denied_error("WRONGPASS invalid username-password pair"));
+
+        // The liveness probe must report a denied PING as plain wording, otherwise the credential
+        // fallback in `connect_standalone` retries with a bogus candidate and the user sees a
+        // misleading "password authentication failed" instead of the real cause.
+        let ping_failure = "Redis ping failed: NOPERM User noping has no permissions to run the 'ping' command";
+        assert!(!is_redis_auth_error(ping_failure));
+        assert!(is_redis_auth_error("Redis connection failed: WRONGPASS invalid username-password pair"));
     }
 
     #[test]

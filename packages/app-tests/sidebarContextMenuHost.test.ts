@@ -110,7 +110,7 @@ test("object source identity and editability are enforced in queryStore", () => 
 
   // pending 占位：同步返回（不 await），tab 已可见并带着可重试的请求身份
   assert.doesNotMatch(pendingBody, /await /);
-  assert.match(pendingBody, /tab\.sourceLoad = \{ startedAt: Date\.now\(\), request: \{ \.\.\.options\.request \} \}/);
+  assert.match(pendingBody, /tab\.sourceLoad = \{ startedAt: Date\.now\(\), initialEditing: options\.initialEditing, request: \{ \.\.\.options\.request \} \}/);
   assert.match(pendingBody, /void loadObjectSourceIntoTab\(id\)/);
   // 落地时清掉加载态，否则 tab 会永远停在转圈
   assert.match(applyBody, /clearObjectSourceLoad\(tab\)/);

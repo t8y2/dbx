@@ -12,11 +12,12 @@ export interface ExplainPlanNode {
   cost?: string;
   rows?: string;
   width?: string;
+  estimatedTimeUs?: string;
   details: string[];
   children: ExplainPlanNode[];
 }
 
-export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "sqlserver";
+export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "oceanbase-oracle" | "sqlserver";
 
 export interface ParsedExplainPlan {
   databaseType: ExplainPlanDatabaseType;
@@ -26,7 +27,12 @@ export interface ParsedExplainPlan {
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "sqlserver"]);
+export function formatExplainPlanDetails(node: ExplainPlanNode | undefined, estimatedTimeLabel: string): string[] {
+  if (!node) return [];
+  return node.estimatedTimeUs === undefined ? node.details : [`${estimatedTimeLabel}: ${node.estimatedTimeUs} µs`, ...node.details];
+}
+
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "oceanbase-oracle", "sqlserver"]);
 export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is ExplainPlanDatabaseType {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
@@ -45,6 +51,8 @@ export function parseExplainResult(databaseType: ExplainPlanDatabaseType, result
     return parseDorisExplain(result);
   } else if (databaseType === "sqlserver") {
     return parseSqlServerExplain(result);
+  } else if (databaseType === "oceanbase-oracle") {
+    return parseOceanbaseOracleExplain(result);
   }
   const raw = parseExplainCell(result.rows[0]?.[0]);
   const nodes = databaseType === "postgres" ? parsePostgresExplain(raw) : parseMysqlExplain(raw);
@@ -586,6 +594,42 @@ function parseExplainCell(value: unknown): unknown {
   } catch {
     return value;
   }
+}
+
+function parseOceanbaseOracleExplain(result: QueryResult): ParsedExplainPlan {
+  // OceanBase JDBC returns one line of the JSON document per Query Plan row.
+  const text = result.rows.map((row) => String(row[0] ?? "")).join("\n");
+  const raw = parseExplainCell(text);
+  const root = objectValue(raw);
+  return { databaseType: "oceanbase-oracle", raw, nodes: root ? [parseOceanbaseOracleNode(root, "0")] : [] };
+}
+
+const OCEANBASE_PLAN_KEYS = { id: "ID", operator: "OPERATOR", name: "NAME", rows: "EST.ROWS", time: "EST.TIME(us)", cost: "COST" } as const;
+const OCEANBASE_PLAN_FIELDS = new Set<string>(Object.values(OCEANBASE_PLAN_KEYS));
+const OCEANBASE_CHILD_KEY = /^CHILD_\d+$/;
+
+function parseOceanbaseOracleNode(plan: Record<string, unknown>, fallbackId: string): ExplainPlanNode {
+  const nodeType = stringValue(plan[OCEANBASE_PLAN_KEYS.operator])?.trim() || "Plan";
+  const relation = stringValue(plan[OCEANBASE_PLAN_KEYS.name])?.trim() || undefined;
+  const children = Object.entries(plan)
+    .filter(([key, value]) => OCEANBASE_CHILD_KEY.test(key) && objectValue(value))
+    .sort(([left], [right]) => Number(left.slice(6)) - Number(right.slice(6)))
+    .map(([key, value]) => parseOceanbaseOracleNode(objectValue(value)!, `${fallbackId}.${key.slice(6)}`));
+  const estimatedTimeUs = numberLike(plan[OCEANBASE_PLAN_KEYS.time]);
+  const details = Object.entries(plan)
+    .filter(([key, value]) => !OCEANBASE_PLAN_FIELDS.has(key) && !OCEANBASE_CHILD_KEY.test(key) && value !== null)
+    .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+  return {
+    id: numberLike(plan[OCEANBASE_PLAN_KEYS.id]) || fallbackId,
+    title: relation && relation !== nodeType ? `${nodeType} on ${relation}` : nodeType,
+    nodeType,
+    relation,
+    cost: numberLike(plan[OCEANBASE_PLAN_KEYS.cost]),
+    rows: numberLike(plan[OCEANBASE_PLAN_KEYS.rows]),
+    estimatedTimeUs,
+    details,
+    children,
+  };
 }
 
 // ── DM (达梦) tabular explain parser ──────────────────────────────────

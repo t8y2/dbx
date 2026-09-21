@@ -110,7 +110,7 @@ EOF
     TDENGINE_INTEGRATION=1 \
       TDENGINE_TEST_HOST=127.0.0.1 \
       TDENGINE_TEST_PORT=6041 \
-      cargo test --manifest-path drivers/tdengine/Cargo.toml --locked --test live -- --nocapture
+      cargo nextest run --manifest-path drivers/tdengine/Cargo.toml --locked --test live --no-capture --no-fail-fast
     ;;
   cassandra)
     cd "$root/agents/drivers/cassandra-go"

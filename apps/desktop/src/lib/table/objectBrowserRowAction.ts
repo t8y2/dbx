@@ -26,14 +26,15 @@ export function singleClickRowAction(row: ObjectBrowserRow | null | undefined, d
 
 /**
  * Determine the action for a double click on an object browser row.
- * - TABLE → open-table (open table data tab)
- * - VIEW/MATERIALIZED_VIEW/PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
+ * - TABLE/VIEW/MATERIALIZED_VIEW → open-table (open data tab, matching the
+ *   sidebar's data-node double-click behavior)
+ * - PROCEDURE/FUNCTION/TRIGGER/SEQUENCE/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → open-source
  * - otherwise → none
  */
 export function doubleClickRowAction(row: ObjectBrowserRow | null | undefined, dbType?: DatabaseType): ObjectBrowserRowAction {
   if (!row) return "none";
   if (dbType === "mongodb") return mongoObjectBrowserRowAction(row);
-  if (row.type === "TABLE") return "open-table";
+  if (row.type === "TABLE" || row.type === "VIEW" || row.type === "MATERIALIZED_VIEW") return "open-table";
   if (row.type === "EVENT") return "open-source";
   if (row.type === "TYPE" && customTypeCapabilities(dbType).details) return "type-info";
   if (canOpenSource(row, dbType)) return "open-source";

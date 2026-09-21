@@ -37,6 +37,33 @@ pub struct ExplainSqlBuildResult {
     pub reason: Option<String>,
 }
 
+/// Payload encoding of an estimated plan produced by [`build_explain_sql`].
+///
+/// Callers that hand a raw plan to a consumer which cannot inspect the SQL
+/// (the plugin Host API) need to know how to decode it. Keep this in sync with
+/// the generated statements in [`build_explain_sql`];
+/// `estimated_plan_format_matches_generated_sql` guards the pairing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EstimatedPlanFormat {
+    /// A JSON document returned as a single cell (PostgreSQL, MySQL, OceanBase Oracle).
+    Json,
+    /// A `ShowPlanXML` document returned as text (SQL Server `SET SHOWPLAN_XML`).
+    Xml,
+    /// A human-readable plan listing (Dameng, Doris, QuestDB, Oracle).
+    Text,
+}
+
+impl EstimatedPlanFormat {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Xml => "xml",
+            Self::Text => "text",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DroppedFilePreviewSqlOptions {
@@ -119,6 +146,20 @@ pub fn build_dropped_file_preview_sql(options: DroppedFilePreviewSqlOptions) -> 
     None
 }
 
+/// How a consumer should decode the estimated plan `build_explain_sql` asks
+/// the server for. Dameng and Oracle plans reach DBX through the driver's
+/// native plan text rather than a generated `EXPLAIN` statement, and every
+/// agent plan is text.
+pub fn estimated_plan_format(database_type: Option<DatabaseType>) -> EstimatedPlanFormat {
+    match database_type {
+        Some(DatabaseType::SqlServer) => EstimatedPlanFormat::Xml,
+        Some(DatabaseType::Dameng | DatabaseType::Questdb | DatabaseType::Doris | DatabaseType::Oracle) => {
+            EstimatedPlanFormat::Text
+        }
+        _ => EstimatedPlanFormat::Json,
+    }
+}
+
 pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
     matches!(
         database_type,
@@ -129,6 +170,7 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Questdb
                 | DatabaseType::Dameng
                 | DatabaseType::Oracle
+                | DatabaseType::OceanbaseOracle
                 | DatabaseType::SqlServer
         )
     )
@@ -1282,6 +1324,47 @@ mod tests {
     }
 
     #[test]
+    fn estimated_plan_format_matches_generated_sql() {
+        // Every dialect `supports_explain_plan` advertises must declare a payload
+        // format that the statement `build_explain_sql` generates really produces.
+        for database_type in
+            DatabaseType::ALL.iter().copied().filter(|database_type| supports_explain_plan(Some(*database_type)))
+        {
+            let explain_sql = build_explain_sql(ExplainSqlOptions {
+                database_type: Some(database_type),
+                format: None,
+                analyze: None,
+                sql: "SELECT 1".to_string(),
+            })
+            .sql
+            .expect("a supported dialect always builds EXPLAIN SQL");
+
+            match estimated_plan_format(Some(database_type)) {
+                EstimatedPlanFormat::Json => assert!(
+                    explain_sql.contains("FORMAT JSON") || explain_sql.contains("FORMAT=JSON"),
+                    "{database_type:?} declares a JSON plan but generated '{explain_sql}'"
+                ),
+                EstimatedPlanFormat::Xml => assert!(
+                    explain_sql.contains("SHOWPLAN_XML"),
+                    "{database_type:?} declares an XML plan but generated '{explain_sql}'"
+                ),
+                EstimatedPlanFormat::Text => assert!(
+                    explain_sql.starts_with("EXPLAIN ") && !explain_sql.contains("FORMAT"),
+                    "{database_type:?} declares a text plan but generated '{explain_sql}'"
+                ),
+            }
+        }
+
+        assert_eq!(estimated_plan_format(None), EstimatedPlanFormat::Json);
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Dameng)), EstimatedPlanFormat::Text);
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Questdb)), EstimatedPlanFormat::Text);
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Doris)), EstimatedPlanFormat::Text);
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Oracle)), EstimatedPlanFormat::Text);
+        assert_eq!(estimated_plan_format(Some(DatabaseType::SqlServer)), EstimatedPlanFormat::Xml);
+        assert_eq!(estimated_plan_format(Some(DatabaseType::Mysql)), EstimatedPlanFormat::Json);
+    }
+
+    #[test]
     fn builds_sqlserver_showplan_xml_batches() {
         let result = build_explain_sql(ExplainSqlOptions {
             database_type: Some(DatabaseType::SqlServer),
@@ -1381,6 +1464,26 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_nonexecuting_oceanbase_oracle_json_explain() {
+        let result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            format: Some(ExplainFormat::Json),
+            analyze: Some(true),
+            sql: "SELECT * FROM events;".to_string(),
+        });
+        assert_eq!(result.sql.as_deref(), Some("EXPLAIN FORMAT=JSON SELECT * FROM events"));
+        assert!(result.ok);
+
+        let unsafe_result = build_explain_sql(ExplainSqlOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            format: None,
+            analyze: None,
+            sql: "DELETE FROM events".to_string(),
+        });
+        assert_eq!(unsafe_result.reason.as_deref(), Some("unsafe"));
     }
 
     #[test]

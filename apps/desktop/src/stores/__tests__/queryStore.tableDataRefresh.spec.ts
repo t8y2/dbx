@@ -179,6 +179,33 @@ describe("queryStore table data refresh", () => {
     expect(mocks.executeMulti).toHaveBeenCalledWith("cache-1", "USER", 'SELECT * FROM "SS"."SS_User" ORDER BY "ID" ASC', undefined, expect.any(String), expect.objectContaining({ maxRows: 100, fetchSize: 100, rowOffset: 100 }));
   });
 
+  it("executes Doris external catalog data tabs against the catalog database, not the connection default database", async () => {
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "doris-1",
+      name: "Doris",
+      db_type: "doris",
+      database: "yunye",
+      query_timeout_secs: 30,
+    });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("doris-1", "mydb", "tt2", "data", undefined, undefined, "ice");
+    store.setTableMeta(tabId, {
+      catalog: "ice",
+      tableName: "tt2",
+      tableType: "TABLE",
+      columns: [{ name: "id", data_type: "int", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+      primaryKeys: [],
+    });
+
+    await store.refreshDataTab(tabId);
+
+    // The backend switches catalog first and then runs USE <database>, so the
+    // connection's internal default database ("yunye") would fail with 1049.
+    expect(mocks.executeMulti).toHaveBeenCalledWith("doris-1", "mydb", "SELECT * FROM `ice`.`mydb`.`tt2` LIMIT 100", undefined, expect.any(String), expect.objectContaining({ catalog: "ice" }));
+  });
+
   it("refreshes one targeted tab while preserving its query context", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

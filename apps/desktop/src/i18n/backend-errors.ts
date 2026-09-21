@@ -90,6 +90,9 @@ const exactMessageKeys: Record<string, string> = {
 
 const patterns: [RegExp, string][] = [
   [/^Plugin update blocked by active connections: ([\s\S]+)$/, "pluginPlatform.updateBlockedByConnections"],
+  // crates/dbx-plugin-runtime provenance guard (installer.rs / marketplace.rs)
+  [/^Plugin update source change requires confirmation:/, "pluginPlatform.updateSourceChangeRequired"],
+  [/^Plugin downgrade to version .+ is not allowed/, "pluginPlatform.updateDowngradeRejected"],
   [/^(.+?) driver is not installed\. Please install it from the Driver Manager\.$/, "connection.driverNotInstalled"],
   [/^JRE (.+?) runtime is not installed\. Please install it from the Driver Manager\.$/, "connection.jreNotInstalled"],
   [/^System Java runtime was not found:/, "connection.systemJavaNotFound"],

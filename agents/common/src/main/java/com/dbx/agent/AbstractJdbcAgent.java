@@ -595,6 +595,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
     }
 
+    /** Called for each session RPC before its SQL can replace the connection's last trace ID. */
+    protected void beforeAgentMethod(String method, String querySessionId) {
+    }
+
     protected boolean advancePastUpdateCounts() {
         return false;
     }

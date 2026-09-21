@@ -63,6 +63,9 @@ pub struct QueryPaginationExecutionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exact_query_row_bound: Option<usize>,
     pub use_agent_result_session: bool,
+    /// Trailing helper column added by DBX's ROWNUM pagination wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagination_row_number_column: Option<String>,
     /// True when the statement cannot be paginated server-side and must be
     /// executed once with the whole result streamed back (single execution).
     /// Only meaningful to in-process callers (query-result export); never
@@ -149,6 +152,7 @@ pub fn build_query_pagination_execution_plan(
         count_sql: None,
         exact_query_row_bound,
         use_agent_result_session: false,
+        pagination_row_number_column: None,
         single_execution: false,
     };
 
@@ -175,16 +179,27 @@ pub fn build_query_pagination_execution_plan(
         return plan;
     }
 
+    // Existing top-level ROWNUM predicates/projections cannot be wrapped without
+    // changing their semantics. Keep one cursor so later pages advance it.
+    if options.database_type == Some(DatabaseType::OceanbaseOracle)
+        && options.use_agent_cursor
+        && has_top_level_rownum(&options.sql)
+    {
+        plan.page_limit = Some(options.pagination.limit);
+        plan.page_offset = Some(options.pagination.offset);
+        plan.use_agent_result_session = true;
+        return plan;
+    }
+
     let can_use_first_page_cursor = options.use_agent_cursor && options.pagination.offset == 0;
-    // HighGo's PostgreSQL-compatible JDBC driver can buffer an unbounded result
-    // before the Agent has a chance to expose its cursor page. Prefer an actual
-    // LIMIT/OFFSET query whenever it can be rewritten safely. For an unordered
-    // query, independent pages are not guaranteed to preserve row order; this is
-    // an intentional tradeoff to keep HighGo execution bounded. Kingbase keeps
-    // the cursor for unordered queries because separate executions may not
-    // preserve row order there.
+    // HighGo and OceanBase Oracle can spend substantially more time executing
+    // an unbounded query before the Agent exposes its first cursor page. Prefer
+    // a bounded SQL query whenever it can be rewritten safely. Independent
+    // pages of an unordered query do not have a stable row order; callers
+    // should add ORDER BY when that matters.
+    // Kingbase keeps the cursor for unordered queries to preserve its behavior.
     let prefer_server_pagination = match options.database_type {
-        Some(DatabaseType::Highgo) => true,
+        Some(DatabaseType::Highgo | DatabaseType::OceanbaseOracle) => true,
         Some(DatabaseType::Kingbase) => kingbase_server_pagination_is_stable(&options.query_base_sql),
         _ => false,
     };
@@ -209,6 +224,15 @@ pub fn build_query_pagination_execution_plan(
         plan.page_sql = paginated.sql;
         plan.page_limit = Some(options.pagination.limit);
         plan.page_offset = Some(options.pagination.offset);
+        if options.pagination.offset > 0
+            && pagination_strategy(options.database_type, PaginationContext::UserQuery)
+                == TablePaginationStrategy::Rownum
+            && !has_top_level_rownum(&options.sql)
+        {
+            plan.pagination_row_number_column = single_selectable_statement(&options.sql, options.database_type)
+                .ok()
+                .map(|statement| rownum_pagination_column_name(&statement));
+        }
         if options.use_agent_cursor
             && matches!(
                 pagination_strategy(options.database_type, PaginationContext::UserQuery),
@@ -671,6 +695,13 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         } else {
             (offset > 0).then(|| add_sql_server_rowcount_pagination(statement, limit, offset))
         };
+    }
+
+    // TOP injected into the first SELECT only bounds that branch of a UNION /
+    // INTERSECT / EXCEPT, so the combined result comes out wrong. Bound the
+    // whole statement instead.
+    if has_top_level_set_operator(statement) {
+        return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
     }
 
     let order_by_index = find_top_level_trailing_order_by(statement);
@@ -1858,12 +1889,25 @@ fn add_rownum_limit(statement: &str, limit: usize, offset: usize) -> String {
         return derived_table_sql("SELECT * FROM", statement, &format!("WHERE ROWNUM <= {limit};"));
     }
     let end = offset + limit;
+    let column = rownum_pagination_column_name(statement);
     let inner = derived_table_sql(
-        "SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM",
+        &format!("SELECT dbx_inner.*, ROWNUM AS \"{column}\" FROM"),
         statement,
         &format!("dbx_inner WHERE ROWNUM <= {end}"),
     );
-    format!("SELECT * FROM ({inner}) WHERE \"__dbx_row_num\" > {offset};")
+    format!("SELECT * FROM ({inner}) WHERE \"{column}\" > {offset};")
+}
+
+fn rownum_pagination_column_name(statement: &str) -> String {
+    let sql = statement.to_ascii_lowercase();
+    let base = "__dbx_row_num";
+    let mut column = base.to_string();
+    let mut suffix = 0;
+    while sql.contains(&column) {
+        suffix += 1;
+        column = format!("{base}_{suffix}");
+    }
+    column
 }
 
 fn add_standard_limit(
@@ -2160,6 +2204,10 @@ fn find_top_level_trailing_order_by(sql: &str) -> Option<usize> {
 
 fn has_top_level_select_top(sql: &str) -> bool {
     top_level_select_tokens_before_from(sql).iter().any(|token| token.text == "TOP")
+}
+
+fn has_top_level_set_operator(sql: &str) -> bool {
+    top_level_sql_tokens(sql).iter().any(|token| matches!(token.text.as_str(), "UNION" | "INTERSECT" | "EXCEPT"))
 }
 
 fn has_top_level_select_distinct(sql: &str) -> bool {
@@ -2585,6 +2633,66 @@ mod tests {
         let sql = result.sql.expect("build unnamed expression page");
         assert!(sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; SELECT id + 1 FROM TicketInfo'"));
         assert_eq!(sqlserver_result_offset(&sql), 100);
+    }
+
+    #[test]
+    fn paginates_sqlserver_set_operations_with_rowcount_instead_of_limiting_first_branch() {
+        // TOP injected into the first SELECT of INTERSECT/EXCEPT/UNION only bounds
+        // that branch, so the combined result is wrong (e.g. 0 rows instead of the
+        // real intersection). The whole statement must be bounded instead.
+        for operator in ["INTERSECT", "EXCEPT", "UNION", "UNION ALL"] {
+            let original_sql = format!("SELECT id FROM a {operator} SELECT id FROM b");
+            let first_page = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql: original_sql.clone(),
+                database_type: Some(DatabaseType::SqlServer),
+                limit: 100,
+                offset: 0,
+            });
+            let sql = first_page.sql.expect("build set operation first page");
+            assert!(!sql.contains("TOP ("), "{operator}: {sql}");
+            assert_eq!(
+                sql,
+                format!("EXEC sys.sp_executesql N'SET ROWCOUNT 100; {original_sql}'; /*__dbx_result_offset=0__*/")
+            );
+
+            let later_page = build_paginated_query_sql(PaginatedQuerySqlOptions {
+                original_sql,
+                database_type: Some(DatabaseType::SqlServer),
+                limit: 100,
+                offset: 100,
+            });
+            let sql = later_page.sql.expect("build set operation later page");
+            assert!(sql.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; "), "{operator}: {sql}");
+            assert_eq!(sqlserver_result_offset(&sql), 100);
+        }
+    }
+
+    #[test]
+    fn keeps_top_level_order_by_when_paginating_sqlserver_set_operations() {
+        let original_sql = "SELECT id FROM a INTERSECT SELECT id FROM b ORDER BY id";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: original_sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            format!("EXEC sys.sp_executesql N'SET ROWCOUNT 100; {original_sql}'; /*__dbx_result_offset=0__*/")
+        );
+    }
+
+    #[test]
+    fn keeps_sqlserver_top_when_set_operator_is_only_inside_subquery() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id FROM (SELECT id FROM a UNION SELECT id FROM b) t".to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert_eq!(result.sql.unwrap(), "SELECT TOP (100) id FROM (SELECT id FROM a UNION SELECT id FROM b) t");
     }
 
     #[test]
@@ -4699,6 +4807,87 @@ WHERE u.id = picked.id;
         assert_eq!(second_page.page_limit, Some(500));
         assert_eq!(second_page.page_offset, Some(500));
         assert!(!second_page.use_agent_result_session);
+    }
+
+    #[test]
+    fn oceanbase_oracle_prefers_bounded_first_page_and_keeps_cursor_fallback() {
+        let sql = "SELECT * FROM events";
+        let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+        assert_eq!(first_page.sql_to_execute, "SELECT * FROM (SELECT * FROM events) WHERE ROWNUM <= 500;");
+        assert_eq!(first_page.page_sql.as_deref(), Some(first_page.sql_to_execute.as_str()));
+        assert_eq!(first_page.page_limit, Some(500));
+        assert_eq!(first_page.page_offset, Some(0));
+        assert!(!first_page.use_agent_result_session);
+        assert!(first_page.count_sql.is_some());
+        assert!(first_page.pagination_row_number_column.is_none());
+
+        let next_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            pagination: QueryPagination { limit: 500, offset: 500, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+        assert!(next_page.sql_to_execute.contains("ROWNUM <= 1000"));
+        assert!(next_page.sql_to_execute.contains("\"__dbx_row_num\" > 500"));
+        assert_eq!(next_page.page_sql.as_deref(), Some(next_page.sql_to_execute.as_str()));
+        assert!(!next_page.use_agent_result_session);
+        assert_eq!(next_page.pagination_row_number_column.as_deref(), Some("__dbx_row_num"));
+
+        let unrewritable = "SELECT * FROM events; SELECT 1";
+        let fallback = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: unrewritable.to_string(),
+            query_base_sql: unrewritable.to_string(),
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+        assert_eq!(fallback.sql_to_execute, unrewritable);
+        assert!(fallback.page_sql.is_none());
+        assert!(fallback.use_agent_result_session);
+    }
+
+    #[test]
+    fn rownum_helper_avoids_names_in_the_original_query() {
+        let sql = "SELECT LEVEL AS \"__dbx_row_num\" FROM DUAL CONNECT BY LEVEL <= 10";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            pagination: QueryPagination { limit: 5, offset: 5, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+        assert_eq!(plan.pagination_row_number_column.as_deref(), Some("__dbx_row_num_1"));
+        assert!(plan.sql_to_execute.contains("ROWNUM AS \"__dbx_row_num_1\""));
+        assert!(plan.sql_to_execute.contains("WHERE \"__dbx_row_num_1\" > 5"));
+        assert!(plan.sql_to_execute.contains(sql));
+    }
+
+    #[test]
+    fn existing_rownum_keeps_a_cursor_and_does_not_mark_a_user_column_as_generated() {
+        let sql = "SELECT ROWNUM AS \"__dbx_row_num\", name FROM events WHERE ROWNUM <= 1000";
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            pagination: QueryPagination { limit: 500, offset: 500, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+        assert!(plan.pagination_row_number_column.is_none());
+        assert!(plan.use_agent_result_session);
+        assert_eq!(plan.page_offset, Some(500));
+        assert_eq!(plan.sql_to_execute, sql);
     }
 
     #[test]

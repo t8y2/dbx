@@ -258,13 +258,15 @@ function rememberNaturalTreeNodeOrder(nodes: readonly TreeNode[]): void {
 
 export function orderPinnedTreeNodes(nodes: TreeNode[], pinnedOrder: readonly string[] = [], isFixedPriority: FixedTreeNodePriority = () => false): TreeNode[] {
   rememberNaturalTreeNodeOrder(nodes);
+  const virtualGroups: TreeNode[] = [];
   const fixed: TreeNode[] = [];
   const pinned: TreeNode[] = [];
   const unpinned: TreeNode[] = [];
   const orderByKey = new Map(normalizePinnedTreeNodeOrder(pinnedOrder).map((key, index) => [key, index] as const));
 
   for (const node of nodes) {
-    if (isFixedPriority(node)) fixed.push(node);
+    if (node.type === "table-vgroup") virtualGroups.push(node);
+    else if (isFixedPriority(node)) fixed.push(node);
     else if (node.pinned) pinned.push(node);
     else unpinned.push(node);
   }
@@ -280,7 +282,7 @@ export function orderPinnedTreeNodes(nodes: TreeNode[], pinnedOrder: readonly st
     return naturalOrder(left, right);
   });
   unpinned.sort(naturalOrder);
-  return [...fixed, ...pinned, ...unpinned];
+  return [...virtualGroups, ...fixed, ...pinned, ...unpinned];
 }
 
 function findTreeNodeLocation(nodes: TreeNode[], target: TreeNode, parent: TreeNode | null = null): { node: TreeNode; parent: TreeNode | null } | null {
@@ -300,6 +302,7 @@ export function updatePinnedTreeNodeInPlace(nodes: TreeNode[], target: TreeNode,
   if (!location) return "missing";
 
   location.node.pinned = pinned;
+  if (location.parent?.type === "table-vgroup") return "siblings";
   const siblings = location.parent?.children ?? nodes;
   const ordered = orderPinnedTreeNodes(siblings);
 
@@ -321,39 +324,34 @@ function clonePinnedTreeNode(node: TreeNode, pinnedIds: Set<string>, pinnedOrder
   };
   clones.set(node, clone);
   inheritNaturalTreeNodeOrder(node, clone);
-  if (node.children) clone.children = applyPinnedTreeNodeStateInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, clones);
-  if (node.hiddenChildren) clone.hiddenChildren = applyPinnedTreeNodeStateInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, clones);
+  if (node.children) clone.children = applyPinnedTreeNodeStateInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, clones, node.type === "table-vgroup");
+  if (node.hiddenChildren) clone.hiddenChildren = applyPinnedTreeNodeStateInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, clones, node.type === "table-vgroup");
   return clone;
 }
 
-function applyPinnedTreeNodeStateInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, clones: WeakMap<TreeNode, TreeNode>): TreeNode[] {
-  rememberNaturalTreeNodeOrder(nodes);
-  return orderPinnedTreeNodes(
-    nodes.map((node) => clonePinnedTreeNode(node, pinnedIds, pinnedOrder, isFixedPriority, clones)),
-    pinnedOrder,
-    isFixedPriority,
-  );
+function applyPinnedTreeNodeStateInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, clones: WeakMap<TreeNode, TreeNode>, preserveLayoutOrder = false): TreeNode[] {
+  if (!preserveLayoutOrder) rememberNaturalTreeNodeOrder(nodes);
+  const clonedNodes = nodes.map((node) => clonePinnedTreeNode(node, pinnedIds, pinnedOrder, isFixedPriority, clones));
+  return preserveLayoutOrder ? clonedNodes : orderPinnedTreeNodes(clonedNodes, pinnedOrder, isFixedPriority);
 }
 
 export function applyPinnedTreeNodeState(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[] = [...pinnedIds], isFixedPriority: FixedTreeNodePriority = () => false): TreeNode[] {
   return applyPinnedTreeNodeStateInternal(nodes, pinnedIds, pinnedOrder, isFixedPriority, new WeakMap());
 }
 
-function syncPinnedTreeNodeStateInPlaceInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, visited: WeakSet<TreeNode>): void {
+function syncPinnedTreeNodeStateInPlaceInternal(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[], isFixedPriority: FixedTreeNodePriority, visited: WeakSet<TreeNode>, preserveLayoutOrder = false): void {
   for (const node of nodes) {
     if (visited.has(node)) continue;
     visited.add(node);
     node.pinned = pinnedIds.has(treeNodePinKey(node)) || pinnedIds.has(node.id);
     if (node.children) {
-      syncPinnedTreeNodeStateInPlaceInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, visited);
-      node.children = orderPinnedTreeNodes(node.children, pinnedOrder, isFixedPriority);
+      syncPinnedTreeNodeStateInPlaceInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, visited, node.type === "table-vgroup");
     }
     if (node.hiddenChildren) {
-      syncPinnedTreeNodeStateInPlaceInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, visited);
-      node.hiddenChildren = orderPinnedTreeNodes(node.hiddenChildren, pinnedOrder, isFixedPriority);
+      syncPinnedTreeNodeStateInPlaceInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, visited, node.type === "table-vgroup");
     }
   }
-  nodes.splice(0, nodes.length, ...orderPinnedTreeNodes(nodes, pinnedOrder, isFixedPriority));
+  if (!preserveLayoutOrder) nodes.splice(0, nodes.length, ...orderPinnedTreeNodes(nodes, pinnedOrder, isFixedPriority));
 }
 
 export function syncPinnedTreeNodeStateInPlace(nodes: TreeNode[], pinnedIds: Set<string>, pinnedOrder: readonly string[] = [...pinnedIds], isFixedPriority: FixedTreeNodePriority = () => false): void {

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Component } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDown, ArrowUp, Braces, ChevronLeft, ChevronRight, Copy, Download, LayoutGrid, LoaderCircle, Pencil, Save, Search, Table2, Trash2 } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Braces, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, LayoutGrid, LoaderCircle, Pencil, Save, Search, Table2, Trash2, Upload } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
@@ -18,7 +19,7 @@ import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
 import { compactLocalTimestamp, sanitizeExportBaseName, saveTextFile } from "@/lib/export/saveTextFile";
 import { parseDocumentStoreJsonDocument, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
-import { parseJsonPreservingLargeNumbers, safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { parseJsonPreservingLargeNumbers, safeJsonFormat, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { useToast } from "@/composables/useToast";
 
 const props = defineProps<{
@@ -149,9 +150,15 @@ function renderMarkHtml(value: string): string {
  * user payload — no name-based stripping, so user fields named `_formatted` or
  * `_rankingScore` survive untouched.
  */
+const displayValueCache = new WeakMap<Hit, Record<string, any>>();
+
 function displayValue(hit: Hit): Record<string, any> {
+  const cached = displayValueCache.get(hit);
+  if (cached) return cached;
   const formatted = hit?.formatted;
-  return formatted && typeof formatted === "object" ? { ...formatted } : { ...hit.document };
+  const value = formatted && typeof formatted === "object" ? { ...formatted } : { ...hit.document };
+  displayValueCache.set(hit, value);
+  return value;
 }
 
 /** Deep-remove `<mark>` search highlight tags to reconstruct the stored document. */
@@ -287,38 +294,93 @@ async function startEdit(hit: Hit) {
 
 /** Download every hit matching the current search as a JSON file of the stored documents. */
 const exporting = ref(false);
+const importing = ref(false);
+const importFileInput = ref<HTMLInputElement | null>(null);
 
 const EXPORT_BATCH_SIZE = 1000;
 
-async function exportResults() {
-  if (exporting.value || totalHits.value === 0) return;
-  if (q.value.trim() || hybridEnabled.value || rankingScoreThreshold.value > 0) {
-    toast(t("meilisearch.exportSearchUnsupported"), 5000);
+type ExportScope = "filtered" | "all";
+
+async function exportResults(scope: ExportScope) {
+  if (exporting.value) return;
+  if (scope === "filtered" && totalHits.value === 0) {
+    toast(t("grid.exportFailed", { message: t("meilisearch.empty") }), 5000);
     return;
   }
   exporting.value = true;
   try {
+    const useSearchPagination = scope === "filtered" && (q.value.trim() || hybridEnabled.value || rankingScoreThreshold.value > 0);
+    if (useSearchPagination && !indexSettingsLoaded.value) await loadIndexSettings();
+    if (useSearchPagination && searchMaxTotalHits.value === null) {
+      throw new Error(t("meilisearch.exportSearchUnsupported"));
+    }
     const documents: Record<string, unknown>[] = [];
     let batchOffset = 0;
+    let expectedTotal: number | undefined;
     while (true) {
-      const page = await api.meilisearchFetchDocuments(props.connectionId, props.index, {
-        filter: filter.value.trim() || null,
-        sort: sort.value.trim() || null,
-        limit: EXPORT_BATCH_SIZE,
-        offset: batchOffset,
-      });
-      const batch = page.documents ?? [];
+      let batch: Record<string, unknown>[];
+      if (useSearchPagination) {
+        const page = await api.meilisearchSearchDocuments(props.connectionId, props.index, buildSearchParams(EXPORT_BATCH_SIZE, batchOffset));
+        batch = (page.hits ?? []).map((hit) => hit.document);
+        expectedTotal = page.totalHits;
+      } else {
+        const page = await api.meilisearchFetchDocuments(props.connectionId, props.index, {
+          filter: scope === "filtered" ? filter.value.trim() || null : null,
+          sort: scope === "filtered" ? sort.value.trim() || null : null,
+          limit: EXPORT_BATCH_SIZE,
+          offset: batchOffset,
+        });
+        batch = page.documents ?? [];
+        expectedTotal = page.total;
+      }
       documents.push(...batch);
-      if (batch.length < EXPORT_BATCH_SIZE) break;
+      if (batch.length === 0 || batch.length < EXPORT_BATCH_SIZE || (expectedTotal !== undefined && documents.length >= expectedTotal)) break;
       batchOffset += batch.length;
+    }
+    const reachedSearchLimit = useSearchPagination && searchMaxTotalHits.value !== null && expectedTotal !== undefined && expectedTotal >= searchMaxTotalHits.value && documents.length >= searchMaxTotalHits.value;
+    if (useSearchPagination && expectedTotal !== undefined && (documents.length < expectedTotal || reachedSearchLimit)) {
+      toast(t("grid.exportFailed", { message: t("meilisearch.exportLimitReached", { count: documents.length, total: expectedTotal }) }), 5000);
+      return;
+    }
+    if (documents.length === 0) {
+      toast(t("grid.exportFailed", { message: t("meilisearch.empty") }), 5000);
+      return;
     }
     const content = stringifyDocumentStoreValue(documents, "meilisearch", 2);
     const baseName = sanitizeExportBaseName(props.index) || "search-results";
-    await saveTextFile(content, `${baseName}-${compactLocalTimestamp()}.json`, "JSON", "json");
+    const saved = await saveTextFile(content, `${baseName}-${compactLocalTimestamp()}.json`, "JSON", "json");
+    if (saved !== false) toast(t("grid.exported"));
   } catch (e: any) {
-    toast(e?.message || String(e), 5000);
+    toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   } finally {
     exporting.value = false;
+  }
+}
+
+async function importDocuments(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  importing.value = true;
+  try {
+    const parsed = parseJsonPreservingLargeNumbers(await file.text());
+    const documents = Array.isArray(parsed) ? parsed : [parsed];
+    if (!documents.length || documents.some((document) => !document || typeof document !== "object" || Array.isArray(document))) {
+      throw new Error(t("meilisearch.importInvalidJson"));
+    }
+    const batchSize = 100;
+    for (let offset = 0; offset < documents.length; offset += batchSize) {
+      const batch = documents.slice(offset, offset + batchSize).map((document) => stringifyJsonPreservingLargeNumbers(document));
+      await api.documentSaveMeilisearchBatch(props.connectionId, props.index, [], [], batch);
+    }
+    toast(t("meilisearch.importSuccess", { count: documents.length }));
+    emit("refresh-stats");
+    await runSearch();
+  } catch (e: any) {
+    toast(t("meilisearch.importFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    importing.value = false;
   }
 }
 
@@ -414,6 +476,8 @@ watch(autoRefresh, (enabled) => {
 
 /** Sortable attributes advertised by the index settings, for the sort picker. */
 const sortableAttributes = ref<string[]>([]);
+const searchMaxTotalHits = ref<number | null>(null);
+const indexSettingsLoaded = ref(false);
 
 async function loadIndexSettings() {
   try {
@@ -425,9 +489,14 @@ async function loadIndexSettings() {
     }
     const sortable = settings?.sortableAttributes;
     sortableAttributes.value = Array.isArray(sortable) ? sortable.filter((item): item is string => typeof item === "string") : [];
+    const maxTotalHits = settings?.pagination?.maxTotalHits;
+    searchMaxTotalHits.value = typeof maxTotalHits === "number" && Number.isFinite(maxTotalHits) ? maxTotalHits : null;
   } catch {
     // Settings discovery is best-effort; the sort/filter inputs stay free-form.
     sortableAttributes.value = [];
+    searchMaxTotalHits.value = null;
+  } finally {
+    indexSettingsLoaded.value = true;
   }
 }
 
@@ -630,9 +699,25 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div class="flex-1" />
-      <Button v-if="totalHits > 0" variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="exporting" @click="exportResults">
-        <Download class="h-3.5 w-3.5" />
-        {{ t("meilisearch.exportResults") }} ({{ totalHits }})
+      <DropdownMenu v-if="!loading && !error">
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="exporting || importing">
+            <LoaderCircle v-if="exporting" class="h-3.5 w-3.5 animate-spin" />
+            <Download v-else class="h-3.5 w-3.5" />
+            {{ t("meilisearch.exportResults") }}
+            <ChevronDown class="h-3 w-3" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="w-max min-w-32 max-w-[calc(100vw-1rem)]">
+          <DropdownMenuItem class="w-full whitespace-nowrap px-2" :disabled="totalHits === 0" @select="void exportResults('filtered')">{{ t("meilisearch.exportFiltered") }} ({{ totalHits }})</DropdownMenuItem>
+          <DropdownMenuItem class="w-full whitespace-nowrap px-2" @select="void exportResults('all')">{{ t("meilisearch.exportAll") }}</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <input ref="importFileInput" type="file" accept="application/json,.json" class="hidden" @change="importDocuments" />
+      <Button variant="ghost" size="sm" class="h-6 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" :disabled="loading || exporting || importing" @click="importFileInput?.click()">
+        <LoaderCircle v-if="importing" class="h-3.5 w-3.5 animate-spin" />
+        <Upload v-else class="h-3.5 w-3.5" />
+        {{ t("meilisearch.importResults") }}
       </Button>
       <span v-if="!loading && !error" class="text-muted-foreground text-xs tabular-nums">{{ resultSummary }}</span>
     </div>
@@ -708,7 +793,7 @@ onBeforeUnmount(() => {
 
       <!-- Grid view -->
       <div v-else class="grid grid-cols-2 gap-4 lg:grid-cols-3">
-        <div v-for="(hit, idx) in hits" :key="documentId(hit) || idx" class="group relative rounded-lg border bg-card px-4 py-3.5">
+        <div v-for="(hit, idx) in hits" :key="documentId(hit) || idx" class="group relative rounded-lg border bg-card px-4 pb-3.5 pt-9">
           <Badge v-if="rankingScore(hit) != null" variant="secondary" class="absolute right-2 bottom-2 tabular-nums" :title="t('meilisearch.showRankingScore')">
             {{ rankingScore(hit)!.toFixed(2) }}
           </Badge>

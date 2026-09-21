@@ -20,5 +20,5 @@ export function queryEditorCommentTokens(dbType?: DatabaseType) {
 }
 
 export function queryEditorWordLanguageData(dbType?: DatabaseType) {
-  return dbType === "sqlserver" ? [{ wordChars: "@" }] : [];
+  return dbType === "sqlserver" ? [{ wordChars: "@#" }] : [];
 }

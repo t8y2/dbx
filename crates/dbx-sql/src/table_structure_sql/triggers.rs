@@ -306,11 +306,141 @@ fn create_oracle_trigger_sql(
         trigger_identifier
     };
     let row_clause = if row_level { "\nFOR EACH ROW" } else { "" };
+    let statement = oracle_trigger_body(statement);
+    if starts_with_trigger_declaration(statement) {
+        // Oracle triggers are edited through their complete source definition, so a declaration we
+        // could not strip means dumping the raw statement after our own `FOR EACH ROW` would send
+        // invalid DDL to the server (ORA-04079) and abort the clone half way.
+        warnings.push(format!(
+            "Trigger \"{name}\" could not be cloned automatically; its stored source is not a plain PL/SQL body. Recreate it manually on {table}."
+        ));
+        return None;
+    }
     let statement = statement.trim_end().trim_end_matches('/').trim_end().trim_end_matches(';').trim_end();
+    if statement.is_empty() {
+        warnings.push(format!("Trigger \"{name}\" has an empty body and was skipped."));
+        return None;
+    }
 
     Some(format!(
         "CREATE OR REPLACE TRIGGER {trigger_name} {timing_clause} {event} ON {table}{row_clause}\n{statement};"
     ))
+}
+
+/// Oracle triggers come back from the driver as `ALL_SOURCE` text. When the dictionary declaration
+/// and the stored source cannot be aligned line by line — a trigger written on a single line — the
+/// raw source is returned instead of the body, and appending it after our own `FOR EACH ROW`
+/// produces invalid DDL (`ORA-04079`). Strip the declaration the same way `sqlserver_trigger_body`
+/// strips `CREATE TRIGGER ... AS`.
+fn oracle_trigger_body(statement: &str) -> &str {
+    let statement = statement.trim();
+    if !starts_with_trigger_declaration(statement) {
+        return statement;
+    }
+    match oracle_trigger_body_start(statement) {
+        Some(index) => statement[index..].trim_end(),
+        None => statement,
+    }
+}
+
+fn starts_with_trigger_declaration(statement: &str) -> bool {
+    let keywords = leading_keywords(statement, 4);
+    match keywords.first().map(String::as_str) {
+        Some("TRIGGER") => true,
+        Some("CREATE") => keywords.iter().any(|keyword| keyword == "TRIGGER"),
+        _ => false,
+    }
+}
+
+fn leading_keywords(statement: &str, limit: usize) -> Vec<String> {
+    let mut keywords = Vec::new();
+    let mut current = String::new();
+    for ch in statement.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            current.push(ch.to_ascii_uppercase());
+            continue;
+        }
+        if !current.is_empty() {
+            keywords.push(std::mem::take(&mut current));
+            if keywords.len() == limit {
+                return keywords;
+            }
+        }
+    }
+    if !current.is_empty() && keywords.len() < limit {
+        keywords.push(current);
+    }
+    keywords
+}
+
+/// Returns the offset where the PL/SQL block of an Oracle trigger declaration starts, skipping
+/// string literals, quoted identifiers, and comments so a `WHEN` condition cannot be mistaken for
+/// the body. The declaration always closes with the `ON <table>` clause before the body begins.
+fn oracle_trigger_body_start(statement: &str) -> Option<usize> {
+    let bytes = statement.as_bytes();
+    let mut index = 0;
+    let mut seen_on = false;
+    let mut word_start: Option<usize> = None;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if ch == '\'' || ch == '"' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] as char == ch {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            word_start = None;
+            continue;
+        }
+        if ch == '-' && bytes.get(index + 1) == Some(&b'-') {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            word_start = None;
+            continue;
+        }
+        if ch == '/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            word_start = None;
+            continue;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            word_start.get_or_insert(index);
+            index += 1;
+            continue;
+        }
+        if let Some(start) = word_start.take() {
+            let word = &statement[start..index];
+            if is_oracle_trigger_body_keyword(word, seen_on) {
+                return Some(start);
+            }
+            if word.eq_ignore_ascii_case("ON") {
+                seen_on = true;
+            }
+        }
+        index += 1;
+    }
+    if let Some(start) = word_start {
+        let word = &statement[start..];
+        if is_oracle_trigger_body_keyword(word, seen_on) {
+            return Some(start);
+        }
+    }
+    None
+}
+
+fn is_oracle_trigger_body_keyword(word: &str, seen_on: bool) -> bool {
+    seen_on
+        && (word.eq_ignore_ascii_case("DECLARE")
+            || word.eq_ignore_ascii_case("BEGIN")
+            || word.eq_ignore_ascii_case("CALL"))
 }
 
 fn oracle_trigger_timing(timing: &str) -> Option<(&'static str, bool)> {
@@ -359,5 +489,37 @@ mod tests {
         assert_eq!(sqlserver_trigger_body(no_options), "SELECT 1 AS a");
         let leading_as = "AS SELECT 2";
         assert_eq!(sqlserver_trigger_body(leading_as), "SELECT 2");
+    }
+
+    #[test]
+    fn oracle_trigger_body_strips_single_line_dictionary_source() {
+        // Oracle stores a trigger written on one line with its declaration and body on the same
+        // line, so the driver cannot align ALL_SOURCE with the dictionary DESCRIPTION and returns
+        // the whole statement. t8y2/dbx#9731.
+        let source = "trigger dbx_v1_trg_bi before insert on dbx_v1_trg for each row begin null; end;";
+        assert_eq!(oracle_trigger_body(source), "begin null; end;");
+
+        let with_when = "TRIGGER audit_trg BEFORE INSERT ON \"HR\".\"ORDERS\" FOR EACH ROW WHEN (NEW.STATUS <> 'BEGIN') BEGIN NULL; END;";
+        assert_eq!(oracle_trigger_body(with_when), "BEGIN NULL; END;");
+
+        let full_ddl = "CREATE OR REPLACE TRIGGER \"HR\".\"AUDIT_TRG\" BEFORE INSERT ON \"HR\".\"ORDERS\" FOR EACH ROW\nDECLARE\n  v NUMBER;\nBEGIN\n  NULL;\nEND;";
+        assert_eq!(oracle_trigger_body(full_ddl), "DECLARE\n  v NUMBER;\nBEGIN\n  NULL;\nEND;");
+
+        let call_trigger = "TRIGGER call_trg BEFORE INSERT ON HR.ORDERS FOR EACH ROW CALL log_insert()";
+        assert_eq!(oracle_trigger_body(call_trigger), "CALL log_insert()");
+    }
+
+    #[test]
+    fn oracle_trigger_body_keeps_plain_bodies_untouched() {
+        let body = "DECLARE\n  v NUMBER;\nBEGIN\n  v := 1; -- ON BEGIN\nEND;";
+        assert_eq!(oracle_trigger_body(body), body);
+
+        // A body that merely mentions the keywords must not be truncated.
+        let literal = "BEGIN\n  INSERT INTO log_v2 VALUES ('on', 'begin');\nEND;";
+        assert_eq!(oracle_trigger_body(literal), literal);
+
+        // Without the ON clause the declaration cannot be split safely, so the source is kept.
+        let unsplittable = "TRIGGER odd_trg COMPOUND TRIGGER";
+        assert_eq!(oracle_trigger_body(unsplittable), unsplittable);
     }
 }

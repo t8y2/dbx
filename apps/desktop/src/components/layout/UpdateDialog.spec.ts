@@ -400,7 +400,70 @@ describe("UpdateDialog aggregate update center", () => {
     driversTab?.click();
     await flushDialog();
 
-    expect(buttonWithText("Update Now")?.disabled).toBe(true);
+    expect(buttonWithText("Update Now")).toBeUndefined();
+    expect(buttonWithText("Updating…")?.disabled).toBe(true);
+  });
+
+  it("allows closing the dialog while component updates continue in the background", async () => {
+    const { state } = await mountDialog(0, {}, undefined, {
+      updateInfo: null,
+      componentUpdatesUpdating: true,
+      updatingComponent: "plugins",
+      pluginUpdates: [
+        {
+          key: "official:example",
+          status: "update",
+          artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash" },
+          repository: { id: "official" },
+          plugin: { id: "example", latestVersion: "1.1.0" },
+          name: "Example plugin",
+        },
+      ],
+    });
+
+    const closeButton = document.body.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
+    expect(closeButton).not.toBeNull();
+    closeButton?.click();
+    await flushDialog();
+    expect(state.open).toBe(false);
+
+    state.open = true;
+    await flushDialog();
+    await clickOutside();
+    expect(state.open).toBe(false);
+
+    state.open = true;
+    await flushDialog();
+    await pressEscape();
+
+    expect(state.open).toBe(false);
+  });
+
+  it("offers an explicit background action while component updates are running", async () => {
+    const { state } = await mountDialog(0, {}, undefined, {
+      updateInfo: null,
+      componentUpdatesUpdating: true,
+      updatingComponent: "plugins",
+      pluginUpdates: [
+        {
+          key: "official:example",
+          status: "update",
+          artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash" },
+          repository: { id: "official" },
+          plugin: { id: "example", latestVersion: "1.1.0" },
+          name: "Example plugin",
+        },
+      ],
+    });
+
+    const backgroundButton = buttonWithText("Run in Background");
+    expect(backgroundButton).toBeDefined();
+    expect(buttonWithText("Updating…")?.disabled).toBe(true);
+
+    backgroundButton?.click();
+    await flushDialog();
+
+    expect(state.open).toBe(false);
   });
 
   it("organizes component updates into tabs and installs the selected category", async () => {
@@ -448,5 +511,32 @@ describe("UpdateDialog aggregate update center", () => {
     await flushDialog();
 
     expect(installComponentUpdates).toHaveBeenCalledWith("drivers");
+  });
+
+  it("marks only a plugin whose update source changed as needing confirmation in the Plugin Center", async () => {
+    const listing = (id: string, provenance: Record<string, string>) => ({
+      key: `official:${id}`,
+      status: "update",
+      artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash", signingKeyId: "key-a" },
+      repository: { id: "official" },
+      plugin: { id, latestVersion: "1.1.0", publisher: "DBX" },
+      installed: { manifest: { id, version: "1.0.0" }, provenance },
+      name: `${id} plugin`,
+    });
+    await mountDialog(0, {}, undefined, {
+      updateInfo: null,
+      pluginUpdates: [listing("same", { repositoryId: "official" }), listing("moved", { repositoryId: "other-repo" })],
+    });
+
+    const pluginsTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="plugins"]');
+    pluginsTab?.click();
+    await flushDialog();
+
+    // "Update all" skips the changed-source plugin, so the dialog has to explain why it stays.
+    const hint = "Confirm the change in the Plugin Center first";
+    const rows = [...document.body.querySelectorAll<HTMLElement>(".rounded-md.border.p-3")];
+    const rowFor = (name: string) => rows.find((row) => row.textContent?.includes(name));
+    expect(rowFor("moved plugin")?.textContent).toContain(hint);
+    expect(rowFor("same plugin")?.textContent).not.toContain(hint);
   });
 });

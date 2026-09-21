@@ -467,6 +467,19 @@ fn highgo_declares_data_transfer_support() {
 }
 
 #[test]
+fn vastbase_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let vastbase = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Vastbase)
+        .expect("Vastbase manifest entry");
+
+    assert!(vastbase.capabilities.table_import);
+    assert!(vastbase.capabilities.data_transfer);
+}
+
+#[test]
 fn xugu_declares_table_import_support() {
     let manifest = driver_manifest();
     let xugu =

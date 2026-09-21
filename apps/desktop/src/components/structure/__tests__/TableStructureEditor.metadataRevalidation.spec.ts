@@ -46,6 +46,7 @@ vi.mock("@lucide/vue", async () => {
     ChevronLeft: Icon,
     ChevronRight: Icon,
     ChevronUp: Icon,
+    ClipboardList: Icon,
     Copy: Icon,
     Database: Icon,
     Info: Icon,

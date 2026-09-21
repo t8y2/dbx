@@ -21,6 +21,13 @@ describe("ConnectionTree global search loading", () => {
     expect(source).toContain("store.discardFilteredTreeNodeChildren(node.id);");
   });
 
+  it("restores the pre-search children of an expanded group instead of reloading page one", () => {
+    // Clearing a remote search must put back the pages the user had loaded
+    // through "load more"; only an uncaptured group falls back to a reload.
+    expect(source).toContain("} else if (!store.restoreFilteredObjectGroupChildren(node)) {");
+    expect(source).toMatch(/restoreFilteredObjectGroupChildren\(node\)\) \{[\s\S]*?tasks\.push\(\(\) => store\.loadObjectGroupChildren\(node, \{ force: true \}\)\);/);
+  });
+
   it("limits concurrent metadata loads without dropping a task", async () => {
     let activeTasks = 0;
     let maximumActiveTasks = 0;

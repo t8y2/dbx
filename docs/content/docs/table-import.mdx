@@ -31,7 +31,7 @@ Create-table mode accepts multiple files at once. Excel workbooks are expanded i
 
 SQL import accepts only literal `INSERT INTO ... VALUES` rows. Expressions, `REPLACE`, `INSERT IGNORE`, `INSERT ... SELECT`, and other constructs that cannot be rewritten losslessly are rejected so data and statement semantics are preserved.
 
-SQL import reads the whole script through the non-streaming path, so each `.sql` file is limited to 100 MB; larger files are rejected with an explicit error. Values written with date functions such as `TO_DATE` and `TO_TIMESTAMP` are imported as the text of their first argument, and the target column must be able to parse that format.
+SQL import streams the script in chunks instead of loading it into memory, so there is no file-size limit and memory use stays flat on large dumps. The total row count is only known once the script has been scanned to the end, so progress during import is reported by bytes read and the row count appears when the import finishes. Because rows are written while the script is still being scanned, a statement that fails half-way leaves the rows already written in the target table; the preview step parses the entire script first, so a malformed dump is normally rejected before any data is written. Values written with date functions such as `TO_DATE` and `TO_TIMESTAMP` are imported as the text of their first argument, and the target column must be able to parse that format.
 
 Desktop reads selected local files directly. Docker/Web uploads browser-selected files to temporary server storage, then releases the prepared source after preview and import finish.
 

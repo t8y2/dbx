@@ -1384,6 +1384,9 @@ func (s *server) validateConnection() error {
 }
 
 func openDB(params connectParams) (*sql.DB, error) {
+	if configuredDatabaseName(params) == "" {
+		return nil, errors.New("XuguDB requires an existing database name; set Database or include DB in the connection string")
+	}
 	dsn := buildDSN(params)
 	db, err := sql.Open("xugu", dsn)
 	if err != nil {
@@ -1920,13 +1923,47 @@ func isXuguMissingOnNullColumnError(err error) bool {
 }
 
 func xuguDSNValue(dsn string, key string) string {
-	for _, part := range strings.Split(dsn, ";") {
+	var result string
+	for _, part := range splitXuguDSNSegments(dsn) {
 		name, value, ok := strings.Cut(part, "=")
 		if ok && strings.EqualFold(strings.TrimSpace(name), key) {
-			return strings.TrimSpace(value)
+			value = strings.TrimSpace(value)
+			if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
+				value = strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+			}
+			result = strings.TrimSpace(value)
 		}
 	}
-	return ""
+	return result
+}
+
+func splitXuguDSNSegments(dsn string) []string {
+	var segments []string
+	var current strings.Builder
+	inQuotes := false
+
+	for index := 0; index < len(dsn); index++ {
+		character := dsn[index]
+		if character == '\'' {
+			current.WriteByte(character)
+			if inQuotes && index+1 < len(dsn) && dsn[index+1] == '\'' {
+				current.WriteByte(dsn[index+1])
+				index++
+			} else {
+				inQuotes = !inQuotes
+			}
+			continue
+		}
+		if character == ';' && !inQuotes {
+			segments = append(segments, current.String())
+			current.Reset()
+			continue
+		}
+		current.WriteByte(character)
+	}
+
+	segments = append(segments, current.String())
+	return segments
 }
 
 func (s *server) listSchemas() ([]string, error) {

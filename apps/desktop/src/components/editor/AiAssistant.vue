@@ -73,6 +73,7 @@ import { useNavigationTargets } from "@/composables/useNavigationTargets";
 import {
   buildAiContext,
   resolveAiDatabaseTarget,
+  resolveAiMentionDatabase,
   resolveAiNamespaceSelection,
   resolveDefaultAiSchema,
   aiDatabaseTypeForConnection,
@@ -2072,10 +2073,15 @@ function normalizeMentionQuery(query: string): { schemaPrefix: string; tableFilt
   };
 }
 
-async function loadMentionCandidates(query: string) {
-  if (!props.connection || !props.tab?.connectionId || !props.tab.database) return;
+function mentionTargetDatabase(): string {
+  return props.tab && props.connection ? resolveAiMentionDatabase(props.tab, props.connection, selectedDatabases.value) : "";
+}
 
-  const key = mentionCacheKey(props.tab.connectionId, props.tab.database, query);
+async function loadMentionCandidates(query: string) {
+  const mentionDatabase = mentionTargetDatabase();
+  if (!props.connection || !props.tab?.connectionId || !mentionDatabase) return;
+
+  const key = mentionCacheKey(props.tab.connectionId, mentionDatabase, query);
   if (mentionCache.value[key]) {
     mentionCandidates.value = mentionCache.value[key];
     return;
@@ -2092,11 +2098,11 @@ async function loadMentionCandidates(query: string) {
     await connectionStore.ensureConnected(props.tab.connectionId);
     let tableCandidates: AiMentionCandidate[] = [];
     if (isSchemaAware(props.connection.db_type)) {
-      const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, props.tab.database));
+      const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, mentionDatabase));
       const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
       const results = await Promise.all(
         filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
-          const tables = await listTables(props.tab!.connectionId, props.tab!.database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+          const tables = await listTables(props.tab!.connectionId, mentionDatabase, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
           return filterAiTableMentionCandidates(
             tables.map((table) => mentionCandidateFromTable(table, schema)),
             tableFilter,
@@ -2106,7 +2112,7 @@ async function loadMentionCandidates(query: string) {
       );
       tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
     } else {
-      const database = props.connection.db_type === "sqlite" ? normalizeSqliteNamespace(props.tab.database || props.connection.database, props.connection) : props.tab.database;
+      const database = props.connection.db_type === "sqlite" ? normalizeSqliteNamespace(mentionDatabase || props.connection.database, props.connection) : mentionDatabase;
       const schema = database || props.connection.database || "main";
       const tables = await listTables(props.tab.connectionId, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
       tableCandidates = filterAiTableMentionCandidates(
@@ -2340,7 +2346,7 @@ function imageAttachmentSupportErrorMessage(error: "provider" | "format"): strin
 
 function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMentions: AiSqlFileMention[], csvAttachments: AiCsvFileContext[] = [], imageAttachments: AiImageAttachment[] = []): AiMessageMention[] {
   const connectionId = props.tab?.connectionId || props.connection?.id || "";
-  const database = props.tab?.database || props.connection?.database || "";
+  const database = mentionTargetDatabase() || props.connection?.database || "";
   return [
     ...tableMentions.map((mention) => ({
       kind: "table" as const,
@@ -2441,7 +2447,7 @@ function refreshMentionState() {
   commandOpen.value = false;
 
   const mention = activeMentionAtCursor();
-  if (!mention || !props.connection || !props.tab?.database) {
+  if (!mention || !props.connection || !mentionTargetDatabase()) {
     mentionOpen.value = false;
     return;
   }
@@ -2452,6 +2458,10 @@ function refreshMentionState() {
     loadMentionCandidates(mention.query).catch(() => {});
   }, 120);
 }
+
+watch(selectedDatabases, () => {
+  if (mentionOpen.value) refreshMentionState();
+});
 
 function onPromptKeyup(event: KeyboardEvent) {
   if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(event.key)) return;
@@ -5182,13 +5192,26 @@ async function openExternalUrl(url: string) {
           </div>
         </div>
       </ScrollArea>
+      <!-- Scroll-to-bottom affordance with an AI busy indicator. Shown when the
+           viewport is scrolled away from the bottom (hysteresis in
+           updateMessageScrollState) OR while a run is active for the visible
+           conversation — then the button doubles as a status marker: a
+           decorative rotating arc ring (aria-hidden; static under
+           prefers-reduced-motion) tells the user at a glance that the
+           assistant is still working, even when auto-scroll already pins the
+           view to the bottom. -->
       <button
-        v-if="showScrollToBottom"
+        v-if="showScrollToBottom || isGenerating"
         type="button"
         class="absolute bottom-3 right-3 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full border bg-background/95 text-foreground shadow-md backdrop-blur hover:bg-muted"
         :title="t('ai.scrollToBottom')"
         @click="scrollToBottom({ force: true })"
       >
+        <svg v-if="isGenerating" data-ai-scroll-ring aria-hidden="true" class="pointer-events-none absolute inset-0 h-full w-full animate-spin text-primary motion-reduce:animate-none" viewBox="0 0 32 32" fill="none">
+          <!-- ~288° open arc of the r=13 ring box (statement-gutter spinner
+               geometry scaled to 32 units); spins clockwise via animate-spin. -->
+          <path d="M29 16a13 13 0 1 1-8.98-12.36" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+        </svg>
         <ArrowDown class="h-4 w-4" />
         <span class="sr-only">{{ t("ai.scrollToBottom") }}</span>
       </button>
@@ -5227,20 +5250,20 @@ async function openExternalUrl(url: string) {
                   "
                 >
                   <PopoverTrigger as-child>
-                    <Button variant="ghost" :class="['h-5 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'min-w-0 flex-1']">
+                    <Button variant="ghost" :title="selectedDatabaseLabel" :class="['h-5 max-w-64 justify-start border-0 p-0 px-1 text-xs font-normal text-foreground/80 shadow-none', showAiSchemaSelector && 'min-w-0 flex-1']">
                       <span class="truncate">{{ selectedDatabaseLabel }}</span>
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent align="start" class="w-64 p-1">
+                  <PopoverContent align="start" class="w-80 max-w-[calc(100vw-2rem)] p-1">
                     <div class="relative mb-1 flex items-center border-b px-2 py-1">
                       <Search class="pointer-events-none absolute left-3 h-3 w-3 text-muted-foreground" />
                       <input v-model="databaseSearchQuery" type="search" class="h-6 w-full bg-transparent pl-5 text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('ai.searchDatabases')" />
                     </div>
                     <button v-if="selectedDatabases.length > 1" type="button" class="mb-1 flex w-full items-center justify-end gap-1 border-b px-2 py-1 text-xs" @click.stop="selectedDatabases = []"><X class="h-3 w-3" />{{ t("ai.clearDatabaseSelection") }}</button>
                     <div class="max-h-64 overflow-y-auto overscroll-contain">
-                      <button v-for="option in filteredDbSelectOptions" :key="option.value" type="button" class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted" @click="toggleDatabase(option.database)">
-                        <Check :class="['h-4 w-4', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
-                        <span class="truncate">{{ option.label }}</span>
+                      <button v-for="option in filteredDbSelectOptions" :key="option.value" type="button" :title="option.label" class="flex w-full min-w-0 items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted" @click="toggleDatabase(option.database)">
+                        <Check :class="['h-4 w-4 shrink-0', selectedDatabaseValues.has(option.database) ? 'opacity-100' : 'opacity-0']" />
+                        <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
                       </button>
                       <div v-if="!filteredDbSelectOptions.length" class="px-2 py-1.5 text-sm text-muted-foreground">{{ t("ai.noDatabasesFound") }}</div>
                     </div>

@@ -74,6 +74,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             let tables = inspect_sql_file_tables(&path).await?;
             assert_eq!(tables.len(), 2);
             let request = SqlFileRequest {
+                txn_session_id: None,
                 execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: false,
                 selected_tables: Some(vec![SqlFileTable { database: Some(database.clone()), name: "chosen".into() }]),
                 part_cooldown_ms: 0,
@@ -90,6 +91,7 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
         let path = dir.join("unsupported.sql");
         std::fs::write(&path, "DROP TABLE chosen; INSERT INTO chosen VALUES (1, 'bad'); CALL unexpected();").map_err(|e| e.to_string())?;
         let request = SqlFileRequest {
+            txn_session_id: None,
             execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: true,
             selected_tables: Some(vec![SqlFileTable { database: None, name: "chosen".into() }]),
             part_cooldown_ms: 0,
@@ -169,6 +171,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
 
         execute_sql_statement(&state, &connection_id, "", &format!("DROP DATABASE `{database}`"), None, None).await?;
         let import_request = SqlFileRequest {
+            txn_session_id: None,
             execution_id: format!("live-mysql-import-{suffix}"),
             connection_id: connection_id.clone(),
             database: String::new(),

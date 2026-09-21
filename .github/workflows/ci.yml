@@ -209,6 +209,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
 
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3 # v2.68.13
+        with:
+          tool: cargo-nextest@0.9.137
+
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
@@ -305,7 +310,13 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
+      SCCACHE_IDLE_TIMEOUT: "0"
     steps:
       - uses: actions/checkout@v5
 
@@ -329,6 +340,10 @@ jobs:
           toolchain: nightly-2026-07-22
           components: rust-src
 
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.16.0"
+
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
         run: ./.github/scripts/prepare-webview2-win7-loader.ps1
@@ -348,7 +363,16 @@ jobs:
         shell: pwsh
         run: |
           $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
-          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
+          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort --timings
+
+      - name: Upload Windows 7 Cargo timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: DBX-win7-cargo-timings
+          path: target/cargo-timings/
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Audit Windows 7 PE imports
         shell: pwsh
@@ -379,6 +403,11 @@ jobs:
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
+
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        run: ${SCCACHE_PATH} --show-stats
 
       - name: Upload Windows 7 test installer
         uses: actions/upload-artifact@v4
@@ -600,11 +629,20 @@ jobs:
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
+
       # mold -run wraps the whole process tree (see the packages job note):
       # test-binary linking dominates this job and sccache cannot cache links.
-      - name: Cargo test
+      - name: Nextest
         run: |-
           mold -run node .github/scripts/ci-rust.mjs test "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
+
+      - name: Rust doc tests
+        run: |-
+          mold -run node .github/scripts/ci-rust.mjs doctest "$RUST_TEST_GROUP" "$RUST_FEATURE_MODE"
 
       - name: Show sccache stats
         if: always()
@@ -854,6 +892,7 @@ jobs:
               - 'vendor/ctor/**'
               - 'vendor/dirs-sys/**'
               - 'vendor/pageant/**'
+              - 'vendor/webview2-com-sys/**'
               - 'vendor/wry/**'
             github_scripts:
               - '.github/scripts/**'
@@ -1046,12 +1085,18 @@ jobs:
           shared-key: ci-agent-rust-v2-${{ matrix.driver }}
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
       # the duckdb sidecar links a large bundled C++ static library.
       - name: Native Rust driver tests
         env:
           DRIVER: ${{ matrix.driver }}
-        run: mold -run cargo test --manifest-path "drivers/$DRIVER/Cargo.toml" --locked
+        run: |
+          mold -run cargo nextest run --manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast
+          mold -run cargo test --doc --manifest-path "drivers/$DRIVER/Cargo.toml" --locked
       - name: TDengine native agent build
         if: matrix.driver == 'tdengine'
         run: mold -run cargo build --manifest-path drivers/tdengine/Cargo.toml --locked --release --bin dbx-tdengine-driver
@@ -1112,6 +1157,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
         if: matrix.driver == 'tdengine'
+      - name: Install nextest
+        if: matrix.driver == 'tdengine'
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3
+        with:
+          tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache
         if: matrix.driver == 'tdengine'
         uses: swatinem/rust-cache@v2

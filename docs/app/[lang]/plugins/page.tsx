@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { fetchPluginCatalog } from "@/lib/pluginCatalog";
+import { fetchPluginInstalls } from "@/lib/pluginStats";
 import { buildMetadata } from "@/lib/metadata";
 import { resolveLang } from "@/lib/i18n";
 import { PluginsClient } from "./PluginsClient";
@@ -33,7 +34,11 @@ export default async function PluginsPage({ params }: { params: Promise<{ lang: 
   const { lang } = await params;
   const l = resolveLang(lang);
   // Build-time snapshot for instant paint and SEO; the client refreshes it from R2 on mount.
-  const catalog = await fetchPluginCatalog({ cache: "force-cache" });
+  // Dev serves fresh data — force-cache would pin a stale entry from .next across sessions.
+  const snapshotCache: RequestCache = process.env.NODE_ENV === "production" ? "force-cache" : "no-store";
+  const catalog = await fetchPluginCatalog({ cache: snapshotCache });
+  // Install counters are decorative: a null snapshot just renders cards without counts.
+  const installs = await fetchPluginInstalls({ cache: snapshotCache });
 
-  return <PluginsClient lang={l} initialPlugins={catalog?.plugins ?? []} />;
+  return <PluginsClient lang={l} initialPlugins={catalog?.plugins ?? []} initialInstalls={installs} />;
 }

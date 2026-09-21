@@ -27,9 +27,9 @@ pub use host::{
     ActivePluginSession, PluginConnectionActionResult, PluginConnectionHandle, PluginHost, PluginRuntimeProxy,
 };
 pub use installer::{
-    PluginInstallPolicy, PluginInstallResponse, PluginInstallResult, PluginPackageInstaller, PluginRollbackResponse,
-    PluginRollbackResult, PluginSignatureStatus, PluginTrustStore, PluginTrustedKey, DBXP_EXTENSION,
-    MAX_PLUGIN_PACKAGE_BYTES, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
+    PluginInstallPolicy, PluginInstallProvenance, PluginInstallResponse, PluginInstallResult, PluginInstallSource,
+    PluginPackageInstaller, PluginRollbackResponse, PluginRollbackResult, PluginSignatureStatus, PluginTrustStore,
+    PluginTrustedKey, DBXP_EXTENSION, MAX_PLUGIN_PACKAGE_BYTES, PLUGIN_CHECKSUMS_FILE, PLUGIN_SIGNATURE_FILE,
 };
 pub use lifecycle::PluginLifecycle;
 pub use marketplace::{
@@ -62,6 +62,10 @@ pub struct InstalledPlugin {
     pub manifest: PluginManifest,
     pub path: PathBuf,
     pub compatibility: PluginCompatibility,
+    /// Where the active installation came from (repository / publisher / signing key / source).
+    /// `None` for installs recorded before provenance existed; those stay unconstrained until the
+    /// next install records fresh provenance.
+    pub provenance: Option<PluginInstallProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +73,8 @@ pub struct InstalledPlugin {
 pub struct InstalledPluginInfo {
     pub manifest: PluginManifest,
     pub compatibility: PluginCompatibilityInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<PluginInstallProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,7 +92,13 @@ pub struct PluginCompatibilityInfo {
 impl InstalledPlugin {
     pub fn new(manifest: PluginManifest, path: PathBuf, app_version: &str) -> Self {
         let compatibility = manifest.compatibility(&path, app_version);
-        Self { manifest, path, compatibility }
+        Self { manifest, path, compatibility, provenance: None }
+    }
+
+    /// Attaches the recorded install provenance (see `installer::read_container_provenance`).
+    pub fn with_provenance(mut self, provenance: Option<PluginInstallProvenance>) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     pub fn info(&self) -> InstalledPluginInfo {
@@ -98,6 +110,7 @@ impl InstalledPlugin {
                 warnings: self.compatibility.warnings.clone(),
                 target: self.compatibility.target.clone(),
             },
+            provenance: self.provenance.clone(),
         }
     }
 }
@@ -221,7 +234,10 @@ impl PluginRegistry {
                     continue;
                 }
             };
-            plugins.push(InstalledPlugin::new(manifest, path, &self.app_version));
+            plugins.push(
+                InstalledPlugin::new(manifest, path, &self.app_version)
+                    .with_provenance(PluginPackageInstaller::read_container_provenance(&container_path)?),
+            );
         }
         plugins.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
         Ok(plugins)
@@ -340,6 +356,7 @@ fn unavailable_plugin(path: PathBuf, error: String) -> InstalledPlugin {
             target: Some(current_plugin_target()),
             ..PluginCompatibility::default()
         },
+        provenance: None,
     }
 }
 

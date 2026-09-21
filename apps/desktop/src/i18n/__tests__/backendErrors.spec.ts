@@ -72,6 +72,16 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "pluginPlatform.updateBlockedByOperations",
   },
   {
+    name: "plugin update from a changed source needs confirmation",
+    message: "Plugin update source change requires confirmation: the offering repository, publisher, or signing key differs from the recorded install",
+    key: "pluginPlatform.updateSourceChangeRequired",
+  },
+  {
+    name: "plugin downgrade is rejected",
+    message: "Plugin downgrade to version 1.0.5 is not allowed (installed 1.1.0)",
+    key: "pluginPlatform.updateDowngradeRejected",
+  },
+  {
     name: "connection admission waits for plugin update",
     message: "Plugin update is in progress. Please try again after it finishes.",
     key: "pluginPlatform.updateInProgress",
@@ -611,6 +621,8 @@ describe("backend error wording is pinned to the Rust sources", () => {
     ["crates/dbx-drivers/src/agent_service.rs", "is in use by drivers: "],
     ["crates/dbx-drivers/src/agent_service.rs", "agent-registry.json not found in the ZIP; not a valid offline driver package."],
     ["crates/dbx-core/src/admin/mq/adapters/kafka.rs", "Kafka does not support unloading topics"],
+    ["crates/dbx-plugin-runtime/src/plugins/installer.rs", "Plugin update source change requires confirmation:"],
+    ["crates/dbx-plugin-runtime/src/plugins/installer.rs", "Plugin downgrade to version "],
     ["crates/dbx-web/src/auth.rs", "Please try again in {remaining}s"],
     ["crates/dbx-web/src/routes/agents.rs", "Close these database connections before updating drivers: "],
     ["src-tauri/src/commands/agents.rs", "Close these database connections before updating drivers: "],

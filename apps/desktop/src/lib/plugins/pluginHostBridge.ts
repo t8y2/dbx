@@ -1,5 +1,6 @@
-import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginWorkbenchContribution } from "@/types/database";
+import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
+import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -9,6 +10,8 @@ const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 // Distinct from the sidecar binary cap: saved files go straight from the
 // plugin iframe to disk and never traverse plugin frames.
 const MAX_BRIDGE_SAVE_BYTES = 512 * 1024 * 1024;
+// Mirrors MAX_PLUGIN_PLAN_NAME_CHARS in crates/dbx-core/src/query/plugin_plan.rs.
+const MAX_PLUGIN_PLAN_IDENTIFIER_CHARS = 256;
 
 /** Structured editor appearance: SQL editor settings that have no CSS-token
  * carrier (font size is a number, the syntax theme an id). Font families are
@@ -44,6 +47,37 @@ export interface PluginSaveFileResult {
   path: string;
 }
 
+export interface PluginDownloadRequest extends PluginSaveFileRequest {
+  downloadId: string;
+  params: Record<string, unknown>;
+}
+
+/** An opened local-file handle handed to a plugin for streaming transfer. */
+export interface PluginFileHandleMeta {
+  handleId: string;
+  name: string;
+  size: number;
+  contentType: string;
+}
+
+export interface PluginPickFilesOptions {
+  multiple?: boolean;
+}
+
+export interface PluginFileReadChunk {
+  dataBase64: string;
+  length: number;
+  eof: boolean;
+}
+
+export interface PluginFileWriteResult {
+  written: number;
+  nextOffset: number;
+}
+
+/** Chunk size the host advertises for streamed saves; fits the bridge payload cap after base64. */
+export const PLUGIN_SAVE_CHUNK_BYTES = 1024 * 1024;
+
 export interface PluginHostBridgeApi {
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
@@ -53,11 +87,36 @@ export interface PluginHostBridgeApi {
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
+  /**
+   * Estimated plan capability metadata for one connection. Requires the plugin
+   * to declare `host.plans:read`. The host only reads the stored connection
+   * config; it never connects or probes the server.
+   */
+  getPlanCapabilities?(connectionId: string): Promise<PluginPlanCapabilities>;
+  /**
+   * Read-only estimated plan acquisition. Requires `host.plans:read`. The host
+   * generates and owns the EXPLAIN statement; the plugin cannot pass one.
+   */
+  explainPlan?(request: PluginPlanRequest): Promise<PluginPlanResult>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
+  downloadFile?(pluginId: string, request: PluginDownloadRequest, onProgress: (progress: unknown) => void): Promise<PluginSaveFileResult | null>;
+  cancelDownload?(pluginId: string, downloadId: string): Promise<void>;
   /** Write text to the system clipboard on behalf of the sandboxed plugin iframe. */
   copyText?(pluginId: string, text: string): Promise<void>;
+  /** Native open dialog; resolves opened read handles (null selection → empty list). */
+  pickFiles?(pluginId: string, options: PluginPickFilesOptions): Promise<PluginFileHandleMeta[]>;
+  /** Stream a chunk from an opened read handle. */
+  readFileChunk?(pluginId: string, handleId: string, offset: number, length?: number): Promise<PluginFileReadChunk>;
+  /** Native save dialog + opened write handle; resolves null when the user cancels. */
+  beginFileSave?(pluginId: string, request: { name?: string; contentType?: string; size?: number }): Promise<{ handleId: string; chunkBytes: number } | null>;
+  /** Stream a chunk into an opened write handle. */
+  writeFileChunk?(pluginId: string, handleId: string, offset: number, bytes: Uint8Array): Promise<PluginFileWriteResult>;
+  /** Flush and close an opened write handle. */
+  finishFileSave?(pluginId: string, handleId: string): Promise<void>;
+  /** Close any file handle, discarding unsaved state. */
+  closeFileHandle?(pluginId: string, handleId: string): Promise<void>;
 }
 
 interface PluginRequestMessage {
@@ -72,6 +131,7 @@ interface PluginRequestMessage {
 }
 
 export class PluginHostBridge {
+  private downloads = new Set<string>();
   private context: PluginWorkbenchContext;
   private locale: string;
   private theme?: PluginBridgeTheme;
@@ -81,7 +141,7 @@ export class PluginHostBridge {
 
   constructor(
     private readonly plugin: InstalledPlugin,
-    private readonly workbench: PluginWorkbenchContribution,
+    private readonly contribution: PluginUiContribution,
     context: PluginWorkbenchContext,
     private readonly targetWindow: () => Window | null,
     private readonly api: PluginHostBridgeApi,
@@ -120,6 +180,8 @@ export class PluginHostBridge {
 
   private requestInit(signal: "load" | "ready"): void {
     if ((this.initSignals.load && this.initSignals.ready) || (signal === "load" && this.initSignals.load)) {
+      for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
+      this.downloads.clear();
       this.initGeneration += 1;
       this.initSignals = { load: false, ready: false };
       this.initStarted = false;
@@ -148,6 +210,8 @@ export class PluginHostBridge {
   /** Stop future posts (queued inits after an async reinit) for a torn-down bridge. */
   dispose(): void {
     this.disposed = true;
+    for (const downloadId of this.downloads) void this.api.cancelDownload?.(this.plugin.manifest.id, downloadId).catch(() => undefined);
+    this.downloads.clear();
   }
 
   private disposed = false;
@@ -161,10 +225,13 @@ export class PluginHostBridge {
       version: BRIDGE_VERSION,
       type: "init",
       pluginId: this.plugin.manifest.id,
-      contributionId: this.workbench.id,
+      contributionId: this.contribution.id,
       locale: this.locale,
       theme: this.theme ? clonePluginData(this.theme) : undefined,
       permissions: [...(this.plugin.manifest.permissions || [])],
+      // Additive capability advertisement: an older host omits `planApi`, and a
+      // plugin must treat the absence as "unsupported" rather than probing.
+      capabilities: { downloadFile: !!this.api.downloadFile, planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan },
       context: snapshotPluginWorkbenchContext(this.context),
     });
   }
@@ -204,6 +271,16 @@ export class PluginHostBridge {
     target.postMessage({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "binary", channel: event.channel, data: buffer }, "*", [buffer]);
   }
 
+  /** Tell the plugin whether an OS-level file drag is currently over its workbench. */
+  forwardDragState(active: boolean): void {
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "dragstate", active });
+  }
+
+  /** Hand the plugin already-opened handles for files dropped onto its workbench. */
+  forwardFileDrop(files: PluginFileHandleMeta[]): void {
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files });
+  }
+
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
     try {
       enforcePayloadLimit(request.params);
@@ -215,6 +292,27 @@ export class PluginHostBridge {
   }
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
+    if (method === "host.downloadFile") {
+      if (!this.api.downloadFile) throw new Error("Streaming file downloads require the desktop host");
+      const input = requireRecord(params, "download params");
+      const downloadId = requireProtocolName(input.downloadId, "download ID");
+      if (this.downloads.size >= 2 || this.downloads.has(downloadId)) throw new Error("Too many active downloads or duplicate download ID");
+      const request = { downloadId, fileName: optionalTrimmedString(input.fileName), params: requireRecord(input.params, "download source") };
+      this.downloads.add(downloadId);
+      try {
+        return await this.api.downloadFile(this.plugin.manifest.id, request, (progress) => {
+          this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "event", method: "host.download.progress", params: progress });
+        });
+      } finally {
+        this.downloads.delete(downloadId);
+      }
+    }
+    if (method === "host.cancelDownload") {
+      const input = requireRecord(params, "cancel download params");
+      const downloadId = requireProtocolName(input.downloadId, "download ID");
+      if (this.downloads.has(downloadId)) await this.api.cancelDownload?.(this.plugin.manifest.id, downloadId);
+      return null;
+    }
     if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
@@ -263,6 +361,17 @@ export class PluginHostBridge {
       await this.api.openFilesystem(this.plugin.manifest.id, requireProtocolName(input.providerId, "filesystem provider"), isRecord(input.context) ? input.context : undefined);
       return null;
     }
+    if (method === "host.getPlanCapabilities") {
+      this.requirePermission(PLUGIN_PLAN_PERMISSION);
+      if (!this.api.getPlanCapabilities) throw new Error("Host plan API is unavailable");
+      const input = requireRecord(params, "host.getPlanCapabilities params");
+      return this.api.getPlanCapabilities(requirePluginPlanIdentifier(input.connectionId, "connectionId"));
+    }
+    if (method === "host.explainPlan") {
+      this.requirePermission(PLUGIN_PLAN_PERMISSION);
+      if (!this.api.explainPlan) throw new Error("Host plan API is unavailable");
+      return this.api.explainPlan(requirePluginPlanRequest(requireRecord(params, "host.explainPlan params")));
+    }
     if (method === "host.saveFile") {
       const input = isRecord(params) ? params : {};
       // The sandboxed iframe cannot trigger downloads (WKWebView cancels blob
@@ -286,6 +395,50 @@ export class PluginHostBridge {
       if (!this.api.copyText) throw new Error("Host clipboard is unavailable");
       await this.api.copyText(this.plugin.manifest.id, input.text);
       return { success: true };
+    }
+    if (method === "host.pickFiles") {
+      // Same trust level as host.saveFile: the bytes only flow after the user
+      // picked the files in the native dialog, so no manifest permission gate.
+      const input = isRecord(params) ? params : {};
+      if (!this.api.pickFiles) throw new Error("Host file picking is unavailable");
+      const files = await this.api.pickFiles(this.plugin.manifest.id, { multiple: input.multiple === true });
+      return { files };
+    }
+    if (method === "host.readFileChunk") {
+      const input = requireRecord(params, "host.readFileChunk params");
+      if (!this.api.readFileChunk) throw new Error("Host file reading is unavailable");
+      return this.api.readFileChunk(this.plugin.manifest.id, requireHandleId(input.handleId), requireOffset(input.offset), input.length === undefined ? undefined : requireChunkLength(input.length));
+    }
+    if (method === "host.beginFileSave") {
+      const input = isRecord(params) ? params : {};
+      if (!this.api.beginFileSave) throw new Error("Host file saving is unavailable");
+      const target = await this.api.beginFileSave(this.plugin.manifest.id, {
+        name: optionalTrimmedString(input.name),
+        contentType: optionalTrimmedString(input.contentType),
+        size: input.size === undefined || typeof input.size !== "number" || !Number.isFinite(input.size) ? undefined : Math.max(0, Math.floor(input.size)),
+      });
+      // Cancelled saves resolve null, exactly as the documented contract and
+      // every plugin's env.d.ts types it.
+      return target;
+    }
+    if (method === "host.writeFileChunk") {
+      const input = requireRecord(params, "host.writeFileChunk params");
+      if (!this.api.writeFileChunk) throw new Error("Host file writing is unavailable");
+      const bytes = binary instanceof ArrayBuffer ? new Uint8Array(binary) : new Uint8Array(base64ToBytes(requireBase64(input.dataBase64)));
+      if (bytes.byteLength > MAX_BRIDGE_BINARY_BYTES) throw new Error("Plugin write chunk exceeds 8 MiB");
+      return this.api.writeFileChunk(this.plugin.manifest.id, requireHandleId(input.handleId), requireOffset(input.offset), bytes);
+    }
+    if (method === "host.finishFileSave") {
+      const input = requireRecord(params, "host.finishFileSave params");
+      if (!this.api.finishFileSave) throw new Error("Host file saving is unavailable");
+      await this.api.finishFileSave(this.plugin.manifest.id, requireHandleId(input.handleId));
+      return null;
+    }
+    if (method === "host.closeFileHandle") {
+      const input = requireRecord(params, "host.closeFileHandle params");
+      if (!this.api.closeFileHandle) throw new Error("Host file handling is unavailable");
+      await this.api.closeFileHandle(this.plugin.manifest.id, requireHandleId(input.handleId));
+      return null;
     }
     throw new Error(`Unsupported plugin host method '${method}'`);
   }
@@ -446,11 +599,12 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set() };
     let sequence = 0;
     let context;
     let locale = 'en';
     let theme;
+    let capabilities = {};
     let resolveReady;
     const initialTheme = ${serializedInitialTheme};
     const applyTheme = (value) => {
@@ -551,6 +705,9 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       get context() { return context; },
       get locale() { return locale; },
       get theme() { return theme; },
+      get capabilities() { return capabilities; },
+      downloadFile: (options) => request('host.downloadFile', options),
+      cancelDownload: (downloadId) => request('host.cancelDownload', { downloadId }),
       request,
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       stream,
@@ -568,6 +725,10 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew) }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
+      // Estimated plans only: mode must be sent explicitly so a plugin states
+      // its intent, and the host refuses anything other than "estimated".
+      getPlanCapabilities: (connectionId) => request('host.getPlanCapabilities', { connectionId }),
+      explainPlan: (planRequest) => request('host.explainPlan', planRequest),
       saveFile: (options = {}, data) => {
         if (data === undefined) return request('host.saveFile', options);
         if (typeof data === 'string') return request('host.saveFile', { ...(options || {}), dataBase64: data });
@@ -575,6 +736,23 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('host.saveFile', options, { transfer: bytes });
       },
       copy: (text) => request('host.copy', { text }),
+      fileTransfer: Object.freeze({
+        pick: (options) => request('host.pickFiles', options || {}),
+        read: (handleId, offset, length) => request('host.readFileChunk', { handleId, offset, length }),
+        beginSave: (options) => request('host.beginFileSave', options || {}),
+        write: (handleId, offset, data) => {
+          if (typeof data === 'string') return request('host.writeFileChunk', { handleId, offset, dataBase64: data });
+          // A Uint8Array can be a view into a larger buffer — transferring
+          // .buffer blindly would send bytes outside the view. Copy the
+          // visible range into a standalone buffer first.
+          const bytes = data instanceof ArrayBuffer ? data : new Uint8Array(data instanceof Uint8Array ? data.slice().buffer : new Uint8Array(data).buffer);
+          return request('host.writeFileChunk', { handleId, offset }, { transfer: bytes });
+        },
+        finish: (handleId) => request('host.finishFileSave', { handleId }),
+        cancel: (handleId) => request('host.closeFileHandle', { handleId }),
+        onDragState: (listener) => { listeners.dragstate.add(listener); return () => listeners.dragstate.delete(listener); },
+        onDrop: (listener) => { listeners.filedrop.add(listener); return () => listeners.filedrop.delete(listener); },
+      }),
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
@@ -591,6 +769,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         pending.delete(message.id);
         if (message.error) handler.reject(new Error(message.error)); else handler.resolve(message.result);
       } else if (message.type === 'init') {
+        capabilities = message.capabilities || {};
         context = message.context;
         locale = typeof message.locale === 'string' ? message.locale : 'en';
         applyTheme(message.theme);
@@ -616,6 +795,14 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const payload = { channel: message.channel, data: message.data ? new Uint8Array(message.data) : new Uint8Array(0) };
         listeners.binary.forEach((listener) => listener(payload));
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
+      } else if (message.type === 'filedrop') {
+        const files = Array.isArray(message.files) ? message.files : [];
+        listeners.filedrop.forEach((listener) => listener(files));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: files }));
+      } else if (message.type === 'dragstate') {
+        const active = message.active === true;
+        listeners.dragstate.forEach((listener) => listener(active));
+        document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
       }
     });
     addEventListener('keydown', (event) => {
@@ -646,6 +833,74 @@ function requireProtocolName(value: unknown, label: string): string {
 function requireTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(120_000, Math.max(1, Math.round(value)));
+}
+
+/** A connection id, database, or schema name: bounded, trimmed, never empty. */
+function requirePluginPlanIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  const identifier = value.trim();
+  if (!identifier) throw new Error(`${label} must not be empty`);
+  if (identifier.length > MAX_PLUGIN_PLAN_IDENTIFIER_CHARS) {
+    throw new Error(`${label} must be at most ${MAX_PLUGIN_PLAN_IDENTIFIER_CHARS} characters`);
+  }
+  return identifier;
+}
+
+function optionalPluginPlanScope(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${label} must be a string`);
+  return value.trim() ? requirePluginPlanIdentifier(value, label) : undefined;
+}
+
+/**
+ * Validates one `host.explainPlan` request. The host owns the EXPLAIN text, so
+ * the only accepted shape is the caller's own SQL plus a connection reference
+ * and an explicit `estimated` mode; anything else is refused here rather than
+ * forwarded and downgraded. The backend re-checks every one of these bounds.
+ */
+function requirePluginPlanRequest(input: Record<string, unknown>): PluginPlanRequest {
+  if (input.mode !== "estimated") throw new Error('host.explainPlan serves mode "estimated" only');
+  if (typeof input.sql !== "string") throw new Error("host.explainPlan requires sql");
+  const sql = input.sql.trim();
+  if (!sql) throw new Error("host.explainPlan requires a non-empty sql");
+  if (sql.length > MAX_PLUGIN_PLAN_SQL_CHARS) {
+    throw new Error(`sql must be at most ${MAX_PLUGIN_PLAN_SQL_CHARS} characters`);
+  }
+
+  const request: PluginPlanRequest = {
+    connectionId: requirePluginPlanIdentifier(input.connectionId, "connectionId"),
+    sql,
+    mode: "estimated",
+  };
+  const database = optionalPluginPlanScope(input.database, "database");
+  if (database !== undefined) request.database = database;
+  const schema = optionalPluginPlanScope(input.schema, "schema");
+  if (schema !== undefined) request.schema = schema;
+  if (input.timeoutMs !== undefined && input.timeoutMs !== null) {
+    request.timeoutMs = clampPluginPlanTimeout(input.timeoutMs);
+  }
+  return request;
+}
+
+/** Pre-clamps to the host ceiling; the backend additionally clamps to the connection's own timeout. */
+function clampPluginPlanTimeout(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
+  return Math.min(MAX_PLUGIN_PLAN_TIMEOUT_MS, Math.max(1, Math.round(value)));
+}
+
+function requireHandleId(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > 128) throw new Error("handleId is invalid");
+  return value;
+}
+
+function requireOffset(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("offset is invalid");
+  return Math.floor(value);
+}
+
+function requireChunkLength(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) throw new Error("length is invalid");
+  return Math.min(8 * 1024 * 1024, Math.floor(value));
 }
 
 function base64ToBytes(value: string): ArrayBuffer {
@@ -684,6 +939,6 @@ function enforcePayloadLimit(value: unknown): void {
   if (bytes > MAX_BRIDGE_PAYLOAD_BYTES) throw new Error("Plugin bridge request is too large");
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

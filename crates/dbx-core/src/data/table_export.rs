@@ -89,6 +89,12 @@ pub struct TableExportRequest {
     pub columns: Option<Vec<String>>,
     #[serde(default)]
     pub column_types: Option<Vec<Option<String>>>,
+    /// Column EXTRA metadata for `columns`, supplied by the data grid. SQL
+    /// INSERT exports need it for dialect rules such as SQL Server/Dameng
+    /// `SET IDENTITY_INSERT` (error 544) and MySQL generated-column skipping;
+    /// without it the export cannot know those rules without a metadata query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_extras: Option<Vec<Option<String>>>,
     #[serde(default)]
     pub primary_keys: Option<Vec<String>>,
     /// 导出 SQL 时是否排除主键列（对应前端数据提取设置里的“排除主键”）。
@@ -227,6 +233,24 @@ fn resolve_requested_export_columns(
 
 fn requested_mysql_sql_export_needs_column_metadata(database_type: DatabaseType, format: &str) -> bool {
     database_type == DatabaseType::Mysql && format.eq_ignore_ascii_case("sql")
+}
+
+/// Column EXTRA values supplied by the data grid, filtered and aligned exactly
+/// like [`resolve_requested_export_columns`] keeps name/type metadata aligned.
+fn resolve_requested_column_extras_by_position(
+    database_type: DatabaseType,
+    columns: &[String],
+    column_extras: Option<&[Option<String>]>,
+) -> Vec<Option<String>> {
+    let Some(column_extras) = column_extras else {
+        return Vec::new();
+    };
+    columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !is_internal_export_column(Some(database_type), column))
+        .map(|(index, _)| column_extras.get(index).cloned().flatten())
+        .collect()
 }
 
 fn resolve_requested_export_column_types(
@@ -691,6 +715,7 @@ async fn fetch_table_export_batch(
             rows: Vec::new(),
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -1539,7 +1564,14 @@ async fn export_table_data_core_inner(
                     resolve_requested_export_column_extras(&col_names, &table_columns),
                 )
             } else {
-                (requested_column_types, Vec::new())
+                (
+                    requested_column_types,
+                    resolve_requested_column_extras_by_position(
+                        db_type,
+                        requested_columns,
+                        request.column_extras.as_deref(),
+                    ),
+                )
             };
         (col_names, column_types, column_extras, primary_keys)
     } else {
@@ -2385,6 +2417,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: Some(vec!["id".to_string(), "name".to_string()]),
             column_types: Some(vec![Some("INTEGER".to_string()), Some("VARCHAR".to_string())]),
+            column_extras: None,
             primary_keys: Some(vec!["id".to_string()]),
             exclude_primary_keys: false,
             where_input: None,
@@ -2551,6 +2584,7 @@ mod tests {
             exclude_primary_keys: false,
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             where_input: None,
             order_by: None,
@@ -2716,6 +2750,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: Some("WHERE temperature > 1".to_string()),
@@ -2776,6 +2811,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -2814,6 +2850,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -2847,6 +2884,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -2888,6 +2926,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -2941,6 +2980,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: Some("WHERE status = 'active'".to_string()),
@@ -2988,6 +3028,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -3063,6 +3104,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -3120,6 +3162,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -3179,6 +3222,7 @@ mod tests {
             insert_mode: Default::default(),
             columns: None,
             column_types: None,
+            column_extras: None,
             primary_keys: None,
             exclude_primary_keys: false,
             where_input: None,
@@ -3261,6 +3305,26 @@ mod tests {
         assert_eq!(
             resolve_requested_export_column_extras(&requested_columns, &table_columns),
             vec![Some("VIRTUAL GENERATED".to_string()), Some("auto_increment".to_string()), None]
+        );
+    }
+
+    #[test]
+    fn requested_column_extras_stay_aligned_with_filtered_columns() {
+        let columns = vec!["table_id".to_string(), "table_name".to_string()];
+        let extras = vec![Some("identity(1,1)".to_string()), None];
+        assert_eq!(
+            resolve_requested_column_extras_by_position(DatabaseType::SqlServer, &columns, Some(&extras)),
+            vec![Some("identity(1,1)".to_string()), None]
+        );
+        assert!(resolve_requested_column_extras_by_position(DatabaseType::SqlServer, &columns, None).is_empty());
+
+        // The synthetic ROWID column never reaches the export, so its EXTRA entry
+        // must be dropped with it instead of shifting the remaining columns.
+        let oracle_columns = vec!["__DBX_ROWID".to_string(), "id".to_string()];
+        let oracle_extras = vec![Some("synthetic".to_string()), Some("identity".to_string())];
+        assert_eq!(
+            resolve_requested_column_extras_by_position(DatabaseType::Oracle, &oracle_columns, Some(&oracle_extras)),
+            vec![Some("identity".to_string())]
         );
     }
 

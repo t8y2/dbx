@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearPendingComponentUpdatesAfterAppUpdate, markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
+import { clearPendingComponentUpdatesAfterAppUpdate, markPendingComponentUpdatesAfterAppUpdate, resolveUpdateAllAction, runPendingComponentUpdatePlan, shouldCloseUpdateCenterAfterComponentUpdate, takePendingComponentUpdatesAfterAppRestart } from "@/lib/updates/componentUpdateOrchestration";
 
 describe("component update orchestration", () => {
   beforeEach(() => {
@@ -86,6 +86,29 @@ describe("component update orchestration", () => {
 
   it("does nothing when no update is available", () => {
     expect(resolveUpdateAllAction({ hasAppUpdate: false, appUpdateCanInstall: true, appUpdatePrepared: false, hasComponentUpdates: false })).toBe("none");
+  });
+
+  it("closes the update center after a successful component-only update with nothing left to install", () => {
+    expect(
+      shouldCloseUpdateCenterAfterComponentUpdate({
+        failedCount: 0,
+        skippedDriverCount: 0,
+        hasAppUpdate: false,
+        remainingComponentUpdateCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the update center open when an update failed or a driver update was skipped", () => {
+    const base = { hasAppUpdate: false, remainingComponentUpdateCount: 0 };
+    expect(shouldCloseUpdateCenterAfterComponentUpdate({ ...base, failedCount: 1, skippedDriverCount: 0 })).toBe(false);
+    expect(shouldCloseUpdateCenterAfterComponentUpdate({ ...base, failedCount: 0, skippedDriverCount: 1 })).toBe(false);
+  });
+
+  it("keeps the update center open while the app or another component still needs an update", () => {
+    const base = { failedCount: 0, skippedDriverCount: 0 };
+    expect(shouldCloseUpdateCenterAfterComponentUpdate({ ...base, hasAppUpdate: true, remainingComponentUpdateCount: 0 })).toBe(false);
+    expect(shouldCloseUpdateCenterAfterComponentUpdate({ ...base, hasAppUpdate: false, remainingComponentUpdateCount: 1 })).toBe(false);
   });
 
   it("can explicitly clear pending state", () => {

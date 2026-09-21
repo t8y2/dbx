@@ -124,7 +124,7 @@ CSV 类型保真：`Double` 导出再导入会变为 `Decimal128`（十进制文
 
 ### 数据库备份与恢复
 
-使用 MongoDB 原生驱动时，在数据库节点右键选择「备份数据库」或「恢复数据库」。数据库备份包含选中集合、集合选项、索引和视图。
+在数据库节点右键选择「备份数据库」或「恢复数据库」。数据库备份包含选中集合、集合选项、索引和视图。原生驱动和 `mongodb-legacy` Agent 均支持；Agent 路径需要较新的 Agent 版本（支持 find 游标），以保证 BSON 类型在传输中不丢失。
 
 - 桌面端支持官方目录布局与 MongoDB archive 格式，均可使用 gzip。Web 端导出 archive 文件，恢复时支持 archive 或上传目录。
 - 目录备份包含 `<数据库>/<集合>.bson` 和 `.metadata.json`，或对应的 `.gz` 文件。MongoDB archive 是独立的流式格式，不是 ZIP 或 tar。

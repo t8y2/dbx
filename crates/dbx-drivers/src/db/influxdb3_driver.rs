@@ -366,6 +366,7 @@ fn build_query_result(rows: Vec<serde_json::Value>, start: Instant) -> QueryResu
         rows: out_rows,
         affected_rows: affected,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated: false,
         session_id: None,
         has_more: false,

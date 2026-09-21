@@ -124,7 +124,7 @@ Collection-import limits: append only (no truncate or upsert), CSV export discov
 
 ### Database backups
 
-With the native MongoDB driver, right-click a database and choose **Back up database** or **Restore database**. Database backups include selected collections, collection options, indexes and views.
+Right-click a database and choose **Back up database** or **Restore database**. Database backups include selected collections, collection options, indexes and views. Both the native driver and the `mongodb-legacy` Agent are supported; the Agent path needs a current Agent build (find-cursor support) so BSON types survive the transfer.
 
 - Desktop supports the official dump directory layout and MongoDB archive format, optionally gzip-compressed. Web exports archive files and restores either archives or uploaded directories.
 - A dump directory contains `<database>/<collection>.bson` and `.metadata.json`, or their `.gz` variants. MongoDB archive is a separate stream format, not ZIP or tar.

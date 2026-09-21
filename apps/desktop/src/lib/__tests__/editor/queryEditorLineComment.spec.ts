@@ -57,6 +57,17 @@ describe("QueryEditor word selection", () => {
     expect(mysql.wordAt(2)).toMatchObject({ from: 1, to: 5 });
     expect(systemVariable.wordAt(1)).toMatchObject({ from: 0, to: 10 });
   });
+
+  it("includes the # prefix in SQL Server temp table words", () => {
+    const create = (doc: string, dbType: "sqlserver" | "mysql") => EditorState.create({ doc, extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData(dbType))] });
+    const local = create("#order", "sqlserver");
+    const global = create("##order", "sqlserver");
+    const mysql = create("#order", "mysql");
+
+    for (let position = 0; position <= 6; position += 1) expect(local.wordAt(position)).toMatchObject({ from: 0, to: 6 });
+    for (let position = 0; position <= 7; position += 1) expect(global.wordAt(position)).toMatchObject({ from: 0, to: 7 });
+    expect(mysql.wordAt(3)).toMatchObject({ from: 1, to: 6 });
+  });
 });
 
 describe("QueryEditor line comment", () => {

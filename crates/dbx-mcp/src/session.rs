@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::transaction::TransactionOwner;
+
 /// Idle time after which an MCP session is considered expired and its pinned
 /// backend connection pool may be reclaimed.
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
@@ -22,6 +24,7 @@ pub struct McpSession {
     /// Value forwarded to the backend as `client_session_id`, pinning all
     /// queries in this session to the same connection pool.
     pub client_session_id: String,
+    pub transaction_owner: Option<Arc<TransactionOwner>>,
     last_used: Instant,
 }
 
@@ -43,6 +46,7 @@ impl<T> McpSessionStoreResult<T> {
 
 #[derive(Default)]
 struct McpSessionState {
+    opening: HashMap<String, McpSession>,
     active: HashMap<String, McpSession>,
     closing: HashMap<String, McpSession>,
 }
@@ -63,8 +67,8 @@ impl McpSessionStore {
     /// reached; expired sessions are swept before the cap is enforced.
     pub async fn open(&self, connection_id: &str, database: &str) -> McpSessionStoreResult<Result<McpSession, String>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state.active);
-        if state.active.len() + state.closing.len() >= MAX_SESSIONS {
+        let expired = sweep_expired(&mut state);
+        if session_count(&state) >= MAX_SESSIONS {
             return McpSessionStoreResult::new(
                 Err(format!(
                     "Too many open MCP sessions (max {MAX_SESSIONS}). Close unused sessions with dbx_close_session."
@@ -72,25 +76,55 @@ impl McpSessionStore {
                 expired,
             );
         }
-        let id = format!("mcp-session-{}", Uuid::new_v4());
-        let session = McpSession {
-            id: id.clone(),
-            connection_id: connection_id.to_string(),
-            database: database.to_string(),
-            // Prefixed so these pools are easy to distinguish from desktop UI
-            // sessions in backend diagnostics. `:` is normalized away by the
-            // backend pool key sanitizer.
-            client_session_id: format!("mcp:{id}"),
-            last_used: Instant::now(),
-        };
-        state.active.insert(id, session.clone());
+        let session = new_session(connection_id, database);
+        state.active.insert(session.id.clone(), session.clone());
         McpSessionStoreResult::new(Ok(session), expired)
+    }
+
+    pub async fn reserve_opening(
+        &self,
+        connection_id: &str,
+        database: &str,
+    ) -> McpSessionStoreResult<Result<McpSession, String>> {
+        let mut state = self.state.lock().await;
+        let expired = sweep_expired(&mut state);
+        if session_count(&state) >= MAX_SESSIONS {
+            return McpSessionStoreResult::new(
+                Err(format!(
+                    "Too many open MCP sessions (max {MAX_SESSIONS}). Close unused sessions with dbx_close_session."
+                )),
+                expired,
+            );
+        }
+        let session = new_session(connection_id, database);
+        state.opening.insert(session.id.clone(), session.clone());
+        McpSessionStoreResult::new(Ok(session), expired)
+    }
+
+    pub async fn promote_opening(&self, session_id: &str, owner: Arc<TransactionOwner>) -> Result<McpSession, String> {
+        let mut state = self.state.lock().await;
+        let mut session =
+            state.opening.remove(session_id).ok_or_else(|| "MCP session opening was cancelled".to_string())?;
+        session.transaction_owner = Some(owner);
+        state.active.insert(session.id.clone(), session.clone());
+        Ok(session)
+    }
+
+    pub async fn cancel_opening(&self, session_id: &str) -> Option<McpSession> {
+        self.state.lock().await.opening.remove(session_id)
+    }
+
+    pub async fn attach_transaction_owner(&self, session_id: &str, owner: Arc<TransactionOwner>) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        let session = state.active.get_mut(session_id).ok_or_else(|| "MCP session is no longer active".to_string())?;
+        session.transaction_owner = Some(owner);
+        Ok(())
     }
 
     /// Resolve a session id and refresh its idle timer.
     pub async fn resolve(&self, session_id: &str) -> McpSessionStoreResult<Option<McpSession>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state.active);
+        let expired = sweep_expired(&mut state);
         let session = state.active.get_mut(session_id).map(|session| {
             session.last_used = Instant::now();
             session.clone()
@@ -102,10 +136,10 @@ impl McpSessionStore {
     /// cap until the backend pool is closed successfully.
     pub async fn begin_close(&self, session_id: &str) -> McpSessionStoreResult<Option<McpSession>> {
         let mut state = self.state.lock().await;
-        let expired = sweep_expired(&mut state.active);
+        let expired = sweep_expired(&mut state);
         let session = state.active.remove(session_id);
         if let Some(session) = &session {
-            state.closing.insert(session.id.clone(), session.clone());
+            state.closing.entry(session.id.clone()).or_insert_with(|| session.clone());
         }
         McpSessionStoreResult::new(session, expired)
     }
@@ -129,16 +163,40 @@ impl McpSessionStore {
     }
 }
 
-fn sweep_expired(sessions: &mut HashMap<String, McpSession>) -> Vec<McpSession> {
+fn new_session(connection_id: &str, database: &str) -> McpSession {
+    let id = format!("mcp-session-{}", Uuid::new_v4());
+    McpSession {
+        id: id.clone(),
+        connection_id: connection_id.to_string(),
+        database: database.to_string(),
+        // Prefixed so these pools are easy to distinguish from desktop UI
+        // sessions in backend diagnostics. `:` is normalized away by the
+        // backend pool key sanitizer.
+        client_session_id: format!("mcp:{id}"),
+        transaction_owner: None,
+        last_used: Instant::now(),
+    }
+}
+
+fn session_count(state: &McpSessionState) -> usize {
+    state.opening.len() + state.active.len() + state.closing.len()
+}
+
+fn sweep_expired(state: &mut McpSessionState) -> Vec<McpSession> {
     let now = Instant::now();
-    let mut expired = Vec::new();
-    sessions.retain(|_, session| {
-        let active = now.duration_since(session.last_used) < SESSION_IDLE_TTL;
-        if !active {
-            expired.push(session.clone());
+    let expired_ids = state
+        .active
+        .iter()
+        .filter(|(_, session)| now.duration_since(session.last_used) >= SESSION_IDLE_TTL)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let mut expired = Vec::with_capacity(expired_ids.len());
+    for id in expired_ids {
+        if let Some(session) = state.active.remove(&id) {
+            state.closing.insert(id, session.clone());
+            expired.push(session);
         }
-        active
-    });
+    }
     expired
 }
 
@@ -165,6 +223,7 @@ mod tests {
         assert!(expired.is_empty());
         assert_eq!(closing.unwrap().id, session.id);
         assert!(store.resolve(&session.id).await.into_parts().0.is_none());
+        assert!(store.begin_close(&session.id).await.into_parts().0.is_none());
         store.finish_close(&session.id).await;
         assert!(store.begin_close(&session.id).await.into_parts().0.is_none());
     }
@@ -180,7 +239,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_sessions_are_swept_and_free_capacity() {
+    async fn expired_sessions_remain_counted_until_cleanup_finishes() {
         let store = McpSessionStore::new();
         let mut session_ids = Vec::new();
         for _ in 0..MAX_SESSIONS {
@@ -190,11 +249,15 @@ mod tests {
         for session_id in &session_ids {
             store.expire_for_test(session_id).await;
         }
-        // All sessions are expired: the sweep must reclaim them before the cap
-        // check, return them for backend cleanup, and allow a new session.
+        // Expiry transfers ownership to closing. Capacity is not reusable until
+        // the detached cleanup worker confirms physical disposal.
         let (opened, expired) = store.open("conn-1", "").await.into_parts();
-        opened.unwrap();
+        assert!(opened.unwrap_err().contains("Too many open MCP sessions"));
         assert_eq!(expired.len(), MAX_SESSIONS);
+        for session in expired {
+            store.finish_close(&session.id).await;
+        }
+        store.open("conn-1", "").await.into_parts().0.unwrap();
 
         // Resolving an expired session must fail instead of silently pinning a
         // fresh backend connection.
@@ -204,5 +267,20 @@ mod tests {
         assert!(resolved.is_none());
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].id, session.id);
+    }
+
+    #[tokio::test]
+    async fn provisional_openings_count_toward_cap_until_promoted_or_cancelled() {
+        let store = McpSessionStore::new();
+        let mut openings = Vec::new();
+        for _ in 0..MAX_SESSIONS {
+            openings.push(store.reserve_opening("conn-1", "").await.into_parts().0.unwrap());
+        }
+        assert!(store.reserve_opening("conn-1", "").await.into_parts().0.is_err());
+        assert!(store.open("conn-1", "").await.into_parts().0.is_err());
+
+        let cancelled = openings.pop().unwrap();
+        assert!(store.cancel_opening(&cancelled.id).await.is_some());
+        store.open("conn-1", "").await.into_parts().0.unwrap();
     }
 }

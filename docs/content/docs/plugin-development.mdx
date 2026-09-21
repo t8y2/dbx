@@ -102,6 +102,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.events",
     "host.filesystem",
     "host.binary",
+    "host.plans:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -117,6 +118,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
+- `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -214,7 +216,7 @@ Action `when` accepts `always`, `create`, or `edit`; `variant` accepts `default`
 
 Reference contributions by ID: a connection provider's `workbench` must point to a declared workbench and `filesystem_provider` to a declared filesystem provider. A contribution icon takes precedence over the plugin-level icon.
 
-Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. `context-menu` invokes `contextMenu/<contribution-id>` on the backend; `result-view` receives a result snapshot in workbench context. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
+Choose `workbench` for a custom file browser: the plugin owns its list, virtualization, previews, context menus, and split panes. Choose `filesystem_provider` only to use DBX's generic file manager; declaring both defaults to the workbench. `context-menu` invokes `contextMenu/<contribution-id>` on the backend; `result-view` receives a result snapshot in workbench context, and the opened contribution id arrives in the `dbx-plugin-init` payload so one UI entrypoint can serve several workbenches and result views. See the [full contribution protocol](https://github.com/t8y2/dbx/blob/main/plugins/README.md) for payloads.
 
 ### Filesystem Protocol
 
@@ -291,11 +293,104 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `readAsset(path)` / `readAssetUrl(path)` | Reads a packaged asset within the plugin resource root. |
 | `openWorkbench(id, context)` | Opens another workbench from this plugin; requires `host.workbench`. |
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
+| `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
+| `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
+| `capabilities` | `{ downloadFile, planApi }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
+| `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
 
 Failed calls reject their Promise; show a useful error and offer retry. Host methods, parameters, and results are versioned API surface—do not call undocumented DBX internals.
 
 `readAsset` paths are relative to `ui.root`: `assets/empty-state.svg` resolves to the package's `ui/assets/empty-state.svg`. Call `URL.revokeObjectURL(assetUrl)` when done, and call the unsubscribe functions returned by `onContext`/`onEvent` when a component is destroyed.
+
+### Estimated Execution Plans
+
+A plugin can read the **estimated** execution plan of a query without owning a driver, a connection pool, or a credential. It sends its own SQL and a connection reference; DBX builds the `EXPLAIN` statement with its own dialect rules, applies the same read-only safety gate it uses for its own plan view, and runs it on the host connection. The plugin receives only the raw plan, which it parses, normalizes, and visualizes itself.
+
+```json
+{
+  "permissions": ["host.plans:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.planApi) {
+  const capabilities = await window.dbxPlugin.getPlanCapabilities(connectionId);
+  if (capabilities.supports.estimatedPlan) {
+    const plan = await window.dbxPlugin.explainPlan({ connectionId, database, sql, mode: "estimated", timeoutMs: 15000 });
+    render(plan.rawPlan, plan.format);
+  }
+}
+```
+
+`getPlanCapabilities(connectionId)` returns `{ dbType, dbVersion?, supports: { estimatedPlan }, limits: { maxTimeoutMs, maxPlanBytes } }`:
+
+- `supports.estimatedPlan` is `false` when this connection's dialect has no estimated plan path in DBX; disable the feature instead of calling `explainPlan`.
+- `limits.maxTimeoutMs` already accounts for the connection's own query timeout, and a requested `timeoutMs` is clamped to it. `limits.maxPlanBytes` caps the plan payload.
+- `dbVersion` is present only when DBX already learned the product version for this connection; the host never probes the server on the plugin's behalf.
+- The call only reads the stored connection config. It does not connect, but the connection must already be open: a saved connection that is currently disconnected is rejected instead of being opened for the plugin.
+
+`explainPlan(request)` returns `{ dbType, dbVersion?, format, rawPlan, truncated, warnings }`:
+
+- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON document for `json` and the plan text otherwise.
+- `warnings` carries `plan_not_json` when the server answered with something that is not JSON (the payload is then reported as `text` instead of pretending it is JSON), `plan_truncated` when the host cut the plan to respect `maxPlanBytes`, and `plan_rows_truncated` when the driver stopped collecting plan rows. `truncated` is `true` whenever the host cut the plan for either reason.
+
+The plan API is bounded by design:
+
+- **Estimated plans only.** `mode` must be `"estimated"`; any other value is rejected. Actual plans (`EXPLAIN ANALYZE`, `SET STATISTICS XML`) execute the statement and are not part of this API.
+- **The plugin never supplies SQL to execute.** Only the source `sql` is accepted and the host builds the `EXPLAIN` statement itself, so a plugin cannot pass an `EXPLAIN` statement, a driver command, or an execution mode.
+- **Read-only targets only.** The same gate DBX uses for its own plan view rejects multi-statement input, DDL, DML, and dangerous keywords. Oracle is the one dialect where DBX also plans DML, because `EXPLAIN PLAN FOR` does not execute it.
+- **No credentials, no result set.** The response carries the plan and metadata only; a password, credential, connection string, or driver internals never cross this boundary.
+- **The connection must already be open.** DBX does not connect on a plugin's behalf, and it does not create one for the plugin. Both `getPlanCapabilities` and `explainPlan` reject a saved-but-disconnected connection with `Connection is not open`; only a connection DBX already holds open can be planned.
+
+Gate on capability rather than probing: read `dbxPlugin.capabilities.planApi` from the init message (an older host omits it), then confirm per-connection support with `getPlanCapabilities` before calling `explainPlan`. Submitting `EXPLAIN` text of your own is neither necessary nor accepted.
+
+The plan API is Host API 1.2. A plugin that cannot work without it declares the floor in its manifest with `"engines": { "host_api": "^1.2" }`. The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
+
+### File Transfer and OS Drops
+
+Desktop hosts stream local files into plugin sandboxes through `window.dbxPlugin.fileTransfer`. Handles are opened only after explicit user consent: a native open/save dialog (`pick` / `beginSave`) or a file dropped from the OS onto this plugin's workbench area (`onDrop`). Transfers are chunked, so multi-gigabyte files never load into memory.
+
+```js
+const fileTransfer = window.dbxPlugin.fileTransfer;
+if (!fileTransfer) {
+  // Web host: fall back to <input type="file"> and sidecar disk writes.
+}
+
+// Upload: the user picks files, the plugin streams chunks to its sidecar.
+const { files } = await fileTransfer.pick({ multiple: true });
+for (const file of files) {
+  let offset = 0;
+  for (;;) {
+    const chunk = await fileTransfer.read(file.handleId, offset, 256 * 1024);
+    await uploadChunk(file.name, offset, chunk.dataBase64); // your own RPC
+    if (chunk.eof) break;
+    offset += chunk.length;
+  }
+  await fileTransfer.cancel(file.handleId);
+}
+
+// Download: open a save target, stream chunks, then flush with finish.
+const target = await fileTransfer.beginSave({ name: "export.csv", size });
+await fileTransfer.write(target.handleId, 0, bytes);
+await fileTransfer.finish(target.handleId);
+
+// OS drag & drop (desktop only): dropped files arrive as opened handles.
+const offDrop = fileTransfer.onDrop((files) => uploadAll(files));
+const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
+```
+
+| API | Purpose |
+| --- | --- |
+| `pick({ multiple })` | Native open dialog; resolves opened read handles `{ handleId, name, size, contentType }`. |
+| `read(handleId, offset, length?)` | Streams a chunk `{ dataBase64, length, eof }` from a read handle. |
+| `beginSave({ name, contentType?, size? })` | Native save dialog + write handle; resolves `{ handleId, chunkBytes }`, or `null` when the user cancels. |
+| `write(handleId, offset, data)` | Writes one chunk (transferred binary or base64); resolves `{ written, nextOffset }`. |
+| `finish(handleId)` / `cancel(handleId)` | Flush-closes a write handle / discards any handle. |
+| `onDrop(fn)` | Files dropped onto this workbench arrive as already-opened read handles. |
+| `onDragState(fn)` | Whether an OS drag is currently over this workbench; drive drop overlays with it. |
+
+Desktop only: the whole namespace is `undefined` in the web host, so feature-detect before use. `onDrop` only fires for drops that land inside this plugin's workbench area; drops elsewhere keep the host's own behavior.
 
 ### Themes, Layout, and Static Assets
 

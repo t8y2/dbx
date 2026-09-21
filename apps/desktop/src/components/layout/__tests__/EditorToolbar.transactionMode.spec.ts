@@ -131,6 +131,14 @@ describe("EditorToolbar commit/rollback visibility", () => {
   const commitSelector = `button[aria-label="toolbar.commit"]`;
   const rollbackSelector = `button[aria-label="toolbar.rollback"]`;
 
+  it.each([undefined, "active-session"])("only opens independent multi-db transactions when the source has no active session (%s)", async (txnSessionId) => {
+    const host = await mountToolbar({ dbType: "oceanbase-oracle", stickyProvenReadOnlyState: true, txnSessionId });
+    const multiDb = host.querySelector<HTMLButtonElement>('button[aria-label="toolbar.multiDbExecute"]');
+    expect(multiDb).not.toBeNull();
+    expect(multiDb!.disabled).toBe(!!txnSessionId);
+    host.remove();
+  });
+
   it("hides Commit/Rollback for a clean MySQL sticky manual session", async () => {
     const host = await mountToolbar({ dbType: "mysql", stickyProvenReadOnlyState: true, txnPossiblyDirty: false, txnSessionId: "txn-1" });
 

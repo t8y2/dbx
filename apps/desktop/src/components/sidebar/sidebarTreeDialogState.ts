@@ -133,6 +133,11 @@ export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
 export const dropAllMongoIndexesLoading = ref(false);
 export const showCreateMongoIndexDialog = ref(false);
+export const showCreateMeilisearchIndexDialog = ref(false);
+export const meilisearchCreateIndexUid = ref("");
+export const meilisearchCreateIndexPrimaryKey = ref("");
+export const meilisearchCreateIndexError = ref("");
+export const meilisearchCreateIndexLoading = ref(false);
 
 function emptyMongoCreateIndexForm(): MongoCreateIndexForm {
   return {
@@ -234,6 +239,7 @@ const openFlags = [
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
   showMongoIndexManagerDialog,
   showClearElasticsearchIndexConfirm,
   showFlushRedisDbConfirm,
@@ -268,6 +274,10 @@ export function resetSidebarTreeDialogState() {
   cloneMongoCollectionError.value = "";
   cloneMongoCollectionLoading.value = false;
   resetMongoCreateIndexForm();
+  meilisearchCreateIndexUid.value = "";
+  meilisearchCreateIndexPrimaryKey.value = "";
+  meilisearchCreateIndexError.value = "";
+  meilisearchCreateIndexLoading.value = false;
   resetMongoIndexManager();
   vacuumTableExecuting.value = false;
   sidebarTreeDialogOwner.value = null;

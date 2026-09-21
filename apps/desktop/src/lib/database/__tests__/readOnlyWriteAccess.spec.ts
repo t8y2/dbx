@@ -44,6 +44,8 @@ describe("read-only write unlock", () => {
     expect(sqlLooksLikeMutation("CREATE TABLE t (id INT)", "mysql")).toBe(true);
     expect(sqlLooksLikeMutation("GET k", "redis")).toBe(false);
     expect(sqlLooksLikeMutation("SET k v", "redis")).toBe(true);
+    expect(sqlLooksLikeMutation("# note\nGET k", "redis")).toBe(false);
+    expect(sqlLooksLikeMutation("-- note\nSET k v", "redis")).toBe(true);
   });
 
   it("keeps the persistent read-only flag on while a window is active", async () => {

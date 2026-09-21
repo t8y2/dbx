@@ -452,6 +452,34 @@ func TestBuildDSNUsesConnectionFields(t *testing.T) {
 	}
 }
 
+func TestOpenDBRejectsMissingDatabaseBeforeOpeningDriver(t *testing.T) {
+	tests := []struct {
+		name   string
+		params connectParams
+	}{
+		{name: "empty structured database", params: connectParams{Host: "db.example.com", Username: "app"}},
+		{name: "whitespace structured database", params: connectParams{Host: "db.example.com", Database: " \t ", Username: "app"}},
+		{name: "empty native DSN database", params: connectParams{ConnectionString: "IP=db.example.com;DB=;User=app"}},
+		{name: "quoted whitespace native DSN database", params: connectParams{ConnectionString: "IP=db.example.com;DB='  ';User=app"}},
+		{name: "URL without database", params: connectParams{ConnectionString: "xugu://app:secret@db.example.com:5138/"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := openDB(test.params)
+			if err == nil {
+				if db != nil {
+					_ = db.Close()
+				}
+				t.Fatal("expected missing database to be rejected before opening the driver")
+			}
+			if !strings.Contains(err.Error(), "XuguDB requires an existing database name") {
+				t.Fatalf("unexpected missing-database error: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildDSNUsesDefaultPort(t *testing.T) {
 	dsn := buildDSN(connectParams{
 		Host:     "db.example.com",
@@ -707,6 +735,9 @@ func TestConfiguredDatabaseName(t *testing.T) {
 		{params: connectParams{ConnectionString: "xugu://user:secret@db.example.com:5138/demo"}, want: "demo"},
 		{params: connectParams{ConnectionString: "jdbc:xugu://db.example.com:5138/reporting"}, want: "reporting"},
 		{params: connectParams{ConnectionString: "IP=db.example.com;DB=SYSTEM;User=SYSDBA;PWD=secret"}, want: "SYSTEM"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='shop;east';User=APP"}, want: "shop;east"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='sales''east';User=APP"}, want: "sales'east"},
+		{params: connectParams{ConnectionString: "IP=db.example.com;DB='  ';User=APP"}, want: ""},
 	}
 
 	for _, tc := range cases {

@@ -684,6 +684,7 @@ fn execute_change_transaction(
             rows: Vec::new(),
             affected_rows: 0,
             execution_time_ms: started_at.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

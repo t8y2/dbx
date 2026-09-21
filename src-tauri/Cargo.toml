@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.17"
+version = "0.6.18"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ rust-version = "1.88.0"
 
 [lib]
 name = "dbx_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "dbx"

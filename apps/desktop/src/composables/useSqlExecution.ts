@@ -7,6 +7,9 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseFeatureSupport";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import * as api from "@/lib/backend/api";
+import { agentProtocolQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
@@ -14,6 +17,7 @@ import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCach
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
+import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
 import { isSqlExecutionSnapshot, resolveExecutableSql, type SqlExecutionOverride, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { isElasticsearchRestRequestText, parseElasticsearchRestRequestTarget, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -24,7 +28,7 @@ import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
-import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult } from "@/types/sqlExecution";
+import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -64,6 +68,7 @@ interface TargetSqlExecutionInput {
   scopeId?: string;
   isCancellationRequested?: () => boolean;
   targetContext?: SqlExecutionTargetContext;
+  manualTransaction?: boolean;
 }
 
 export function stripSqlComments(sql: string): string {
@@ -253,7 +258,7 @@ export function useSqlExecution(deps: {
       const commands = sql
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line.length > 0);
+        .filter((line) => line.length > 0 && !isRedisCommentLine(line));
       let highestSafety: "allowed" | "write" | "confirm" | "blocked" = "allowed";
       for (const cmd of commands) {
         const safety = classifyRedisCommandSafety(cmd);
@@ -489,7 +494,7 @@ export function useSqlExecution(deps: {
       const commands = sql
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line.length > 0);
+        .filter((line) => line.length > 0 && !isRedisCommentLine(line));
       let highestSafety: "allowed" | "confirm" | "blocked" = "allowed";
       for (const command of commands) {
         const safety = classifyRedisCommandSafety(command);
@@ -547,6 +552,9 @@ export function useSqlExecution(deps: {
 
     if (cancelRequested()) return finish({ status: "cancelled" });
     const cancelRequestCount = tab.cancelRequestCount ?? 0;
+    if (input.manualTransaction && (!input.executionTarget || !supportsTransaction(effectiveDatabaseTypeForConnection(connection)))) {
+      return finish({ status: "failed", errorMessage: t("multiDbExecute.manualUnsupported") });
+    }
     const workerId = input.executionTarget ? queryStore.createMultiDbExecutionWorker(tab.id, input.executionTarget, input.scopeId ?? "") : undefined;
     if (input.executionTarget && !workerId) return finish({ status: "failed", errorMessage: t("multiDbExecute.targetMissingConnection") });
     const executionTabId = workerId ?? tab.id;
@@ -562,46 +570,151 @@ export function useSqlExecution(deps: {
         errorMessage,
       });
     };
+    let manualSessionId: string | undefined;
+    let retainedWorker = false;
+    let commitUncertain = false;
+    let recordedRunId: string | undefined;
+    let recordCommittedOutcome: (() => Promise<void>) | undefined;
+    const rollbackManualSession = async (sessionId: string) => {
+      try {
+        await api.rollbackManualTransaction(sessionId);
+        return true;
+      } catch (error) {
+        // Core already removes sessions on statement errors and idle expiry.
+        if (!/transaction session not found/i.test(String(error))) throw error;
+        return false;
+      }
+    };
+    const transaction: MultiDbManualTransaction = {
+      canCommit: false,
+      async finish(action) {
+        if (!manualSessionId) return;
+        if (action === "commit" && !transaction.canCommit) throw new Error(t("multiDbExecute.manualCommitUnavailable"));
+        let warning: string | undefined;
+        if (action === "commit") {
+          transaction.canCommit = false;
+          try {
+            await api.commitManualTransaction(manualSessionId);
+          } catch (error) {
+            commitUncertain = true;
+            throw error;
+          }
+        } else if (!(await rollbackManualSession(manualSessionId)) && commitUncertain) {
+          warning = t("toolbar.commitOutcomeUnknown");
+        }
+        // A later history/metadata/worker cleanup failure must never retry a commit.
+        manualSessionId = undefined;
+        transaction.canCommit = false;
+        const run = queryStore.tabs.find((candidate) => candidate.id === tab.id)?.resultRuns?.find((candidate) => candidate.id === recordedRunId);
+        if (run?.multiDbExecution) {
+          run.multiDbExecution.status = warning ? "failed" : action === "commit" ? "success" : "rolled_back";
+          run.multiDbExecution.errorMessage = warning;
+        }
+        try {
+          if (action === "commit") await recordCommittedOutcome?.();
+        } catch (error) {
+          toast(String(error), 5000);
+        } finally {
+          if (workerId) await queryStore.removeMultiDbExecutionWorker(workerId, input.scopeId).catch((error) => toast(String(error), 5000));
+        }
+        return warning;
+      },
+    };
+    const failedManualResult = async (status: "failed" | "cancelled", errorMessage?: string): Promise<MultiDbTargetExecutionResult> => {
+      transaction.canCommit = false;
+      if (manualSessionId) {
+        try {
+          await rollbackManualSession(manualSessionId);
+          manualSessionId = undefined;
+        } catch (error) {
+          retainedWorker = true;
+          return finish({ status, errorMessage: [errorMessage, String(error)].filter(Boolean).join("\n"), transaction });
+        }
+      }
+      return finish({ status, errorMessage });
+    };
     try {
-      await queryStore.executeTabSql(executionTabId, sql, {
-        resultBaseSql: sql,
-        ...(input.targetContext ? { targetContext: input.targetContext } : {}),
-        ...(sourceOffset !== undefined ? { sourceOffset } : {}),
-        ...(connection.db_type === "redis" ? { skipRedisSafetyCheck: !blockRedisCommands } : {}),
-      });
+      if (input.manualTransaction) {
+        manualSessionId = await api.beginManualTransaction(executionTab.connectionId, executionTab.database, executionTab.schema, executionTab.catalog);
+        if (cancelRequested()) return await failedManualResult("cancelled");
+        const worker = queryStore.getExecutionTab(executionTabId);
+        if (!worker) throw new Error(t("multiDbExecute.targetMissingConnection"));
+        // Submit once on the dedicated session. No ordinary-connection fallback,
+        // expired-session replay, or per-statement retry is allowed for this batch.
+        const maxRows = agentProtocolQueryResultMaxRows(effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
+        const databaseType = effectiveDatabaseTypeForConnection(connection);
+        const compatibility = databaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(executionTab.connectionId, executionTab.database) : undefined;
+        const statements = splitSqlStatementRanges(sql, databaseType, sqlStatementParameterOptionsForCompatibility(databaseType, compatibility));
+        const results: NonNullable<QueryTab["results"]> = [];
+        for (const [statementIndex, statement] of (statements.length ? statements : [{ sql, from: 0, to: sql.length }]).entries()) {
+          if (cancelRequested()) return await failedManualResult("cancelled");
+          const statementResults = await api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows);
+          results.push(
+            ...statementResults.map((result) => ({
+              ...result,
+              statement_index: statementIndex,
+              sourceStatement: statement.sql,
+              ...(sourceOffset === undefined ? {} : { sourceFrom: sourceOffset + statement.from, sourceTo: sourceOffset + statement.to }),
+            })),
+          );
+          if (statementResults.some(isQueryExecutionErrorResult)) break;
+        }
+        worker.results = results;
+        worker.activeResultIndex = 0;
+        worker.result = results[0];
+        worker.resultBaseSql = sql;
+        worker.lastExecutedSql = sql;
+      } else
+        await queryStore.executeTabSql(executionTabId, sql, {
+          resultBaseSql: sql,
+          ...(input.targetContext ? { targetContext: input.targetContext } : {}),
+          ...(sourceOffset !== undefined ? { sourceOffset } : {}),
+          ...(connection.db_type === "redis" ? { skipRedisSafetyCheck: !blockRedisCommands } : {}),
+        });
       const latest = queryStore.getExecutionTab(executionTabId) ?? tab;
       if (cancelRequested() || tabCancelRequested(cancelRequestCount)) {
-        return finish({ status: "cancelled" });
+        return await failedManualResult("cancelled");
       }
       focusSqlServerDataResult(executionTabId, connection.db_type, latest);
       const failure = firstQueryExecutionError(latest);
       const errorMessage = failure ? (failure.error ? translateBackendError(t, failure.error, failure.rows?.[0]?.[0]) : String(failure.rows?.[0]?.[0] ?? t("common.failed"))) : undefined;
       const success = !failure;
-      const resultStatus = success ? "success" : "failed";
-      captureWorkerResult(resultStatus, errorMessage);
-      historyStore.add({
-        connection_id: executionTab.connectionId,
-        connection_name: connection.name || "",
-        database: executionTab.database,
-        sql,
-        execution_time_ms: Date.now() - startedAt,
-        success,
-        error: errorMessage,
-        activity_kind: classifySqlActivityKind(sql),
-        operation: primarySqlOperation(sql),
-        affected_rows: success ? latest.result?.affected_rows : undefined,
-      });
-      if (success) {
-        const refreshTarget = sqlMetadataRefreshTarget(sql, executionTab.schema);
-        if (refreshTarget.scope === "connection") {
-          connectionStore.invalidateMetadataCache(executionTab.connectionId);
-          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId });
-          await connectionStore.loadDatabases(executionTab.connectionId, { force: true });
-        } else if (refreshTarget.scope === "database") {
-          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId, database: executionTab.database, schema: refreshTarget.schema });
-          await connectionStore.refreshObjectListTreeNode(executionTab.connectionId, executionTab.database, refreshTarget.schema);
+      const resultStatus = success ? (input.manualTransaction ? "pending_commit" : "success") : "failed";
+      recordedRunId = captureWorkerResult(resultStatus, errorMessage);
+      const executionDuration = Date.now() - startedAt;
+      const recordOutcome = async () => {
+        await historyStore.add({
+          connection_id: executionTab.connectionId,
+          connection_name: connection.name || "",
+          database: executionTab.database,
+          sql,
+          execution_time_ms: executionDuration,
+          success,
+          error: errorMessage,
+          activity_kind: classifySqlActivityKind(sql),
+          operation: primarySqlOperation(sql),
+          affected_rows: success ? latest.result?.affected_rows : undefined,
+        });
+        if (success) {
+          const refreshTarget = sqlMetadataRefreshTarget(sql, executionTab.schema);
+          if (refreshTarget.scope === "connection") {
+            connectionStore.invalidateMetadataCache(executionTab.connectionId);
+            await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId });
+            await connectionStore.loadDatabases(executionTab.connectionId, { force: true });
+          } else if (refreshTarget.scope === "database") {
+            await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId, database: executionTab.database, schema: refreshTarget.schema });
+            await connectionStore.refreshObjectListTreeNode(executionTab.connectionId, executionTab.database, refreshTarget.schema);
+          }
         }
+      };
+      if (input.manualTransaction && success) {
+        transaction.canCommit = true;
+        retainedWorker = true;
+        recordCommittedOutcome = recordOutcome;
+        return finish({ status: "pending_commit", transaction });
       }
+      await recordOutcome();
+      if (input.manualTransaction) return await failedManualResult("failed", errorMessage);
       // 多库 worker 路径（workerId 存在）下不切主编辑器输出视图：并行 Promise.all
       // 会让多个 worker 几乎同时改这个共享 ref，导致主视图在 result/summary 间反复
       // 跳动（闪烁/竞态）。worker 结果已由 captureMultiDbExecutionWorkerResult 记录
@@ -613,9 +726,9 @@ export function useSqlExecution(deps: {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       captureWorkerResult("failed", errorMessage);
-      return finish({ status: "failed", errorMessage });
+      return await failedManualResult("failed", errorMessage);
     } finally {
-      if (workerId) await queryStore.removeMultiDbExecutionWorker(workerId, input.scopeId);
+      if (workerId && !retainedWorker) await queryStore.removeMultiDbExecutionWorker(workerId, input.scopeId);
     }
   }
 

@@ -250,6 +250,36 @@ pub async fn list_indexes(client: &MeilisearchClient) -> Result<Vec<String>, Str
     Ok(names)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchCreateIndexInput {
+    pub uid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<String>,
+}
+
+pub async fn create_index(client: &MeilisearchClient, input: &MeilisearchCreateIndexInput) -> Result<(), String> {
+    let uid = input.uid.trim();
+    if uid.is_empty() {
+        return Err("Meilisearch index UID cannot be empty".to_string());
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("uid".to_string(), Value::String(uid.to_string()));
+    if let Some(primary_key) = input.primary_key.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        body.insert("primaryKey".to_string(), Value::String(primary_key.to_string()));
+    }
+
+    let response = client
+        .post("/indexes")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let task = task_from_response(response, "index creation").await?;
+    wait_for_task(client, task.task_uid).await
+}
+
 #[derive(Debug, Deserialize)]
 struct DocumentsResponse {
     results: Vec<Value>,
@@ -266,7 +296,6 @@ fn meilisearch_fetch_body(
     let mut body = Map::new();
     body.insert("offset".to_string(), Value::Number(offset.into()));
     body.insert("limit".to_string(), Value::Number(limit.into()));
-    body.insert("fields".to_string(), Value::Array(vec![Value::String("*".to_string())]));
     if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
         body.insert("filter".to_string(), filter);
     }
@@ -906,6 +935,9 @@ fn meilisearch_search_body(
     }
     body.insert("offset".to_string(), Value::Number(offset.into()));
     body.insert("limit".to_string(), Value::Number(limit.into()));
+    // Search results are also used for filtered export. Request the complete
+    // stored document instead of the index's displayed-attributes subset.
+    body.insert("attributesToRetrieve".to_string(), Value::Array(vec![Value::String("*".to_string())]));
     if let Some(filter) = meilisearch_filter_from_request(filter, primary_key)? {
         body.insert("filter".to_string(), filter);
     }
@@ -1858,6 +1890,7 @@ fn raw_response_result(status: u16, body: String, start: Instant, truncated: boo
         rows: vec![vec![Value::Number(status.into()), Value::String(body)]],
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
+        server_execute_time_us: None,
         truncated,
         session_id: None,
         has_more: false,
@@ -2372,7 +2405,10 @@ mod tests {
             super::meilisearch_fetch_body(0, 1000, Some(r#"genre = "sci-fi""#), Some("movie_id:asc"), Some("movie_id"))
                 .unwrap();
 
-        assert_eq!(body.get("fields"), Some(&json!(["*"])));
+        // Omitting `fields` asks Meilisearch to return every stored field.
+        // A wildcard field is treated as a literal field name by some versions
+        // and produces `{}` documents in the export response.
+        assert!(!body.contains_key("fields"));
         assert_eq!(body.get("limit"), Some(&json!(1000)));
         assert_eq!(body.get("offset"), Some(&json!(0)));
     }

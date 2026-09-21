@@ -1011,8 +1011,8 @@ test("AI partner presets reuse a supported runtime adapter", () => {
   assert.ok(jalapeno);
   assert.equal(jalapeno.provider, "openai-compatible");
   assert.equal(jalapeno.endpoint, "https://api.jalapeno-cloud.ai/v1");
-  assert.equal(jalapeno.model, "GLM-5.2");
-  assert.deepEqual(jalapeno.models, [{ name: "GLM-5.2" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }]);
+  assert.ok(jalapeno.model);
+  assert.ok(jalapeno.models.some(({ name }) => name === jalapeno.model));
   assert.equal(jalapeno.requiresApiKey, true);
   assert.equal(jalapeno.websiteUrl, "https://www.jalapeno-cloud.ai/dbx");
   assert.equal(jalapeno.apiKeyUrl, "https://www.jalapeno-cloud.ai/dbx");

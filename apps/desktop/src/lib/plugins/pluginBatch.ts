@@ -17,10 +17,12 @@ export interface BatchOutcome {
 /**
  * Run `action` over `items` sequentially, recording per-item success/failure. A failing item is
  * captured and the batch continues; nothing is rolled back. `nameOf` supplies a human label used
- * in the summary. Empty input yields an empty outcome.
+ * in the summary. `onProgress` fires after every item (success or failure) so callers can render
+ * live "(current/total)" progress. Empty input yields an empty outcome.
  */
-export async function runBatch<T>(items: readonly T[], nameOf: (item: T) => string, action: (item: T) => Promise<void>): Promise<BatchOutcome> {
+export async function runBatch<T>(items: readonly T[], nameOf: (item: T) => string, action: (item: T) => Promise<void>, onProgress?: (completed: number, total: number) => void): Promise<BatchOutcome> {
   const results: BatchItemOutcome[] = [];
+  let completed = 0;
   for (const item of items) {
     const name = nameOf(item);
     try {
@@ -29,6 +31,8 @@ export async function runBatch<T>(items: readonly T[], nameOf: (item: T) => stri
     } catch (cause) {
       results.push({ name, ok: false, error: cause instanceof Error ? cause.message : String(cause) });
     }
+    completed += 1;
+    onProgress?.(completed, items.length);
   }
   return {
     results,

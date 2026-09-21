@@ -18,6 +18,8 @@ import { dedupeMultiDbExecutionTargets, multiDbExecutionTargetKey, type MultiDbE
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { targetAllowsEmptyDatabase, targetIsSingleDatabase, targetSupportsCatalog, targetSupportsSchema, targetUsesConnectionOnlyScope } from "@/lib/database/sqlExecutionTargetCapabilities";
+import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const open = defineModel<boolean>("open", { default: false });
 
@@ -31,6 +33,7 @@ const props = defineProps<{
   cancelTarget?: MultiDbExecutionAdapter["cancelTarget"];
   cancelPending?: MultiDbExecutionAdapter["cancelPending"];
   sourceOffset?: number;
+  initialManualTransaction?: boolean;
 }>();
 
 const { t } = useI18n();
@@ -65,6 +68,10 @@ const pendingClose = ref(false);
 const unsavedPromptOpen = ref(false);
 const executionStarted = ref(false);
 const executionMode = ref<MultiDbExecutionMode>("serial");
+const manualTransaction = ref(false);
+const discardTransactionsOpen = ref(false);
+const closingTransactions = ref(false);
+const supportsManualTransaction = computed(() => isTauriRuntime() && supportsTransaction(props.databaseType));
 const currentTime = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 let validationRun = 0;
@@ -103,7 +110,7 @@ const hasUnsavedChanges = computed(() => {
   }
   return manualSelectionTouched.value;
 });
-const canExecute = computed(() => !isExecuting.value && !!props.sql.trim() && allTargetsValid.value && invalidTargetCount.value === 0 && needsRecheckCount.value === 0);
+const canExecute = computed(() => !isExecuting.value && !execution.hasTransactions.value && !!props.sql.trim() && allTargetsValid.value && invalidTargetCount.value === 0 && needsRecheckCount.value === 0);
 const canSaveGroup = computed(() => !isExecuting.value && !!props.databaseType && selectedTargets.value.length > 0 && allTargetsValid.value);
 const progressCompleted = computed(() => (batch.value?.items ?? []).filter((item) => !["pending", "running"].includes(item.status)).length);
 const progressCounts = computed(() => {
@@ -113,6 +120,7 @@ const progressCounts = computed(() => {
     failed: items.filter((item) => item.status === "failed").length,
     skipped: items.filter((item) => item.status === "skipped").length,
     notExecuted: items.filter((item) => item.status === "not_executed" || item.status === "cancelled").length,
+    pendingCommit: items.filter((item) => item.status === "pending_commit").length,
   };
 });
 const elapsedMs = computed(() => {
@@ -125,7 +133,7 @@ function syncBackgroundTask(current: NonNullable<typeof batch.value>): void {
   const items = current.items;
   const completed = items.filter((item) => !["pending", "running"].includes(item.status)).length;
   const failureCount = items.filter((item) => item.status === "failed").length;
-  const status = current.status === "cancelled" ? "cancelled" : current.status === "completed" ? "completed" : "running";
+  const status = items.some((item) => item.transaction) ? "running" : current.status === "cancelled" ? "cancelled" : current.status === "completed" ? "completed" : "running";
   updateMultiDbExecutionTask(current.id, {
     sourceTabId: current.sourceTabId,
     total: items.length,
@@ -178,6 +186,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (elapsedTimer) clearInterval(elapsedTimer);
   if (trackedBatchId) unregisterTaskCancelHandler(trackedBatchId);
+  void execution.dispose().then((cleaned) => {
+    if (!cleaned) toast(t("multiDbExecute.cleanupFailed"), 5000);
+  });
 });
 
 const searchQuery = computed(() => searchText.value.trim().toLocaleLowerCase());
@@ -221,6 +232,8 @@ function statusLabel(status: MultiDbExecutionItemStatus): string {
     skipped: t("multiDbExecute.skipped"),
     cancelled: t("multiDbExecute.cancelled"),
     not_executed: t("multiDbExecute.notExecuted"),
+    pending_commit: t("multiDbExecute.pendingCommit"),
+    rolled_back: t("multiDbExecute.rolledBack"),
   };
   return labels[status];
 }
@@ -557,6 +570,10 @@ function cancelUnsavedPrompt(): void {
 }
 
 function requestClose(): void {
+  if ((batch.value?.context.manualTransaction && isExecuting.value) || execution.hasTransactions.value) {
+    discardTransactionsOpen.value = true;
+    return;
+  }
   if (isExecuting.value) {
     open.value = false;
     return;
@@ -568,6 +585,21 @@ function requestClose(): void {
     return;
   }
   open.value = false;
+}
+
+async function discardTransactionsAndClose(): Promise<void> {
+  if (closingTransactions.value) return;
+  closingTransactions.value = true;
+  try {
+    if (!(await execution.cancelAndRollback())) {
+      discardTransactionsOpen.value = false;
+      return;
+    }
+    discardTransactionsOpen.value = false;
+    open.value = false;
+  } finally {
+    closingTransactions.value = false;
+  }
 }
 
 function openGroupNameDialog(mode: "create" | "update" | "clone" | "rename", group?: SqlExecutionTargetGroup): void {
@@ -637,9 +669,11 @@ function groupNameForId(id: string): string {
 }
 
 function openForNewBatch(): void {
+  if (isExecuting.value || execution.hasTransactions.value) return;
   execution.reset();
   executionStarted.value = false;
   executionMode.value = "serial";
+  manualTransaction.value = props.initialManualTransaction === true && supportsManualTransaction.value;
   trackedBatchId = undefined;
   manageGroups.value = false;
   selectedGroupId.value = undefined;
@@ -662,7 +696,7 @@ async function startExecution(): Promise<void> {
   if (!valid || !canExecute.value) return;
   if (selectedGroupId.value) targetGroupStore.markGroupUsed(selectedGroupId.value);
   executionStarted.value = true;
-  void execution.start(props.sql, selectedTargets.value, { sourceOffset: props.sourceOffset }, executionMode.value);
+  void execution.start(props.sql, selectedTargets.value, { sourceOffset: props.sourceOffset, manualTransaction: manualTransaction.value && supportsManualTransaction.value }, executionMode.value);
 }
 
 function removeSelected(target: MultiDbExecutionTarget): void {
@@ -722,7 +756,7 @@ watch(
       <DialogHeader class="shrink-0 border-b px-5 py-3">
         <DialogTitle class="flex items-center gap-2">
           <Layers class="h-5 w-5 text-primary" />
-          {{ executionStarted ? t("multiDbExecute.progress") : t("multiDbExecute.title") }}
+          {{ executionStarted ? t("multiDbExecute.progress", { completed: progressCompleted, total: batch?.items.length ?? 0 }) : t("multiDbExecute.title") }}
         </DialogTitle>
       </DialogHeader>
 
@@ -735,6 +769,7 @@ watch(
           <Badge variant="outline">{{ t("multiDbExecute.failed") }} {{ progressCounts.failed }}</Badge>
           <Badge variant="outline">{{ t("multiDbExecute.skipped") }} {{ progressCounts.skipped }}</Badge>
           <Badge variant="outline">{{ t("multiDbExecute.notExecuted") }} {{ progressCounts.notExecuted }}</Badge>
+          <Badge v-if="progressCounts.pendingCommit" variant="outline">{{ t("multiDbExecute.pendingCommit") }} {{ progressCounts.pendingCommit }}</Badge>
         </div>
         <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <div class="space-y-2">
@@ -750,6 +785,10 @@ watch(
                 <div v-if="item.durationMs !== undefined" class="text-xs tabular-nums text-muted-foreground">{{ t("multiDbExecute.elapsed", { duration: formatDataTransferDuration(item.durationMs) }) }}</div>
                 <div v-if="item.errorMessage" class="mt-1 whitespace-pre-wrap break-words text-xs text-destructive">{{ item.errorMessage }}</div>
               </div>
+              <div v-if="item.transaction" class="flex shrink-0 gap-2">
+                <Button size="sm" :disabled="isExecuting || item.settling || !item.transaction.canCommit" @click="execution.finishTransaction(item.id, 'commit')">{{ t("multiDbExecute.commit") }}</Button>
+                <Button size="sm" variant="outline" :disabled="isExecuting || item.settling" @click="execution.finishTransaction(item.id, 'rollback')">{{ t("multiDbExecute.rollback") }}</Button>
+              </div>
             </div>
           </div>
         </div>
@@ -758,7 +797,7 @@ watch(
             <X class="h-4 w-4" />
             {{ t("multiDbExecute.cancelBatch") }}
           </Button>
-          <Button v-if="isExecuting" variant="outline" @click="requestClose">{{ t("exportProgress.minimize") }}</Button>
+          <Button v-if="isExecuting && !batch.context.manualTransaction" variant="outline" @click="requestClose">{{ t("exportProgress.minimize") }}</Button>
           <Button v-else @click="requestClose">{{ t("common.close") }}</Button>
         </DialogFooter>
       </div>
@@ -989,6 +1028,11 @@ watch(
         </div>
 
         <div class="flex shrink-0 flex-wrap items-center gap-2 border-t bg-muted/15 px-5 py-2 text-xs text-muted-foreground">
+          <label v-if="supportsManualTransaction" class="flex items-center gap-2">
+            <input v-model="manualTransaction" type="checkbox" :disabled="isExecuting" />
+            {{ t("multiDbExecute.manualTransaction") }}
+          </label>
+          <p v-if="manualTransaction" class="w-full">{{ t("multiDbExecute.manualWarning") }}</p>
           <span>{{ executionMode === "serial" ? t("multiDbExecute.serialContinueOnError") : t("multiDbExecute.parallelContinueOnError") }}</span>
           <span v-if="validating" class="inline-flex items-center gap-1"><Loader2 class="h-3 w-3 animate-spin" />{{ t("common.loading") }}</span>
           <span v-else-if="invalidTargetCount" class="text-destructive">{{ t("multiDbExecute.invalidTargetCount", { count: invalidTargetCount }) }}</span>
@@ -1010,6 +1054,19 @@ watch(
           </Button>
         </DialogFooter>
       </div>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog :open="discardTransactionsOpen" @update:open="(value) => !closingTransactions && (discardTransactionsOpen = value)">
+    <DialogContent class="sm:max-w-[480px]">
+      <DialogHeader
+        ><DialogTitle>{{ t("multiDbExecute.discardTitle") }}</DialogTitle></DialogHeader
+      >
+      <p class="text-sm text-muted-foreground">{{ t("multiDbExecute.discardWarning") }}</p>
+      <DialogFooter>
+        <Button variant="outline" :disabled="closingTransactions" @click="discardTransactionsOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button variant="destructive" :disabled="closingTransactions || batch?.status === 'cancelling'" @click="discardTransactionsAndClose">{{ t("multiDbExecute.rollbackAndClose") }}</Button>
+      </DialogFooter>
     </DialogContent>
   </Dialog>
 

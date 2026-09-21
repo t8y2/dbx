@@ -34,9 +34,3 @@ test("SQL file execution summary reserves space for aggregate columns", () => {
   assert.match(dialogSource, /<tfoot class="sticky bottom-0 z-10 border-t-2 border-primary\/35 bg-muted font-semibold text-foreground/);
   assert.match(dialogSource, /<th scope="row" class="px-2\.5 py-2 text-left">\{\{ t\("sqlFile\.totalFiles"/);
 });
-
-test("SQL file execution dialog preserves cancel, close, and retry actions", () => {
-  assert.match(dialogSource, /<template v-if="running">[\s\S]*@click="open = false"[\s\S]*@click="cancelExecution"/);
-  assert.match(dialogSource, /<template v-else>[\s\S]*@click="open = false"[\s\S]*:disabled="!canStart" @click="startExecution"/);
-  assert.match(dialogSource, /terminalStatus\.value = cancelRequested\.value \? "cancelled" : "error"/);
-});

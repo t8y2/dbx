@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiMentionDatabase, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -143,6 +143,14 @@ describe("Dameng AI context routing", () => {
     });
     expect(resolveDefaultAiSchema(connection, ["ARCHIVE", "APP_USER", "REPORTING"])).toBe("APP_USER");
     expect(resolveDefaultAiSchema(connection, ["REPORTING", "ARCHIVE"])).toBe("REPORTING");
+  });
+
+  it("lists @ mention tables from the database picked in the composer", () => {
+    const connection = postgresConnection();
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second"])).toBe("db_second");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, ["db_second", "db_first"])).toBe("db_second");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), connection, [])).toBe("db_first");
+    expect(resolveAiMentionDatabase(queryTab("db_first"), damengConnection(), ["ignored"])).toBe("db_first");
   });
 
   it("does not change non-Dameng namespace behavior", () => {

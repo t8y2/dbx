@@ -722,6 +722,193 @@ async fn official_database_tools_round_trip_through_dbx() {
 }
 
 #[tokio::test]
+#[ignore = "opt-in: DBX_MONGO_LEGACY_DUMP_TEST_HOST (host:port, MongoDB 3.6+ without auth) and an installed MongoDB Legacy Agent; creates temporary databases"]
+async fn legacy_agent_database_round_trip_through_dbx() {
+    use dbx_core::{
+        connection::{AppState, PoolKind},
+        models::connection::ConnectionConfig,
+        mongo_ops::mongo_run_command_core,
+        mongodb_dump::*,
+        storage::Storage,
+    };
+    // Everything, including seeding and verification, goes through the legacy agent: the native
+    // Rust driver refuses servers older than 4.2, which is the very case the agent exists for.
+    async fn command(state: &AppState, id: &str, database: &str, command: Document) -> Document {
+        let json = mongodb::bson::Bson::Document(command).into_canonical_extjson().to_string();
+        let result = mongo_run_command_core(state, id, database, &json).await.unwrap();
+        let response = result.extended_documents.unwrap().remove(0);
+        let response = dbx_core::db::mongo_driver::json_object_to_document_extended_json(&response).unwrap();
+        assert_eq!(
+            response.get_f64("ok").ok().or_else(|| response.get_i32("ok").ok().map(f64::from)),
+            Some(1.0),
+            "{response}"
+        );
+        response
+    }
+    fn batch(response: &Document) -> Vec<Document> {
+        let cursor = response.get_document("cursor").unwrap();
+        cursor.get_array("firstBatch").unwrap().iter().map(|b| b.as_document().unwrap().clone()).collect()
+    }
+    async fn documents(state: &AppState, id: &str, database: &str, collection: &str) -> Vec<Vec<u8>> {
+        batch(&command(state, id, database, doc! { "find": collection, "sort": { "_id": 1 } }).await)
+            .iter()
+            .map(|document| mongodb::bson::to_vec(document).unwrap())
+            .collect()
+    }
+    async fn specs(state: &AppState, id: &str, database: &str, collection: &str) -> (Document, Vec<Document>) {
+        let listed =
+            batch(&command(state, id, database, doc! { "listCollections": 1, "filter": { "name": collection } }).await);
+        let spec = listed.first().unwrap_or_else(|| panic!("{database}.{collection} is missing"));
+        let options = spec.get_document("options").cloned().unwrap_or_default();
+        let mut indexes = Vec::new();
+        if spec.get_str("type").unwrap_or("collection") != "view" {
+            for mut index in batch(&command(state, id, database, doc! { "listIndexes": collection }).await) {
+                index.remove("ns");
+                index.remove("v");
+                indexes.push(index);
+            }
+            indexes.sort_by_key(|index| index.get_str("name").unwrap().to_string());
+        }
+        (options, indexes)
+    }
+
+    let endpoint = std::env::var("DBX_MONGO_LEGACY_DUMP_TEST_HOST").expect("DBX_MONGO_LEGACY_DUMP_TEST_HOST");
+    let (host, port) = endpoint.split_once(':').expect("host:port");
+    let files = tempfile::tempdir().unwrap();
+    let database = format!("dbx_legacy_{}", uuid::Uuid::new_v4().simple());
+    let state = AppState::new(Storage::open(&files.path().join("storage.db")).await.unwrap());
+    let id = "legacy-dump-test";
+    let config: ConnectionConfig = serde_json::from_value(serde_json::json!({ "id": id, "name": "Legacy dump test", "db_type": "mongodb", "host": host, "port": port.parse::<u16>().unwrap(), "username": "", "password": "", "database": database, "driver_profile": "mongodb-legacy" })).unwrap();
+    state.configs.write().await.insert(id.into(), config);
+    let key = state.get_or_create_pool(id, Some(&database)).await.unwrap();
+    let kind = match state.pool_handle(&key).await {
+        Some(PoolKind::Agent(_)) => "agent",
+        Some(PoolKind::MongoDb(_)) => "native",
+        Some(_) => "other",
+        None => "none",
+    };
+    assert_eq!(kind, "agent", "test must run over the legacy agent (pool key {key})");
+
+    command(&state, id, &database, doc! { "create": "records", "validator": { "score": { "$gte": 0 } }, "validationLevel": "strict", "collation": { "locale": "en", "strength": 2 } }).await;
+    command(&state, id, &database, doc! { "insert": "records", "documents": [
+        { "_id": 1, "score": 1i64, "name": "first", "when": mongodb::bson::DateTime::from_millis(1_700_000_000_000) },
+        { "_id": 2, "score": 2i64, "name": "second", "ratio": 0.5f64, "tags": ["a", "b"] },
+    ] }).await;
+    command(&state, id, &database, doc! { "createIndexes": "records", "indexes": [ { "key": { "name": 1, "score": -1 }, "name": "compound_unique", "unique": true }, { "key": { "expires": 1 }, "name": "ttl", "expireAfterSeconds": 3600 }] }).await;
+    command(&state, id, &database, doc! { "create": "empty" }).await;
+    command(&state, id, &database, doc! { "create": "capped", "capped": true, "size": 65536i64, "max": 100i64 }).await;
+    command(&state, id, &database, doc! { "insert": "capped", "documents": [ { "_id": 1, "n": 1 } ] }).await;
+    command(&state, id, &database, doc! { "insert": "odd/name", "documents": [ { "_id": mongodb::bson::oid::ObjectId::new(), "binary": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3] }, "big": i64::MAX } ] }).await;
+    command(&state, id, &database, doc! { "create": "z_view", "viewOn": "records", "pipeline": [ { "$match": { "score": { "$gte": 1 } } } ], "collation": { "locale": "en", "strength": 2 } }).await;
+    command(&state, id, &database, doc! { "create": "a_nested", "viewOn": "z_view", "pipeline": [], "collation": { "locale": "en", "strength": 2 } }).await;
+    let collections = ["records", "empty", "capped", "odd/name", "z_view", "a_nested"];
+
+    let catalog = inspect_mongodb_database_dump(&state, id, &database).await.unwrap();
+    assert_eq!(catalog.collections.len(), 6);
+
+    let mut databases = vec![database.clone()];
+    for format in [MongoDumpFormat::Directory, MongoDumpFormat::Archive] {
+        for gzip in [false, true] {
+            let tag = format!("{format:?}_{gzip}");
+            let output = files.path().join(format!("legacy-{tag}"));
+            let dump = MongoDatabaseDumpRequest {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                connection_id: id.into(),
+                database: database.clone(),
+                file_path: output.to_str().unwrap().into(),
+                format,
+                gzip,
+                collections: None,
+            };
+            let dumped = dump_mongodb_database(&state, &dump, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+            assert_eq!(dumped.collections_done, 6);
+            assert_eq!(dumped.documents_read, 4);
+
+            let preview = prepare_mongodb_restore_source(MongoRestoreSourceRequest {
+                path: output.to_str().unwrap().into(),
+                format,
+                gzip,
+            })
+            .await
+            .unwrap();
+            let restored = format!("{database}_{tag}");
+            databases.push(restored.clone());
+            let request = MongoDatabaseRestoreRequest {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                connection_id: id.into(),
+                database: restored.clone(),
+                source_database: database.clone(),
+                source_ref: preview.source_ref.clone(),
+                collections: None,
+                drop_existing: false,
+                restore_options: true,
+                restore_indexes: true,
+                stop_on_error: true,
+                objcheck: gzip,
+                batch_size: 500,
+                execution_id: None,
+            };
+            let result =
+                restore_mongodb_database(&state, &request, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+            assert_eq!(result.collections_done, 6);
+            assert_eq!(result.documents_written, 4);
+            assert_eq!(result.documents_failed, 0);
+            assert_eq!(result.indexes_created, 2, "records: compound_unique + ttl; _id_ indexes are never recreated");
+            for collection in collections {
+                assert_eq!(
+                    documents(&state, id, &database, collection).await,
+                    documents(&state, id, &restored, collection).await,
+                    "data: {tag} {collection}"
+                );
+                assert_eq!(
+                    specs(&state, id, &database, collection).await,
+                    specs(&state, id, &restored, collection).await,
+                    "metadata: {tag} {collection}"
+                );
+            }
+
+            // Selective restore with dropExisting replaces only the chosen collection.
+            command(&state, id, &restored, doc! { "insert": "unselected", "documents": [ { "_id": "keep" } ] }).await;
+            command(
+                &state,
+                id,
+                &restored,
+                doc! { "insert": "records", "documents": [ { "_id": 999, "score": 999, "name": "remove" } ] },
+            )
+            .await;
+            let mut selected = request.clone();
+            selected.drop_existing = true;
+            selected.collections = Some(vec!["records".into()]);
+            restore_mongodb_database(&state, &selected, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+            assert_eq!(
+                documents(&state, id, &database, "records").await,
+                documents(&state, id, &restored, "records").await
+            );
+            assert_eq!(documents(&state, id, &restored, "unselected").await.len(), 1);
+
+            // Appending onto existing _ids reports each duplicate instead of silently succeeding.
+            let mut duplicate = request.clone();
+            duplicate.collections = Some(vec!["records".into()]);
+            duplicate.stop_on_error = false;
+            let appended =
+                restore_mongodb_database(&state, &duplicate, |_| Box::pin(async { false }), |_| {}).await.unwrap();
+            assert_eq!(appended.documents_written, 0);
+            assert_eq!(appended.documents_failed, 2);
+            assert_eq!(
+                documents(&state, id, &database, "records").await,
+                documents(&state, id, &restored, "records").await
+            );
+
+            assert!(release_mongodb_restore_source(&preview.source_ref));
+            println!("legacy agent {tag}: six collections/views, BSON, options and indexes match");
+        }
+    }
+    for database in databases {
+        command(&state, id, &database, doc! { "dropDatabase": 1 }).await;
+    }
+}
+
+#[tokio::test]
 async fn database_source_rejects_invalid_metadata_and_view_cycles() {
     use dbx_core::mongodb_dump::*;
     let directory = tempfile::tempdir().unwrap();

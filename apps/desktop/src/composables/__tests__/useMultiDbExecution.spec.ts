@@ -9,6 +9,116 @@ const targets = [
 ] as const;
 
 describe("useMultiDbExecution", () => {
+  it("retains separate transactions until each target is explicitly settled", async () => {
+    const commits = targets.map(() => vi.fn().mockResolvedValue(undefined));
+    const executor = useMultiDbExecution(
+      {
+        executeTarget: async ({ target, context }) => {
+          expect(context.manualTransaction).toBe(true);
+          return { status: "pending_commit", transaction: { canCommit: true, finish: commits[targets.findIndex((candidate) => candidate.connectionId === target.connectionId)] } };
+        },
+      },
+      { sourceTabId: "source" },
+    );
+    const batch = await executor.start("UPDATE t SET n = 1", targets, { manualTransaction: true });
+    expect(executor.hasTransactions.value).toBe(true);
+    expect(commits.every((commit) => commit.mock.calls.length === 0)).toBe(true);
+    executor.reset();
+    expect(executor.batch.value?.id).toBe(batch?.id);
+    expect(await executor.start("SELECT 2", targets)).toBeUndefined();
+    await executor.finishTransaction(batch!.items[0].id, "commit");
+    await executor.finishTransaction(batch!.items[1].id, "rollback");
+    expect(batch!.items.map((item) => item.status)).toEqual(["success", "rolled_back", "pending_commit"]);
+    expect(commits[0]).toHaveBeenCalledWith("commit");
+    expect(commits[1]).toHaveBeenCalledWith("rollback");
+    expect(commits[2]).not.toHaveBeenCalled();
+  });
+
+  it("preserves a failed settlement for rollback and does not run it twice concurrently", async () => {
+    let reject!: (reason: Error) => void;
+    const finish = vi.fn(
+      () =>
+        new Promise<void>((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const executor = useMultiDbExecution({ executeTarget: async () => ({ status: "pending_commit", transaction: { canCommit: true, finish } }) }, { sourceTabId: "source" });
+    const batch = await executor.start("UPDATE t SET n = 1", [targets[0]], { manualTransaction: true });
+    const committing = executor.finishTransaction(batch!.items[0].id, "commit");
+    expect(await executor.finishTransaction(batch!.items[0].id, "commit")).toBe(false);
+    reject(new Error("connection lost"));
+    expect(await committing).toBe(false);
+    expect(batch!.items[0].errorMessage).toBe("connection lost");
+    expect(executor.hasTransactions.value).toBe(true);
+    finish.mockResolvedValueOnce(undefined);
+    expect(await executor.finishTransaction(batch!.items[0].id, "rollback")).toBe(true);
+    expect(finish).toHaveBeenCalledTimes(2);
+    expect(executor.hasTransactions.value).toBe(false);
+  });
+
+  it("rolls back an execution that finishes after disposal without starting the next target", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const finish = vi.fn().mockResolvedValue(undefined);
+    const executeTarget = vi.fn(async () => {
+      await gate;
+      return { status: "pending_commit" as const, transaction: { canCommit: true, finish } };
+    });
+    const executor = useMultiDbExecution({ executeTarget }, { sourceTabId: "source" });
+    const run = executor.start("UPDATE t SET n = 1", targets, { manualTransaction: true });
+    const disposing = executor.dispose();
+    expect(finish).not.toHaveBeenCalled();
+    release();
+    await run;
+    expect(await disposing).toBe(true);
+    expect(executeTarget).toHaveBeenCalledTimes(1);
+    expect(finish).toHaveBeenCalledExactlyOnceWith("rollback");
+    expect(executor.batch.value!.items.map((item) => item.status)).toEqual(["rolled_back", "not_executed", "not_executed"]);
+  });
+
+  it("waits for a commit in flight before disposing the other transactions", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const finish = vi.fn(async (action: string) => {
+      if (action === "commit") await gate;
+    });
+    const executor = useMultiDbExecution({ executeTarget: async () => ({ status: "pending_commit", transaction: { canCommit: true, finish } }) }, { sourceTabId: "source" });
+    const batch = await executor.start("UPDATE t SET n = 1", targets.slice(0, 2), { manualTransaction: true });
+    const commit = executor.finishTransaction(batch!.items[0].id, "commit");
+    const disposing = executor.dispose();
+    release();
+    await commit;
+    expect(await disposing).toBe(true);
+    expect(batch!.items.map((item) => item.status)).toEqual(["success", "rolled_back"]);
+    expect(finish.mock.calls.map((call) => call[0])).toEqual(["commit", "rollback"]);
+  });
+
+  it("retains failed cleanup without allowing commit or reset", async () => {
+    const finish = vi.fn().mockRejectedValue(new Error("rollback unavailable"));
+    const executor = useMultiDbExecution({ executeTarget: async () => ({ status: "failed", transaction: { canCommit: false, finish } }) }, { sourceTabId: "source" });
+    const batch = await executor.start("UPDATE t SET n = 1", [targets[0]], { manualTransaction: true });
+    expect(await executor.finishTransaction(batch!.items[0].id, "commit")).toBe(false);
+    expect(finish).not.toHaveBeenCalled();
+    expect(await executor.rollbackPending()).toBe(false);
+    executor.reset();
+    expect(executor.hasTransactions.value).toBe(true);
+    expect(batch!.items[0].errorMessage).toBe("rollback unavailable");
+  });
+
+  it("reports an unknown commit outcome instead of marking it rolled back", async () => {
+    const finish = vi.fn().mockResolvedValue("Verify data: commit result unknown");
+    const executor = useMultiDbExecution({ executeTarget: async () => ({ status: "pending_commit", transaction: { canCommit: false, finish } }) }, { sourceTabId: "source" });
+    const batch = await executor.start("UPDATE t SET n = 1", [targets[0]], { manualTransaction: true });
+    expect(await executor.finishTransaction(batch!.items[0].id, "rollback")).toBe(false);
+    expect(batch!.items[0].status).toBe("failed");
+    expect(batch!.items[0].errorMessage).toBe("Verify data: commit result unknown");
+    expect(executor.hasTransactions.value).toBe(false);
+  });
+
   it("executes serially and continues after a target failure", async () => {
     const executionOrder: string[] = [];
     const executor = useMultiDbExecution(

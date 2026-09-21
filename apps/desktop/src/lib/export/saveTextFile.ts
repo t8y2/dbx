@@ -1,7 +1,7 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { appendDebugLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 
-export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string } = {}) {
+export async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string } = {}): Promise<boolean> {
   const logSaveStage = (stage: string, details: Record<string, unknown> = {}) => {
     if (!isDebugLoggingEnabled()) return;
     appendDebugLog("info", `[DBX][export:save:${stage}]`, {
@@ -25,7 +25,7 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
     logSaveStage("dialog-result", { selected: !!path });
     if (path) await writeTextFile(path, content);
     if (path) logSaveStage("write-done");
-    return;
+    return Boolean(path);
   }
 
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
@@ -36,6 +36,7 @@ export async function saveTextFile(content: string, defaultFileName: string, fil
   a.click();
   URL.revokeObjectURL(url);
   logSaveStage("browser-download-triggered");
+  return true;
 }
 
 export function sanitizeExportBaseName(value: string): string {

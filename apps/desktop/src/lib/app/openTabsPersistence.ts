@@ -23,6 +23,8 @@ export interface SavedOpenTab {
   customTitle?: boolean;
   connectionId: string;
   database: string;
+  /** 原连接已被删除但页签被保留时记录的原连接名，用于新建同名连接后重新绑定。 */
+  detachedConnectionName?: string;
   catalog?: string;
   schema?: string;
   sql: string;
@@ -163,6 +165,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.customTitle ? { customTitle: true } : {}),
     connectionId: tab.connectionId,
     database: tab.database,
+    ...(tab.detachedConnectionName ? { detachedConnectionName: tab.detachedConnectionName } : {}),
     ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
     schema: tab.schema,
     sql: shouldPersistTabSql(tab) ? tab.sql : "",

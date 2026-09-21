@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -25,6 +25,8 @@ use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::models::connection::DatabaseType;
+use crate::sql::SqlParsingOptions;
+use crate::sql_file_import::{SqlFileStreamDecoder, StreamingSqlFileSplitter};
 use crate::transfer::{
     escape_value_typed, execute_on_pool, generate_insert_typed_from_value_rows,
     generate_insert_typed_sql_batches_from_value_rows, get_columns_for_transfer, normalize_integer_literal,
@@ -34,6 +36,8 @@ use crate::transfer::{
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
+/// `.sql` 脚本已改为流式解析，不再受体积上限约束；该上限只保留给 JSON 等
+/// 仍然需要整份物化的格式。
 pub const MAX_NON_STREAMING_IMPORT_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_LEGACY_XLS_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
 const IMPORT_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -1572,14 +1576,41 @@ pub fn parse_sql_bytes_with_options(
     let mut target: Option<SqlInsertTarget> = None;
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut total_rows = 0usize;
+    collect_sql_import_rows(
+        statements.iter().map(String::as_str),
+        dialect.as_ref(),
+        family,
+        &mut target,
+        &mut rows,
+        preview_limit,
+        &mut total_rows,
+    )?;
 
+    let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
+    Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
+}
+
+/// 逐条语句把 INSERT 数据行登记到 `target` / `rows`。
+///
+/// 非流式的 [`parse_sql_bytes_with_options`] 与流式的 [`SqlImportRowStream`] 共用这段
+/// 解析逻辑，保证两条路径的取值白名单、方言标识符折叠与错误信息完全一致，
+/// 只有「行以什么节奏产出」不同。
+fn collect_sql_import_rows<'a>(
+    statements: impl IntoIterator<Item = &'a str>,
+    dialect: &dyn sqlparser::dialect::Dialect,
+    family: SqlImportDialectFamily,
+    target: &mut Option<SqlInsertTarget>,
+    rows: &mut Vec<Vec<serde_json::Value>>,
+    preview_limit: usize,
+    total_rows: &mut usize,
+) -> Result<(), String> {
     for statement_sql in statements {
-        let parsed = match Parser::parse_sql(dialect.as_ref(), &statement_sql) {
+        let parsed = match Parser::parse_sql(dialect, statement_sql) {
             Ok(statements) => statements,
             Err(error) => {
                 // 非 INSERT 语句（DDL、SET、……）不属于数据导入范畴，跳过；
                 // 以 INSERT/REPLACE 开头却解析失败的语句必须报错，不能静默丢弃。
-                let keyword = sql_import_leading_keyword(&statement_sql);
+                let keyword = sql_import_leading_keyword(statement_sql);
                 let is_insert = keyword
                     .as_deref()
                     .is_some_and(|word| word.eq_ignore_ascii_case("INSERT") || word.eq_ignore_ascii_case("REPLACE"));
@@ -1593,16 +1624,249 @@ pub fn parse_sql_bytes_with_options(
             let Statement::Insert(insert) = statement else {
                 continue;
             };
-            parse_sql_insert_statement(&insert, family, &mut target, &mut rows, preview_limit, &mut total_rows)?;
+            parse_sql_insert_statement(&insert, family, target, rows, preview_limit, total_rows)?;
         }
     }
-
-    let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
-    Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
+    Ok(())
 }
 
 pub fn parse_sql_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
     parse_sql_bytes_with_options(bytes, &TableImportParseOptions::default(), preview_limit)
+}
+
+/// SQL 脚本导入的增量行流。
+///
+/// 旧实现会把整个脚本读成 `String`、拆成全部语句后把所有数据行物化成
+/// `Vec<Vec<Value>>`，峰值内存随文件线性增长（实测约 10 倍脚本体积），这也是
+/// 表导入原先给 `.sql` 设定 100 MB 上限的原因。这里改为分块解码 → 增量拆分语句
+/// → 按批产出数据行，峰值内存从「整个文件 + 全部行」降到「一个解码分块 + 一条语句」。
+///
+/// 行语义与 [`parse_sql_bytes_with_options`] 共用 [`collect_sql_import_rows`]，
+/// 因此取值白名单、方言折叠与报错文案保持一致。
+struct SqlImportRowStream {
+    decoder: SqlFileStreamDecoder,
+    /// `None` 表示已经读到 EOF 并取走了 `finish()` 的收尾语句。
+    splitter: Option<StreamingSqlFileSplitter>,
+    family: SqlImportDialectFamily,
+    target: Option<SqlInsertTarget>,
+    rows: Vec<Vec<serde_json::Value>>,
+    total_rows: usize,
+}
+
+impl SqlImportRowStream {
+    async fn open(
+        file_path: &str,
+        options: &TableImportParseOptions,
+        bytes_read: Option<Arc<AtomicU64>>,
+    ) -> Result<Self, String> {
+        let family = options.sql_dialect.map(sql_import_dialect_family).unwrap_or(SqlImportDialectFamily::Generic);
+        let parsing_options = match options.sql_dialect {
+            Some(db_type) => SqlParsingOptions::for_database_type(db_type),
+            None => SqlParsingOptions::default(),
+        };
+        // 目标为 MySQL 兼容库时按 mysqldump 的 `_binary '...'` 字面量规范化解码，
+        // 与 SQL 文件执行路径保持一致；其它方言保持原始文本，避免误改普通字符串。
+        let decoder = SqlFileStreamDecoder::open_for_import(
+            Path::new(file_path),
+            options.encoding.and_then(TableImportTextEncoding::encoding),
+            family == SqlImportDialectFamily::MySql,
+            bytes_read,
+        )
+        .await?;
+        Ok(Self {
+            decoder,
+            splitter: Some(StreamingSqlFileSplitter::new(options.sql_dialect, parsing_options)),
+            family,
+            target: None,
+            rows: Vec::new(),
+            total_rows: 0,
+        })
+    }
+
+    fn effective_encoding(&self) -> TableImportTextEncoding {
+        table_import_text_encoding_from_charset(self.decoder.encoding())
+    }
+
+    fn columns(&self) -> Option<Vec<String>> {
+        self.target.as_ref().map(|target| target.columns.clone())
+    }
+
+    /// 已经扫描到的数据行总数；脚本读完之前只是「目前读到多少」。
+    fn total_rows(&self) -> usize {
+        self.total_rows
+    }
+
+    /// 返回下一批最多 `max_rows` 行，`Ok(None)` 表示脚本已经读完。
+    ///
+    /// 单条 INSERT 语句的行会一次全部登记，因此内部缓冲区可能短暂超过 `max_rows`
+    /// （上限是一条语句的数据量）；返回值仍然不超过 `max_rows`。
+    async fn next_batch(&mut self, max_rows: usize) -> Result<Option<Vec<Vec<serde_json::Value>>>, String> {
+        let max_rows = max_rows.max(1);
+        while self.rows.len() < max_rows && self.splitter.is_some() {
+            self.read_next_chunk().await?;
+        }
+        if self.rows.is_empty() {
+            return Ok(None);
+        }
+        let take = max_rows.min(self.rows.len());
+        Ok(Some(self.rows.drain(..take).collect()))
+    }
+
+    async fn read_next_chunk(&mut self) -> Result<(), String> {
+        match self.decoder.next_chunk().await? {
+            Some(chunk) => {
+                let statements = self
+                    .splitter
+                    .as_mut()
+                    .expect("splitter stays present until the stream reaches EOF")
+                    .push_chunk(&chunk);
+                self.consume_statements(&statements)
+            }
+            None => {
+                let splitter = self.splitter.take().expect("splitter stays present until the stream reaches EOF");
+                let statements = splitter.finish();
+                self.consume_statements(&statements)
+            }
+        }
+    }
+
+    fn consume_statements(&mut self, statements: &[crate::sql::SqlStatementWithControl]) -> Result<(), String> {
+        let dialect = sql_import_parser_dialect(self.family);
+        collect_sql_import_rows(
+            statements.iter().map(|statement| statement.sql.as_str()),
+            dialect.as_ref(),
+            self.family,
+            &mut self.target,
+            &mut self.rows,
+            usize::MAX,
+            &mut self.total_rows,
+        )
+    }
+}
+
+/// 表导入的行来源。
+///
+/// 分隔文本、JSON、Excel 仍然先把行解析进内存；`.sql` 脚本改用
+/// [`SqlImportRowStream`] 增量产出，内存不再随文件体积增长，因此 `.sql`
+/// 不再有 100 MB 的体积上限。
+enum ImportRowSource {
+    Materialized { columns: Vec<String>, rows: std::vec::IntoIter<Vec<serde_json::Value>>, total_rows: usize },
+    Sql { stream: Box<SqlImportRowStream>, bytes_read: Arc<AtomicU64>, pending: Option<Vec<Vec<serde_json::Value>>> },
+}
+
+impl ImportRowSource {
+    /// 打开行来源并预取第一批行。
+    ///
+    /// SQL 脚本的列清单来自第一条 INSERT 语句，必须先读出一批行，调用方才能在
+    /// 写入前完成映射校验与导入计划编译；其余格式只有一种列清单，预取不影响语义。
+    async fn open(
+        file_path: &str,
+        source_format: TableImportSourceFormat,
+        parse_options: &TableImportParseOptions,
+        text_source_columns: HashSet<String>,
+        first_batch_rows: usize,
+    ) -> Result<Self, String> {
+        if source_format == TableImportSourceFormat::Sql {
+            let bytes_read = Arc::new(AtomicU64::new(0));
+            let mut stream = SqlImportRowStream::open(file_path, parse_options, Some(bytes_read.clone())).await?;
+            let pending = stream.next_batch(first_batch_rows).await?;
+            return Ok(Self::Sql { stream: Box::new(stream), bytes_read, pending });
+        }
+        let parsed = parse_import_file_with_options_and_text_columns(
+            file_path,
+            Some(source_format),
+            parse_options,
+            usize::MAX,
+            text_source_columns,
+        )
+        .await?;
+        Ok(Self::Materialized { columns: parsed.columns, rows: parsed.rows.into_iter(), total_rows: parsed.total_rows })
+    }
+
+    fn columns(&self) -> Result<Vec<String>, String> {
+        match self {
+            Self::Materialized { columns, .. } => Ok(columns.clone()),
+            Self::Sql { stream, .. } => {
+                stream.columns().ok_or_else(|| "No INSERT statements found in SQL file".to_string())
+            }
+        }
+    }
+
+    fn total_rows(&self) -> usize {
+        match self {
+            Self::Materialized { total_rows, .. } => *total_rows,
+            Self::Sql { stream, .. } => stream.total_rows(),
+        }
+    }
+
+    /// 是否在写入前就已知全部行数。SQL 脚本只有在扫描到 EOF 后才知道总行数。
+    fn total_rows_known(&self) -> bool {
+        matches!(self, Self::Materialized { .. })
+    }
+
+    /// 已读取的源字节数，用于大脚本的按字节进度；物化来源在解析阶段已经读完。
+    fn bytes_read(&self, total_bytes: u64) -> u64 {
+        match self {
+            Self::Materialized { .. } => total_bytes,
+            Self::Sql { bytes_read, .. } => bytes_read.load(Ordering::Relaxed).min(total_bytes),
+        }
+    }
+
+    async fn next_batch(&mut self, max_rows: usize) -> Result<Option<Vec<Vec<serde_json::Value>>>, String> {
+        match self {
+            Self::Materialized { rows, .. } => {
+                let batch = rows.by_ref().take(max_rows).collect::<Vec<_>>();
+                Ok((!batch.is_empty()).then_some(batch))
+            }
+            Self::Sql { stream, pending, .. } => {
+                if let Some(batch) = pending.take() {
+                    return Ok(Some(batch));
+                }
+                stream.next_batch(max_rows).await
+            }
+        }
+    }
+}
+
+/// 流式扫描 `.sql` 脚本：只保留前 `preview_limit` 行用于预览/建表推断，
+/// 同时统计文件里的数据行总数（预览的 `totalRowsExact` 语义保持不变）。
+/// 内存不再随脚本体积增长，因此大文件预览不会先把全部行物化再截断。
+async fn parse_sql_streaming_preview(
+    file_path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+) -> Result<ParsedImportFile, String> {
+    let mut stream = SqlImportRowStream::open(file_path, options, None).await?;
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    while let Some(batch) = stream.next_batch(preview_limit.max(1)).await? {
+        if rows.len() >= preview_limit {
+            continue;
+        }
+        let remaining = preview_limit - rows.len();
+        rows.extend(batch.into_iter().take(remaining));
+    }
+    let columns = stream.columns().ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
+    Ok(ParsedImportFile {
+        columns,
+        rows,
+        total_rows: stream.total_rows(),
+        effective_encoding: Some(stream.effective_encoding()),
+    })
+}
+
+/// 解码器实际使用的 charset → 表导入对外暴露的编码枚举。
+fn table_import_text_encoding_from_charset(charset: &'static encoding_rs::Encoding) -> TableImportTextEncoding {
+    if charset == encoding_rs::UTF_8 {
+        TableImportTextEncoding::Utf8
+    } else if charset == encoding_rs::GBK {
+        TableImportTextEncoding::Gbk
+    } else if charset == encoding_rs::UTF_16LE {
+        TableImportTextEncoding::Utf16Le
+    } else if charset == encoding_rs::UTF_16BE {
+        TableImportTextEncoding::Utf16Be
+    } else {
+        TableImportTextEncoding::Utf8
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3429,7 +3693,8 @@ pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportF
 }
 
 fn ensure_non_streaming_file_size(path: &str, format: TableImportSourceFormat) -> Result<(), String> {
-    if format.is_delimited() {
+    // 分隔文本与 SQL 脚本都是流式解析，内存占用不随文件体积增长，没有体积上限。
+    if format.is_delimited() || format == TableImportSourceFormat::Sql {
         return Ok(());
     }
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
@@ -3483,14 +3748,8 @@ async fn parse_import_file_with_options_and_text_columns(
             parse_json_bytes_with_options(&bytes, options, preview_limit)
         }
         TableImportSourceFormat::Sql => {
-            let path = path.to_string();
-            let options = options.clone();
-            tokio::task::spawn_blocking(move || {
-                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                parse_sql_bytes_with_options(&bytes, &options, preview_limit)
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            // 大脚本走增量解析：只保留前 `preview_limit` 行，内存不随体积增长。
+            parse_sql_streaming_preview(path, options, preview_limit).await
         }
         TableImportSourceFormat::Excel => {
             let path = path.to_string();
@@ -5147,16 +5406,68 @@ fn emit_import_error<F>(
 where
     F: FnMut(TableImportProgress),
 {
-    let message = import_error_message(request, rows_imported, error);
-    progress_callback(import_progress(
-        &request.import_id,
-        TableImportStatus::Error,
+    emit_import_error_with_total_rows_exact(
+        progress_callback,
+        request,
         rows_imported,
         total_rows,
+        true,
+        started_at,
+        error,
+    )
+}
+
+/// 流式来源（`.sql`）在读完整份脚本之前并不知道总行数，所以失败事件也必须沿用
+/// 「总数未知」这个标志；否则界面会把已解析到的部分行数当成总行数显示成 `N / M`。
+#[allow(clippy::too_many_arguments)]
+fn emit_import_error_with_total_rows_exact<F>(
+    progress_callback: &mut F,
+    request: &TableImportRequest,
+    rows_imported: usize,
+    total_rows: usize,
+    total_rows_exact: bool,
+    started_at: Instant,
+    error: impl AsRef<str>,
+) -> String
+where
+    F: FnMut(TableImportProgress),
+{
+    let message = import_error_message(request, rows_imported, error);
+    progress_callback(import_progress_with_details(
+        &request.import_id,
+        TableImportStatus::Error,
+        TableImportPhase::Done,
+        rows_imported,
+        total_rows,
+        total_rows_exact,
+        0,
+        0,
         started_at,
         Some(message.clone()),
     ));
     message
+}
+
+/// 取消事件同样要带上「总数是否已知」，流式来源取消时总数只是已解析的部分行数。
+fn import_cancelled_progress(
+    import_id: &str,
+    rows_imported: usize,
+    total_rows: usize,
+    total_rows_exact: bool,
+    started_at: Instant,
+) -> TableImportProgress {
+    import_progress_with_details(
+        import_id,
+        TableImportStatus::Cancelled,
+        TableImportPhase::Done,
+        rows_imported,
+        total_rows,
+        total_rows_exact,
+        0,
+        0,
+        started_at,
+        None,
+    )
 }
 
 fn delimited_record_to_row(
@@ -6917,44 +7228,68 @@ where
         target_column_types = created_column_types.clone().unwrap_or_default();
     }
     let text_source_columns = textual_source_columns_for_import(&request.mappings, &target_column_types);
-    let parsed = match parse_import_file_with_options_and_text_columns(
+    let effective_batch_size = effective_import_batch_size(db_type, batch_size);
+    let mut row_source = match ImportRowSource::open(
         &request.file_path,
-        Some(source_format),
+        source_format,
         &import_parse_options,
-        usize::MAX,
         text_source_columns,
+        effective_batch_size,
     )
     .await
     {
-        Ok(parsed) => parsed,
+        Ok(source) => source,
         Err(error) => {
             return Err(emit_import_error(&mut progress_callback, request, 0, 0, started_at, error));
         }
     };
 
-    let total_rows = parsed.total_rows;
-    if let Err(error) = mapping_indexes(&parsed, &request.mappings) {
+    let total_rows = row_source.total_rows();
+    let total_rows_exact = row_source.total_rows_known();
+    // 流式来源在读完之前不知道总行数，进度与计数都不能按已知总数裁剪。
+    let total_rows_cap = if total_rows_exact { total_rows } else { usize::MAX };
+    let source_columns = match row_source.columns() {
+        Ok(columns) => columns,
+        Err(error) => {
+            return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error));
+        }
+    };
+    if let Err(error) = mapping_indexes_for_columns(&source_columns, &request.mappings) {
         return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error));
     }
-    progress_callback(import_progress_with_details(
-        &request.import_id,
-        TableImportStatus::Running,
-        TableImportPhase::Writing,
-        0,
-        total_rows,
-        true,
-        total_bytes,
-        total_bytes,
-        started_at,
-        None,
-    ));
+    if total_rows_exact {
+        progress_callback(import_progress_with_details(
+            &request.import_id,
+            TableImportStatus::Running,
+            TableImportPhase::Writing,
+            0,
+            total_rows,
+            true,
+            total_bytes,
+            total_bytes,
+            started_at,
+            None,
+        ));
+    } else {
+        progress_callback(import_progress_with_details(
+            &request.import_id,
+            TableImportStatus::Running,
+            TableImportPhase::Writing,
+            0,
+            total_rows,
+            false,
+            row_source.bytes_read(total_bytes),
+            total_bytes,
+            started_at,
+            None,
+        ));
+    }
     let mut last_progress_emit = Instant::now();
 
-    let effective_batch_size = effective_import_batch_size(db_type, batch_size);
     let compiled_plan = if *db_type == DatabaseType::CloudflareD1 {
         None
     } else {
-        match compile_import_plan(&parsed.columns, &request.mappings, &target_column_types) {
+        match compile_import_plan(&source_columns, &request.mappings, &target_column_types) {
             Ok(plan) => Some(plan),
             Err(error) => {
                 return Err(emit_import_error(&mut progress_callback, request, 0, total_rows, started_at, error));
@@ -6992,15 +7327,29 @@ where
     }
 
     let mut rows_imported = 0;
-    for rows in parsed.rows.chunks(effective_batch_size) {
+    loop {
+        let rows = match row_source.next_batch(effective_batch_size).await {
+            Ok(Some(rows)) => rows,
+            Ok(None) => break,
+            Err(error) => {
+                return Err(emit_import_error_with_total_rows_exact(
+                    &mut progress_callback,
+                    request,
+                    rows_imported,
+                    total_rows,
+                    total_rows_exact,
+                    started_at,
+                    error,
+                ));
+            }
+        };
         if is_cancelled(&request.import_id).await {
-            progress_callback(import_progress(
+            progress_callback(import_cancelled_progress(
                 &request.import_id,
-                TableImportStatus::Cancelled,
                 rows_imported,
                 total_rows,
+                total_rows_exact,
                 started_at,
-                None,
             ));
             return Err("Import cancelled".to_string());
         }
@@ -7012,10 +7361,10 @@ where
             &is_cancelled,
             &request.connection_id,
             &request.database,
-            rows,
+            &rows,
             compiled_plan.as_ref(),
             sqlserver_bulk_plan.as_ref(),
-            &parsed.columns,
+            &source_columns,
             &request.mappings,
             &target_column_types,
             &request.table,
@@ -7035,39 +7384,54 @@ where
         {
             Ok(row_count) => row_count,
             Err(error) => {
-                rows_imported = (rows_imported + error.rows_imported).min(total_rows);
+                rows_imported = (rows_imported + error.rows_imported).min(total_rows_cap);
                 if error.cancelled {
-                    progress_callback(import_progress(
+                    progress_callback(import_cancelled_progress(
                         &request.import_id,
-                        TableImportStatus::Cancelled,
                         rows_imported,
                         total_rows,
+                        total_rows_exact,
                         started_at,
-                        None,
                     ));
                     return Err(error.message);
                 }
-                return Err(emit_import_error(
+                return Err(emit_import_error_with_total_rows_exact(
                     &mut progress_callback,
                     request,
                     rows_imported,
                     total_rows,
+                    total_rows_exact,
                     started_at,
                     error.message,
                 ));
             }
         };
-        rows_imported = (rows_imported + row_count).min(total_rows);
+        rows_imported = (rows_imported + row_count).min(total_rows_cap);
         pending_truncate = false;
         if last_progress_emit.elapsed() >= IMPORT_PROGRESS_INTERVAL {
-            progress_callback(import_progress(
-                &request.import_id,
-                TableImportStatus::Running,
-                rows_imported,
-                total_rows,
-                started_at,
-                None,
-            ));
+            if total_rows_exact {
+                progress_callback(import_progress(
+                    &request.import_id,
+                    TableImportStatus::Running,
+                    rows_imported,
+                    total_rows,
+                    started_at,
+                    None,
+                ));
+            } else {
+                progress_callback(import_progress_with_details(
+                    &request.import_id,
+                    TableImportStatus::Running,
+                    TableImportPhase::Writing,
+                    rows_imported,
+                    total_rows,
+                    false,
+                    row_source.bytes_read(total_bytes),
+                    total_bytes,
+                    started_at,
+                    None,
+                ));
+            }
             last_progress_emit = Instant::now();
         }
     }
@@ -7086,7 +7450,7 @@ where
         &mut progress_callback,
     )
     .await?
-    .min(total_rows);
+    .min(total_rows_cap);
 
     let flushed_rows = flush_pending_postgres_copy(
         state,
@@ -7101,40 +7465,42 @@ where
     let flushed_rows = match flushed_rows {
         Ok(rows) => rows,
         Err(error) if error.cancelled => {
-            progress_callback(import_progress(
+            progress_callback(import_cancelled_progress(
                 &request.import_id,
-                TableImportStatus::Cancelled,
                 rows_imported,
                 total_rows,
+                total_rows_exact,
                 started_at,
-                None,
             ));
             return Err(error.message);
         }
         Err(error) => {
-            return Err(emit_import_error(
+            return Err(emit_import_error_with_total_rows_exact(
                 &mut progress_callback,
                 request,
                 rows_imported,
                 total_rows,
+                total_rows_exact,
                 started_at,
                 error.message,
             ));
         }
     };
-    rows_imported = rows_imported.saturating_add(flushed_rows).min(total_rows);
+    rows_imported = rows_imported.saturating_add(flushed_rows).min(total_rows_cap);
 
+    // 流式脚本到 EOF 才能确认总行数；写入全部成功时它就是已导入的行数。
+    let reported_total_rows = if total_rows_exact { total_rows } else { rows_imported };
     progress_callback(import_progress(
         &request.import_id,
         TableImportStatus::Done,
         rows_imported,
-        total_rows,
+        reported_total_rows,
         started_at,
         None,
     ));
     log_import_metrics(request, source_format, rows_imported, started_at, db_write_ms, statement_count);
 
-    Ok(import_summary(&request.import_id, rows_imported, total_rows, started_at))
+    Ok(import_summary(&request.import_id, rows_imported, reported_total_rows, started_at))
 }
 
 #[cfg(test)]
@@ -8639,6 +9005,174 @@ mod tests {
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!("a;b")]);
         assert_eq!(parsed.rows[1], vec![serde_json::json!("it -- not a comment")]);
+    }
+
+    /// 流式行流必须与整份解析产出完全一致的列、行与总行数，
+    /// 否则超过 100 MB 的脚本会得到与旧路径不同的结果。
+    #[tokio::test]
+    async fn streaming_sql_rows_match_whole_file_parsing() {
+        let script = "-- dump header\n\
+                      /*!40101 SET NAMES utf8mb4 */;\n\
+                      CREATE TABLE users (id INT, name TEXT);\n\
+                      INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'Bob');\n\
+                      INSERT INTO users (id, name) VALUES (3, 'Cathy');\n\
+                      INSERT INTO users (id, name) VALUES (4, 'a;b');\n";
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, script).unwrap();
+        let file_path = path.to_string_lossy().to_string();
+        let options = sql_import_options(DatabaseType::Mysql);
+
+        let expected = parse_sql_bytes_with_options(script.as_bytes(), &options, usize::MAX).unwrap();
+        let mut stream = SqlImportRowStream::open(&file_path, &options, None).await.unwrap();
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next_batch(2).await.unwrap() {
+            assert!(batch.len() <= 2, "batch size must respect the requested limit");
+            rows.extend(batch);
+        }
+
+        assert_eq!(stream.columns(), Some(expected.columns.clone()));
+        assert_eq!(rows, expected.rows);
+        assert_eq!(stream.total_rows(), expected.total_rows);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 脚本远大于一次解码分块（256 KiB），语句必须跨分块正确拼接。
+    #[tokio::test]
+    async fn streaming_sql_rows_span_decode_chunks() {
+        let mut script = String::new();
+        for index in 0..30000 {
+            script.push_str(&format!("INSERT INTO t (id, name) VALUES ({index}, 'row-{index}');\n"));
+        }
+        assert!(
+            script.len() > 4 * crate::sql_file_import::SQL_FILE_READ_CHUNK_BYTES,
+            "script must span multiple decoder chunks to exercise cross-chunk statement assembly"
+        );
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &script).unwrap();
+        let file_path = path.to_string_lossy().to_string();
+        let options = sql_import_options(DatabaseType::Mysql);
+
+        let expected = parse_sql_bytes_with_options(script.as_bytes(), &options, usize::MAX).unwrap();
+        let mut stream = SqlImportRowStream::open(&file_path, &options, None).await.unwrap();
+        let mut rows = Vec::new();
+        while let Some(batch) = stream.next_batch(500).await.unwrap() {
+            rows.extend(batch);
+        }
+
+        assert_eq!(rows.len(), 30000);
+        assert_eq!(rows, expected.rows);
+        assert_eq!(stream.columns(), Some(vec!["id".to_string(), "name".to_string()]));
+        assert_eq!(stream.total_rows(), 30000);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn streaming_sql_preview_keeps_row_count_exact() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "INSERT INTO t (id) VALUES (1), (2), (3), (4), (5);").unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let parsed = parse_sql_streaming_preview(&file_path, &TableImportParseOptions::default(), 2).await.unwrap();
+
+        assert_eq!(parsed.total_rows, 5);
+        assert_eq!(parsed.rows.len(), 2);
+        assert_eq!(parsed.columns, vec!["id"]);
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Utf8));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn streaming_sql_preview_reports_missing_insert_statements() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "CREATE TABLE t (id INT); SET NAMES utf8;").unwrap();
+
+        let error = parse_sql_streaming_preview(&path.to_string_lossy(), &TableImportParseOptions::default(), 10)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("No INSERT statements found"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 流式路径必须同时支持显式编码与自动探测 GBK，否则旧路径能导入的脚本会解码成乱码。
+    #[tokio::test]
+    async fn streaming_sql_preview_decodes_gbk_with_and_without_explicit_encoding() {
+        let mut script = b"INSERT INTO t (name) VALUES ('".to_vec();
+        script.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4]);
+        script.extend_from_slice(b"');");
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &script).unwrap();
+        let file_path = path.to_string_lossy().to_string();
+
+        let explicit = TableImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Gbk),
+            ..TableImportParseOptions::default()
+        };
+        let parsed = parse_sql_streaming_preview(&file_path, &explicit, 10).await.unwrap();
+        assert_eq!(parsed.rows[0], vec![serde_json::json!("中文")]);
+        assert_eq!(parsed.effective_encoding, Some(TableImportTextEncoding::Gbk));
+
+        let detected = parse_sql_streaming_preview(&file_path, &TableImportParseOptions::default(), 10).await.unwrap();
+        assert_eq!(detected.rows[0], vec![serde_json::json!("中文")]);
+        assert_eq!(detected.effective_encoding, Some(TableImportTextEncoding::Gbk));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `.sql` 已经改成流式解析，不应再受 100 MB 非流式上限约束。
+    #[test]
+    fn sql_import_is_not_size_capped() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-limit-{}.sql", uuid::Uuid::new_v4()));
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_NON_STREAMING_IMPORT_BYTES + 1).unwrap();
+        drop(file);
+
+        ensure_non_streaming_file_size(&path.to_string_lossy(), TableImportSourceFormat::Sql).unwrap();
+        ensure_non_streaming_file_size(&path.to_string_lossy(), TableImportSourceFormat::Json).unwrap_err();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 流式 `.sql` 在读完整份脚本之前，`total_rows` 只是已解析的部分行数。
+    /// 失败与取消事件必须沿用「总数未知」这个标志，否则界面会把 19000 行导入
+    /// 显示成 `19000 / 2771` 这种自相矛盾的进度。
+    #[test]
+    fn streaming_import_error_and_cancel_report_total_rows_as_inexact() {
+        let request = TableImportRequest {
+            import_id: "import-stream".to_string(),
+            connection_id: "connection-1".to_string(),
+            database: "db".to_string(),
+            schema: "public".to_string(),
+            table: "users".to_string(),
+            file_path: "stream.sql".to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Sql),
+            parse_options: TableImportParseOptions::default(),
+            mappings: vec![],
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 500,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+        };
+        let started_at = Instant::now();
+        let mut events = vec![import_cancelled_progress(&request.import_id, 19_000, 2_771, false, started_at)];
+        {
+            let mut callback = |progress: TableImportProgress| events.push(progress);
+            emit_import_error_with_total_rows_exact(&mut callback, &request, 19_000, 2_771, false, started_at, "boom");
+            // 非流式来源的总数在写入前就已知，沿用原来的精确语义。
+            emit_import_error(&mut callback, &request, 19_000, 2_771, started_at, "boom");
+        }
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].status, TableImportStatus::Cancelled);
+        assert_eq!(events[1].status, TableImportStatus::Error);
+        assert_eq!(events[2].status, TableImportStatus::Error);
+        assert_eq!(events[0].rows_imported, 19_000);
+        assert_eq!(events[1].rows_imported, 19_000);
+        assert!(!events[0].total_rows_exact, "cancelled streaming import must not claim an exact total");
+        assert!(!events[1].total_rows_exact, "failed streaming import must not claim an exact total");
+        assert!(events[2].total_rows_exact, "non-streaming sources keep reporting exact totals");
+        assert!(events[1].error.as_deref().unwrap_or_default().contains("boom"));
     }
 
     #[test]

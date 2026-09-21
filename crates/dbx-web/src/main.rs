@@ -567,6 +567,8 @@ async fn main() {
         .route("/query/build-explain-sql", post(routes::query::build_explain_sql))
         .route("/query/build-dropped-file-preview-sql", post(routes::query::build_dropped_file_preview_sql))
         .route("/query/get-explain-info", post(routes::query::get_explain_info))
+        .route("/query/plugin-plan-capabilities", post(routes::query::get_plugin_plan_capabilities))
+        .route("/query/plugin-estimated-plan", post(routes::query::get_plugin_estimated_plan))
         .route("/query/build-create-user-sql", post(routes::query::build_create_user_sql))
         .route("/query/build-table-select-sql", post(routes::query::build_table_select_sql))
         .route("/query/build-database-search-sql", post(routes::query::build_database_search_sql))
@@ -932,6 +934,7 @@ async fn main() {
         .route("/document-store/meilisearch/settings/update", post(routes::document_store::meilisearch_update_settings))
         .route("/document-store/meilisearch/stats", post(routes::document_store::meilisearch_get_stats))
         .route("/document-store/meilisearch/overview", post(routes::document_store::meilisearch_get_overview))
+        .route("/document-store/meilisearch/index/create", post(routes::document_store::meilisearch_create_index))
         .route("/document-store/meilisearch/index/delete", post(routes::document_store::meilisearch_delete_index))
         .route(
             "/document-store/meilisearch/system/overview",

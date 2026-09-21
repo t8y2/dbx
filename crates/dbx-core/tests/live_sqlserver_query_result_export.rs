@@ -131,6 +131,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
+        export_column_extras: None,
         column_comments: None,
         auto_filter: None,
         identifier_quote: None,

@@ -8,10 +8,12 @@ pub const SUPPORTED_PLUGIN_MANIFEST_VERSION: u32 = 1;
 /// Host API version the host advertises at `plugin/initialize`.
 ///
 /// 1.1 adds the plugin-initiated `host/requestUserInput` method (see
-/// `plugins/runtime.rs`). It is additive: 1.0 plugins keep working, and a
-/// plugin that wants the capability must check the advertised version (or the
-/// `host.requestUserInput` entry in `host.features`) before calling it.
-pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.1.0";
+/// `plugins/runtime.rs`). 1.2 adds the plugin-initiated plan Host API
+/// (`host.getPlanCapabilities` / `host.explainPlan`). Both are additive: older
+/// plugins keep working, and a plugin that wants either capability must check
+/// the advertised version (or the matching `capabilities` / `host.features`
+/// entry) before calling it.
+pub const SUPPORTED_PLUGIN_HOST_API_VERSION: &str = "1.2.0";
 /// Capabilities the host advertises to a plugin backend at `plugin/initialize`.
 pub const SUPPORTED_PLUGIN_HOST_FEATURES: &[&str] = &["host.requestUserInput"];
 pub const SUPPORTED_PLUGIN_PROTOCOL_VERSION: u32 = 1;
@@ -19,7 +21,8 @@ pub const PLUGIN_CONNECTION_TEST_METHOD: &str = "connection/test";
 pub const PLUGIN_CONNECTION_CONNECT_METHOD: &str = "connection/connect";
 pub const PLUGIN_CONNECTION_DISCONNECT_METHOD: &str = "connection/disconnect";
 pub const PLUGIN_CONNECTION_ACTION_METHOD: &str = "connection/action";
-pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &["host.events", "host.binary", "host.workbench", "host.filesystem"];
+pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] =
+    &["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read"];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
 /// the sandbox CSP or enumerate large origin lists.
@@ -1009,6 +1012,13 @@ fn validate_engine_requirement(label: &str, requirement: &str, actual: &str, err
     if requirement.trim().is_empty() {
         return;
     }
+    // An empty installed version means the host could not identify itself (the
+    // standalone MCP binary and CLI are versioned independently from the DBX
+    // app). The requirement is unverifiable there, not unsatisfied, so skip it
+    // instead of failing every plugin (#9595).
+    if actual.trim().is_empty() {
+        return;
+    }
     let requirement = match VersionReq::parse(requirement.trim()) {
         Ok(requirement) => requirement,
         Err(error) => {
@@ -1475,7 +1485,7 @@ mod tests {
     use super::{
         parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions,
         PluginConnectionActionContribution, PluginConnectionProviderContribution, PluginFormFieldBinding,
-        PluginManifest,
+        PluginManifest, SUPPORTED_PLUGIN_HOST_API_VERSION, SUPPORTED_PLUGIN_PERMISSIONS,
     };
 
     #[test]
@@ -1535,6 +1545,110 @@ mod tests {
         std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
         let compatibility = manifest.compatibility(dir.path(), "0.1.0");
         assert!(compatibility.errors.iter().any(|error| error.contains("host.network:http://api.vendor.com")));
+    }
+
+    #[test]
+    fn accepts_host_plans_read_and_still_rejects_unknown_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.plans:read"]
+        }))
+        .unwrap();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        // The plan API is read-only: an execute-scoped scope must not be declared.
+        for permission in ["host.plans:execute", "host.plans", "host.plans:read:all", "host.plan:read"] {
+            let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+                "manifest_version": 1,
+                "id": "io.dbx.example",
+                "name": "Example",
+                "version": "1.0.0",
+                "publisher": "example",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+                "permissions": [permission]
+            }))
+            .unwrap();
+            let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+            assert!(!compatibility.compatible, "{permission} must stay unsupported");
+            assert!(
+                compatibility.errors.iter().any(|error| error.contains(permission)),
+                "{permission}: {:?}",
+                compatibility.errors
+            );
+        }
+    }
+
+    /// The published schema is the editor/CI contract for the same enum; a
+    /// permission added to one side only would let a manifest pass an editor
+    /// check and fail installation (or the reverse).
+    #[test]
+    fn manifest_schema_permission_enum_matches_supported_permissions() {
+        let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("plugins")
+            .join("manifest.schema.json");
+        let schema: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&schema_path).unwrap()).unwrap();
+        let declared = schema["properties"]["permissions"]["items"]["anyOf"][0]["enum"]
+            .as_array()
+            .expect("permissions.items.anyOf[0].enum must be an array")
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(declared, SUPPORTED_PLUGIN_PERMISSIONS.iter().map(|value| value.to_string()).collect::<Vec<_>>());
+    }
+
+    /// The reason for the 1.2.0 bump: `engines.host_api` is how a plugin states
+    /// "I need the plan API", so the advertised version has to satisfy `^1.2`
+    /// while a floor this host cannot meet stays rejected.
+    #[test]
+    fn host_api_advertises_the_floor_a_plan_api_plugin_declares() {
+        let advertised = semver::Version::parse(SUPPORTED_PLUGIN_HOST_API_VERSION)
+            .expect("the advertised Host API version must be semver");
+        assert!(
+            semver::VersionReq::parse("^1.2").unwrap().matches(&advertised),
+            "the host must satisfy the plan API floor it asks plugins to declare"
+        );
+
+        for requirement in ["^1.0", "^1.1", "^1.2", ">=1.1.0, <2.0.0"] {
+            assert!(host_api_requirement_errors(requirement).is_empty(), "{requirement} must be satisfiable");
+        }
+        for requirement in [">=1.3.0", "^2.0"] {
+            assert!(!host_api_requirement_errors(requirement).is_empty(), "{requirement} must be rejected");
+        }
+    }
+
+    /// A minimal v1 manifest declaring `host.plans:read`, so the compatibility
+    /// result isolates `engines.host_api`.
+    fn host_api_requirement_errors(requirement: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": requirement },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.plans:read"]
+        }))
+        .unwrap();
+        manifest.compatibility(dir.path(), "0.1.0").errors
     }
 
     #[test]
@@ -1606,6 +1720,34 @@ mod tests {
 
         assert!(compatibility.compatible, "{:?}", compatibility.errors);
         assert_eq!(manifest.localizations["zh-CN"].name.as_deref(), Some("本地化插件"));
+    }
+
+    #[test]
+    fn compatibility_skips_dbx_engine_gate_for_unknown_host_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=999.0.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.events"]
+        }))
+        .unwrap();
+
+        // A standalone host reports no app version: the requirement is
+        // unverifiable there, not unsatisfied (#9595).
+        let compatibility = manifest.compatibility(dir.path(), "");
+        assert!(compatibility.compatible, "{:?}", compatibility.errors);
+
+        // A host that knows the app version keeps enforcing the gate.
+        let compatibility = manifest.compatibility(dir.path(), "0.6.16");
+        assert!(!compatibility.compatible, "{:?}", compatibility.errors);
+        assert!(compatibility.errors.iter().any(|error| error.contains(">=999.0.0")), "{:?}", compatibility.errors);
     }
 
     #[test]

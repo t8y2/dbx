@@ -324,7 +324,7 @@ function resolveCanvasRenderState(canvas: HTMLCanvasElement, isDark: boolean, st
   return state;
 }
 
-export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
+export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean {
   const {
     canvas,
     scroller,
@@ -387,7 +387,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
   if (canvas.style.height !== canvasHeight) canvas.style.height = canvasHeight;
 
   const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+  if (!ctx) return false;
   ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
@@ -742,4 +742,5 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     }
     ctx.restore();
   }
+  return true;
 }

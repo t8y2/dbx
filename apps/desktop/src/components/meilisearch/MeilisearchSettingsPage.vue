@@ -10,6 +10,7 @@ import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 
 const props = defineProps<{
@@ -23,6 +24,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 
 const settingsText = ref("");
@@ -116,6 +118,11 @@ async function confirmDeleteIndex() {
     await api.meilisearchDeleteIndex(props.connectionId, props.index);
     toast(t("meilisearch.indexDeleted"));
     deleteIndexConfirmOpen.value = false;
+    try {
+      await connectionStore.loadElasticsearchIndices(props.connectionId);
+    } catch (refreshError) {
+      console.warn("[DBX][meilisearch-index-refresh:error]", refreshError);
+    }
     // The tab may have been closed while the delete was in flight.
     if (ownerTabId && queryStore.tabs.some((tab) => tab.id === ownerTabId)) queryStore.closeTab(ownerTabId);
   } catch (e: any) {

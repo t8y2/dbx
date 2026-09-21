@@ -42,6 +42,13 @@ const USER_INPUT_MAX_OPTIONS: usize = 8;
 const USER_INPUT_MAX_OPTION_CHARS: usize = 200;
 const MAX_JSON_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_BINARY_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// A legacy `stdio-jsonl` plugin writes one whole response per line, so a single
+/// query page has to fit in that line. The framed transport caps JSON payloads at
+/// `MAX_JSON_MESSAGE_BYTES` because an oversized payload can move to a binary frame,
+/// but a JSONL plugin has no equivalent escape hatch: rejecting the line fails the
+/// user's query (`plugin output line is too large`, seen with wide Oracle/JDBC pages).
+/// Allow the line reader the same ceiling as a binary frame instead.
+const MAX_JSON_LINE_BYTES: usize = MAX_BINARY_MESSAGE_BYTES;
 const FRAME_KIND_JSON: u8 = 0;
 const FRAME_KIND_BINARY: u8 = 1;
 
@@ -896,7 +903,7 @@ async fn read_json_lines(
     mut reader: BufReader<ChildStdout>,
 ) -> Result<(), String> {
     loop {
-        let Some(line) = read_limited_line(&mut reader, MAX_JSON_MESSAGE_BYTES)
+        let Some(line) = read_limited_line(&mut reader, MAX_JSON_LINE_BYTES)
             .await
             .map_err(|error| format!("Failed to read plugin '{}' output: {error}", session.plugin.manifest.id))?
         else {
@@ -960,7 +967,10 @@ where
         }
         let take = available.iter().position(|byte| *byte == b'\n').map(|index| index + 1).unwrap_or(available.len());
         if output.len().saturating_add(take) > maximum {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "plugin output line is too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("plugin output line is too large: {maximum} bytes maximum"),
+            ));
         }
         output.extend_from_slice(&available[..take]);
         reader.consume(take);
@@ -1769,6 +1779,50 @@ sleep 30
         let session = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await.unwrap();
         let result: serde_json::Value = session.invoke("ping", serde_json::Value::Null).await.unwrap();
         assert_eq!(result["ok"], true);
+        session.shutdown().await;
+    }
+
+    /// A legacy `stdio-jsonl` plugin answers with one line per response, so a whole
+    /// query page has to fit in that line — there is no binary frame to fall back on
+    /// the way the framed transport has. A 12 MB page (a wide Oracle/JDBC result)
+    /// must therefore be read instead of failing the query with
+    /// "plugin output line is too large".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_jsonl_runtime_reads_responses_above_the_json_frame_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r request
+request_id=$(printf '%s' "$request" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"id":%s,"result":{"page":"' "$request_id"
+head -c 12000000 /dev/zero | tr '\0' 'x'
+printf '"}}\n'
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "name": "Legacy",
+            "executable": "plugin.sh"
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let session = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await.unwrap();
+        let result: serde_json::Value = session
+            .invoke("executeQuery", serde_json::Value::Null)
+            .await
+            .expect("a 12 MB legacy JSONL response must be read instead of failing the query");
+        assert_eq!(result["page"].as_str().map(str::len), Some(12_000_000));
         session.shutdown().await;
     }
 

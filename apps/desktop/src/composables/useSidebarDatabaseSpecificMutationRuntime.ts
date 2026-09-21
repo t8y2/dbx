@@ -36,6 +36,7 @@ import { elasticsearchClearIndexPreview, isElasticsearchProtocolIndex, isPartial
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { uuid } from "@/lib/common/utils";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import type { NacosAdminConfig } from "@/types/nacos";
@@ -77,6 +78,11 @@ import {
   cloneMongoCollectionError,
   cloneMongoCollectionLoading,
   showCreateMongoIndexDialog,
+  showCreateMeilisearchIndexDialog,
+  meilisearchCreateIndexUid,
+  meilisearchCreateIndexPrimaryKey,
+  meilisearchCreateIndexError,
+  meilisearchCreateIndexLoading,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
   mongoCreateIndexError,
@@ -366,6 +372,48 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       .catch(() => {
         // MongoDB is schemaless; users can still enter a field that was not sampled.
       });
+  }
+
+  const canCreateMeilisearchIndex = computed(() => {
+    const node = activeNode.value;
+    const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+    return node.type === "connection" && config?.db_type === "meilisearch" && !connectionIsEffectivelyReadOnly(config);
+  });
+
+  function prepareCreateMeilisearchIndexDialog() {
+    if (!canCreateMeilisearchIndex.value) return;
+    meilisearchCreateIndexUid.value = "";
+    meilisearchCreateIndexPrimaryKey.value = "";
+    meilisearchCreateIndexError.value = "";
+    meilisearchCreateIndexLoading.value = false;
+    showCreateMeilisearchIndexDialog.value = true;
+  }
+
+  async function confirmCreateMeilisearchIndex() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const uid = meilisearchCreateIndexUid.value.trim();
+    if (!canCreateMeilisearchIndex.value || node.type !== "connection" || !connectionId) return;
+    if (!uid) {
+      meilisearchCreateIndexError.value = t("meilisearch.createIndexUidRequired");
+      return;
+    }
+    meilisearchCreateIndexLoading.value = true;
+    meilisearchCreateIndexError.value = "";
+    try {
+      await connectionStore.ensureConnected(connectionId);
+      await api.meilisearchCreateIndex(connectionId, {
+        uid,
+        primaryKey: meilisearchCreateIndexPrimaryKey.value.trim() || undefined,
+      });
+      showCreateMeilisearchIndexDialog.value = false;
+      toast(t("meilisearch.indexCreated"), 3000);
+      await connectionStore.loadElasticsearchIndices(connectionId);
+    } catch (error) {
+      meilisearchCreateIndexError.value = translateBackendError(t, errorMessage(error));
+    } finally {
+      meilisearchCreateIndexLoading.value = false;
+    }
   }
 
   async function loadMongoIndexManagerRows() {
@@ -1219,6 +1267,9 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoCreateIndexCanSubmit,
     mongoCreateIndexCanAddField,
     prepareCreateMongoIndexDialog,
+    canCreateMeilisearchIndex,
+    prepareCreateMeilisearchIndexDialog,
+    confirmCreateMeilisearchIndex,
     addMongoCreateIndexField,
     removeMongoCreateIndexField,
     confirmCreateMongoIndex,

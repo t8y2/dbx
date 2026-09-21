@@ -104,6 +104,9 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning 100 rows by default (up to 1000 with the `max_rows` parameter) |
 | `dbx_execute_batch` | Execute a SQL script containing multiple statements in one call, returning a result per statement (or a single merged result with `use_transaction` on a multi-statement script) |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
+| `dbx_begin_transaction` | Begin a transaction on a transaction-enabled native MySQL session |
+| `dbx_commit_transaction` | Commit the active session transaction after MySQL acknowledges `COMMIT` |
+| `dbx_rollback_transaction` | Roll back the active session transaction |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
 | `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
@@ -162,6 +165,16 @@ Regular `dbx_execute_query` calls are independent. When a workflow must preserve
 Sessions support SQL connections only and are bound to one connection and database. Unknown, closed, or expired IDs fail instead of silently falling back to an ordinary query. Call `dbx_close_session` when finished. Idle sessions are reclaimed after 30 minutes, and the server allows at most 32 concurrent sessions.
 
 <Callout type="warn">A stateful session does not widen SQL policy. `USE` is meaningful only inside a session, while writes, DDL, production protection, connection read-only state, and database privileges are rechecked for every request.</Callout>
+
+### Explicit native MySQL transactions
+
+Set `enable_transactions: true` when calling `dbx_open_session` to reserve one physical native MySQL connection eagerly. Then use `dbx_begin_transaction`, one or more `dbx_execute_query` or `dbx_execute_batch` calls with the returned `session_id`, and finally `dbx_commit_transaction` or `dbx_rollback_transaction`. Queries before and after a transaction still use the same owned connection. `use_transaction` remains incompatible with `session_id`; it is the separate atomic-batch feature described above.
+
+This opt-in mode is available only for local native MySQL connections. DBX Web/`DBX_WEB_URL`, external driver profiles, compatibility engines, and other database types return `TRANSACTION_UNSUPPORTED` instead of falling back to auto-commit. Transaction-session SQL accepts one parsed `SELECT` (including locking reads), `INSERT`, `UPDATE`, `DELETE`, or `REPLACE` statement per operation. It rejects raw transaction control, DDL and temporary DDL, `CALL`, `LOAD`, table locks, `SET`, `USE`, XA, file/output clauses, executable comments, optimizer hints, and multi-statements. Complete batches hold one operation slot and report the resulting transaction state for every statement.
+
+Responses include `transaction_state` (`idle`, `active`, or `unknown`) and, when known, `transaction_outcome` (`committed`, `rolled_back`, or `unknown`). A normal MySQL statement error can leave the transaction active; DBX probes fresh state on the same connection before reporting it. A timeout, cancellation, transport failure, or lost `COMMIT` acknowledgement makes the outcome `unknown`, permanently blocks more SQL on that session, and disposes the connection without replaying the statement or `COMMIT`. A positive connection query timeout applies to transaction operations; when the connection is configured as unlimited (`0`), transaction owners still apply their default 300-second operation cap so busy work remains bounded. Closing, expiry, protocol-session deletion, and server shutdown attempt bounded rollback for a known active transaction and then dispose the connection.
+
+<Callout type="warn">Rollback guarantees require transactional storage such as InnoDB. Triggers, stored functions, nontransactional tables, and external side effects can have effects that MySQL cannot roll back. DBX rechecks the current connection/database scope, tool allowlist, read-only and production protections, and confirmed SQL after queue waiting. Rollback and close remain available for cleanup after write permission is revoked.</Callout>
 
 ## Database Access
 

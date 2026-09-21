@@ -119,6 +119,10 @@ describe("connection query actions", () => {
     expect(supportsConnectionQueryActions("mq")).toBe(false);
     expect(supportsConnectionQueryActions("mqtt")).toBe(false);
   });
+
+  it("hides the sidebar new-query entry for Meilisearch", () => {
+    expect(supportsConnectionQueryActions("meilisearch")).toBe(false);
+  });
 });
 
 describe("message queue query capabilities", () => {

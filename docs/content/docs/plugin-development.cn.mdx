@@ -102,6 +102,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
     "host.events",
     "host.filesystem",
     "host.binary",
+    "host.plans:read",
     "host.network:https://s3.example.com:443"
   ],
   "entrypoints": {
@@ -117,6 +118,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 
 - `engines.dbx` 是可选的 DBX 版本范围；`engines.host_api` 是必需的 Host API 版本声明。
 - `host.workbench` 允许打开另一个工作台，`host.events` 接收宿主事件，`host.binary` 使用二进制通道，`host.filesystem` 使用文件系统入口。
+- `host.plans:read` 允许针对 DBX 自己的连接读取估算执行计划（见 [估算执行计划](#估算执行计划)）。它是只读权限：不授予普通 SQL 执行、写操作、DDL 或真实执行计划，且这是唯一存在的计划类权限。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
@@ -214,7 +216,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 
 同一插件内通过 `id` 互相引用：Connection Provider 的 `workbench` 必须指向一个已声明的工作台，`filesystem_provider` 必须指向一个已声明的文件系统 Provider。图标优先使用 Contribution 的 `icon`，缺失时回退到插件级 `icon`。
 
-自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。`context-menu` 调用后端 `contextMenu/<contribution-id>`，`result-view` 则在工作台 context 中接收结果快照；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
+自定义文件浏览器应使用 `workbench`：列表、虚拟滚动、预览、右键菜单和分栏由插件前端实现。只有希望使用 DBX 通用文件管理器时才选择 `filesystem_provider`；同时声明两者时默认打开工作台。`context-menu` 调用后端 `contextMenu/<contribution-id>`，`result-view` 则在工作台 context 中接收结果快照，被打开的 contribution id 会通过 `dbx-plugin-init` 负载下发，因此单个 UI 入口可以为多个工作台和结果视图服务；具体负载见[完整贡献点协议](https://github.com/t8y2/dbx/blob/main/plugins/README.md)。
 
 ### 文件系统协议
 
@@ -291,11 +293,104 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `readAsset(path)` / `readAssetUrl(path)` | 读取包内资源；路径不能越出插件资源根目录。 |
 | `openWorkbench(id, context)` | 打开本插件的另一个工作台；需要 `host.workbench`。 |
 | `openFilesystem(id, context)` | 打开本插件的文件系统入口；需要 `host.filesystem`。 |
+| `getPlanCapabilities(connectionId)` | 读取宿主与该连接能提供什么计划能力；需要 `host.plans:read`。 |
+| `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | 返回 `sql` 的估算执行计划；需要 `host.plans:read`。 |
+| `capabilities` | 来自 init 消息的 `{ downloadFile, planApi }`。字段缺失或为 `false` 表示当前宿主不支持该组 Host API，应据此关闭功能而不是用真实请求试探。 |
 | `onInit(fn)` / `onEvent(fn)` | 监听初始化、环境变化或后端事件；转发后端事件需要 `host.events`。 |
+| `fileTransfer` | 本地文件流式传输与系统拖放（仅桌面端）；见下文。 |
 
 调用失败会以 Promise rejection 返回，处理时应展示可理解的错误并允许重试。通过 `request` 调用的宿主方法、参数和返回值以当前 Host API 版本为准，不要调用未在协议中声明的 DBX 内部函数。
 
 `readAsset` 的路径相对于 `ui.root`，所以这里的 `assets/empty-state.svg` 对应包内 `ui/assets/empty-state.svg`。资源不用时调用 `URL.revokeObjectURL(assetUrl)`；组件销毁时调用 `onContext`/`onEvent` 等返回的取消订阅函数，避免重复监听。
+
+### 估算执行计划
+
+插件可以在不自带驱动、连接池和凭据的前提下读取一条查询的**估算**执行计划。插件只传自己的原始 SQL 和连接引用；DBX 用自己已有的方言规则生成 `EXPLAIN` 语句、应用与自身计划视图完全相同的只读安全校验，并在宿主连接上执行。插件只拿到原始计划，由自己完成解析、归一化和可视化。
+
+```json
+{
+  "permissions": ["host.plans:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.planApi) {
+  const capabilities = await window.dbxPlugin.getPlanCapabilities(connectionId);
+  if (capabilities.supports.estimatedPlan) {
+    const plan = await window.dbxPlugin.explainPlan({ connectionId, database, sql, mode: "estimated", timeoutMs: 15000 });
+    render(plan.rawPlan, plan.format);
+  }
+}
+```
+
+`getPlanCapabilities(connectionId)` 返回 `{ dbType, dbVersion?, supports: { estimatedPlan }, limits: { maxTimeoutMs, maxPlanBytes } }`：
+
+- `supports.estimatedPlan` 为 `false` 表示该连接的方言在 DBX 中没有估算计划路径；应直接禁用功能，而不是调用 `explainPlan`。
+- `limits.maxTimeoutMs` 已经考虑该连接自身的查询超时，请求里的 `timeoutMs` 会被夹到该上限；`limits.maxPlanBytes` 限制计划负载大小。
+- `dbVersion` 只在 DBX 已经知道该连接产品版本时才存在；宿主不会为了插件去探测服务器。
+- 该调用只读取已保存的连接配置，不会建立连接；但连接必须已经打开：已保存但当前已断开的连接会被拒绝，而不是替插件重新建连。
+
+`explainPlan(request)` 返回 `{ dbType, dbVersion?, format, rawPlan, truncated, warnings }`：
+
+- `format` 为 `json`、`xml`（SQL Server `ShowPlanXML`）或 `text`。`format` 为 `json` 时 `rawPlan` 是已解析的 JSON 文档，其余情况是计划文本。
+- `warnings` 可能包含：`plan_not_json`（服务端返回的内容不是 JSON，负载会如实标记为 `text`，而不是假装可解析）、`plan_truncated`（宿主为遵守 `maxPlanBytes` 截断了计划）、`plan_rows_truncated`（驱动达到计划行数上限）。只要发生过任一截断，`truncated` 都是 `true`。
+
+计划 API 的边界：
+
+- **只做估算计划。** `mode` 必须是 `"estimated"`，其它取值一律拒绝。真实执行计划（`EXPLAIN ANALYZE`、`SET STATISTICS XML`）会真正执行语句，不属于本 API。
+- **插件不能自己提供要执行的 SQL。** 只接受原始 `sql`，`EXPLAIN` 语句完全由宿主生成，因此插件无法传入 `EXPLAIN` 文本、驱动命令或执行模式。
+- **只允许只读目标。** DBX 自身计划视图使用的同一道校验会拒绝多语句、DDL、DML 和危险关键字。Oracle 是唯一例外：DBX 也会为它规划 DML，因为 `EXPLAIN PLAN FOR` 并不会执行该语句。
+- **不涉及凭据，也不返回结果集。** 返回体只有计划和元信息，密码、凭据、连接串、驱动内部结构都不会越过这条边界。
+- **连接必须已经打开。** DBX 不会替插件建立连接，也不会为插件创建连接。`getPlanCapabilities` 与 `explainPlan` 对「已保存但已断开」的连接都会以 `Connection is not open` 拒绝；只有 DBX 当前已经打开的连接才能规划。
+
+判断能力时请读 `dbxPlugin.capabilities.planApi`（旧宿主不会带这个字段），再用 `getPlanCapabilities` 确认这条连接是否支持，最后才调用 `explainPlan`。自行拼 `EXPLAIN` 文本既没必要，也不会被接受。
+
+计划 API 属于 Host API 1.2。无法离开它工作的插件应在 manifest 里声明下限：`"engines": { "host_api": "^1.2" }`。manifest 里的版本范围是兼容下限，`capabilities.planApi` 是运行期探测，两者都保留。
+
+### 文件传输与系统拖放
+
+桌面端宿主通过 `window.dbxPlugin.fileTransfer` 把本地文件流式接入插件沙箱。句柄只在用户明确同意后打开：原生打开/保存对话框（`pick` / `beginSave`），或从系统拖放到本插件工作台区域内的文件（`onDrop`）。传输按分块进行，多 GB 文件也不会整体载入内存。
+
+```js
+const fileTransfer = window.dbxPlugin.fileTransfer;
+if (!fileTransfer) {
+  // Web 宿主：回退到 <input type="file"> 和 sidecar 落盘。
+}
+
+// 上传：用户在原生对话框选择文件，插件把分块推给自己的 sidecar。
+const { files } = await fileTransfer.pick({ multiple: true });
+for (const file of files) {
+  let offset = 0;
+  for (;;) {
+    const chunk = await fileTransfer.read(file.handleId, offset, 256 * 1024);
+    await uploadChunk(file.name, offset, chunk.dataBase64); // 你自己的 RPC
+    if (chunk.eof) break;
+    offset += chunk.length;
+  }
+  await fileTransfer.cancel(file.handleId);
+}
+
+// 下载：打开保存目标，分块写入，最后 finish 落盘。
+const target = await fileTransfer.beginSave({ name: "export.csv", size });
+await fileTransfer.write(target.handleId, 0, bytes);
+await fileTransfer.finish(target.handleId);
+
+// 系统拖放（仅桌面端）：被拖入的文件以已打开的句柄送达。
+const offDrop = fileTransfer.onDrop((files) => uploadAll(files));
+const offDrag = fileTransfer.onDragState((active) => showDropOverlay(active));
+```
+
+| API | 用途 |
+| --- | --- |
+| `pick({ multiple })` | 原生打开对话框；返回已打开的读句柄 `{ handleId, name, size, contentType }`。 |
+| `read(handleId, offset, length?)` | 从读句柄流式读取一个分块 `{ dataBase64, length, eof }`。 |
+| `beginSave({ name, contentType?, size? })` | 原生保存对话框 + 写句柄；返回 `{ handleId, chunkBytes }`，用户取消时为 `null`。 |
+| `write(handleId, offset, data)` | 写入一个分块（二进制 transfer 或 base64）；返回 `{ written, nextOffset }`。 |
+| `finish(handleId)` / `cancel(handleId)` | 冲洗并关闭写句柄 / 丢弃任意句柄。 |
+| `onDrop(fn)` | 拖入本工作台的文件以已打开的读句柄送达。 |
+| `onDragState(fn)` | 是否有系统拖拽悬在本工作台上方；用它驱动拖放遮罩。 |
+
+仅桌面端可用：Web 宿主下整个命名空间是 `undefined`，使用前请先探测。`onDrop` 只在拖放落点位于本插件工作台区域内时触发；落点在宿主其他区域时保持宿主自身的行为。
 
 ### 主题、布局和静态资源
 

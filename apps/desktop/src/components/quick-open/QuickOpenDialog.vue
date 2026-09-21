@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Command, FileCode, FileText, Search, FolderPlus, SlidersHorizontal, X } from "@lucide/vue";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
@@ -21,7 +22,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen();
+const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, loadPluginWorkbenches, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen();
 const inputRef = ref<HTMLInputElement | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 const settingsStore = useSettingsStore();
@@ -198,6 +199,8 @@ function getTypeLabel(type: string): string {
       return t("quickOpen.sqlFile");
     case "sql_library_file":
       return t("quickOpen.sqlLibraryFile");
+    case "plugin_workbench":
+      return t("quickOpen.pluginWorkbench");
     default:
       return type;
   }
@@ -219,6 +222,8 @@ watch(
       refreshSearchSettings();
       // Eagerly load external SQL files so they appear in the initial list
       void loadExternalSqlFiles();
+      // Refresh plugin workbench entries so installs/uninstalls show up without a restart
+      void loadPluginWorkbenches();
       nextTick(() => {
         inputRef.value?.focus();
       });
@@ -362,6 +367,7 @@ watch(selectedIndex, async () => {
             <div v-for="(item, index) in filteredItems" :key="item.id" :data-selected="index === selectedIndex" :class="['px-4 py-2 cursor-pointer', index === selectedIndex ? 'bg-accent' : 'hover:bg-muted']" @click="handleSelect(item)" @mouseenter="selectedIndex = index">
               <div class="flex items-center justify-between gap-3">
                 <div class="flex items-center gap-2 flex-1 min-w-0">
+                  <PluginIcon v-if="item.type === 'plugin_workbench' && item.pluginId" :plugin-id="item.pluginId" :icon="item.pluginIcon" :contribution-id="item.contributionId" class="h-4 w-4 shrink-0" />
                   <component v-if="getItemIcon(item.type)" :is="getItemIcon(item.type)" class="h-4 w-4 shrink-0 text-muted-foreground" />
                   <div class="flex-1 min-w-0">
                     <div class="text-sm font-medium truncate">

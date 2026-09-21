@@ -14,7 +14,7 @@ use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
 use russh::MethodKind;
 use russh::MethodSet;
-use russh::{kex, mac, ChannelOpenFailure, Preferred};
+use russh::{cipher, kex, mac, ChannelOpenFailure, Preferred};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -205,6 +205,21 @@ fn ssh_client_config() -> Config {
         }
     }
     preferred.mac = Cow::Owned(mac);
+
+    let mut ciphers = preferred.cipher.into_owned();
+    // AES-CBC stays available as a last-resort fallback for old or appliance SSH
+    // daemons whose entire offer is CBC (for example `aes256-cbc,aes128-cbc`),
+    // which otherwise abort the handshake with "No common Cipher algorithm"
+    // before authentication is ever attempted. The entries are appended behind
+    // russh's safe defaults, so a capable server never negotiates down to CBC.
+    // 3DES/blowfish/cast128/arcfour are deliberately left out: they are weaker
+    // still, and a CBC-only daemon finds AES first in the same offer.
+    for algorithm in [cipher::AES_256_CBC, cipher::AES_192_CBC, cipher::AES_128_CBC] {
+        if !ciphers.contains(&algorithm) {
+            ciphers.push(algorithm);
+        }
+    }
+    preferred.cipher = Cow::Owned(ciphers);
 
     Config {
         nodelay: true,
@@ -2109,6 +2124,26 @@ mod tests {
         tunnel.connect_timeout_secs = 0;
 
         assert_eq!(effective_hop_timeout(&tunnel), default_ssh_connect_timeout_secs());
+    }
+
+    #[test]
+    fn ssh_client_config_keeps_legacy_cbc_ciphers_after_safe_defaults() {
+        let config = ssh_client_config();
+        let ciphers = config.preferred.cipher;
+        let position = |needle: russh::cipher::Name| ciphers.iter().position(|algorithm| *algorithm == needle).unwrap();
+
+        // A CBC-only daemon (issue #9397 offered aes256-cbc/aes128-cbc and
+        // nothing else) only finds a common cipher through these fallbacks.
+        let aes256_cbc_index = position(russh::cipher::AES_256_CBC);
+        let aes128_cbc_index = position(russh::cipher::AES_128_CBC);
+        let gcm_index = position(russh::cipher::AES_256_GCM);
+        let ctr_index = position(russh::cipher::AES_128_CTR);
+
+        // Every safe default stays ahead of CBC, so a capable server still
+        // negotiates a modern cipher.
+        assert!(gcm_index < aes256_cbc_index);
+        assert!(ctr_index < aes256_cbc_index);
+        assert!(aes256_cbc_index < aes128_cbc_index);
     }
 
     #[test]

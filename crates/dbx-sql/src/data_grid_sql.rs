@@ -606,22 +606,37 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
             )
         })
         .collect::<Vec<_>>();
-    if options.insert_mode == DataGridCopyInsertMode::RowByRow
+    let statements = if options.insert_mode == DataGridCopyInsertMode::RowByRow
         || options.database_type.is_some_and(uses_single_row_insert_statements)
     {
+        value_rows.iter().map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};")).collect::<Vec<_>>()
+    } else {
+        vec![format!(
+            "INSERT INTO {table} ({columns}) VALUES{}{};",
+            if value_rows.len() == 1 { " " } else { "\n" },
+            value_rows.join(",\n")
+        )]
+    };
+    // SQL Server and Dameng reject explicit values for identity columns unless the
+    // statement runs between `SET IDENTITY_INSERT <table> ON` and `OFF` (SQL Server
+    // error 544), so a copied INSERT that carries the identity column must ship the
+    // wrapper. Each statement is wrapped on its own so row-by-row copies stay
+    // individually executable, matching the SQL export path.
+    let needs_identity_insert_wrapper =
+        matches!(options.database_type, Some(DatabaseType::SqlServer | DatabaseType::Dameng))
+            && insert_columns.iter().any(|(_, _, info)| info.as_ref().is_some_and(is_auto_generated_column));
+    if needs_identity_insert_wrapper {
         return Some(
-            value_rows
+            statements
                 .iter()
-                .map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};"))
+                .map(|statement| {
+                    format!("SET IDENTITY_INSERT {table} ON;\n{statement}\nSET IDENTITY_INSERT {table} OFF;")
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
     }
-    Some(format!(
-        "INSERT INTO {table} ({columns}) VALUES{}{};",
-        if value_rows.len() == 1 { " " } else { "\n" },
-        value_rows.join(",\n")
-    ))
+    Some(statements.join("\n"))
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
@@ -2294,7 +2309,7 @@ fn format_oracle_lob_assignment_literal(text: &str, constructor: &str) -> String
 
 fn oracle_sql_literal_char_len(ch: char) -> usize {
     match ch {
-        '\\' | '\'' => 2,
+        '\'' => 2,
         _ => ch.len_utf8(),
     }
 }
@@ -2307,7 +2322,6 @@ fn append_oracle_sql_literal_characters(output: &mut String, text: &str) {
 
 fn append_oracle_sql_literal_char(output: &mut String, ch: char) {
     match ch {
-        '\\' => output.push_str("\\\\"),
         '\'' => output.push_str("''"),
         _ => output.push(ch),
     }
@@ -2472,7 +2486,9 @@ pub fn format_grid_sql_literal_with_identifier_quote(
     }
     let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
-    } else if is_sqlite_literal_database(database_type) || database_type == Some(DatabaseType::Dameng) {
+    } else if is_sqlite_literal_database(database_type)
+        || matches!(database_type, Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+    {
         // These engines keep backslashes literal in ordinary string literals,
         // so only the quote delimiter needs escaping.
         literal_text.replace('\'', "''")
@@ -4627,6 +4643,94 @@ mod tests {
         );
     }
 
+    fn sqlserver_identity_copy_insert_options(
+        rows: Vec<Vec<Value>>,
+        insert_mode: DataGridCopyInsertMode,
+    ) -> DataGridCopyInsertStatementOptions {
+        DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("dbx_test".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "gen_table".to_string(),
+                primary_keys: vec!["table_id".to_string()],
+                columns: Some(vec![
+                    column("table_id", "int", false, Some("identity")),
+                    column("table_name", "nvarchar(200)", false, None),
+                ]),
+            }),
+            columns: vec!["table_id".to_string(), "table_name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows,
+            exclude_primary_keys: false,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode,
+        }
+    }
+
+    #[test]
+    fn sqlserver_copy_insert_wraps_identity_columns_with_identity_insert() {
+        let statement = build_data_grid_copy_insert_statement(sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        ));
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;"
+            )
+        );
+    }
+
+    #[test]
+    fn sqlserver_row_by_row_copy_insert_wraps_every_statement() {
+        let statement = build_data_grid_copy_insert_statement(sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")], vec![json!(2), json!("t_user")]],
+            DataGridCopyInsertMode::RowByRow,
+        ));
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "SET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;\nSET IDENTITY_INSERT [dbo].[gen_table] ON;\nINSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (2, N't_user');\nSET IDENTITY_INSERT [dbo].[gen_table] OFF;"
+            )
+        );
+    }
+
+    #[test]
+    fn sqlserver_copy_insert_omits_identity_wrapper_without_identity_columns() {
+        let mut options = sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        );
+        options.table_meta.as_mut().expect("table meta").columns =
+            Some(vec![column("table_id", "int", false, None), column("table_name", "nvarchar(200)", false, None)]);
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO [dbo].[gen_table] ([table_id], [table_name]) VALUES (1, N't_destype');")
+        );
+    }
+
+    #[test]
+    fn dameng_copy_insert_wraps_identity_columns_with_identity_insert() {
+        let mut options = sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        );
+        options.database_type = Some(DatabaseType::Dameng);
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "SET IDENTITY_INSERT \"dbo\".\"gen_table\" ON;\nINSERT INTO \"dbo\".\"gen_table\" (\"table_id\", \"table_name\") VALUES (1, 't_destype');\nSET IDENTITY_INSERT \"dbo\".\"gen_table\" OFF;"
+            )
+        );
+    }
+
     #[test]
     fn mysql_copy_statements_preserve_blob_hex_literals() {
         let table_meta = DataGridTableMeta {
@@ -6082,7 +6186,7 @@ mod tests {
             format_grid_assignment_sql_literal(&json!(special_value), Some(DatabaseType::Oracle), Some(&clob), None);
         assert!(special_literal.starts_with("TO_CLOB('"));
         assert!(special_literal.contains("''"));
-        assert!(special_literal.contains("\\\\"));
+        assert!(!special_literal.contains("\\\\"));
         let varchar = column("body", "VARCHAR2(5000)", true, None);
         let varchar_literal =
             format_grid_assignment_sql_literal(&json!(large_value), Some(DatabaseType::Oracle), Some(&varchar), None);
@@ -7821,6 +7925,38 @@ mod tests {
     }
 
     #[test]
+    fn oracle_data_grid_writes_do_not_double_escape_backslashes() {
+        assert_eq!(format_grid_sql_literal(&json!(r"\n"), Some(DatabaseType::Oracle), None), r"'\n'");
+        assert_eq!(format_grid_sql_literal(&json!(r"line\n's"), Some(DatabaseType::Oracle), None), r"'line\n''s'");
+
+        let nested_json = r#"{"ext":"{\"v1\":\"123\",\"v3\":\"{\\\"vl1\\\":\\\"x\\\"}\"}"}"#;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Oracle),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("DBX_TEST".to_string()),
+                table_name: "DBX9708_JSON".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), column("VAL", "VARCHAR2(400)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "VAL".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!(nested_json))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![format!(r#"UPDATE "DBX_TEST"."DBX9708_JSON" SET "VAL" = '{nested_json}' WHERE "ID" = 1;"#)]
+        );
+    }
+
+    #[test]
     fn sqlserver_literals_do_not_double_escape_backslashes() {
         assert_eq!(format_grid_sql_literal(&json!(r".\SQL2016"), Some(DatabaseType::SqlServer), None), r"N'.\SQL2016'");
         assert_eq!(
@@ -7875,6 +8011,37 @@ mod tests {
         // backslash as an escape character, so this behavior must be preserved.
         assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Mysql), None), r"'a\\b'");
         assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::Neo4j), None), r"'a\\b'");
+    }
+
+    #[test]
+    fn oceanbase_oracle_literals_do_not_double_escape_backslashes() {
+        assert_eq!(format_grid_sql_literal(&json!(r"a\b"), Some(DatabaseType::OceanbaseOracle), None), r"'a\b'");
+        assert_eq!(
+            format_grid_sql_literal(&json!(r"line\n's"), Some(DatabaseType::OceanbaseOracle), None),
+            r"'line\n''s'"
+        );
+    }
+
+    #[test]
+    fn oracle_clob_literals_keep_backslashes_single() {
+        let clob = column("body", "CLOB", true, None);
+        assert_eq!(
+            format_grid_assignment_sql_literal(&json!(r"a\b's"), Some(DatabaseType::Oracle), Some(&clob), None),
+            r"'a\b''s'"
+        );
+        // Backslashes count as one byte toward the chunk budget, so a value at the
+        // chunk boundary splits at the same offset it would without backslashes.
+        let value = format!("{}\\", "x".repeat(ORACLE_SQL_LITERAL_MAX_BYTES));
+        let literal = format_grid_assignment_sql_literal(&json!(value), Some(DatabaseType::Oracle), Some(&clob), None);
+        let chunks = literal
+            .split("TO_CLOB('")
+            .skip(1)
+            .map(|chunk| chunk.split("')").next().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), ORACLE_LOB_LITERAL_CHUNK_BYTES);
+        assert!(chunks[1].ends_with('\\'));
+        assert!(!chunks.iter().any(|chunk| chunk.contains("\\\\")));
     }
 
     #[test]

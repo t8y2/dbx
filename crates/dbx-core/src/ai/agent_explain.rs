@@ -6,6 +6,11 @@ use crate::connection::{AppState, PoolKind};
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::{is_safe_dameng_autotrace_sql, is_safe_explain_sql_for_database};
 
+/// Acquires an estimated plan for an agent-backed connection.
+///
+/// `timeout_secs` overrides the connection's own query timeout for this call
+/// (`None` keeps the connection default). Overrides are host-owned: the plugin
+/// Host plan API clamps the value before it gets here.
 pub async fn get_agent_explain_info_core(
     state: &AppState,
     connection_id: &str,
@@ -13,13 +18,14 @@ pub async fn get_agent_explain_info_core(
     schema: Option<&str>,
     sql: &str,
     mode: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<String, String> {
     let mode = mode.unwrap_or("explain");
     let (database_type, timeout_secs) = {
         let configs = state.configs.read().await;
         let config = configs.get(connection_id).ok_or_else(|| "Connection config not found".to_string())?.clone();
         let database_type = explain_database_type(&config);
-        let timeout_secs = config.effective_query_timeout_secs();
+        let timeout_secs = timeout_secs.unwrap_or_else(|| config.effective_query_timeout_secs());
         (database_type, timeout_secs)
     };
     if !is_safe_agent_explain_sql(sql, mode, database_type) {
@@ -68,7 +74,12 @@ pub async fn get_agent_explain_info_core(
     decode_agent_explain_result(result)
 }
 
-fn explain_database_type(config: &ConnectionConfig) -> DatabaseType {
+/// Resolves the dialect an EXPLAIN must be generated for. A custom JDBC
+/// connection is only known to be Oracle when its configuration says so; every
+/// other custom JDBC connection stays `Jdbc` and therefore gets no plan
+/// acquisition. Shared with the plugin Host plan API so both paths agree on
+/// which dialects are treatable.
+pub(crate) fn explain_database_type(config: &ConnectionConfig) -> DatabaseType {
     if config.db_type != DatabaseType::Jdbc {
         return config.db_type;
     }
@@ -248,6 +259,7 @@ mod tests {
             Some("SYSTEM"),
             "UPDATE T SET C = 1",
             Some("explain"),
+            None,
         )
         .await
         .unwrap();

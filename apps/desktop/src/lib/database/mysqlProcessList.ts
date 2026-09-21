@@ -137,6 +137,21 @@ export function buildCancelQuerySql(id: number): string {
   return `KILL QUERY ${id}`;
 }
 
+/**
+ * Build the `KILL <id>` statement that disconnects the session itself.
+ *
+ * `KILL QUERY` only interrupts the statement running at that instant, so an idle
+ * (`Sleep`) session survives it and keeps showing up in the process list. When the
+ * user asks to close a session, only this statement actually removes it (and rolls
+ * back the session's uncommitted transaction, the same as the server-side `KILL`).
+ */
+export function buildTerminateSessionSql(id: number): string {
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error(`Invalid session id: ${id}`);
+  }
+  return `KILL ${id}`;
+}
+
 /** Clamp a user-entered refresh interval to a safe integer range of seconds. */
 export function clampInterval(seconds: number): number {
   if (!Number.isFinite(seconds)) return DEFAULT_REFRESH_SECONDS;

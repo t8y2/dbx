@@ -151,6 +151,9 @@ public final class JsonRpcServer {
     }
 
     private Object dispatch(String method, JsonObject params) throws Exception {
+        if (agent instanceof AbstractJdbcAgent observingAgent) {
+            observingAgent.beforeAgentMethod(method, stringOrNull(params, "sessionId"));
+        }
         if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
             return AgentProtocol.handshakeResult();
         }

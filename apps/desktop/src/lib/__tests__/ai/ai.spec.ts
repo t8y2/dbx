@@ -77,6 +77,26 @@ describe("AI SQL dialect prompt", () => {
     await setLocale("en");
   });
 
+  it("gives Redis agents database and key-scan safety guidance", () => {
+    const prompt = buildSystemPrompt("general", context({ connectionName: "Redis", databaseType: "redis", database: "8", selectedDatabases: ["8"] }), "agent");
+
+    expect(prompt).toContain("Use dbx_execute_redis_command");
+    expect(prompt).toContain("db argument");
+    expect(prompt).toContain("Never send the SELECT command");
+    expect(prompt).toContain("Use SCAN, not KEYS");
+    expect(prompt).not.toContain("execute_query tool");
+    expect(prompt).not.toContain("Put SQL in a fenced");
+  });
+
+  it("keeps Redis ask mode command-oriented", () => {
+    const prompt = buildSystemPrompt("general", context({ connectionName: "Redis", databaseType: "redis", database: "8" }), "ask");
+
+    expect(prompt).toContain("Redis Ask mode");
+    expect(prompt).toContain("do not generate SELECT commands");
+    expect(prompt).not.toContain("Generate SQL and explanations only");
+    expect(buildUserPrompt("query", context({ databaseType: "redis", database: "8" }), "scan task keys", false)).toBe("scan task keys");
+  });
+
   it("keeps attached text data out of the system prompt", () => {
     const attachmentContext = context({
       csvFiles: [{ name: "orders.csv", content: "id,total\n1,42", truncated: true }],

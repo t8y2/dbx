@@ -370,6 +370,8 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `readAsset(path)` / `readAssetUrl(path)`
 - `openWorkbench(contributionId, context)` — requires `host.workbench`
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
+- `getPlanCapabilities(connectionId)` / `explainPlan(request)` — reads an estimated execution plan for one connection; requires `host.plans:read`, see [Estimated execution plans](#estimated-execution-plans)
+- `capabilities` — `{ downloadFile, planApi }` advertised in the init message; a missing or `false` entry means that Host API group is unavailable on this host, so gate the matching call on it instead of probing with a request
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
@@ -412,7 +414,7 @@ Plugin-authored names, descriptions, contribution labels, form-field text, and s
 
 ### `result-view`
 
-A result view contributes a plugin-rendered visualization for query results. DBX shows one toolbar button per installed view next to the result grid; clicking it opens the plugin workbench with the current result as context:
+A result view contributes a plugin-rendered visualization for query results. DBX shows one toolbar button per installed view next to the result grid; clicking it opens a plugin tab that renders the plugin's UI entrypoint with the current result as context:
 
 ```json
 {
@@ -422,7 +424,9 @@ A result view contributes a plugin-rendered visualization for query results. DBX
 }
 ```
 
-The workbench `context.result` is a bounded snapshot — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need the full or streamed result set should re-execute through their backend using the SQL and connection reference. Requires a UI entrypoint.
+A result view declares display metadata only: it carries no UI of its own and never names a workbench. The opened contribution id reaches the plugin UI in the init payload (`dbx-plugin-init` detail `contributionId`), so a plugin that declares several result views selects the matching one inside its single UI entrypoint.
+
+The `context.result` snapshot is bounded — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need the full or streamed result set should re-execute through their backend using the SQL and connection reference. Requires a UI entrypoint.
 
 ### `context-menu`
 
@@ -469,6 +473,86 @@ Host API 1.x defines these backend methods:
 Every entry has `name`, canonical `uri`, `kind` (`file`, `directory`, `symlink`, or `other`), and optional `size`, `modifiedAt`, and `contentType`. DBX validates schemes, response sizes, base64, cursors, and entry metadata before the frontend sees a result.
 
 Mutation methods return `{ success, message?, entry? }` and are rejected unless the provider declares the matching capability. Inline read/write payloads are capped at 4 MiB. The built-in file manager currently owns directory navigation, pagination, and bounded file preview. Large upload/download and PTY/SFTP streams use `stdio-framed` binary channels with plugin-defined transfer methods, chunk acknowledgements, cancellation, and progress events; they must not be encoded as one large JSON value.
+
+### Estimated execution plans
+
+A plugin can read the **estimated** execution plan of a query without touching a database driver, a credential, or a connection string. The host builds the `EXPLAIN` statement with its own `build_explain_sql`, applies the same read-only safety gate DBX uses for its own plan view, and executes it on the connection the plugin names. The plugin receives only the raw plan.
+
+```json
+{
+  "permissions": ["host.plans:read"]
+}
+```
+
+| Request | Purpose |
+| --- | --- |
+| `host.getPlanCapabilities({ connectionId })` | Reports what the host and this connection can plan. It only reads the stored connection config; it never connects or probes the server. The connection must already be open. |
+| `host.explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`. The connection must already be open. |
+
+`host.getPlanCapabilities` returns:
+
+```json
+{
+  "dbType": "postgres",
+  "dbVersion": "15.19",
+  "supports": { "estimatedPlan": true },
+  "limits": { "maxTimeoutMs": 60000, "maxPlanBytes": 4194304 }
+}
+```
+
+- `supports.estimatedPlan` is `false` when this connection's dialect has no estimated plan path in DBX; disable the feature instead of calling `explainPlan`.
+- `limits` are the host's ceilings. `maxTimeoutMs` already accounts for the connection's own query timeout, and a requested `timeoutMs` is clamped to it. A connection configured with no query timeout still gets the host ceiling.
+- `dbVersion` is present only when DBX already learned the product version for this connection. The host never probes the server on the plugin's behalf.
+
+`host.explainPlan` returns:
+
+```json
+{
+  "dbType": "postgres",
+  "dbVersion": "15.19",
+  "format": "json",
+  "rawPlan": [{ "Plan": { "Node Type": "Seq Scan" } }],
+  "truncated": false,
+  "warnings": []
+}
+```
+
+- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON document for `json` and the plan text otherwise, so the plugin can parse and normalize it itself.
+- `warnings` carries `plan_not_json` when the server answered with something that is not JSON (the payload is then reported as `text` rather than pretending it is JSON), `plan_truncated` when the host cut the plan to respect `maxPlanBytes`, and `plan_rows_truncated` when the driver stopped collecting plan rows.
+- `truncated` is `true` whenever the host cut the plan for either reason.
+
+The sandboxed UI can call this through `window.dbxPlugin` directly:
+
+```js
+if (window.dbxPlugin.capabilities.planApi) {
+  const capabilities = await window.dbxPlugin.getPlanCapabilities(connectionId);
+  if (capabilities.supports.estimatedPlan) {
+    const plan = await window.dbxPlugin.explainPlan({ connectionId, database, sql, mode: "estimated", timeoutMs: 15000 });
+  }
+}
+```
+
+Boundaries:
+
+- **Estimated plans only.** `mode` must be `"estimated"`; any other value is rejected. Actual plans (`EXPLAIN ANALYZE`, `SET STATISTICS XML`) execute the statement and are not part of this API.
+- **The plugin never supplies SQL to execute.** Only the source `sql` is accepted and the host builds the `EXPLAIN` statement itself, so a plugin cannot pass an `EXPLAIN` statement, a driver command, or an execution mode.
+- **Read-only targets only.** The same gate DBX uses for its own plan view rejects multi-statement input, DDL, DML, and dangerous keywords. Oracle is the one dialect where DBX also plans DML, because `EXPLAIN PLAN FOR` does not execute it.
+- **No credentials.** The response carries the plan and metadata only; a password, credential, connection string, or driver internals never cross this boundary, and the plan is not a user result set.
+- **The connection must already be open.** DBX does not connect on a plugin's behalf. A saved connection that is currently disconnected is rejected by both `host.getPlanCapabilities` and `host.explainPlan` with `Connection is not open`; only a connection DBX already holds open can be planned.
+- **`host.plans:read` is read-only.** It does not permit normal SQL execution, writes, DDL, or actual plans, and it is the only permission this API reads.
+- **Bounded.** `limits.maxPlanBytes` caps the plan payload, `timeoutMs` is clamped by the host, and a plan that cannot be cut safely fails with an explicit error instead of returning a partial document.
+
+Gate on capability rather than probing: read `window.dbxPlugin.capabilities.planApi` from the init message (an older host omits it), then confirm per-connection support with `host.getPlanCapabilities` before calling `host.explainPlan`.
+
+The plan API is Host API 1.2, so a plugin that cannot work without it declares the floor in its manifest:
+
+```json
+{
+  "engines": { "host_api": "^1.2" }
+}
+```
+
+The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
 
 ### Host API methods a plugin may call
 
@@ -582,7 +666,7 @@ Sidecars are shared per plugin process, not spawned per tab. Plugins own their i
 - **UI isolation:** sandboxed iframe, restrictive CSP, bounded bridge payloads, safe asset paths, plugin identity binding.
 - **Secret persistence:** plugin secrets are removed from connection JSON and stored through DBX's secret-store path. Ordinary cloud-sync snapshots always contain redacted placeholders. Secrets enter sync data only inside the encrypted payload when the user has configured a sync passphrase; without one, plugin secrets remain local and are not synchronized.
 - **Native backend trust:** a native sidecar runs with the current OS user's privileges. A signature identifies the repository that approved and published the package; it is not an OS sandbox or proof that the author is harmless. Install only plugins whose backend code you trust.
-- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX.
+- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX. `host.plans:read` grants reading host-generated estimated execution plans only; it never grants SQL execution, writes, DDL, or actual plans.
 
 Custom repository public keys can be added or removed in Plugin Center. Obtain them through a channel independent from the downloaded package.
 

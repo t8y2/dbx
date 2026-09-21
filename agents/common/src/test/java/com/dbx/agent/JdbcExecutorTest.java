@@ -27,6 +27,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcExecutorTest {
     @Test
+    void statementRowLimitIncludesOverflowProbeWithoutIntegerOverflow() {
+        assertEquals(2, JdbcExecutor.statementMaxRows(0));
+        assertEquals(JdbcExecutor.DEFAULT_MAX_ROWS + 1,
+            JdbcExecutor.statementMaxRows(JdbcExecutor.DEFAULT_MAX_ROWS));
+        assertEquals(Integer.MAX_VALUE, JdbcExecutor.statementMaxRows(Integer.MAX_VALUE));
+    }
+
+    @Test
     void blobResultValuesPreferBlobObjectsWhenGetBytesFails() throws Exception {
         ResultSet rs = resultSet(
             new SerialBlob(new byte[]{0x01, 0x2A, (byte) 0xFF}),

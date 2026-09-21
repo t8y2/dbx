@@ -5,9 +5,9 @@ use dbx_core::cloud_sync::{
     forget_snippet_token, forget_webdav_password,
     forget_webdav_sync_secrets_passphrase as core_forget_webdav_sync_secrets_passphrase, resolve_snippet_token,
     resolve_webdav_password, resolve_webdav_sync_secrets_passphrase, retry_pending_snippet_cleanup,
-    save_snippet_sync_id as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
+    save_snippet_sync_id_for_instance as core_save_snippet_sync_id, save_snippet_token, save_webdav_password,
     save_webdav_sync_secrets_preference as core_save_webdav_sync_secrets_preference, snippet_saved_token_status,
-    snippet_sync_settings as core_snippet_sync_settings, webdav_saved_password_status,
+    snippet_sync_settings_for_instance as core_snippet_sync_settings, webdav_saved_password_status,
     webdav_sync_secrets_status as core_webdav_sync_secrets_status, ApplySnapshotOptions, ApplySnapshotSummary,
     SnippetProvider, SnippetSyncClient, SnippetSyncConfig, SnippetSyncSettings, SnippetSyncSummary, SnippetTokenStatus,
     WebDavClient, WebDavConfig, WebDavPasswordStatus, WebDavSyncSecretsStatus, WebDavSyncSummary,
@@ -135,7 +135,7 @@ pub async fn webdav_sync_download(
 #[tauri::command]
 pub async fn snippet_sync_test(state: State<'_, Arc<AppState>>, mut config: SnippetSyncConfig) -> Result<(), String> {
     resolve_snippet_token(&state.storage, &mut config).await?;
-    SnippetSyncClient::new(config).test().await
+    SnippetSyncClient::new(config)?.test().await
 }
 
 #[tauri::command]
@@ -167,17 +167,19 @@ pub async fn forget_snippet_saved_token(
 pub async fn snippet_sync_settings(
     state: State<'_, Arc<AppState>>,
     provider: SnippetProvider,
+    instance_url: Option<String>,
 ) -> Result<SnippetSyncSettings, String> {
-    core_snippet_sync_settings(&state.storage, provider).await
+    core_snippet_sync_settings(&state.storage, provider, instance_url.as_deref()).await
 }
 
 #[tauri::command]
 pub async fn save_snippet_sync_id(
     state: State<'_, Arc<AppState>>,
     provider: SnippetProvider,
+    instance_url: Option<String>,
     snippet_id: Option<String>,
 ) -> Result<(), String> {
-    core_save_snippet_sync_id(&state.storage, provider, snippet_id.as_deref()).await
+    core_save_snippet_sync_id(&state.storage, provider, instance_url.as_deref(), snippet_id.as_deref()).await
 }
 
 #[tauri::command]
@@ -187,7 +189,7 @@ pub async fn retry_snippet_legacy_cleanup(
 ) -> Result<SnippetSyncSettings, String> {
     resolve_snippet_token(&state.storage, &mut config).await?;
     let provider = config.provider;
-    let client = SnippetSyncClient::new(config);
+    let client = SnippetSyncClient::new(config)?;
     retry_pending_snippet_cleanup(&state.storage, provider, &client).await
 }
 
@@ -214,7 +216,7 @@ pub async fn snippet_sync_upload(
     };
     let snapshot =
         build_sync_snapshot(&state.storage, env!("CARGO_PKG_VERSION"), editor_settings, secrets_passphrase).await?;
-    let client = SnippetSyncClient::new(config);
+    let client = SnippetSyncClient::new(config)?;
     let mut summary = client.put_snapshot(&snapshot, snippet_passphrase.as_deref(), secrets_passphrase).await?;
     finalize_snippet_migration(&state.storage, &client, &mut summary).await?;
     Ok(summary)
@@ -229,7 +231,7 @@ pub async fn snippet_sync_download(
     secrets_passphrase: Option<String>,
 ) -> Result<SnippetDownloadResult, String> {
     resolve_snippet_token(&state.storage, &mut config).await?;
-    let (snapshot, summary) = SnippetSyncClient::new(config).get_snapshot(snippet_passphrase.as_deref()).await?;
+    let (snapshot, summary) = SnippetSyncClient::new(config)?.get_snapshot(snippet_passphrase.as_deref()).await?;
     let apply_summary = apply_sync_snapshot(
         &state.storage,
         &snapshot,
@@ -268,7 +270,7 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(app_state);
         let state: tauri::State<'_, Arc<AppState>> = app.state();
-        let settings = super::snippet_sync_settings(state, SnippetProvider::GitHub).await.unwrap();
+        let settings = super::snippet_sync_settings(state, SnippetProvider::GitHub, None).await.unwrap();
 
         assert_eq!(settings.snippet_id.as_deref(), Some("replacement-id"));
         assert_eq!(settings.legacy_cleanup_required_id.as_deref(), Some("legacy-id"));

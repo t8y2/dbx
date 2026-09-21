@@ -1531,6 +1531,7 @@ pub fn run() {
 
     builder
         .manage(CloseBehaviorState::new())
+        .manage(commands::plugin_file::PluginFileState::new())
         .manage(AppLocaleState::new())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
@@ -1873,6 +1874,10 @@ pub fn run() {
             commands::connection::save_table_vgroups,
             commands::connection::load_table_vgroups,
             commands::connection::delete_table_vgroups_for_connection,
+            commands::plugin_file::plugin_file_open,
+            commands::plugin_file::plugin_file_read,
+            commands::plugin_file::plugin_file_write,
+            commands::plugin_file::plugin_file_close,
             commands::plugins::list_plugins,
             commands::plugins::list_plugin_trusted_keys,
             commands::plugins::save_plugin_trusted_key,
@@ -1890,6 +1895,8 @@ pub fn run() {
             commands::plugins::list_active_plugins,
             commands::plugins::stop_plugin,
             commands::plugins::invoke_plugin,
+            commands::plugin_download::download_plugin_file,
+            commands::plugin_download::cancel_plugin_download,
             commands::plugins::invoke_plugin_connection_action,
             commands::plugins::notify_plugin,
             commands::plugins::send_plugin_binary,
@@ -1994,6 +2001,8 @@ pub fn run() {
             commands::query::build_sorted_query_sql,
             commands::query::build_explain_sql,
             commands::query::get_explain_info,
+            commands::query::get_plugin_plan_capabilities,
+            commands::query::get_plugin_estimated_plan,
             commands::query::build_create_user_sql,
             commands::query::build_dropped_file_preview_sql,
             commands::query::build_table_select_sql,
@@ -2372,6 +2381,7 @@ pub fn run() {
             commands::document_cmd::meilisearch_update_index_settings,
             commands::document_cmd::meilisearch_get_index_stats,
             commands::document_cmd::meilisearch_get_index_overview,
+            commands::document_cmd::meilisearch_create_index,
             commands::document_cmd::meilisearch_delete_index,
             commands::document_cmd::meilisearch_delete_all_documents,
             commands::document_cmd::meilisearch_get_system_overview,

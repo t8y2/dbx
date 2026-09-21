@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import type { UpdateInfo } from "@/lib/backend/api";
 import type { AgentDriverInfo, McpServerStatus, UpdateDownloadSource } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
-import type { MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { pluginSourceChange, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
@@ -95,9 +95,11 @@ const selectedCategoryHasUpdate = computed(() => {
   if (selectedTab.value === "plugins") return props.pluginUpdates.length > 0;
   return false;
 });
-const isUpdatingSelectedCategory = computed(() => selectedCategory.value !== null && props.updatingComponent === selectedCategory.value);
 const isAnyComponentUpdating = computed(() => props.componentUpdatesUpdating || props.updatingComponent !== null);
-const isCloseBlocked = computed(() => props.isInstallingUpdate || isUpdatingSelectedCategory.value);
+// Component update tasks are owned by the app-level composable. Closing the
+// dialog only leaves them running in the background; replacing an app update
+// is the only operation that must keep the modal open.
+const isCloseBlocked = computed(() => props.isInstallingUpdate);
 const blocksImplicitDismiss = computed(() => isCloseBlocked.value);
 const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady && !props.isUpdatingAll);
 
@@ -300,6 +302,9 @@ watch(
                   <div class="min-w-0">
                     <div class="truncate font-medium">{{ plugin.name }}</div>
                     <div class="mt-0.5 text-xs text-muted-foreground">{{ plugin.installed?.manifest.version || t("updates.notInstalled") }} → {{ plugin.plugin.latestVersion }}</div>
+                    <!-- "Update all" deliberately skips a changed source: the user has to confirm it in
+                         the Plugin Center, so say so instead of leaving an item that never updates. -->
+                    <div v-if="pluginSourceChange(plugin)" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t("pluginPlatform.updateSourceChangeRequired") }}</div>
                   </div>
                   <span class="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">{{ t("settings.updateAvailable") }}</span>
                 </div>
@@ -359,9 +364,15 @@ watch(
         </DialogFooter>
 
         <DialogFooter v-else data-update-footer class="mx-0 mb-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
-          <Button v-if="selectedCategory" :disabled="!selectedCategoryHasUpdate || isAnyComponentUpdating || isInstallingUpdate || isUpdatingAll" @click="emit('install-component-updates', selectedCategory)">
-            <Loader2 v-if="isUpdatingSelectedCategory" class="h-4 w-4 animate-spin" />
-            {{ t(isUpdatingSelectedCategory ? "updates.updating" : "updates.updateNow") }}
+          <template v-if="isAnyComponentUpdating">
+            <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
+            <Button class="shrink-0" disabled>
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t("updates.updating") }}
+            </Button>
+          </template>
+          <Button v-else-if="selectedCategory" :disabled="!selectedCategoryHasUpdate || isInstallingUpdate || isUpdatingAll" @click="emit('install-component-updates', selectedCategory)">
+            {{ t("updates.updateNow") }}
           </Button>
         </DialogFooter>
       </div>

@@ -3,6 +3,7 @@
 import { createApp, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
+import pluginHostSource from "./PluginWorkbenchHost.vue?raw";
 
 const mocks = vi.hoisted(() => ({
   readPluginUiEntry: vi.fn(),
@@ -10,6 +11,17 @@ const mocks = vi.hoisted(() => ({
   subscribePluginEvents: vi.fn(),
   repushPluginConnection: vi.fn(),
   reopenPluginConnection: vi.fn(),
+  openPluginLocalFile: vi.fn(),
+  readPluginLocalFileChunk: vi.fn(),
+  writePluginLocalFileChunk: vi.fn(),
+  closePluginLocalFile: vi.fn(),
+}));
+
+vi.mock("@/lib/backend/tauri", () => ({
+  openPluginLocalFile: mocks.openPluginLocalFile,
+  readPluginLocalFileChunk: mocks.readPluginLocalFileChunk,
+  writePluginLocalFileChunk: mocks.writePluginLocalFileChunk,
+  closePluginLocalFile: mocks.closePluginLocalFile,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -131,5 +143,71 @@ describe("PluginWorkbenchHost initialization", () => {
     reinit.resolve();
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
     expect(postMessage.mock.calls[0]?.[0]).toMatchObject({ type: "init" });
+  });
+
+  it("claims OS drops over its iframe and forwards opened handles to the plugin", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    mocks.openPluginLocalFile.mockResolvedValue({ handleId: 7, name: "a.txt", size: 3, contentType: "text/plain", write: false });
+
+    const claimed = !document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/a.txt"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+
+    expect(claimed).toBe(true);
+    await vi.waitFor(() => {
+      const posted = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>);
+      expect(posted.some((message) => message.type === "filedrop" && (message.files as Array<Record<string, unknown>>)?.some((file) => file.handleId === "t7" && file.name === "a.txt"))).toBe(true);
+    });
+    expect(mocks.openPluginLocalFile).toHaveBeenCalledWith("sample", "/tmp/a.txt", false);
+    elementFromPoint.mockRestore();
+  });
+
+  it("leaves drops outside the iframe to the host fallback", async () => {
+    const { postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(document.body);
+
+    const claimed = !document.dispatchEvent(
+      new CustomEvent("dbx:tauri-file-drop", {
+        detail: { type: "drop", paths: ["/tmp/a.txt"], position: { x: 200, y: 200 } },
+        cancelable: true,
+      }),
+    );
+
+    expect(claimed).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(mocks.openPluginLocalFile).not.toHaveBeenCalled();
+    elementFromPoint.mockRestore();
+  });
+
+  it("reports drag enter/leave state while the pointer is over the iframe", async () => {
+    const { frame, postMessage } = await mountHost();
+    const elementFromPoint = vi.spyOn(document, "elementFromPoint").mockReturnValue(frame);
+    const payload = (type: "enter" | "leave") => new CustomEvent("dbx:tauri-file-drop", { detail: { type, position: { x: 10, y: 10 } }, cancelable: true });
+
+    document.dispatchEvent(payload("enter"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: true }), "*");
+
+    document.dispatchEvent(payload("leave"));
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "dragstate", active: false }), "*");
+    elementFromPoint.mockRestore();
+  });
+});
+
+describe("PluginWorkbenchHost file-save handle tracking", () => {
+  const hostSource = pluginHostSource;
+  const beginSaveSource = hostSource.slice(hostSource.indexOf("async function beginPluginFileSave"), hostSource.indexOf("async function writePluginFileChunkById"));
+
+  it("opens the save target through openTauriPluginFile so the write handle joins openTauriHandles", () => {
+    // A beginSave the plugin abandons (no finish/cancel) must still be
+    // reclaimed by unmount's disposeLocalFileHandles; a direct
+    // openPluginLocalFile call would leak the handle in the shared
+    // 64-slot registry for the lifetime of the workbench host.
+    expect(beginSaveSource).toContain("await openTauriPluginFile(pluginId, path, true)");
+    expect(beginSaveSource).not.toContain("openPluginLocalFile");
   });
 });

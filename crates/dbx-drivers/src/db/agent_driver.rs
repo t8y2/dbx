@@ -1997,7 +1997,12 @@ impl AgentDriverClient {
     pub async fn disconnect(&mut self) -> Result<Value, String> {
         self.invalidate_cached_query();
         if self.shared_runtime.is_some() {
-            let session_id = self.agent_session_id.as_ref().ok_or("Shared Agent session id is missing")?.clone();
+            // A manual transaction can close its session before the detached
+            // pool finishes cleanup. Closing it again must not be reported as
+            // a runtime failure and terminate unrelated shared sessions.
+            let Some(session_id) = self.agent_session_id.clone() else {
+                return Ok(Value::Null);
+            };
             let result =
                 self.call_method(AgentMethod::CloseSession, serde_json::json!({ "agentSessionId": session_id })).await;
             if result.is_ok() {
@@ -4361,6 +4366,25 @@ for line in sys.stdin:
         wait_for_runtime_reap(&runtime).await;
 
         assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_session_disconnect_is_idempotent_and_preserves_sibling() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("repeat-disconnect-test").await;
+        runtime.increment_session_count();
+        runtime.increment_session_count();
+        let mut closing = AgentDriverClient::shared_session(runtime.clone(), "closing-session".to_string());
+        let mut sibling = AgentDriverClient::shared_session(runtime.clone(), "sibling-session".to_string());
+        closing.disconnect().await.unwrap();
+        assert_eq!(runtime.active_session_count(), 1);
+        assert_eq!(closing.disconnect().await.unwrap(), serde_json::Value::Null);
+        assert_eq!(runtime.active_session_count(), 1);
+        let reply: serde_json::Value = sibling.call("probe", serde_json::json!({})).await.unwrap();
+        assert_eq!(reply, serde_json::json!({"ok": true}));
+        assert!(!runtime.is_failed());
+        sibling.disconnect().await.unwrap();
+        runtime.kill_and_wait().await;
         let _ = std::fs::remove_file(script_path);
     }
 

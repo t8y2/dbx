@@ -14,6 +14,11 @@ src-tauri/windows/nsis/**/*.nsi text eol=lf
 # Keep plugin dev-host formatting checks consistent on Windows checkouts.
 plugins/sdk/dev-host/** text=auto eol=lf
 
+# The vendored WebView2 loaders are hash-pinned build inputs. `-text` disables
+# any eol conversion on checkout, because build.rs verifies their raw SHA256.
+vendor/webview2-com-sys/**/*.lib -text -diff
+vendor/webview2-com-sys/**/*.dll -text -diff
+
 # Keep tests available for review and CI without counting them as shipped code
 # in GitHub's repository language breakdown.
 packages/app-tests/** linguist-vendored

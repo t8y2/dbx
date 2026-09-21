@@ -1,7 +1,7 @@
 import { requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlSemanticToken } from "@/lib/sql/semantic/types";
-import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import type { DatabaseType } from "@/types/database";
 
@@ -26,6 +26,21 @@ function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boole
     default:
       return false;
   }
+}
+
+/**
+ * Resolve the dialect used to read and rewrite DDL text. Callers that only
+ * know the connection's syntax-highlighting dialect (which collapses every
+ * Oracle-like database onto MySQL) must not have that value decide identifier
+ * quoting rules: a case-sensitive Oracle/Dameng name such as `"cName"` would
+ * lose its quotes. The effective database type wins, the highlighting dialect
+ * stays as the fallback for unmapped types.
+ */
+export function ddlFormatDialectFor(options: { formatDialect?: SqlFormatDialect; databaseType?: DatabaseType; highlightDialect?: SqlFormatDialect }): SqlFormatDialect {
+  if (options.formatDialect) return options.formatDialect;
+  const fromDatabaseType = options.databaseType ? sqlFormatDialectForDbType(options.databaseType) : undefined;
+  if (fromDatabaseType && fromDatabaseType !== "generic") return fromDatabaseType;
+  return options.highlightDialect ?? fromDatabaseType ?? "generic";
 }
 
 /** Removes dialect identifier quotes from safe names while preserving strings, comments, and unsafe names. */

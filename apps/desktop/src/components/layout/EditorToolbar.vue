@@ -295,7 +295,7 @@ const executeButtonClass = computed(() => {
 const canMultiExecute = computed(() => {
   if (!supportsQueryExecution(props.activeConnection?.db_type)) return false;
   if (props.activeTab.isExecuting || props.activeTab.isExplaining || props.activeTab.isCancelling) return false;
-  if (props.autoCommit === false || isTransactionActive.value) return false;
+  if (isTransactionActive.value) return false;
   return !!props.executableSql.trim();
 });
 

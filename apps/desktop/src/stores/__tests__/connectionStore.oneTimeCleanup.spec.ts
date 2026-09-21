@@ -30,6 +30,9 @@ function installApiMocks() {
     loadTableVGroups: vi.fn().mockResolvedValue({}),
     saveTableVGroups: vi.fn().mockResolvedValue(undefined),
     deleteTableVGroupsForConnection: vi.fn().mockResolvedValue(undefined),
+    // 关闭页签会顺带回收结果/客户端会话；缺失的导出会让清理路径报错刷屏。
+    closeQuerySession: vi.fn().mockResolvedValue(undefined),
+    closeClientConnectionSession: vi.fn().mockResolvedValue(undefined),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     sessionCredentialStatus: vi.fn().mockResolvedValue(false),
@@ -126,9 +129,10 @@ describe("connectionStore one_time runtime cleanup", () => {
     expect(disconnectDb).not.toHaveBeenCalled();
   });
 
-  // The connection is gone for good, so its tabs can never reconnect: executing in
-  // one would fail with "Connection config not found".
-  it("removeConnection closes the tabs of a one_time connection", async () => {
+  // 删除连接是终态，页签一律由「删除连接」策略决定，one_time 连接也不例外——它的页签虽然
+  // 无法再执行，但里面的 SQL 文本是用户的工作。默认 close-tabs 仍会关闭页签，只是未保存的
+  // 草稿必须先经保存/放弃确认，不能像以前那样被静默丢弃。
+  it("removeConnection asks before discarding an unsaved SQL draft of a one_time connection", async () => {
     installApiMocks();
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -141,7 +145,28 @@ describe("connectionStore one_time runtime cleanup", () => {
 
     await store.removeConnection("preview-1");
 
+    expect(queryStore.showCloseConfirm).toBe(true);
+    expect(queryStore.pendingCloseTabId).toBe(queryId);
+
+    queryStore.forceCloseAllPendingTabs();
     expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
+  });
+
+  it("removeConnection keeps the SQL tabs of a one_time connection when the policy says so", async () => {
+    installApiMocks();
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().updateEditorSettings({ deleteConnectionTabHandlingMode: "keep-all-tabs" });
+    const store = useConnectionStore();
+    const queryStore = useQueryStore();
+    store.connections = [previewConnection()];
+    const queryId = queryStore.createTab("preview-1", "", "sales.parquet", "query");
+    queryStore.updateSql(queryId, "select 1;");
+
+    await store.removeConnection("preview-1");
+
+    expect(queryStore.tabs.some((tab) => tab.id === queryId)).toBe(true);
     expect(queryStore.showCloseConfirm).toBe(false);
   });
 
@@ -166,7 +191,9 @@ describe("connectionStore one_time runtime cleanup", () => {
     expect(queryStore.tabs.some((tab) => tab.connectionId === "preview-1")).toBe(false);
   });
 
-  it("removeConnection keeps the tabs of a saved connection for the disconnect handling mode", async () => {
+  // 删除连接是终态（配置已从磁盘移除、无法重连），因此页签由「删除连接」策略决定，
+  // 不再复用「断开连接」策略。默认 close-tabs：删除即关闭该连接的页签。
+  it("removeConnection applies the delete tab handling mode to a saved connection", async () => {
     installApiMocks();
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -177,6 +204,6 @@ describe("connectionStore one_time runtime cleanup", () => {
 
     await store.removeConnection("saved-1");
 
-    expect(queryStore.tabs.some((tab) => tab.connectionId === "saved-1")).toBe(true);
+    expect(queryStore.tabs.some((tab) => tab.connectionId === "saved-1")).toBe(false);
   });
 });

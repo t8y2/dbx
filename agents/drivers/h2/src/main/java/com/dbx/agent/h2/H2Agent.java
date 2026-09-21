@@ -59,38 +59,53 @@ public class H2Agent extends AbstractJdbcAgent {
 
     @Override
     protected void loadDriver(ConnectParams params) throws Exception {
+        // Selection and physical opens must not race a first connection's file lock.
+        synchronized (H2FileConnections.class) {
+            selectDriver(params);
+        }
+    }
+
+    private void selectDriver(ConnectParams params) throws Exception {
         H2DriverVersion selected = H2DriverVersion.select(params);
         if (selected == H2DriverVersion.CUSTOM) {
-            H2DriverLoader.LoadedDriver external = H2DriverLoader.loadExternal(
+            loadedDriver = H2DriverLoader.loadExternal(
                 params.getJdbc_driver_paths(),
                 params.getJdbc_driver_class()
             );
-            if (loadedDriver == null || !loadedDriver.identity().equals(external.identity())) {
-                replaceLoadedDriver(external);
-            } else {
-                external.classLoader().close();
-            }
-        } else if (loadedDriver == null || loadedDriver.version() != selected) {
-            replaceLoadedDriver(H2DriverLoader.load(selected));
+        } else {
+            loadedDriver = H2DriverLoader.load(selected);
         }
         driverVersion = selected;
     }
 
-    private void replaceLoadedDriver(H2DriverLoader.LoadedDriver replacement) throws Exception {
-        H2DriverLoader.LoadedDriver previous = loadedDriver;
-        if (previous != null) {
-            try {
-                previous.classLoader().close();
-            } catch (Exception error) {
-                replacement.classLoader().close();
-                throw error;
-            }
-        }
-        loadedDriver = replacement;
-    }
-
     @Override
     protected Connection openConnection(ConnectParams params) throws Exception {
+        String url = buildJdbcUrl(params);
+        if (H2FileFormatDetector.localDatabaseBasePath(url) != null) {
+            synchronized (H2FileConnections.class) {
+                selectDriver(params);
+                H2DriverLoader.LoadedDriver active = H2FileConnections.find(url);
+                if (active != null && !active.identity().equals(loadedDriver.identity())) {
+                    throw new SQLException("This H2 file is already open with a different driver; use the same H2 driver profile or disconnect it first");
+                }
+                Connection opened = connectWithDriver(params);
+                try {
+                    H2FileConnections.register(url, opened, loadedDriver);
+                } catch (Exception error) {
+                    try {
+                        opened.close();
+                    } catch (Exception closeError) {
+                        error.addSuppressed(closeError);
+                    }
+                    throw error;
+                }
+                return opened;
+            }
+        }
+        return connectWithDriver(params);
+    }
+
+    private Connection connectWithDriver(ConnectParams params) throws Exception {
         if (loadedDriver == null) {
             throw new IllegalStateException("H2 JDBC driver was not loaded");
         }

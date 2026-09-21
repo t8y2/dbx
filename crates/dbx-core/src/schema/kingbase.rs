@@ -205,6 +205,7 @@ mod tests {
             ]],
             affected_rows: 0,
             execution_time_ms: 0,
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,

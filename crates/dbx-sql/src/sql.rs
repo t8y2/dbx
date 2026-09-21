@@ -59,6 +59,9 @@ pub struct SqlFileRequest {
     pub database: String,
     pub file_path: String,
     pub continue_on_error: bool,
+    /// Reuse a held manual transaction instead of committing through ordinary query execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub txn_session_id: Option<String>,
     #[serde(default)]
     pub selected_tables: Option<Vec<dbx_types::sql_file::SqlFileTable>>,
     #[serde(default)]
@@ -952,6 +955,13 @@ fn starts_with_soft_statement_keyword(sql: &str, options: SqlParsingOptions) -> 
 #[allow(dead_code)]
 fn split_sql_statement_ranges(sql: &str) -> Vec<SqlStatementRange> {
     split_sql_statement_ranges_with_options(sql, SqlParsingOptions::default())
+}
+
+/// Statement ranges that keep their byte offsets into `sql`, so callers can rewrite
+/// individual statements in place (see the Oracle administrative DDL tolerance in
+/// `sql_analysis`).
+pub(crate) fn statement_ranges_for_database(sql: &str, db_type: DatabaseType) -> Vec<SqlStatementRange> {
+    split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(db_type))
 }
 
 fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions) -> Vec<SqlStatementRange> {
@@ -2525,11 +2535,30 @@ impl OraclePlSqlBlock {
 
         for (index, token) in self.tokens.iter().enumerate() {
             if token.is_semicolon() {
+                if matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader)) {
+                    scopes.pop();
+                }
                 continue;
             }
 
-            if token.is_word("BEGIN") {
-                scopes.push(OraclePlSqlScope::Block);
+            if token.is_word("DECLARE") {
+                if !matches!(scopes.last(), Some(OraclePlSqlScope::Declaration)) {
+                    scopes.push(OraclePlSqlScope::Declaration);
+                }
+            } else if token.is_any_word(&["PROCEDURE", "FUNCTION"])
+                && matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine))
+            {
+                scopes.push(OraclePlSqlScope::RoutineHeader);
+            } else if token.is_any_word(&["IS", "AS"]) && matches!(scopes.last(), Some(OraclePlSqlScope::RoutineHeader))
+            {
+                *scopes.last_mut().unwrap() = OraclePlSqlScope::Routine;
+            } else if token.is_word("BEGIN") {
+                // A local routine's BEGIN belongs to that routine, not to the outer block.
+                if matches!(scopes.last(), Some(OraclePlSqlScope::Declaration | OraclePlSqlScope::Routine)) {
+                    *scopes.last_mut().unwrap() = OraclePlSqlScope::Block;
+                } else {
+                    scopes.push(OraclePlSqlScope::Block);
+                }
                 saw_begin = true;
                 complete = false;
             } else if token.is_word("CASE") {
@@ -2621,6 +2650,12 @@ enum OraclePlSqlCreateObjectKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OraclePlSqlScope {
     Object,
+    /// DECLARE section awaiting its own BEGIN.
+    Declaration,
+    /// Local PROCEDURE/FUNCTION header, before IS/AS (a `;` here is a forward declaration).
+    RoutineHeader,
+    /// Local PROCEDURE/FUNCTION after IS/AS, awaiting its own BEGIN.
+    Routine,
     Block,
     Case,
 }
@@ -3820,6 +3855,25 @@ SELECT 2 FROM DUMMY;";
         assert_eq!(
             find_statement_at_cursor_for_database(sql, cursor, DatabaseType::SapHana),
             "DO\nBEGIN\n  IF 1 = 1 THEN\n    SELECT CASE WHEN 1 = 1 THEN 1 ELSE 0 END AS \"Result\" FROM DUMMY;\n  END IF;\nEND;"
+        );
+    }
+
+    #[test]
+    fn oracle_split_keeps_anonymous_block_with_local_routines_together() {
+        let cases = [
+            "DECLARE\nPROCEDURE local_proc IS\nBEGIN\n  NULL;\nEND;\n\nBEGIN\nlocal_proc;\nEND;",
+            "DECLARE\n  v NUMBER;\n  PROCEDURE p1 IS BEGIN NULL; END;\n  FUNCTION f1 RETURN NUMBER IS BEGIN RETURN 1; END f1;\nBEGIN\n  p1;\n  v := f1;\nEND;",
+            "DECLARE\n  PROCEDURE fwd(x NUMBER);\n  PROCEDURE fwd(x NUMBER) IS BEGIN NULL; END;\nBEGIN\n  fwd(1);\nEND;",
+            "DECLARE\n  PROCEDURE outer_p IS\n    PROCEDURE inner_p IS BEGIN NULL; END;\n  BEGIN\n    inner_p;\n  END;\nBEGIN\n  outer_p;\nEND;",
+        ];
+        for sql in cases {
+            assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Oracle), vec![sql.to_string()], "{sql}");
+        }
+        let block = cases[0];
+        let sql = format!("{block}\nSELECT 1 FROM dual;");
+        assert_eq!(
+            split_sql_statements_for_database(&sql, DatabaseType::Oracle),
+            vec![block.to_string(), "SELECT 1 FROM dual".to_string()]
         );
     }
 

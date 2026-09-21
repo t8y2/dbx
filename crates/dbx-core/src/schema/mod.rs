@@ -6318,6 +6318,9 @@ async fn list_object_statistics_once(
         }
     }
     if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
+            return crate::mongo_ops::mongo_agent_list_object_statistics(&client, database).await;
+        }
         if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Oracle) {
             return oracle_agent_list_object_statistics(
                 client,

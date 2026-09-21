@@ -40,6 +40,38 @@ async fn agent_run_command_document(
     mongo_driver::json_object_to_document_extended_json(response)
 }
 
+/// The database view's per-collection "rows"/"size" columns over the legacy agent: one
+/// `collStats` per non-view collection through `runCommand`, mirroring
+/// `mongo_driver::list_object_statistics`. A collection whose `collStats` fails is left out so
+/// the view keeps that row blank instead of failing the whole listing. The agent connection is
+/// a single RPC channel, so the round trips run sequentially.
+pub async fn mongo_agent_list_object_statistics(
+    client: &crate::db::agent_driver::PooledAgentClient,
+    database: &str,
+) -> Result<Vec<crate::db::ObjectStatistics>, String> {
+    let database = database.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    let specs = {
+        let mut client = client.lock().await;
+        if !client.supports_capability(AgentCapability::MongoRunCommand) {
+            return Ok(Vec::new());
+        }
+        crate::document_ops::mongo_collection_specs_from_agent_response(
+            client.mongo_list_collection_specs(database).await?,
+        )?
+    };
+    let mut statistics = Vec::with_capacity(specs.len());
+    for spec in specs.into_iter().filter(|spec| spec.kind != mongo_driver::MongoCollectionKind::View) {
+        let Ok(command) = mongo_driver::collection_stats_command(&spec.name, None) else { continue };
+        if let Ok(result) = agent_run_command_document(client, database, command, "collection stats").await {
+            statistics.push(mongo_driver::object_statistics_from_collection_stats(&spec.name, database, &result));
+        }
+    }
+    Ok(statistics)
+}
+
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
 }

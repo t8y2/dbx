@@ -311,7 +311,7 @@ pub async fn list_object_statistics(client: &Client, database: &str) -> Result<V
 /// Map `collStats` onto the shared statistics shape: the document count, and the
 /// on-disk footprint (data + indexes) the SQL engines report as
 /// `DATA_LENGTH + INDEX_LENGTH`.
-fn object_statistics_from_collection_stats(name: &str, database: &str, result: &Document) -> ObjectStatistics {
+pub fn object_statistics_from_collection_stats(name: &str, database: &str, result: &Document) -> ObjectStatistics {
     ObjectStatistics {
         name: name.to_string(),
         schema: Some(database.to_string()),

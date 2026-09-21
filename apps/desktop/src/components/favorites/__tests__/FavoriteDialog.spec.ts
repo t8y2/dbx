@@ -72,6 +72,37 @@ describe("favorite dialog", () => {
     expect(document.body.textContent).toContain(favoritesEn.invalidCode);
     expect(api.createTableFavorite).not.toHaveBeenCalled();
   });
+  it("previews the next code but leaves allocation to the backend", async () => {
+    api.listTableFavorites.mockResolvedValue({ items: [], nextCode: "05" });
+    await mount();
+    expect(document.querySelectorAll<HTMLInputElement>("input")[0].value).toBe("05");
+    api.createTableFavorite.mockResolvedValueOnce({ item: { ...item, code: "06" }, created: true });
+    await submit();
+    expect(api.createTableFavorite).toHaveBeenCalledWith(expect.objectContaining({ code: undefined }));
+  });
+  it("saves a manually edited code as a custom code", async () => {
+    api.listTableFavorites.mockResolvedValue({ items: [], nextCode: "05" });
+    await mount();
+    await setInput(0, "08");
+    api.createTableFavorite.mockRejectedValueOnce(new Error("FAVORITE_CODE_CONFLICT: code already exists"));
+    await submit();
+    expect(api.createTableFavorite).toHaveBeenCalledWith(expect.objectContaining({ code: "08" }));
+    expect(document.querySelectorAll<HTMLInputElement>("input")[0].value).toBe("08");
+    expect(document.body.textContent).toContain(favoritesEn.codeConflict);
+  });
+  it("does not overwrite manual input when a late preview arrives", async () => {
+    let resolve!: (value: { items: TableFavorite[]; nextCode: string }) => void;
+    api.listTableFavorites.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    await mount();
+    await setInput(0, "custom");
+    resolve({ items: [], nextCode: "05" });
+    await flush();
+    expect(document.querySelectorAll<HTMLInputElement>("input")[0].value).toBe("custom");
+  });
   it("retains user input on persistence failure", async () => {
     const store = await mount();
     await setInput(1, "My customers");

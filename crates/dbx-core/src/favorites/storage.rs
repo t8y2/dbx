@@ -64,6 +64,19 @@ fn require_revision(item: &TableFavorite, revision: i64) -> Result<(), String> {
     Ok(())
 }
 
+fn next_available_code(conn: &Connection) -> Result<(String, i64), String> {
+    let mut value: i64 = conn
+        .query_row("SELECT next_value FROM table_favorite_sequence WHERE singleton = 1", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    loop {
+        let candidate = format!("{value:02}");
+        value = value.checked_add(1).ok_or("INVALID_FAVORITE: automatic code sequence exhausted")?;
+        if !code_in_use(conn, &candidate, "")? {
+            return Ok((candidate, value));
+        }
+    }
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -79,7 +92,8 @@ impl Storage {
                 .map_err(|e| e.to_string())?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(|e| e.to_string())?;
-            Ok(TableFavorites { items })
+            let (next_code, _) = next_available_code(conn)?;
+            Ok(TableFavorites { items, next_code })
         })
         .await
     }
@@ -98,15 +112,9 @@ impl Storage {
                 if code_in_use(&tx, &code, "")? { return Err("FAVORITE_CODE_CONFLICT: code already exists".into()); }
                 code
             } else {
-                let mut value: i64 = tx.query_row("SELECT next_value FROM table_favorite_sequence WHERE singleton = 1", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-                loop {
-                    let candidate = format!("F{value:04}");
-                    value = value.checked_add(1).ok_or("INVALID_FAVORITE: automatic code sequence exhausted")?;
-                    if !code_in_use(&tx, &candidate, "")? {
-                        tx.execute("UPDATE table_favorite_sequence SET next_value = ?1 WHERE singleton = 1", [value]).map_err(|e| e.to_string())?;
-                        break candidate;
-                    }
-                }
+                let (candidate, value) = next_available_code(&tx)?;
+                tx.execute("UPDATE table_favorite_sequence SET next_value = ?1 WHERE singleton = 1", [value]).map_err(|e| e.to_string())?;
+                candidate
             };
             let item = TableFavorite { id: Uuid::new_v4().to_string(), code, name, target: input.target, revision: 1, created_at: now_ms(), updated_at: now_ms() };
             tx.execute(

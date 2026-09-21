@@ -31,13 +31,28 @@ async fn setup() -> (TempDir, Storage) {
 }
 
 #[tokio::test]
+async fn favorites_code_preview_does_not_reserve_and_skips_taken_codes() {
+    let (_dir, storage) = setup().await;
+    assert_eq!(storage.list_table_favorites().await.unwrap().next_code, "01");
+    assert_eq!(storage.list_table_favorites().await.unwrap().next_code, "01");
+    storage.create_table_favorite(input("custom", Some("01"))).await.unwrap();
+    assert_eq!(storage.list_table_favorites().await.unwrap().next_code, "02");
+    let first = storage.create_table_favorite(input("first", None)).await.unwrap();
+    let second = storage.create_table_favorite(input("second", None)).await.unwrap();
+    assert_eq!(first.item.code, "02");
+    assert_eq!(second.item.code, "03");
+    let payload = serde_json::to_value(storage.list_table_favorites().await.unwrap()).unwrap();
+    assert_eq!(payload["nextCode"], "04");
+}
+
+#[tokio::test]
 async fn favorites_numbering_idempotence_and_restart() {
     let (dir, storage) = setup().await;
-    let custom = storage.create_table_favorite(input("a", Some(" f0001 "))).await.unwrap();
-    assert_eq!(custom.item.code, "F0001");
+    let custom = storage.create_table_favorite(input("a", Some(" 01 "))).await.unwrap();
+    assert_eq!(custom.item.code, "01");
     assert_eq!(custom.item.name, "a 收藏");
     let automatic = storage.create_table_favorite(input("b", None)).await.unwrap();
-    assert_eq!(automatic.item.code, "F0002");
+    assert_eq!(automatic.item.code, "02");
     let duplicate = storage.create_table_favorite(input("b", Some("DIFFERENT"))).await.unwrap();
     assert!(!duplicate.created);
     assert_eq!(duplicate.item, automatic.item);
@@ -45,7 +60,7 @@ async fn favorites_numbering_idempotence_and_restart() {
     drop(storage);
     let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
     assert_eq!(storage.list_table_favorites().await.unwrap().items, vec![automatic.item]);
-    assert_eq!(storage.create_table_favorite(input("c", None)).await.unwrap().item.code, "F0003");
+    assert_eq!(storage.create_table_favorite(input("c", None)).await.unwrap().item.code, "03");
 }
 
 #[tokio::test]
@@ -192,7 +207,7 @@ async fn favorites_validation_and_code_conflict_do_not_consume_sequence() {
     let mut emoji = input("b", None);
     emoji.name = "🦀".repeat(100);
     let b = storage.create_table_favorite(emoji).await.unwrap().item;
-    assert_eq!(b.code, "F0001");
+    assert_eq!(b.code, "01");
     assert!(storage
         .update_table_favorite(a.id, UpdateTableFavorite { name: "a".into(), code: b.code, expected_revision: 1 })
         .await
@@ -216,7 +231,7 @@ async fn favorites_old_database_upgrade_and_whole_database_copy() {
     );
     let copied = Storage::open(&target.path().join("dbx.db")).await.unwrap();
     assert_eq!(copied.list_table_favorites().await.unwrap().items, vec![a]);
-    assert_eq!(copied.create_table_favorite(input("b", None)).await.unwrap().item.code, "F0002");
+    assert_eq!(copied.create_table_favorite(input("b", None)).await.unwrap().item.code, "02");
 }
 
 #[tokio::test]

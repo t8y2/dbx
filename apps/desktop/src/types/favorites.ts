@@ -40,4 +40,5 @@ export interface RelinkTableFavorite {
 
 export interface TableFavorites {
   items: TableFavorite[];
+  nextCode?: string;
 }

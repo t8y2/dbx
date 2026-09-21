@@ -6,6 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { favoritePath } from "@/lib/favorites/target";
 import { favoriteErrorMessage } from "@/lib/favorites/errors";
+import { listTableFavorites } from "@/lib/backend/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -16,6 +17,7 @@ const connections = useConnectionStore();
 const { toast } = useToast();
 const name = ref("");
 const code = ref("");
+const codeEdited = ref(false);
 const error = ref("");
 const busy = ref(false);
 const confirmRemove = ref(false);
@@ -27,6 +29,16 @@ watch(
   (value) => {
     name.value = value?.mode === "create" ? value.target.objectName : value?.item.name || "";
     code.value = value?.mode === "create" ? "" : value?.item.code || "";
+    codeEdited.value = false;
+    if (value?.mode === "create") {
+      void listTableFavorites()
+        .then((result) => {
+          if (store.dialog === value && !codeEdited.value) code.value = result.nextCode || "";
+        })
+        .catch(() => {
+          // Preview is optional; saving without a custom code still allocates atomically.
+        });
+    }
     error.value = "";
     confirmRemove.value = value?.mode === "edit" && !!value.remove;
   },
@@ -60,7 +72,7 @@ async function save() {
   busy.value = true;
   try {
     if (state.mode === "create") {
-      const result = await store.create({ target: state.target, name: name.value, code: code.value.trim() || undefined });
+      const result = await store.create({ target: state.target, name: name.value, code: codeEdited.value ? code.value.trim() || undefined : undefined });
       if (store.dialog !== state) return;
       if (!result.created) {
         store.dialog = { mode: "edit", item: result.item };
@@ -116,7 +128,11 @@ async function remove() {
       </DialogHeader>
       <form class="grid gap-4" @submit.prevent="save">
         <template v-if="store.dialog?.mode !== 'relink'">
-          <label class="grid gap-1.5">{{ t("favorites.code") }}<Input v-model="code" :disabled="busy" :placeholder="t('favorites.autoCode')" autocomplete="off" /></label>
+          <label class="grid gap-1.5"
+            >{{ t("favorites.code") }}<Input v-model="code" :disabled="busy" :placeholder="t('favorites.autoCode')" autocomplete="off" @update:model-value="codeEdited = true" /><span v-if="store.dialog?.mode === 'create' && !codeEdited" class="text-xs text-muted-foreground">{{
+              t("favorites.codePreview")
+            }}</span></label
+          >
           <label class="grid gap-1.5">{{ t("favorites.name") }}<Input v-model="name" :disabled="busy" autocomplete="off" /></label>
         </template>
         <div v-if="oldPath" class="min-w-0 text-muted-foreground">

@@ -80,8 +80,10 @@ pub struct RelinkTableFavorite {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TableFavorites {
     pub items: Vec<TableFavorite>,
+    pub next_code: String,
 }
 
 pub(crate) fn validate_target(target: &FavoriteTarget) -> Result<(), String> {

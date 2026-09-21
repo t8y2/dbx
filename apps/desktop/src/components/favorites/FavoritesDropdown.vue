@@ -106,8 +106,8 @@ function relink(item: TableFavorite) {
       <p v-if="store.error" role="alert" class="mt-2 break-words text-xs text-destructive">{{ store.error }}</p>
       <p v-if="store.loading && !store.initialized" role="status" class="p-4 text-muted-foreground">{{ t("favorites.loading") }}</p>
       <p v-else-if="!filtered.length && !store.error" class="p-4 text-muted-foreground">{{ t(search ? "favorites.noMatches" : "favorites.empty") }}</p>
-      <div ref="list" class="mt-2 max-h-80 overflow-y-auto" :aria-label="t('favorites.title')">
-        <div v-for="(item, index) in filtered" :key="item.id" class="flex items-center rounded hover:bg-accent focus-within:bg-accent" :class="index === selected ? 'bg-accent/50' : ''">
+      <div ref="list" class="mt-2 flex max-h-80 flex-col gap-1 overflow-y-auto py-1" :aria-label="t('favorites.title')">
+        <div v-for="(item, index) in filtered" :key="item.id" class="flex shrink-0 items-center rounded hover:bg-accent focus-within:bg-accent">
           <button data-favorite-open type="button" class="min-w-0 flex-1 p-2 text-left" :disabled="opening" @focus="selected = index" @click="open(item)">
             <span class="block truncate text-sm">{{ item.code }} · {{ item.name }}</span
             ><span class="block truncate text-xs text-muted-foreground" :title="path(item)">{{ path(item) }}</span>

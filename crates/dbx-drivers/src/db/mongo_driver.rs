@@ -2475,6 +2475,16 @@ pub fn find_one_and_update_command(
     Ok(command)
 }
 
+/// A replacement document whose keys start with `$` would be silently executed as
+/// an update by the server, so both the native and legacy-agent `findOneAndReplace`
+/// paths refuse it up front with the same message.
+fn reject_update_operator_replacement(replacement: &Document) -> Result<(), String> {
+    if let Some(operator) = replacement.keys().find(|key| key.starts_with('$')) {
+        return Err(format!("Replacement document must not contain update operators such as {operator}"));
+    }
+    Ok(())
+}
+
 /// The `findAndModify` server command behind `findOneAndReplace()`. A replacement with update
 /// operators is refused here because the server would silently treat it as an update instead.
 pub fn find_one_and_replace_command(
@@ -2489,9 +2499,7 @@ pub fn find_one_and_replace_command(
         serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
     let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
-    if let Some(operator) = replacement.keys().find(|key| key.starts_with('$')) {
-        return Err(format!("Replacement document must not contain update operators such as {operator}"));
-    }
+    reject_update_operator_replacement(&replacement)?;
     let options: MongoFindOneAndReplaceOptions = parse_find_and_modify_options(options_json, "findOneAndReplace")?;
     let mut command = doc! { "findAndModify": collection, "query": filter, "update": replacement };
     if find_and_modify_returns_after(options.return_document.as_deref(), options.return_new_document, options.new)? {
@@ -2589,6 +2597,7 @@ pub async fn find_one_and_replace(
         serde_json::from_str(replacement_json).map_err(|e| format!("Invalid replacement JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
     let replacement = json_object_to_document(&replacement_value).map_err(|e| format!("Invalid replacement: {e}"))?;
+    reject_update_operator_replacement(&replacement)?;
     let options: MongoFindOneAndReplaceOptions = parse_find_and_modify_options(options_json, "findOneAndReplace")?;
     let col = client.database(database).collection::<Document>(collection);
     let mut action = col.find_one_and_replace(filter, replacement);

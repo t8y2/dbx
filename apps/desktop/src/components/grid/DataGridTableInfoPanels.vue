@@ -1,13 +1,22 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { KeyRound, Loader2, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, TableInfoTab, TriggerInfo } from "@/types/database";
+import { formatObjectBrowserBytes, formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
+import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, TableInfoTab, TriggerInfo } from "@/types/database";
 
 interface DataGridTableInfoPanelsProps {
   activeTab: TableInfoTab;
   searchQuery: string;
+  tableName: string;
+  tableSchema: string;
+  database: string;
+  tableOwner: string | null;
+  overviewStats: ObjectStatistics | null;
+  overviewComment: string | null;
+  overviewLoading: boolean;
   columns: ColumnInfo[];
   columnsLoading: boolean;
   indexes: IndexInfo[];
@@ -36,6 +45,20 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+const overviewRows = computed(() => {
+  const rows: { label: string; value: string; mono?: boolean }[] = [
+    { label: t("common.table"), value: props.tableName },
+    { label: t("common.schema"), value: props.tableSchema },
+    { label: t("common.database"), value: props.database },
+    { label: t("grid.tableOwner"), value: props.tableOwner ?? "", mono: true },
+    { label: t("structureEditor.comment"), value: props.overviewComment ?? "" },
+    { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(props.overviewStats?.estimated_rows), mono: true },
+    { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(props.overviewStats?.total_bytes), mono: true },
+  ];
+  const query = props.searchQuery.trim().toLowerCase();
+  return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));
+});
 </script>
 
 <template>
@@ -211,6 +234,20 @@ const { t } = useI18n();
         <div v-if="constraint.columns.length" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ constraint.columns.join(", ") }}</div>
         <div v-if="constraint.ref_table" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
         <div v-if="constraint.definition" class="mt-1 font-mono text-[11px] text-muted-foreground break-all whitespace-pre-wrap">{{ constraint.definition }}</div>
+      </div>
+    </div>
+  </div>
+  <div v-else-if="props.activeTab === 'info'" class="table-info-scroller flex-1 min-h-0 overflow-auto">
+    <div v-if="props.overviewLoading" class="h-full flex items-center justify-center">
+      <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+    </div>
+    <div v-else-if="props.searchQuery && overviewRows.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+      {{ t("grid.tableInfoNoResults") }}
+    </div>
+    <div v-else class="divide-y">
+      <div v-for="row in overviewRows" :key="row.label" class="flex items-baseline gap-3 px-3 py-2 text-xs">
+        <span class="w-20 shrink-0 text-muted-foreground">{{ row.label }}</span>
+        <span class="min-w-0 flex-1 select-text break-words" :class="row.mono ? 'font-mono text-[11px]' : ''" :title="row.value">{{ row.value }}</span>
       </div>
     </div>
   </div>

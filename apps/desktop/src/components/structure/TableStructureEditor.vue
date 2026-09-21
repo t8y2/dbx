@@ -3774,6 +3774,17 @@ function columnContextMenuItems(column: EditableStructureColumn): ContextMenuIte
   ];
 }
 
+/**
+ * The delete control is icon-only and swaps between three actions, so its
+ * tooltip has to name the action instead of only showing the shortcut (#9870).
+ */
+function deleteColumnActionLabel(column: EditableStructureColumn): string {
+  if (!column.original) {
+    return t("structureEditor.remove");
+  }
+  return column.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop");
+}
+
 function isColumnNameDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.renameColumn);
 }
@@ -5031,7 +5042,10 @@ watch(
                                 <Copy :class="structureIconClass" />
                               </Button>
                             </TooltipTrigger>
-                            <TooltipContent side="bottom" class="font-mono font-medium" data-copy-column-shortcut-content>⌘/Ctrl+D</TooltipContent>
+                            <TooltipContent side="bottom" data-copy-column-shortcut-content>
+                              <span>{{ t("structureEditor.copyColumn") }}</span>
+                              <span data-slot="kbd" class="font-mono font-medium opacity-70">⌘/Ctrl+D</span>
+                            </TooltipContent>
                           </Tooltip>
                           <Tooltip :delay-duration="FIELD_SHORTCUT_TOOLTIP_DELAY_MS" data-delete-column-shortcut-tooltip>
                             <TooltipTrigger as-child>
@@ -5043,8 +5057,9 @@ watch(
                                 <X :class="structureIconClass" />
                               </Button>
                             </TooltipTrigger>
-                            <TooltipContent side="bottom" class="font-mono font-medium" data-delete-column-shortcut-content>
-                              {{ column.markedForDrop ? t("structureEditor.restore") : "⌘/Ctrl+Del" }}
+                            <TooltipContent side="bottom" data-delete-column-shortcut-content>
+                              <span>{{ deleteColumnActionLabel(column) }}</span>
+                              <span data-slot="kbd" class="font-mono font-medium opacity-70">⌘/Ctrl+Del</span>
                             </TooltipContent>
                           </Tooltip>
                         </div>

@@ -761,12 +761,28 @@ describe("TableStructureEditor action column", () => {
     expect(copyTooltip?.getAttribute("delay-duration")).toBe("500");
     expect(deleteTooltip?.getAttribute("delay-duration")).toBe("500");
     expect(root.querySelector("[data-add-column-shortcut-content]")?.textContent).toBe("Shift+Enter");
-    expect(root.querySelector("[data-copy-column-shortcut-content]")?.textContent).toBe("⌘/Ctrl+D");
-    expect(root.querySelector("[data-delete-column-shortcut-content]")?.textContent?.trim()).toBe("⌘/Ctrl+Del");
+    // The add control already renders its label, so that hint stays a bare shortcut.
     expect(root.querySelector("[data-add-column-shortcut-content]")?.textContent).not.toContain("structureEditor.addColumn");
-    expect(root.querySelector("[data-copy-column-shortcut-content]")?.textContent).not.toContain("structureEditor.copyColumn");
+    // The icon-only copy/delete controls must name the action next to the shortcut (#9870).
+    expect(root.querySelector("[data-copy-column-shortcut-content]")?.textContent).toBe("structureEditor.copyColumn⌘/Ctrl+D");
+    expect(root.querySelector("[data-delete-column-shortcut-content]")?.textContent).toBe("structureEditor.drop⌘/Ctrl+Del");
     expect(copyTooltip?.querySelector("button")?.hasAttribute("title")).toBe(false);
     expect(deleteTooltip?.querySelector("button")?.hasAttribute("title")).toBe(false);
+  });
+
+  it("names the delete control after the action it currently performs", async () => {
+    const root = await mountEditor("dameng");
+
+    const persistedDelete = root.querySelector<HTMLButtonElement>('button[aria-label="structureEditor.drop"]');
+    if (!persistedDelete) throw new Error("Missing delete button for the persisted column");
+    persistedDelete.click();
+    await vi.waitFor(() => expect(root.querySelector("[data-delete-column-shortcut-content]")?.textContent).toBe("structureEditor.restore⌘/Ctrl+Del"));
+
+    buttonWithText(root, "structureEditor.addColumn").click();
+    await vi.waitFor(() => expect(root.querySelector('[data-column-row-index="1"]')).not.toBeNull());
+    const addedRow = root.querySelector('[data-column-row-index="1"]');
+    expect(addedRow?.querySelector('button[aria-label="structureEditor.remove"]')).not.toBeNull();
+    expect(addedRow?.querySelector("[data-delete-column-shortcut-content]")?.textContent).toBe("structureEditor.remove⌘/Ctrl+Del");
   });
 
   it("adds a field below the focused input on Shift+Enter", async () => {

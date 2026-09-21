@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use super::with_connection_timeout;
 use crate::models::connection::DatabaseConnectionInfo;
-use crate::types::IndexInfo;
+use crate::types::{IndexInfo, ObjectStatistics};
 use dbx_types::document::{MongoGridFsBucketInfo, MongoGridFsFileInfo};
-use futures::{io::AsyncReadExt, io::AsyncWriteExt, TryStreamExt};
+use futures::{io::AsyncReadExt, io::AsyncWriteExt, stream, StreamExt, TryStreamExt};
 use percent_encoding::percent_decode_str;
 use std::{collections::HashSet, time::Duration};
 
@@ -272,6 +272,68 @@ pub async fn run_command(client: &Client, database: &str, command_json: &str) ->
         total_is_exact: true,
         next_cursor: None,
     })
+}
+
+/// Bounded `collStats` round trips for the database view's per-collection stats.
+const MONGO_OBJECT_STATISTICS_CONCURRENCY: usize = 8;
+
+/// Per-collection document counts and on-disk sizes for the database view's
+/// "rows"/"size" columns.
+///
+/// `listCollections` carries no size metadata, so every collection needs its own
+/// `collStats`. Views are skipped (they own no storage and `collStats` rejects
+/// them) and the round trips run with bounded concurrency so a database with
+/// hundreds of collections does not serialize into one long wait. A collection
+/// whose `collStats` fails is left out; the view then keeps that row blank.
+pub async fn list_object_statistics(client: &Client, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+    let database = database.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+
+    let collections = list_collection_specs(client, database).await?;
+    let handle = client.database(database);
+    let stats = stream::iter(
+        collections
+            .into_iter()
+            .filter(|spec| spec.kind != MongoCollectionKind::View)
+            .map(|spec| {
+                let handle = handle.clone();
+                async move {
+                    let result = handle.run_command(collection_stats_command_document(&spec.name, None)).await.ok()?;
+                    Some(object_statistics_from_collection_stats(&spec.name, database, &result))
+                }
+            }),
+    )
+    .buffer_unordered(MONGO_OBJECT_STATISTICS_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    Ok(stats.into_iter().flatten().collect())
+}
+
+/// Map `collStats` onto the shared statistics shape: the document count, and the
+/// on-disk footprint (data + indexes) the SQL engines report as
+/// `DATA_LENGTH + INDEX_LENGTH`.
+fn object_statistics_from_collection_stats(name: &str, database: &str, result: &Document) -> ObjectStatistics {
+    ObjectStatistics {
+        name: name.to_string(),
+        schema: Some(database.to_string()),
+        estimated_rows: collection_stats_int(result, "count"),
+        total_bytes: match (collection_stats_int(result, "storageSize"), collection_stats_int(result, "totalIndexSize")) {
+            (None, None) => None,
+            (data, index) => Some(data.unwrap_or(0).saturating_add(index.unwrap_or(0))),
+        },
+    }
+}
+
+fn collection_stats_int(result: &Document, key: &str) -> Option<i64> {
+    match result.get(key) {
+        Some(Bson::Int32(value)) => Some(i64::from(*value)),
+        Some(Bson::Int64(value)) => Some(*value),
+        Some(Bson::Double(value)) if value.is_finite() => Some(*value as i64),
+        _ => None,
+    }
 }
 
 fn server_version_from_build_info(result: &Document) -> Result<String, String> {
@@ -4693,6 +4755,66 @@ mod tests {
         let error = server_version_from_build_info(&doc! { "ok": 1 }).unwrap_err();
 
         assert!(error.contains("MongoDB server version not found"));
+    }
+
+    #[test]
+    fn object_statistics_maps_collstats_fields() {
+        let stats = object_statistics_from_collection_stats(
+            "orders_10k",
+            "dbx_mongo_demo",
+            &doc! {
+                "count": 10000_i64,
+                "size": 2084944_i64,
+                "storageSize": 536576_i64,
+                "totalIndexSize": 364544_i64,
+            },
+        );
+
+        assert_eq!(stats.name, "orders_10k");
+        assert_eq!(stats.schema.as_deref(), Some("dbx_mongo_demo"));
+        assert_eq!(stats.estimated_rows, Some(10000));
+        // 536576 + 364544: the on-disk data + index footprint.
+        assert_eq!(stats.total_bytes, Some(901120));
+    }
+
+    #[test]
+    fn object_statistics_accepts_int32_collstats_fields() {
+        let stats = object_statistics_from_collection_stats(
+            "stores",
+            "app",
+            &doc! {
+                "count": 50_i32,
+                "storageSize": 20480_i32,
+                "totalIndexSize": 20480_i32,
+            },
+        );
+
+        assert_eq!(stats.estimated_rows, Some(50));
+        assert_eq!(stats.total_bytes, Some(40960));
+    }
+
+    #[test]
+    fn object_statistics_keeps_missing_fields_unknown() {
+        let stats = object_statistics_from_collection_stats("empty", "app", &doc! { "ok": 1_i32 });
+
+        assert_eq!(stats.estimated_rows, None);
+        assert_eq!(stats.total_bytes, None);
+    }
+
+    #[test]
+    fn object_statistics_reports_zero_sized_collections() {
+        let stats = object_statistics_from_collection_stats(
+            "fresh",
+            "app",
+            &doc! {
+                "count": 0_i32,
+                "storageSize": 0_i64,
+                "totalIndexSize": 0_i64,
+            },
+        );
+
+        assert_eq!(stats.estimated_rows, Some(0));
+        assert_eq!(stats.total_bytes, Some(0));
     }
 
     #[test]

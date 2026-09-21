@@ -69,6 +69,7 @@ pub mod tunnel_profiles;
 pub mod update;
 mod update_cache;
 mod update_portable;
+pub mod user_skills;
 pub mod vector_cmd;
 pub mod window_controls;
 pub mod xlsx_export;

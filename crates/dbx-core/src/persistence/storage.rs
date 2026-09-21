@@ -231,6 +231,10 @@ pub struct DesktopSettings {
     pub plugin_store_dir: Option<String>,
     #[serde(default)]
     pub agent_store_dir: Option<String>,
+    #[serde(default)]
+    pub custom_ai_skill_root_enabled: bool,
+    #[serde(default)]
+    pub custom_ai_skill_root: Option<String>,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
 }
@@ -683,6 +687,8 @@ impl Default for DesktopSettings {
             driver_store_dir: None,
             plugin_store_dir: None,
             agent_store_dir: None,
+            custom_ai_skill_root_enabled: false,
+            custom_ai_skill_root: None,
             sidebar_table_page_size: default_sidebar_table_page_size(),
         }
     }
@@ -2263,6 +2269,18 @@ impl Storage {
             }
         }
         settings.insert(
+            "custom_ai_skill_root_enabled".to_string(),
+            serde_json::Value::Bool(desktop_settings.custom_ai_skill_root_enabled),
+        );
+        match desktop_settings.custom_ai_skill_root.as_ref().filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                settings.insert("custom_ai_skill_root".to_string(), serde_json::Value::String(path.clone()));
+            }
+            None => {
+                settings.remove("custom_ai_skill_root");
+            }
+        }
+        settings.insert(
             "sidebar_table_page_size".to_string(),
             serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
         );
@@ -2326,6 +2344,16 @@ impl Storage {
                 .map(ToString::to_string),
             agent_store_dir: settings
                 .get("agent_store_dir")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            custom_ai_skill_root_enabled: settings
+                .get("custom_ai_skill_root_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().custom_ai_skill_root_enabled),
+            custom_ai_skill_root: settings
+                .get("custom_ai_skill_root")
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())

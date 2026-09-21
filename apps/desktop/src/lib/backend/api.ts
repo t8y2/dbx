@@ -413,6 +413,10 @@ export const deletePromptTemplate = forward("deletePromptTemplate");
 export const getAiGlobalCustomInstructions = forward("getAiGlobalCustomInstructions");
 export const setAiGlobalCustomInstructions = forward("setAiGlobalCustomInstructions");
 
+// User Skills (read-only Codex-compatible SKILL.md library)
+export const listUserSkills = forward("listUserSkills");
+export const readUserSkills = forward("readUserSkills");
+
 // System
 export const listSystemFonts = forward("listSystemFonts");
 export const listSshConfigHosts = forward("listSshConfigHosts");

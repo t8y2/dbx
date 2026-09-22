@@ -1756,6 +1756,7 @@ export default withEnglishFallback({
     esDeepPageJumpConfirmMessage:
       "Elasticsearch search_after doğrudan bir sayfaya atlayamaz. DBX eksik imleçleri sırayla getirmelidir ve geri gitme 1. sayfadan yeniden başlar. {page}. sayfaya atlamak için {requests} sorgu gönderilmesi bekleniyor. Bu uzun sürebilir ve küme yükünü artırabilir. Devam edilsin mi?",
     esDeepPageJumpContinue: "Devam et",
+    loadAllAndGoToLastRow: "Tümünü yükle ve son satıra git",
     allLoaded: "tümü yüklendi",
     calculateTotalRows: "Toplam satırları say",
     calculateTotalRowsInline: "(toplam satırları say)",

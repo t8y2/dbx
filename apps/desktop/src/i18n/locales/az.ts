@@ -1755,6 +1755,7 @@ export default withEnglishFallback({
     esDeepPageJumpConfirmMessage:
       "Elasticsearch search_after birbaşa səhifəyə keçə bilmir. DBX çatışmayan kursorları ardıcıllıqla əldə etməlidir və geriyə keçid 1-ci səhifədən yenidən başlayır. {page} nömrəli səhifəyə keçid zamanı {requests} sorğu göndəriləcəyi gözlənilir. Bu, uzun çəkə və klasterin yükünü artıra bilər. Davam edilsin?",
     esDeepPageJumpContinue: "Davam et",
+    loadAllAndGoToLastRow: "Hamısını yüklə və sonuncu sətrə keç",
     allLoaded: "hamısı yükləndi",
     calculateTotalRows: "Sətirlərin ümumi sayını hesabla",
     calculateTotalRowsInline: "(sətirlərin ümumi sayını hesabla)",

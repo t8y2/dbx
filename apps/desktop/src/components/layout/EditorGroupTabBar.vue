@@ -175,13 +175,12 @@ const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.edi
 // The icon-only collapse only exists in the vertical toolbar; horizontal
 // placements must ignore the persisted collapse state entirely.
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
+// Outer [data-workspace-tab-navigation] / [data-special-page-navigation] owns
+// the shared vertical rail width; fill that rail so nested pane bars stay in
+// sync while the resize handle updates the outer panel (issue #9977).
 const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value) return undefined;
-  if (props.tabBarCollapsed) {
-    return { width: "100%", flex: "0 0 100%" };
-  }
-  const width = props.tabBarWidth ?? 240;
-  return { width: `${width}px`, flex: `0 0 ${width}px` };
+  return { width: "100%", flex: "0 0 100%" };
 });
 const tabBarCollapseIcon = computed(() => {
   const isLeft = settingsStore.editorSettings.tabPlacement === "left";

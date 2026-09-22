@@ -6901,7 +6901,7 @@ function openExternalUrl(url: string) {
                                 <span>{{ t(option.labelKey) }}</span>
                                 <Badge v-if="option.recommended" class="h-4 rounded-full px-1.5 text-[10px] leading-none">{{ t("connection.sqliteWorkerPlacementDefault") }}</Badge>
                               </div>
-                              <p class="text-[11px] leading-relaxed text-background/80">{{ t(option.hintKey) }}</p>
+                              <p class="text-[11px] leading-relaxed text-background-solid/80">{{ t(option.hintKey) }}</p>
                             </TooltipContent>
                           </Tooltip>
                         </div>

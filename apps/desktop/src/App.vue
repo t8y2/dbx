@@ -195,7 +195,7 @@ type AiAssistantHandle = {
   openPluginConversation: (request: AiPluginConversationRequest) => void;
   triggerAction: (action: AiAction, instruction?: string) => void;
   setPrompt: (text: string) => void;
-  addTableMention: (target: { schema?: string; table: string }) => void;
+  addTableMention: (target: { schema?: string; table: string }, binding?: AiConversationBinding) => void;
   clearContextReferences: () => void;
   focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */
@@ -1718,7 +1718,6 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     if (requestId !== addToAiRequestId) return;
-    connectionStore.activeConnectionId = node.connectionId;
 
     let target: { database: string; schema?: string; catalog?: string } | null = null;
     if (node.type === "connection") {
@@ -1739,22 +1738,15 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
     }
     if (!target) return;
 
-    const currentTab = activeTab.value;
-    const contextChanged = currentTab?.connectionId !== node.connectionId || currentTab?.database !== target.database || (currentTab?.schema || "") !== (target.schema || "") || (currentTab?.catalog || "") !== (target.catalog || "");
-
-    const contextTab = queryStore.tabs.find((tab) => tab.connectionId === node.connectionId && tab.database === target.database && (tab.schema || "") === (target.schema || "") && (tab.catalog || "") === (target.catalog || ""));
-    if (contextTab) {
-      queryStore.switchTab(contextTab.id);
-    } else {
-      queryStore.createTab(node.connectionId, target.database, undefined, "query", target.schema, undefined, target.catalog);
-    }
-
+    // The *conversation* is retargeted, not the editor: asking about a table must
+    // not move the workspace's active connection or steal/create a tab (#9902).
+    // The previous connection's mentions are cleared inside applyExternalBinding().
+    const binding: AiConversationBinding = { connectionId: node.connectionId, database: target.database, schema: target.schema };
     const tableMentions = nodes.filter((entry) => entry.type === "table" && !!entry.label).map((entry) => ({ schema: entry.schema, table: entry.label }));
 
     openRightSidebarPanel("ai");
     invokeWhenAiReady((handle) => {
-      if (contextChanged) handle.clearContextReferences();
-      for (const mention of tableMentions) handle.addTableMention(mention);
+      for (const mention of tableMentions) handle.addTableMention(mention, binding);
     });
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);

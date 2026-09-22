@@ -94,4 +94,32 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     expect(source).toContain(":model-value=\"boundSchema || ''\"");
     expect(source).not.toContain(":model-value=\"connection?.id || ''\"");
   });
+
+  it("labels each history row with the connection it is bound to", () => {
+    // Which database a conversation talks to has to be readable without opening
+    // it — the binding is per conversation, and several can be live at once.
+    expect(source).toContain("{{ conv.connectionName }}");
+    expect(source).toContain("conversationRowDetail(conv).connectionMissing");
+    expect(bodyOf("function conversationRowDetail(conv: AiConversation)")).toContain("connectionMissing: !!conv.connectionId && !connectionStore.getConfig(conv.connectionId)");
+  });
+
+  it("retargets the conversation when a table is picked from another connection", () => {
+    // Sliced between anchors rather than via bodyOf(): the parameter's
+    // `{ schema?: string; table: string }` annotation is the first "{" after the
+    // signature, so bodyOf would return the type, not the function body.
+    const start = source.indexOf("function addTableMention(");
+    const body = source.slice(start, source.indexOf("function clearContextReferences", start));
+
+    expect(body).toContain("void applyExternalBinding(binding)");
+    expect(body).toContain("addSelectedMention(");
+
+    const apply = bodyOf("async function applyExternalBinding(binding: AiConversationBinding)");
+    // The previous connection's mentions and schema options no longer apply...
+    expect(apply).toContain("clearContextReferences();");
+    // ...and the new target goes onto the conversation, never the editor.
+    expect(apply).toContain("rebindConversation(connection, binding.database, binding.schema)");
+    expect(apply).toContain("binding.connectionId === boundConnectionId.value");
+    expect(apply).not.toContain("queryStore.");
+    expect(apply).not.toContain("activeConnectionId");
+  });
 });

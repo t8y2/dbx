@@ -444,6 +444,8 @@ interface ConversationRowDetail {
   reason: string | null;
   canRetry: boolean;
   hasQueuedInput: boolean;
+  /** The conversation's bound connection no longer exists (#9902). */
+  connectionMissing: boolean;
 }
 
 function runPhaseText(run: DesktopAiRunRuntime<ChatMessage>, t: (key: string, params?: Record<string, unknown>) => string): string {
@@ -497,6 +499,7 @@ function conversationRowDetail(conv: AiConversation): ConversationRowDetail {
     reason,
     canRetry: status === "failed" || status === "interrupted",
     hasQueuedInput: queuedInputs.has(conv.id),
+    connectionMissing: !!conv.connectionId && !connectionStore.getConfig(conv.connectionId),
   };
 }
 
@@ -4987,10 +4990,31 @@ function setPrompt(text: string, fromPlugin = false) {
   nextTick(() => promptTextareaRef.value?.focus());
 }
 
-function addTableMention(target: { schema?: string; table: string }) {
+/**
+ * Retarget the shown conversation at a connection an external entrypoint named —
+ * e.g. "Ask AI" on a table picked in another connection's tree (#9902).
+ *
+ * The pick is explicit, so the conversation follows it. The editor is left
+ * alone: the host used to assign `connectionStore.activeConnectionId` and
+ * switch/create a tab for that connection, which moved the whole workspace onto
+ * whatever the AI panel was asked about.
+ */
+async function applyExternalBinding(binding: AiConversationBinding) {
+  if (!binding.connectionId || binding.connectionId === boundConnectionId.value) return;
+  const connection = connectionStore.getConfig(binding.connectionId);
+  if (!connection) return;
+  // Mentions and schema options belonged to the previous connection.
+  clearContextReferences();
+  await rebindConversation(connection, binding.database, binding.schema);
+}
+
+function addTableMention(target: { schema?: string; table: string }, binding?: AiConversationBinding) {
   if (pluginContext.value) startNewChat();
   const table = target.table.trim();
   if (!table) return;
+  // Clearing the old references happens synchronously inside
+  // applyExternalBinding(), before this call adds the new mention.
+  if (binding) void applyExternalBinding(binding);
   addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
   nextTick(() => promptTextareaRef.value?.focus());
 }
@@ -5114,7 +5138,14 @@ async function openExternalUrl(url: string) {
                 @keydown.esc.stop.prevent="cancelRenameConversation"
                 @blur="commitRenameConversation(conv)"
               />
-              <span v-else class="min-w-0 flex-1 truncate" :title="conv.title">{{ conv.title }}</span>
+              <!-- The bound connection belongs on the row: a conversation keeps
+                   its own database (#9902), so which one it talks to must be
+                   readable without opening it. `isConnectionMissing` marks a
+                   binding whose connection was deleted or renamed away. -->
+              <span v-else class="min-w-0 flex-1">
+                <span class="block truncate" :title="conv.title">{{ conv.title }}</span>
+                <span v-if="conv.connectionName" class="block truncate text-[10px]" :class="conversationRowDetail(conv).connectionMissing ? 'text-destructive/80' : 'text-muted-foreground/70'">{{ conv.connectionName }}</span>
+              </span>
               <button v-if="renamingConversationId !== conv.id" type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground" :title="t('ai.renameConversation')" @click.stop="startRenameConversation(conv)"><Pencil class="h-3 w-3" /></button>
               <span v-if="conversationRowDetail(conv).hasQueuedInput" class="shrink-0 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[10px] text-primary" :aria-label="t('ai.rowQueuedInput')" :title="t('ai.rowQueuedInput')">{{ t("ai.rowQueuedInput") }}</span>
               <span v-if="conversationRowDetail(conv).status === 'preparing' || conversationRowDetail(conv).status === 'running'" class="flex min-w-0 shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusRunning')" :title="t('ai.runStatusRunning')">

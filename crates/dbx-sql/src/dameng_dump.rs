@@ -117,37 +117,34 @@ pub fn parse_dump_log(text: &str, kind: DamengDumpKind) -> DamengDumpOutcome {
 
     let warnings = text.contains("[警告]");
 
-    let elapsed_seconds = text
-        .lines()
-        .rev()
-        .find(|l| l.contains("共花费"))
-        .and_then(|l| {
-            l.split_whitespace().find_map(|tok| {
-                let t = tok.trim_end_matches('s');
-                if !t.is_empty() && t.parse::<f64>().is_ok() {
-                    Some(format!("{t}s"))
-                } else {
-                    None
-                }
-            })
-        });
+    let elapsed_seconds = text.lines().rev().find(|l| l.contains("共花费")).and_then(|l| {
+        l.split_whitespace().find_map(|tok| {
+            let t = tok.trim_end_matches('s');
+            if !t.is_empty() && t.parse::<f64>().is_ok() {
+                Some(format!("{t}s"))
+            } else {
+                None
+            }
+        })
+    });
 
     let error = if success {
         None
     } else {
         text.lines()
             .rev()
-            .find(|l| l.contains("DMException") || l.contains("错误") || l.contains("失败") || l.contains("EXP-") || l.contains("IMP-"))
+            .find(|l| {
+                l.contains("DMException")
+                    || l.contains("错误")
+                    || l.contains("失败")
+                    || l.contains("EXP-")
+                    || l.contains("IMP-")
+            })
             .map(|l| l.trim().to_string())
             .or_else(|| Some("dexp/dimp did not report success".to_string()))
     };
 
-    DamengDumpOutcome {
-        success,
-        warnings,
-        elapsed_seconds,
-        error,
-    }
+    DamengDumpOutcome { success, warnings, elapsed_seconds, error }
 }
 
 #[cfg(test)]
@@ -174,19 +171,13 @@ mod tests {
 
     #[test]
     fn userid_is_first_and_carries_credentials() {
-        assert_eq!(
-            userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236),
-            "USERID=SYSDBA/Dameng123@127.0.0.1:5236"
-        );
+        assert_eq!(userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236), "USERID=SYSDBA/Dameng123@127.0.0.1:5236");
     }
 
     #[test]
     fn export_parfile_matches_real_invocation() {
         let par = build_parfile_contents(&req(DamengDumpKind::Export));
-        assert_eq!(
-            par,
-            "FILE=\"/tmp/dbx_dcss.dmp\"\nLOG=\"/tmp/dbx_dcss.log\"\nSCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n"
-        );
+        assert_eq!(par, "FILE=\"/tmp/dbx_dcss.dmp\"\nLOG=\"/tmp/dbx_dcss.log\"\nSCHEMAS=DCSS\nTABLESPACE=N\nDROP=N\n");
     }
 
     #[test]

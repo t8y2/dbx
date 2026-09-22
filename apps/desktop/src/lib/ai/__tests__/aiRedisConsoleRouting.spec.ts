@@ -9,27 +9,32 @@ const redisBrowserSource = readFileSync(new URL("../../../components/redis/Redis
 
 describe("AI Redis console routing", () => {
   it("routes Redis insert and execute actions to the active Redis console", () => {
-    expect(aiAssistantSource).toContain('emit("insertRedisCommand", code)');
-    expect(aiAssistantSource).toContain('emit("executeRedisCommand", code)');
+    // Every action carries the conversation's bound connection (#9902); the
+    // console refuses a target that is not the visible tab.
+    expect(aiAssistantSource).toContain('emit("insertRedisCommand", code, conversationBinding.value)');
+    expect(aiAssistantSource).toContain('emit("executeRedisCommand", code, conversationBinding.value)');
     expect(aiAssistantSource).toContain("seg.isSql || isRedisConnection");
-    expect(appSource).toContain("if (routeAiRedisCommand(sql, false)) return;");
-    expect(appSource).toContain("if (routeAiRedisCommand(sql, true)) return;");
+    expect(appSource).toContain("if (routeAiRedisCommand(sql, false, target)) return;");
+    expect(appSource).toContain("if (routeAiRedisCommand(sql, true, target)) return;");
     expect(contentAreaSource).toContain('props.activeTab.mode !== "redis"');
     expect(contentAreaSource).toContain("redisKeyBrowserRef.value?.executeCommand?.(command)");
   });
 
   it("keeps the existing SQL editor and execution behavior for non-Redis connections", () => {
-    expect(aiAssistantSource).toContain('emit("appendSql", code)');
-    expect(aiAssistantSource).toContain('emit("executeSql", code)');
-    expect(aiAssistantSource).toContain('emit("tempRunSql", code)');
-    expect(appSource).toContain("const tabId = ensureQueryTab();");
+    expect(aiAssistantSource).toContain('emit("appendSql", code, conversationBinding.value)');
+    expect(aiAssistantSource).toContain('emit("executeSql", code, conversationBinding.value)');
+    expect(aiAssistantSource).toContain('emit("tempRunSql", code, conversationBinding.value)');
+    // The target tab is resolved from the bound connection, never from the tab
+    // that happens to be active (#9902).
+    expect(appSource).toContain("const tabId = ensureQueryTabForConnection(target);");
+    expect(appSource).not.toContain("function ensureQueryTab()");
     expect(appSource).toContain("buildDeduplicatedAppendedEditorSql(currentSql, sql)");
-    expect(appSource).toContain('buildAppendedEditorSql(activeTab.value?.sql || "", sql)');
-    expect(appSource).toContain("const decision = classifyAiSqlExecution(sql, activeConnection.value);");
+    expect(appSource).toContain("buildAppendedEditorSql(aiTargetTabSql(tabId), sql)");
+    expect(appSource).toContain("const decision = classifyAiSqlExecution(sql, connection);");
   });
 
   it("deduplicates immediate-run editor writes without skipping execution", () => {
-    const handler = appSource.match(/function onAiExecuteSql\(sql: string\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const handler = appSource.match(/function onAiExecuteSql\(sql: string, target: AiConversationBinding\) \{[\s\S]*?\n\}/)?.[0] ?? "";
     expect(handler).toContain("buildDeduplicatedAppendedEditorSql(currentSql, sql)");
     expect(handler).toContain("if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);");
     expect(handler).toContain("runAiGeneratedSql(sql, tabId);");

@@ -25,8 +25,11 @@ export interface QueryEditorSurfaceHandle {
   acceptQueryEditorExecutionViewport(requestId: number): boolean;
   pasteClipboardAsSqlInCondition(): Promise<boolean>;
   applyTableStructureChanges(): Promise<boolean>;
-  insertRedisCommand(command: string): Promise<boolean>;
-  executeRedisCommand(command: string): Promise<boolean>;
+  /** `connectionId` (the AI panel's conversation binding, #9902) makes the Redis
+   *  console refuse a target that is not the visible tab, instead of driving
+   *  another connection's console. */
+  insertRedisCommand(command: string, connectionId?: string): Promise<boolean>;
+  executeRedisCommand(command: string, connectionId?: string): Promise<boolean>;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;

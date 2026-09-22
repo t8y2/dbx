@@ -1359,13 +1359,18 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
-async function insertRedisCommand(command: string): Promise<boolean> {
+// The Redis console is bound to the visible tab. When a caller names a
+// connection (the AI panel runs against its conversation's bound connection,
+// #9902), refuse a mismatch instead of driving another connection's console.
+async function insertRedisCommand(command: string, connectionId?: string): Promise<boolean> {
   if (props.activeTab.mode !== "redis") return false;
+  if (connectionId && props.activeTab.connectionId !== connectionId) return false;
   return (await redisKeyBrowserRef.value?.insertCommand?.(command)) ?? false;
 }
 
-async function executeRedisCommand(command: string): Promise<boolean> {
+async function executeRedisCommand(command: string, connectionId?: string): Promise<boolean> {
   if (props.activeTab.mode !== "redis") return false;
+  if (connectionId && props.activeTab.connectionId !== connectionId) return false;
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
 }
 

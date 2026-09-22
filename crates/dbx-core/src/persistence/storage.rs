@@ -755,7 +755,9 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '',
         connection_name TEXT NOT NULL DEFAULT '',
+        connection_id TEXT NOT NULL DEFAULT '',
         database TEXT NOT NULL DEFAULT '',
+        schema_name TEXT,
         messages_json TEXT NOT NULL DEFAULT '[]',
         queued_input TEXT,
         plugin_context_json TEXT,
@@ -957,6 +959,9 @@ impl Storage {
             ensure_state_store_columns_sync(conn)?;
             ensure_ai_conversations_columns_sync(conn)?;
             ensure_ai_runs_columns_sync(conn)?;
+            // After the column exists: bind legacy conversations to their
+            // connection when the stored name identifies exactly one (#9902).
+            backfill_ai_conversation_connections(conn)?;
             Ok(())
         })
     }
@@ -1226,9 +1231,84 @@ fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
 
 /// Adds conversation metadata columns to databases created before these fields.
 fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String> {
-    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT"), ("plugin_context_json", "TEXT")];
+    const COLUMNS: &[(&str, &str)] = &[
+        ("queued_input", "TEXT"),
+        ("plugin_context_json", "TEXT"),
+        // Session-scoped connection binding (#9902). Existing rows keep the
+        // empty default and are backfilled from `connection_name` by
+        // [`backfill_ai_conversation_connections`].
+        ("connection_id", "TEXT NOT NULL DEFAULT ''"),
+        ("schema_name", "TEXT"),
+    ];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
+}
+
+/// Backfills `connection_id` for conversations persisted before session-scoped
+/// binding existed (#9902).
+///
+/// `connection_name` is **not unique** (the import dedup key is
+/// name + host + port), so only an unambiguous match may be written back: a name
+/// that resolves to exactly one saved connection is bound, while zero matches
+/// (connection deleted or never saved) and several matches (duplicates) stay
+/// empty and surface as "unbound" in the UI. Guessing here would silently pin a
+/// conversation to the wrong database, which is the defect this column exists to
+/// fix.
+///
+/// Runs on every open but only touches rows that are still empty, so it is
+/// idempotent and picks up connections imported after the last run.
+fn backfill_ai_conversation_connections(conn: &Connection) -> Result<usize, String> {
+    let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, config_json FROM connections").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, json) = row.map_err(|e| e.to_string())?;
+            // Only the display name is needed, and it is exactly what the
+            // frontend persisted into `connection_name`. Reading it straight
+            // from the JSON avoids depending on the full `ConnectionConfig`
+            // deserializer (which also handles legacy shapes) for a migration.
+            let name = serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|value| value.get("name").and_then(|name| name.as_str()).map(|name| name.trim().to_string()))
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            by_name.entry(name).or_default().push(id);
+        }
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT id, connection_name FROM ai_conversations WHERE connection_id = ''")
+        .map_err(|e| e.to_string())?;
+    let pending = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    drop(stmt);
+
+    let mut updated = 0usize;
+    for (conversation_id, connection_name) in pending {
+        let candidates = match by_name.get(connection_name.trim()) {
+            Some(candidates) => candidates,
+            None => continue,
+        };
+        if candidates.len() != 1 {
+            continue;
+        }
+        let changed = conn
+            .execute(
+                "UPDATE ai_conversations SET connection_id = ?1 WHERE id = ?2 AND connection_id = ''",
+                params![candidates[0], conversation_id],
+            )
+            .map_err(|e| e.to_string())?;
+        updated += changed;
+    }
+    Ok(updated)
 }
 
 /// Adds the background-run recovery columns (`fifo_category`, `pending_input`,
@@ -2883,12 +2963,14 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
+                   connection_id = excluded.connection_id, \
                    database = excluded.database, \
+                   schema_name = excluded.schema_name, \
                    messages_json = excluded.messages_json, \
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
@@ -2897,7 +2979,9 @@ impl Storage {
                     conv.id,
                     conv.title,
                     conv.connection_name,
+                    conv.connection_id,
                     conv.database,
+                    conv.schema,
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
@@ -2917,7 +3001,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2936,6 +3020,8 @@ impl Storage {
                         created_at: row.get(6)?,
                         updated_at: row.get(7)?,
                         plugin_context: row.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json)).transpose().map_err(map_from_sql_err)?,
+                        connection_id: row.get(9)?,
+                        schema: row.get(10)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -3002,12 +3088,14 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
+                   connection_id = excluded.connection_id,
                    database = excluded.database,
+                   schema_name = excluded.schema_name,
                    messages_json = excluded.messages_json,
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
@@ -3016,7 +3104,9 @@ impl Storage {
                     conv.id,
                     conv.title,
                     conv.connection_name,
+                    conv.connection_id,
                     conv.database,
+                    conv.schema,
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
@@ -5213,17 +5303,19 @@ impl Storage {
             self.with_conn(move |conn| {
                 conn.execute(
                     "INSERT OR IGNORE INTO ai_conversations \
-                     (id, title, connection_name, database, messages_json, created_at, updated_at, plugin_context_json) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, title, connection_name, connection_id, database, schema_name, messages_json, created_at, updated_at, plugin_context_json) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         conv.id,
                         conv.title,
                         conv.connection_name,
+                        conv.connection_id,
                         conv.database,
+                        conv.schema,
                         messages_json,
                         conv.created_at,
                         conv.updated_at,
-                    conv.plugin_context.map(|value| value.to_string())
+                        conv.plugin_context.map(|value| value.to_string())
                     ],
                 )
                 .map(|_| ())
@@ -5231,6 +5323,10 @@ impl Storage {
             })
             .await?;
         }
+        // Rows just imported predate the binding column (or carry a binding from
+        // a newer JSON export); bind the ones the stored name identifies
+        // unambiguously now, since `init_schema` already ran its pass (#9902).
+        self.with_conn(|conn| backfill_ai_conversation_connections(conn).map(|_| ())).await?;
         let _ = tokio::fs::rename(&path, data_dir.join("ai_conversations.json.bak")).await;
         Ok(())
     }
@@ -5733,7 +5829,9 @@ mod tests {
             id: id.to_string(),
             title: id.to_string(),
             connection_name: "local".to_string(),
+            connection_id: "local".to_string(),
             database: "db".to_string(),
+            schema: None,
             messages: vec![AiChatMessage {
                 role: "user".to_string(),
                 content: id.to_string(),
@@ -6012,6 +6110,109 @@ mod tests {
         storage.save_ai_conversation(&conversation).await.unwrap();
         let loaded = storage.load_ai_conversations().await.unwrap();
         assert!(loaded[0].queued_input.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Legacy `ai_conversations` table (no `connection_id` / `schema_name`), plus
+    /// a `connections` table whose rows the backfill matches against.
+    fn create_legacy_conversation_db(path: &std::path::Path, conversations: &str, connections: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE ai_conversations (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+                database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE connections (id TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+            {connections}
+            {conversations}"
+        ))
+        .unwrap();
+        drop(conn);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_roundtrips_connection_binding() {
+        let path = temp_db_path("ai-conversation-binding-roundtrip");
+        let storage = Storage::open(&path).await.unwrap();
+
+        let mut conversation = ai_conversation("bound-conv", "0000");
+        conversation.connection_id = "conn-prod".to_string();
+        conversation.schema = Some("public".to_string());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].connection_id, "conn-prod");
+        assert_eq!(loaded[0].schema.as_deref(), Some("public"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_upgrades_legacy_schema_and_binds_a_unique_connection() {
+        let path = temp_db_path("ai-conversation-legacy-binding");
+        create_legacy_conversation_db(
+            &path,
+            "INSERT INTO ai_conversations (id, title, connection_name) VALUES ('prod', 'Prod chat', 'Prod MySQL');
+             INSERT INTO ai_conversations (id, title, connection_name) VALUES ('orphan', 'Orphan chat', 'Deleted Conn');",
+            "INSERT INTO connections (id, config_json) VALUES ('c-prod', '{\"name\":\"Prod MySQL\"}');",
+        );
+
+        let storage = Storage::open(&path).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let conversation = |id: &str| loaded.iter().find(|item| item.id == id).unwrap();
+
+        // Exactly one saved connection carries the stored name: bind it.
+        assert_eq!(conversation("prod").connection_id, "c-prod");
+        // Nothing carries that name; a guess would silently point at the wrong
+        // database, so the conversation stays unbound for the UI to resolve.
+        assert!(conversation("orphan").connection_id.is_empty());
+        assert!(conversation("orphan").schema.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_backfill_skips_ambiguous_connection_names() {
+        let path = temp_db_path("ai-conversation-binding-ambiguous");
+        create_legacy_conversation_db(
+            &path,
+            "INSERT INTO ai_conversations (id, title, connection_name) VALUES ('dup', 'Dup chat', 'Shared Name');
+             INSERT INTO ai_conversations (id, title, connection_name) VALUES ('nameless', 'Nameless chat', '');",
+            "INSERT INTO connections (id, config_json) VALUES ('c1', '{\"name\":\"Shared Name\"}');
+             INSERT INTO connections (id, config_json) VALUES ('c2', '{\"name\":\"Shared Name\"}');",
+        );
+
+        let storage = Storage::open(&path).await.unwrap();
+        for conversation in storage.load_ai_conversations().await.unwrap() {
+            // Two connections share the name (names are not unique), and an empty
+            // name identifies nothing: neither may be auto-bound.
+            assert!(conversation.connection_id.is_empty(), "{} must stay unbound", conversation.id);
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_backfill_never_overwrites_an_existing_binding() {
+        let path = temp_db_path("ai-conversation-binding-idempotent");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut conversation = ai_conversation("pinned", "0000");
+        conversation.connection_id = "conn-a".to_string();
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        drop(storage);
+
+        // A connection matching the stored name appears *after* the binding was
+        // written; re-running the backfill must leave the explicit binding alone.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("INSERT INTO connections (id, config_json) VALUES ('conn-later', '{\"name\":\"local\"}')", [])
+            .unwrap();
+        drop(conn);
+
+        let storage = Storage::open(&path).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].connection_id, "conn-a");
 
         let _ = std::fs::remove_file(path);
     }

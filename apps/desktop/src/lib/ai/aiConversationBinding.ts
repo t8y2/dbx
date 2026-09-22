@@ -1,0 +1,84 @@
+import type { AiConversation } from "@/lib/backend/tauri";
+import type { AiContextTarget } from "@/lib/ai/ai";
+import type { QueryTab } from "@/types/database";
+
+/**
+ * Connection a conversation talks to (#9902).
+ *
+ * The binding belongs to the conversation — not to whichever editor tab happens
+ * to be active — so several conversations can run against different connections
+ * at once. `schema` only applies to schema-scoped engines (Postgres, Dameng).
+ */
+export interface AiConversationBinding {
+  connectionId: string;
+  database: string;
+  schema?: string;
+}
+
+/** Ambient editor state, used only as the default for a chat with no binding. */
+export interface AiAmbientBinding {
+  connectionId?: string;
+  database?: string;
+  schema?: string;
+}
+
+/**
+ * Binding to use for the conversation on screen.
+ *
+ * A persisted conversation always wins, *including* when its `connectionId` is
+ * empty: that means deliberately unbound (its stored name matched zero or
+ * several saved connections, or the bound connection was deleted). Falling back
+ * to the ambient tab there would recreate the cross-conversation leak this
+ * binding exists to prevent, so callers must surface the unbound state instead.
+ *
+ * Only a chat that has never been persisted — no record yet — takes `draft` (a
+ * connection chosen in the composer before the first message) or, failing that,
+ * the ambient tab.
+ */
+export function resolveConversationBinding(conversation: AiConversation | undefined, draft: AiConversationBinding | null, ambient: AiAmbientBinding): AiConversationBinding {
+  if (conversation) {
+    return { connectionId: conversation.connectionId, database: conversation.database, schema: conversation.schema };
+  }
+  if (draft) return draft;
+  return { connectionId: ambient.connectionId ?? "", database: ambient.database ?? "", schema: ambient.schema };
+}
+
+/**
+ * Whether the on-screen binding needs the user to pick a connection before the
+ * next request can target anything. True only for a *persisted* conversation
+ * with no connection: a brand-new chat resolves through the ambient tab instead.
+ */
+export function isBindingUnresolved(conversation: AiConversation | undefined, binding: AiConversationBinding): boolean {
+  return !!conversation && !binding.connectionId;
+}
+
+/**
+ * Binding to persist when snapshotting `targetConversationId`.
+ *
+ * An existing conversation keeps its own binding — writing a transcript must
+ * never re-derive it from the active tab, which is exactly how the binding
+ * became global. A chat that has not been saved yet takes `fallback`.
+ */
+export function bindingForSnapshot(conversations: readonly AiConversation[], targetConversationId: string, fallback: AiConversationBinding): AiConversationBinding {
+  const existing = conversations.find((conversation) => conversation.id === targetConversationId);
+  if (existing) {
+    return { connectionId: existing.connectionId, database: existing.database, schema: existing.schema };
+  }
+  return fallback;
+}
+
+/**
+ * Context target for a request: the conversation's namespace, plus the visible
+ * editor's SQL / result / focused table — but only when that tab sits on the
+ * bound connection. Another connection's editor state is not context for this
+ * chat, and carrying it would leak one database's SQL into another's request.
+ */
+export function aiContextTargetFor(binding: AiConversationBinding, visibleTab: Pick<QueryTab, "connectionId" | "sql" | "result" | "tableMeta"> | undefined): AiContextTarget {
+  const sameConnection = !!visibleTab && visibleTab.connectionId === binding.connectionId;
+  return {
+    connectionId: binding.connectionId,
+    database: binding.database,
+    schema: binding.schema,
+    ...(sameConnection && visibleTab ? { sql: visibleTab.sql, result: visibleTab.result, tableMeta: visibleTab.tableMeta } : {}),
+  };
+}

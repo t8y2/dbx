@@ -75,7 +75,7 @@ describe("Auto picker entry", () => {
     expect(resolveSelection).toContain("settings.defaultAutoRouting");
     expect(resolveSelection.indexOf('return "auto";')).toBeGreaterThanOrEqual(0);
     expect(resolveSelection.indexOf('return "auto";')).toBeLessThan(resolveSelection.indexOf("resolveDefaultAction(mode)"));
-    expect(resolveSelection).toContain("isVectorDbType(props.connection.db_type)");
+    expect(resolveSelection).toContain("isVectorDbType(boundConnection.value.db_type)");
   });
 
   it("lands new conversations, mode switches and mount init on the settings-driven default", () => {
@@ -97,7 +97,9 @@ describe("Auto picker entry", () => {
     const templateGuardIdx = source.lastIndexOf('<template v-if="showActionButtons">', listStart);
     expect(templateGuardIdx).toBeGreaterThanOrEqual(0);
 
-    const vectorWatchStart = source.indexOf("() => props.connection?.db_type,");
+    // Keyed by the conversation's bound connection, not the visible tab: the
+    // hidden action must match whichever database this chat actually targets.
+    const vectorWatchStart = source.indexOf("() => boundConnection.value?.db_type,");
     const vectorWatch = source.slice(vectorWatchStart, source.indexOf("{ immediate: true },", vectorWatchStart));
     expect(vectorWatch).toContain('activeAction.value = "generate";');
   });

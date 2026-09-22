@@ -1164,7 +1164,16 @@ export interface AiConversation {
   id: string;
   title: string;
   connectionName: string;
+  /** Connection this conversation is bound to (#9902). The binding belongs to
+   *  the conversation, not to whichever editor tab is active.
+   *  Empty means "unbound": either persisted before session-scoped binding
+   *  existed and its `connectionName` matched zero or several saved connections
+   *  (names are not unique), or the bound connection was deleted. Consumers must
+   *  ask the user rather than fall back to the active tab. */
+  connectionId: string;
   database: string;
+  /** Schema for schema-scoped engines (Postgres, Dameng); absent otherwise. */
+  schema?: string;
   messages: AiChatMessage[];
   /** One editable "send later" input saved while an active run occupies the
    *  conversation (parent PRD §5). Persisted with the conversation. */

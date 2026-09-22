@@ -76,6 +76,8 @@ test("AI analysis export keeps the connection that produced each assistant respo
   assert.match(source, /sourceConnectionName\?: string/);
   assert.match(source, /const runSourceName = runPluginContext\?\.pluginName \?\? connection\?\.name \?\? ""/);
   assert.match(source, /runMessages\.push\(\{ role: "assistant", content: "", sourceConnectionName: runSourceName \}\)/);
-  assert.match(source, /connectionName: msg\.sourceConnectionName \?\? props\.connection\?\.name/);
+  // The fallback for a message that predates `sourceConnectionName` is the
+  // conversation's own bound connection, not whatever tab is visible (#9902).
+  assert.match(source, /connectionName: msg\.sourceConnectionName \?\? boundConnection\.value\?\.name/);
   assert.match(source, /sourceConnectionName: m\.role === "assistant" \? conv\.connectionName : undefined/);
 });

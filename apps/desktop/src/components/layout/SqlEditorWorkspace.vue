@@ -107,8 +107,11 @@ defineExpose({
     const group = groupForElement(commandTargetElement(null));
     return group?.applyTableStructureChanges() ?? activeEditorGroup()?.applyTableStructureChanges() ?? Promise.resolve(false);
   },
-  insertRedisCommand: (command: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command) ?? Promise.resolve(false),
-  executeRedisCommand: (command: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command) ?? Promise.resolve(false),
+  // The Redis console lives on the visible tab; `connectionId` (the AI panel's
+  // conversation binding, #9902) makes the group refuse a mismatch instead of
+  // driving another connection's console.
+  insertRedisCommand: (command: string, connectionId?: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command, connectionId) ?? Promise.resolve(false),
+  executeRedisCommand: (command: string, connectionId?: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command, connectionId) ?? Promise.resolve(false),
 });
 
 const { t } = useI18n();

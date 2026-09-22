@@ -47,7 +47,7 @@ describe("AI assistant applies per-db_type prompt template defaults", () => {
     // Same axis aiDatabaseTypeForConnection established for schema selection:
     // gbase → mysql, doris-over-mysql protocol → doris, jdbc → inferred
     // dialect. Raw db_type keying would never match for those connections.
-    expect(source).toContain("const templateDbType = computed(() => (!pluginContext.value && props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));");
+    expect(source).toContain("const templateDbType = computed(() => (!pluginContext.value && boundConnection.value ? aiDatabaseTypeForConnection(boundConnection.value) : undefined));");
     expect(source).toContain("aiDatabaseTypeForConnection");
   });
 

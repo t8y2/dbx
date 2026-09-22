@@ -362,6 +362,23 @@ struct SharedResourceBudget {
     semaphore: Arc<Semaphore>,
 }
 
+/// Cached Salesforce connected-user identity + org display name, serialized
+/// with camelCase field names for the frontend.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SalesforceCurrentUser {
+    pub user_id: String,
+    pub name: String,
+    pub email: String,
+    pub organization_id: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_admin: Option<bool>,
+    pub org_name: String,
+}
+
 pub struct AppState {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     task_supervisor: TaskSupervisor,
@@ -5131,6 +5148,38 @@ impl AppState {
             return Err("Connection pool is unhealthy".to_string());
         }
         Ok(())
+    }
+
+    /// Cached connected-user identity for a Salesforce connection. Returns a
+    /// camelCase-serializable struct for the frontend (identity badge, admin
+    /// warning). Errors when the connection is not Salesforce or has no pool.
+    pub async fn salesforce_current_user(&self, connection_id: &str) -> Result<SalesforceCurrentUser, String> {
+        let db_type = {
+            let configs = self.configs.read().await;
+            configs.get(connection_id).map(|c| c.db_type)
+        };
+        if db_type != Some(DatabaseType::Salesforce) {
+            return Err("Not a Salesforce connection".to_string());
+        }
+        let pool_key = base_pool_key_for(db_type, connection_id, None, false);
+        let pool = self.pool_handle(&pool_key).await.ok_or_else(|| "Connection not found".to_string())?;
+        match pool {
+            PoolKind::Salesforce(client) => {
+                let user = client.cached_current_user().await?;
+                let org_name = client.org_display_name().await;
+                Ok(SalesforceCurrentUser {
+                    user_id: user.user_id,
+                    name: user.name,
+                    email: user.email,
+                    organization_id: user.organization_id,
+                    username: user.username,
+                    profile_name: user.profile_name,
+                    is_admin: user.is_admin,
+                    org_name,
+                })
+            }
+            _ => Err("Not a Salesforce connection".to_string()),
+        }
     }
 
     pub async fn refresh_connections(&self) {

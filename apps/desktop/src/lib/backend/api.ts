@@ -63,6 +63,7 @@ export const salesforceOauthDeviceStart = forward("salesforceOauthDeviceStart");
 export const salesforceOauthDevicePoll = forward("salesforceOauthDevicePoll");
 export const salesforceOauthRefresh = forward("salesforceOauthRefresh");
 export const salesforceOauthPasswordLogin = forward("salesforceOauthPasswordLogin");
+export const salesforceCurrentUser = forward("salesforceCurrentUser");
 export const connectDb = forward("connectDb");
 export const connectionDatabaseInfo = forward("connectionDatabaseInfo");
 export const saveConnectionDatabaseInfo = forward("saveConnectionDatabaseInfo");

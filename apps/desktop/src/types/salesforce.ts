@@ -55,4 +55,26 @@ export interface SalesforceExternalConfig {
   auth?: SalesforceAuthContext;
 }
 
+/**
+ * Identity of the user a Salesforce connection is authenticated as, resolved from
+ * `GET /services/oauth2/userinfo` plus a `Profile.PermissionsModifyAllData` probe.
+ * Returned by the `salesforce_current_user` command / `GET /api/salesforce/current-user`.
+ *
+ * `isAdmin` is advisory only (a permission set can grant fine-grained rights), so it
+ * drives a UI hint and never a security decision — Salesforce enforces the real rules.
+ * The backend omits `isAdmin` / `profileName` when the probe did not resolve, so both
+ * are optional; fields Salesforce did not return come back as empty strings.
+ */
+export interface SalesforceCurrentUser {
+  userId: string;
+  name: string;
+  email: string;
+  organizationId: string;
+  username: string;
+  profileName?: string;
+  isAdmin?: boolean | null;
+  /** Org display name (`SELECT Name FROM Organization`), falling back to the instance host. */
+  orgName: string;
+}
+
 export const SALESFORCE_OAUTH_CALLBACK_URL = "http://localhost:27098/callback";

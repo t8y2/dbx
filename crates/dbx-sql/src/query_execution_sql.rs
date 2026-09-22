@@ -297,6 +297,11 @@ pub fn is_write_sql_for_database(sql: &str, database_type: DatabaseType) -> bool
             return is_write;
         }
     }
+    if database_type == DatabaseType::Salesforce {
+        if let Some(is_write) = classify_salesforce_statement_write(sql) {
+            return is_write;
+        }
+    }
     if let Some(risk) = classify_search_engine_query_risk(sql, database_type) {
         return risk != SearchEngineQueryRisk::ReadOnly;
     }
@@ -311,6 +316,20 @@ fn classify_dynamodb_statement_write(source: &str) -> Option<bool> {
         _ if header.starts_with("DBX DYNAMODB") => Some(true),
         _ => None,
     }
+}
+
+/// Classify a `DBX SALESFORCE` pseudo-command as a write or non-write.
+/// `DBX SALESFORCE DML` → `Some(true)`; any other `DBX SALESFORCE` header →
+/// `Some(true)` (fail closed); plain SOQL → `None` (fall through to generic
+/// classification where SELECT is read).
+fn classify_salesforce_statement_write(source: &str) -> Option<bool> {
+    let header = source.lines().find(|line| !line.trim().is_empty())?.trim().to_ascii_uppercase();
+    if !header.starts_with("DBX SALESFORCE") {
+        return None;
+    }
+    // Every DBX SALESFORCE pseudo-command is a write: only DML exists today,
+    // and unknown future headers should fail closed rather than slip through.
+    Some(true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1975,5 +1994,34 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn classify_salesforce_statement_write_dml_is_write() {
+        let dml = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"x\",\"fields\":{}}";
+        assert_eq!(classify_salesforce_statement_write(dml), Some(true));
+    }
+
+    #[test]
+    fn classify_salesforce_statement_write_unknown_header_fails_closed() {
+        let unknown = "DBX SALESFORCE FUTURE\n{}";
+        assert_eq!(classify_salesforce_statement_write(unknown), Some(true));
+    }
+
+    #[test]
+    fn classify_salesforce_statement_write_soql_is_not_classified() {
+        assert_eq!(classify_salesforce_statement_write("SELECT Id FROM Account"), None);
+        assert_eq!(classify_salesforce_statement_write("  SELECT Name FROM Lead  "), None);
+    }
+
+    #[test]
+    fn is_write_sql_for_database_salesforce_soql_is_read() {
+        assert!(!is_write_sql_for_database("SELECT Id FROM Account", DatabaseType::Salesforce));
+    }
+
+    #[test]
+    fn is_write_sql_for_database_salesforce_dml_is_write() {
+        let dml = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\",\"id\":\"x\"}";
+        assert!(is_write_sql_for_database(dml, DatabaseType::Salesforce));
     }
 }

@@ -2893,7 +2893,7 @@
       "traits": {
         "singleDatabase": true
       },
-      "supportLevel": "browse",
+      "supportLevel": "operate",
       "capabilities": {
         "queryExecution": true,
         "metadataBrowse": true,
@@ -2901,7 +2901,7 @@
         "objectSource": false,
         "schemaSearch": true,
         "diagram": false,
-        "tableDataEdit": false,
+        "tableDataEdit": true,
         "tableStructureEdit": false,
         "tableImport": false,
         "dataTransfer": false,

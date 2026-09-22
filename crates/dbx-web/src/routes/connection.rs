@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use dbx_core::connection::{
@@ -907,6 +907,18 @@ pub struct SalesforcePasswordLoginRequest {
     pub params: SfOauthParams,
     pub username: String,
     pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct SalesforceCurrentUserQuery {
+    pub connection_id: String,
+}
+
+pub async fn salesforce_current_user(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SalesforceCurrentUserQuery>,
+) -> Result<Json<dbx_core::connection::SalesforceCurrentUser>, AppError> {
+    state.app.salesforce_current_user(&q.connection_id).await.map(Json).map_err(AppError::from)
 }
 
 #[cfg(test)]

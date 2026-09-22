@@ -410,6 +410,7 @@ async fn main() {
         .route("/connection/salesforce-oauth-device-poll", post(routes::connection::salesforce_oauth_device_poll))
         .route("/connection/salesforce-oauth-refresh", post(routes::connection::salesforce_oauth_refresh))
         .route("/connection/salesforce-oauth-password-login", post(routes::connection::salesforce_oauth_password_login))
+        .route("/salesforce/current-user", get(routes::connection::salesforce_current_user))
         .route("/plugins", get(routes::plugins::list_plugins))
         .route("/plugins/trusted-keys", get(routes::plugins::list_plugin_trusted_keys))
         .route("/plugins/trusted-keys/save", post(routes::plugins::save_plugin_trusted_key))

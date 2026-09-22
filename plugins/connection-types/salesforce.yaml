@@ -12,7 +12,7 @@ skipTcpProbe: true
 defaultPort: 443
 traits:
   singleDatabase: true
-supportLevel: browse
+supportLevel: operate
 capabilities:
   queryExecution: true
   metadataBrowse: true
@@ -20,7 +20,7 @@ capabilities:
   objectSource: false
   schemaSearch: true
   diagram: false
-  tableDataEdit: false
+  tableDataEdit: true
   tableStructureEdit: false
   tableImport: false
   dataTransfer: false

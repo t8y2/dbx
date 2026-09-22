@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use dbx_core::connection::AppState;
+use dbx_core::connection::{AppState, SalesforceCurrentUser};
 use dbx_core::salesforce_oauth::{
     authorize_with_browser, device_authorization_request, device_poll, password_grant_token, refresh_access_token,
     SfDeviceAuthorization, SfDevicePoll, SfOauthParams, SfRefreshedToken, SfTokenSet,
@@ -49,4 +49,14 @@ pub async fn salesforce_oauth_password_login(
     password: String,
 ) -> Result<SfTokenSet, String> {
     password_grant_token(&params, &username, &password).await
+}
+
+/// Cached connected-user identity for a Salesforce connection. Read-only
+/// metadata call used by the identity badge and admin-detection UI.
+#[tauri::command]
+pub async fn salesforce_current_user(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<SalesforceCurrentUser, String> {
+    state.salesforce_current_user(&connection_id).await
 }

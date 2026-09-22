@@ -87,6 +87,22 @@ export interface CustomSaveHandler {
   targetLabel?: string;
 }
 
+/**
+ * Summary handed to `confirmSaveRequest` so an engine whose writes cannot be
+ * rolled back (Salesforce REST: one record per request, no transactions) can
+ * show the operator exactly what is about to happen before anything is sent.
+ */
+export interface DataGridSaveConfirmationRequest {
+  /** Rows with edited cells (one write per row). */
+  updates: number;
+  inserts: number;
+  deletes: number;
+  /** Save target name (table / sObject), when known. */
+  targetLabel?: string;
+  /** The statements about to be executed — for Salesforce these are `DBX SALESFORCE DML` pseudo-commands. */
+  statements: string[];
+}
+
 export interface UseDataGridEditorOptions {
   result: ComputedRef<{ columns: string[]; rows: CellValue[][] }>;
   editable: ComputedRef<boolean | undefined>;
@@ -119,6 +135,12 @@ export interface UseDataGridEditorOptions {
   rowStatusFilter: Ref<RowStatusFilter>;
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
   confirmDangerousRowDeletion?: ComputedRef<boolean>;
+  /**
+   * Optional operator review before a save is executed. Return `false` to cancel:
+   * the pending edits stay in the grid and nothing is sent. Engines whose writes
+   * cannot be rolled back (Salesforce REST) use this; auto-save never bypasses it.
+   */
+  confirmSaveRequest?: ComputedRef<((request: DataGridSaveConfirmationRequest) => Promise<boolean>) | undefined>;
   /** `生成 SQL 时包含数据库名` — qualify saved tables with their database. */
   includeDatabaseNameInSaveSql?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
@@ -1990,6 +2012,28 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         source: i18n.global.t("readOnlyUnlock.sourceDataEditor"),
       });
       if (!confirmed) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    }
+    // Engines without transactional rollback (Salesforce: one REST call per record,
+    // a failure leaves earlier records applied) let the host review the operation
+    // list first. Auto-save never writes without that review, matching the
+    // production-database interlock above.
+    const confirmSaveRequest = options.confirmSaveRequest?.value;
+    if (confirmSaveRequest) {
+      if (saveOptions.autoSave) {
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+      const saveConfirmed = await confirmSaveRequest({
+        updates: snapshot.dirtyRows.size,
+        inserts: snapshot.newRows.length,
+        deletes: snapshot.deletedRows.size,
+        targetLabel: tableMeta.value?.tableName,
+        statements: stmts,
+      });
+      if (!saveConfirmed) {
         await finishInterruptedSaveChanges(snapshot);
         return;
       }

@@ -66,6 +66,10 @@ pub struct SfClient {
     /// Resolved organization display name (one SOQL call, cached; falls back
     /// to the instance host label without caching on failure).
     org_name_cache: Arc<Mutex<Option<String>>>,
+    /// Cached connected-user identity (one `current_user()` call, cached for
+    /// the connection's lifetime so repeated metadata requests don't burn API
+    /// quota).
+    current_user_cache: Arc<Mutex<Option<SfUserInfo>>>,
 }
 
 /// Re-auth material held for the connection's lifetime (refresh token for
@@ -169,6 +173,7 @@ impl SfClient {
             sobject_cache: Arc::new(Mutex::new(None)),
             describe_cache: Arc::new(Mutex::new(HashMap::new())),
             org_name_cache: Arc::new(Mutex::new(None)),
+            current_user_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -305,6 +310,18 @@ impl SfClient {
         self.api_send(Method::GET, url, None).await
     }
 
+    async fn api_post(&self, url: &str, body: Value) -> Result<Value, String> {
+        self.api_send(Method::POST, url, Some(body)).await
+    }
+
+    async fn api_patch(&self, url: &str, body: Value) -> Result<Value, String> {
+        self.api_send(Method::PATCH, url, Some(body)).await
+    }
+
+    async fn api_delete(&self, url: &str) -> Result<Value, String> {
+        self.api_send(Method::DELETE, url, None).await
+    }
+
     /// GET with conditional-request headers; returns `Ok(None)` on 304.
     async fn api_get_conditional(
         &self,
@@ -383,9 +400,16 @@ impl SfClient {
         client.api_get(&format!("{}/sobjects/", client.api_base())).await.map(|_| ())
     }
 
-    /// Execute a SOQL query. `max_rows` caps materialized rows; remaining rows
-    /// stay behind `has_more` + QueryLocator (`session_id`).
+    /// Execute a SOQL query or a `DBX SALESFORCE DML` pseudo-command. `max_rows`
+    /// caps materialized rows; remaining rows stay behind `has_more` +
+    /// QueryLocator (`session_id`).
     pub async fn execute_query(&self, soql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
+        // Route DBX SALESFORCE pseudo-commands before the SOQL path so they
+        // never get `apply_fields_function_limit` treatment.
+        if starts_with_salesforce_header(soql) {
+            let statement = parse_salesforce_statement(soql)?;
+            return self.execute_dml(&statement).await;
+        }
         let started = Instant::now();
         let soql = apply_fields_function_limit(soql);
         let url = format!("{}/query?q={}", self.api_base(), urlencoded(&soql));
@@ -485,6 +509,21 @@ impl SfClient {
                         record.get("Profile").and_then(|p| p.get("PermissionsModifyAllData")).and_then(Value::as_bool);
                 }
             }
+        }
+        Ok(info)
+    }
+
+    /// Cached variant of `current_user()`: returns the resolved identity from
+    /// the in-memory cache when available, falling back to a fresh call on
+    /// the first invocation (or after the cache is cleared). Repeated UI
+    /// polls don't burn Salesforce API quota.
+    pub async fn cached_current_user(&self) -> Result<SfUserInfo, String> {
+        if let Some(cached) = self.current_user_cache.lock().ok().and_then(|guard| guard.clone()) {
+            return Ok(cached);
+        }
+        let info = self.current_user().await?;
+        if let Ok(mut guard) = self.current_user_cache.lock() {
+            *guard = Some(info.clone());
         }
         Ok(info)
     }
@@ -920,6 +959,220 @@ fn salesforce_error_message(status: StatusCode, body: &Value) -> String {
     result
 }
 
+// ---------------------------------------------------------------------------
+// DBX SALESFORCE DML pseudo-command (spec §8)
+// ---------------------------------------------------------------------------
+
+/// Pseudo-command header the grid save path emits. Case-insensitive after
+/// trim; everything after it (trimmed) is one JSON object.
+const SALESFORCE_DML_HEADER: &str = "DBX SALESFORCE DML";
+
+/// DML operation parsed from the JSON body's `op` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfDmlOp {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl SfDmlOp {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Parsed `DBX SALESFORCE DML` statement ready for execution.
+#[derive(Debug, Clone)]
+pub struct SfDmlStatement {
+    pub op: SfDmlOp,
+    pub object: String,
+    /// Required for `update`/`delete`; ignored for `insert`.
+    pub id: Option<String>,
+    /// Field API name → JSON value. Required and non-empty for `insert`/
+    /// `update`; absent for `delete`.
+    pub fields: Option<serde_json::Map<String, Value>>,
+}
+
+/// True when the source's first non-empty trimmed line begins with
+/// `DBX SALESFORCE` (case-insensitive). Used by `execute_query` to route
+/// pseudo-commands away from the SOQL path without eagerly parsing the JSON
+/// body — a non-DBX SOQL query never reaches this check.
+fn starts_with_salesforce_header(source: &str) -> bool {
+    let header = source.lines().find(|line| !line.trim().is_empty()).map(str::trim).unwrap_or("");
+    header.to_ascii_uppercase().starts_with("DBX SALESFORCE")
+}
+
+/// Parse a `DBX SALESFORCE DML` statement from its textual form.
+///
+/// Shape (header line + JSON body, DynamoDB-precedent):
+/// ```text
+/// DBX SALESFORCE DML
+/// {"op":"update","object":"Account","id":"001xx…","fields":{"Name":"Acme"}}
+/// ```
+///
+/// The header is compared case-insensitively after trim; the remainder is
+/// trimmed and parsed as one JSON object. Unknown `DBX SALESFORCE …` headers,
+/// malformed JSON, unknown ops, and missing required fields all produce
+/// `Err(String)` — never a panic.
+pub fn parse_salesforce_statement(source: &str) -> Result<SfDmlStatement, String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Salesforce statement is empty.".to_string());
+    }
+    let (header, rest) = match trimmed.split_once('\n') {
+        Some((h, r)) => (h.trim(), r),
+        None => (trimmed, ""),
+    };
+    if !header.eq_ignore_ascii_case(SALESFORCE_DML_HEADER) {
+        return Err(
+            "Unsupported DBX SALESFORCE statement. Use DBX SALESFORCE DML with a JSON body (op, object, id, fields)."
+                .to_string(),
+        );
+    }
+    let body = rest.trim();
+    if body.is_empty() {
+        return Err("DBX SALESFORCE DML statement is missing its JSON body.".to_string());
+    }
+    let json: Value =
+        serde_json::from_str(body).map_err(|error| format!("Invalid DBX SALESFORCE DML JSON body: {error}"))?;
+    let obj = json.as_object().ok_or_else(|| "DBX SALESFORCE DML body must be a JSON object.".to_string())?;
+
+    let op_str = obj
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "DBX SALESFORCE DML body requires an 'op' field (insert | update | delete).".to_string())?;
+    let op = match op_str {
+        "insert" => SfDmlOp::Insert,
+        "update" => SfDmlOp::Update,
+        "delete" => SfDmlOp::Delete,
+        _ => return Err(format!("Unknown DBX SALESFORCE DML op: '{op_str}'. Expected insert, update, or delete.")),
+    };
+
+    let object = obj
+        .get("object")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "DBX SALESFORCE DML body requires a non-empty 'object' field.".to_string())?
+        .to_string();
+
+    let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+
+    match op {
+        SfDmlOp::Update | SfDmlOp::Delete => {
+            if id.as_deref().unwrap_or("").is_empty() {
+                return Err(format!("DBX SALESFORCE DML {} requires a non-empty 'id' field.", op.as_str()));
+            }
+        }
+        SfDmlOp::Insert => {}
+    }
+
+    let fields = obj.get("fields").and_then(Value::as_object).cloned();
+    match op {
+        SfDmlOp::Insert | SfDmlOp::Update => {
+            if fields.as_ref().is_none_or(|map| map.is_empty()) {
+                return Err(format!("DBX SALESFORCE DML {} requires a non-empty 'fields' object.", op.as_str()));
+            }
+        }
+        SfDmlOp::Delete => {}
+    }
+
+    Ok(SfDmlStatement { op, object, id, fields })
+}
+
+impl SfClient {
+    /// Execute a parsed `DBX SALESFORCE DML` statement against the REST API.
+    ///
+    /// - `insert` → `POST {apiBase}/sobjects/{object}` (body = fields)
+    /// - `update` → `PATCH {apiBase}/sobjects/{object}/{id}` (body = fields)
+    /// - `delete` → `DELETE {apiBase}/sobjects/{object}/{id}` (no body)
+    ///
+    /// Insert returns the new Id in the result rows; update/delete return
+    /// `affected_rows = 1` with no rows. Errors are prefixed with the
+    /// operation context so a failed row is identifiable in a batch.
+    async fn execute_dml(&self, statement: &SfDmlStatement) -> Result<QueryResult, String> {
+        let started = Instant::now();
+        let api_base = self.api_base();
+        let context = match statement.op {
+            SfDmlOp::Insert => format!("insert on {}", statement.object),
+            SfDmlOp::Update => format!("update on {} (Id {})", statement.object, statement.id.as_deref().unwrap_or("")),
+            SfDmlOp::Delete => format!("delete on {} (Id {})", statement.object, statement.id.as_deref().unwrap_or("")),
+        };
+
+        match statement.op {
+            SfDmlOp::Insert => {
+                let url = format!("{api_base}/sobjects/{}", urlencoded(&statement.object));
+                let body = Value::Object(statement.fields.clone().unwrap_or_default());
+                let value =
+                    self.api_post(&url, body).await.map_err(|error| format!("Salesforce {context} failed: {error}"))?;
+                let success = value.get("success").and_then(Value::as_bool).unwrap_or(false);
+                if !success {
+                    let errors = value.get("errors").cloned().unwrap_or(Value::Null);
+                    let detail = if errors.is_null() {
+                        "Salesforce reported success=false without error details.".to_string()
+                    } else {
+                        format!("{errors}")
+                    };
+                    return Err(format!("Salesforce {context} failed: {detail}"));
+                }
+                let new_id = value.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                Ok(QueryResult {
+                    columns: vec!["Id".to_string()],
+                    column_types: vec!["String".to_string()],
+                    column_sortables: vec![false],
+                    spatial_columns: Vec::new(),
+                    spatial_values: Vec::new(),
+                    rows: vec![vec![Value::String(new_id)]],
+                    affected_rows: 1,
+                    execution_time_ms: started.elapsed().as_millis(),
+                    server_execute_time_us: None,
+                    truncated: false,
+                    session_id: None,
+                    has_more: false,
+                    elasticsearch_raw_body: None,
+                    messages: Vec::new(),
+                })
+            }
+            SfDmlOp::Update => {
+                let id = statement.id.as_deref().unwrap_or("");
+                let url = format!("{api_base}/sobjects/{}/{}", urlencoded(&statement.object), urlencoded(id));
+                let body = Value::Object(statement.fields.clone().unwrap_or_default());
+                self.api_patch(&url, body).await.map_err(|error| format!("Salesforce {context} failed: {error}"))?;
+                Ok(salesforce_affected_query_result(1, started))
+            }
+            SfDmlOp::Delete => {
+                let id = statement.id.as_deref().unwrap_or("");
+                let url = format!("{api_base}/sobjects/{}/{}", urlencoded(&statement.object), urlencoded(id));
+                self.api_delete(&url).await.map_err(|error| format!("Salesforce {context} failed: {error}"))?;
+                Ok(salesforce_affected_query_result(1, started))
+            }
+        }
+    }
+}
+
+fn salesforce_affected_query_result(affected_rows: u64, started: Instant) -> QueryResult {
+    QueryResult {
+        columns: Vec::new(),
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
+        rows: Vec::new(),
+        affected_rows,
+        execution_time_ms: started.elapsed().as_millis(),
+        server_execute_time_us: None,
+        truncated: false,
+        session_id: None,
+        has_more: false,
+        elasticsearch_raw_body: None,
+        messages: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1254,5 +1507,106 @@ mod tests {
         assert!(ropc_client.has_refresh_token());
         let ropc_debug = format!("{ropc_client:?}");
         assert!(!ropc_debug.contains("user@example.com"), "{ropc_debug}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_insert() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Account\",\"fields\":{\"Name\":\"Acme\"}}";
+        let stmt = parse_salesforce_statement(source).unwrap();
+        assert_eq!(stmt.op, SfDmlOp::Insert);
+        assert_eq!(stmt.object, "Account");
+        assert!(stmt.id.is_none());
+        let fields = stmt.fields.unwrap();
+        assert_eq!(fields.get("Name").and_then(Value::as_str), Some("Acme"));
+    }
+
+    #[test]
+    fn parse_salesforce_statement_update() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001xx000003DGbY\",\"fields\":{\"Name\":\"Acme\"}}";
+        let stmt = parse_salesforce_statement(source).unwrap();
+        assert_eq!(stmt.op, SfDmlOp::Update);
+        assert_eq!(stmt.object, "Account");
+        assert_eq!(stmt.id.as_deref(), Some("001xx000003DGbY"));
+    }
+
+    #[test]
+    fn parse_salesforce_statement_delete() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\",\"id\":\"001xx000003DGbY\"}";
+        let stmt = parse_salesforce_statement(source).unwrap();
+        assert_eq!(stmt.op, SfDmlOp::Delete);
+        assert_eq!(stmt.id.as_deref(), Some("001xx000003DGbY"));
+        assert!(stmt.fields.is_none());
+    }
+
+    #[test]
+    fn parse_salesforce_statement_case_insensitive_header() {
+        let source = "dbx salesforce dml\n{\"op\":\"delete\",\"object\":\"Lead\",\"id\":\"abc\"}";
+        let stmt = parse_salesforce_statement(source).unwrap();
+        assert_eq!(stmt.op, SfDmlOp::Delete);
+    }
+
+    #[test]
+    fn parse_salesforce_statement_malformed_json() {
+        let source = "DBX SALESFORCE DML\n{not json";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("Invalid DBX SALESFORCE DML JSON body"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_unknown_op() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"upsert\",\"object\":\"Account\",\"id\":\"x\"}";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("Unknown DBX SALESFORCE DML op"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_missing_id_for_update() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"fields\":{\"Name\":\"x\"}}";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("requires a non-empty 'id'"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_missing_id_for_delete() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\"}";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("requires a non-empty 'id'"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_empty_fields_for_insert() {
+        let source = "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Account\",\"fields\":{}}";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("non-empty 'fields'"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_non_dbx_soql_is_not_matched() {
+        // Plain SOQL never enters the parser — but if it somehow did, the
+        // header check catches it.
+        let source = "SELECT Id FROM Account";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("Unsupported DBX SALESFORCE statement"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_unknown_header() {
+        let source = "DBX SALESFORCE SOMETHING\n{}";
+        let err = parse_salesforce_statement(source).unwrap_err();
+        assert!(err.contains("Unsupported DBX SALESFORCE statement"), "{err}");
+    }
+
+    #[test]
+    fn parse_salesforce_statement_empty_input() {
+        let err = parse_salesforce_statement("").unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn starts_with_salesforce_header_detects_dml() {
+        assert!(starts_with_salesforce_header("DBX SALESFORCE DML\n{}"));
+        assert!(starts_with_salesforce_header("  dbx salesforce dml\n{}"));
+        assert!(!starts_with_salesforce_header("SELECT Id FROM Account"));
+        assert!(!starts_with_salesforce_header(""));
     }
 }

@@ -3,6 +3,7 @@ order: 800
 dbType: salesforce
 rustVariant: Salesforce
 label: Salesforce
+dialect: SOQL
 runtimeMode: native
 mcpMode: bridge
 singleConnectionPool: true

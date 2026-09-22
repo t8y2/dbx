@@ -732,6 +732,24 @@ fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
                         })
                         .filter(|values: &Vec<String>| !values.is_empty());
                     let length = field.get("length").and_then(Value::as_i64).filter(|length| *length > 0);
+                    let mut extra = serde_json::json!({
+                        "updateable": field.get("updateable").and_then(Value::as_bool).unwrap_or(false),
+                        "createable": field.get("createable").and_then(Value::as_bool).unwrap_or(false),
+                        "custom": field.get("custom").and_then(Value::as_bool).unwrap_or(false),
+                        "label": label,
+                    });
+                    if let Some(rel_name) = field.get("relationshipName").and_then(Value::as_str) {
+                        if !rel_name.is_empty() {
+                            extra["relationshipName"] = serde_json::json!(rel_name);
+                        }
+                    }
+                    if let Some(refs) = field.get("referenceTo").and_then(Value::as_array) {
+                        let ref_strings: Vec<String> =
+                            refs.iter().filter_map(Value::as_str).filter(|s| !s.is_empty()).map(String::from).collect();
+                        if !ref_strings.is_empty() {
+                            extra["referenceTo"] = serde_json::json!(ref_strings);
+                        }
+                    }
                     ColumnInfo {
                         is_primary_key: name.eq_ignore_ascii_case("Id"),
                         is_nullable: field.get("nillable").and_then(Value::as_bool).unwrap_or(true),
@@ -745,14 +763,7 @@ fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
                         // describe flags the grid/DML layer needs later (M4):
                         // formula/rollup/auto-number fields come back with
                         // updateable=false and must render read-only.
-                        extra: Some(
-                            serde_json::json!({
-                                "updateable": field.get("updateable").and_then(Value::as_bool).unwrap_or(false),
-                                "createable": field.get("createable").and_then(Value::as_bool).unwrap_or(false),
-                                "custom": field.get("custom").and_then(Value::as_bool).unwrap_or(false),
-                            })
-                            .to_string(),
-                        ),
+                        extra: Some(extra.to_string()),
                         comment: if label.is_empty() || label == name { None } else { Some(label) },
                         numeric_precision: field
                             .get("precision")
@@ -928,6 +939,88 @@ mod tests {
         assert_eq!(columns[2].numeric_scale, Some(2));
         let extra: Value = serde_json::from_str(columns[1].extra.as_ref().unwrap()).unwrap();
         assert_eq!(extra["updateable"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn describe_columns_extra_has_label_relationship_and_reference() {
+        let describe = serde_json::json!({
+            "fields": [
+                {
+                    "name": "StageName",
+                    "label": "Stage",
+                    "type": "picklist",
+                    "nillable": false,
+                    "updateable": true,
+                    "createable": true,
+                    "picklistValues": [
+                        {"value": "Prospecting", "active": true},
+                        {"value": "Closed", "active": true},
+                        {"value": "Old", "active": false}
+                    ]
+                },
+                {
+                    "name": "OwnerId",
+                    "label": "Owner ID",
+                    "type": "reference",
+                    "nillable": false,
+                    "updateable": true,
+                    "createable": true,
+                    "relationshipName": "Owner",
+                    "referenceTo": ["User"]
+                },
+                {
+                    "name": "Name",
+                    "label": "Account Name",
+                    "type": "string",
+                    "nillable": false,
+                    "updateable": true,
+                    "createable": true,
+                    "length": 255
+                }
+            ]
+        });
+        let columns = parse_describe_columns(&describe);
+        assert_eq!(columns.len(), 3);
+
+        // (a) picklist: enum_values only includes active values; extra has label
+        let picklist_extra: Value = serde_json::from_str(columns[0].extra.as_ref().unwrap()).unwrap();
+        assert_eq!(picklist_extra["label"], serde_json::json!("Stage"));
+        assert_eq!(picklist_extra["updateable"], serde_json::json!(true));
+        assert!(picklist_extra.get("relationshipName").is_none());
+        assert!(picklist_extra.get("referenceTo").is_none());
+        assert_eq!(columns[0].enum_values.as_ref().unwrap(), &vec!["Prospecting".to_string(), "Closed".to_string()]);
+
+        // (b) reference: relationshipName and referenceTo present in extra
+        let ref_extra: Value = serde_json::from_str(columns[1].extra.as_ref().unwrap()).unwrap();
+        assert_eq!(ref_extra["label"], serde_json::json!("Owner ID"));
+        assert_eq!(ref_extra["relationshipName"], serde_json::json!("Owner"));
+        assert_eq!(ref_extra["referenceTo"], serde_json::json!(["User"]));
+        assert!(columns[1].enum_values.is_none());
+
+        // (c) plain string: label present, no relationship/reference
+        let str_extra: Value = serde_json::from_str(columns[2].extra.as_ref().unwrap()).unwrap();
+        assert_eq!(str_extra["label"], serde_json::json!("Account Name"));
+        assert!(str_extra.get("relationshipName").is_none());
+        assert!(str_extra.get("referenceTo").is_none());
+    }
+
+    #[test]
+    fn describe_columns_reference_empty_array_omitted() {
+        let describe = serde_json::json!({
+            "fields": [{
+                "name": "LookupId",
+                "label": "Lookup",
+                "type": "reference",
+                "nillable": true,
+                "referenceTo": [],
+                "relationshipName": null
+            }]
+        });
+        let columns = parse_describe_columns(&describe);
+        assert_eq!(columns.len(), 1);
+        let extra: Value = serde_json::from_str(columns[0].extra.as_ref().unwrap()).unwrap();
+        assert!(extra.get("referenceTo").is_none(), "empty referenceTo must be omitted");
+        assert!(extra.get("relationshipName").is_none(), "null relationshipName must be omitted");
     }
 
     #[test]

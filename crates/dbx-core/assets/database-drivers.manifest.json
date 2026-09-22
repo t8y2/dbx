@@ -2883,6 +2883,7 @@
     {
       "dbType": "salesforce",
       "label": "Salesforce",
+      "dialect": "SOQL",
       "runtimeMode": "native",
       "mcpMode": "bridge",
       "singleConnectionPool": true,

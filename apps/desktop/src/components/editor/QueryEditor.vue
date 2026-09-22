@@ -102,6 +102,18 @@ import {
 } from "@/lib/elasticsearch/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, mongoCompletionNeedsCollections, mongoCompletionNeedsFields, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongo/mongoCompletion";
 import {
+  buildSoqlCompletionItems,
+  getSoqlCompletionContext,
+  getSoqlCompletionResultValidFor,
+  resolveSoqlFieldCandidates,
+  resolveSoqlValueField,
+  shouldAutoOpenSoqlCompletion,
+  soqlCompletionNeedsObjects,
+  type SoqlCompletionField,
+  type SoqlCompletionItem,
+  type SoqlCompletionObject,
+} from "@/lib/soql/soqlCompletion";
+import {
   buildSqlServerUseDatabaseCompletionItems,
   mergeSqlCompletionQualifierNames,
   resolveSqlCompletionRoutineLookupTarget,
@@ -265,12 +277,14 @@ const props = defineProps<{
 }>();
 
 function sqlBehaviorDialect(): "mysql" | "postgres" | "sqlserver" | undefined {
-  return props.syntaxDialect === "clickhouse" ? props.dialect : (props.syntaxDialect ?? props.dialect);
+  // clickhouse and soql ride the SQL editor but have no matching behavior dialect;
+  // fall back to the connection's dialect (undefined for Salesforce).
+  return props.syntaxDialect === "clickhouse" || props.syntaxDialect === "soql" ? props.dialect : (props.syntaxDialect ?? props.dialect);
 }
 
 function queryEditorSelectionLanguage(): "sql" | "text" {
   const databaseType = props.databaseType;
-  return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" || databaseType === "salesforce" ? "text" : "sql";
+  return databaseType === "redis" || databaseType === "mongodb" || databaseType === "elasticsearch" || databaseType === "easysearch" || databaseType === "meilisearch" || databaseType === "victoriametrics" ? "text" : "sql";
 }
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
@@ -4280,7 +4294,7 @@ let typedCompletionActivationUntil = 0;
 let suppressNextSqlCompletionAutoStartUntil = 0;
 let activeCompletionOrigin: SqlCompletionTriggerOrigin | null = null;
 
-type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
+type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem | SoqlCompletionItem;
 
 interface BatchColumnSelectionCandidate {
   key: string;
@@ -5185,6 +5199,51 @@ async function provideMongoCompletions(currentState: import("@codemirror/state")
   };
 }
 
+async function provideSoqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
+  if (!props.connectionId) return null;
+  const epoch = ++completionEpoch;
+  const fullDoc = currentState.doc.toString();
+  if (!explicit && !shouldAutoOpenSoqlCompletion(fullDoc, position)) return null;
+
+  const completionContext = getSoqlCompletionContext(fullDoc, position);
+  if (completionContext.mode === "none") return null;
+  const database = props.database;
+
+  let objects: SoqlCompletionObject[] = [];
+  let fields: SoqlCompletionField[] = [];
+  let valueField: SoqlCompletionField | null = null;
+
+  // Field loader backed by the store (which reads the backend describe cache), so
+  // relationship traversal costs at most one describe per distinct sObject.
+  const loadFields = (objectName: string) => (database ? connectionStore.listSoqlCompletionFields(props.connectionId!, database, objectName) : Promise.resolve<SoqlCompletionField[]>([]));
+
+  try {
+    if (database && soqlCompletionNeedsObjects(completionContext.mode)) {
+      objects = await connectionStore.listSoqlCompletionObjects(props.connectionId, database);
+    }
+    if (database && completionContext.mode === "field") {
+      fields = await resolveSoqlFieldCandidates(completionContext, loadFields);
+    }
+    if (database && completionContext.mode === "value") {
+      valueField = await resolveSoqlValueField(completionContext, loadFields);
+    }
+  } catch {
+    // Metadata load failed (offline, no describe cache yet): fall back to keyword-only.
+    objects = [];
+    fields = [];
+    valueField = null;
+  }
+  if (epoch !== completionEpoch) return null;
+
+  const items = buildSoqlCompletionItems(completionContext, { objects, fields, valueField });
+  if (items.length === 0) return null;
+  return {
+    from: completionContext.from,
+    options: items.map((item) => completionOptionForItem(item)),
+    validFor: getSoqlCompletionResultValidFor(completionContext),
+  };
+}
+
 async function provideSqlCompletions(context: CompletionContext) {
   const currentState = context.state;
   const position = context.pos;
@@ -5206,7 +5265,9 @@ async function provideSqlCompletions(context: CompletionContext) {
     return provideRedisCompletions(currentState, position, explicit);
   }
   if (props.databaseType === "victoriametrics") return null;
-  if (props.databaseType === "salesforce") return null;
+  if (props.databaseType === "salesforce") {
+    return provideSoqlCompletions(currentState, position, explicit);
+  }
   const hasDatabase = props.database != null;
   const sequenceLiteralContext = getPostgresSequenceLiteralCompletionContext(fullDoc, position, props.databaseType);
   const databaseLinkContext = oracleDatabaseLinkCompletionContext(fullDoc, position, props.databaseType);
@@ -5572,7 +5633,10 @@ function shouldStartSqlCompletionAfterInput(insertedText: string, removedText: s
   if (props.databaseType === "mongodb") {
     return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
   }
-  if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch" || props.databaseType === "salesforce") return false;
+  if (props.databaseType === "salesforce") {
+    return !!(insertedText || removedText) && shouldAutoOpenSoqlCompletion(fullDoc, position);
+  }
+  if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch") return false;
   if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
     // Preserve old character-based checks for non-SQL providers.
     if (!insertedText && removedText) {

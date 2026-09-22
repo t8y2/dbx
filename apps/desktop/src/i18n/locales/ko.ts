@@ -1400,6 +1400,7 @@ export default withEnglishFallback({
     pluginSshKeyPickerEmpty: "키를 찾을 수 없음",
     pluginSshKeyEncrypted: "암호화됨",
     objectCacheRefreshFailed: "개체 캐시 새로 고침 실패: {message}",
+    mqttMaxPacketSize: "최대 패킷 크기(바이트)",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

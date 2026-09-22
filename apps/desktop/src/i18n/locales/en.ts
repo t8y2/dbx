@@ -1118,6 +1118,7 @@ export default {
     mqttWsPath: "WebSocket Path",
     mqttWsPathPlaceholder: "/mqtt",
     mqttConnectTimeout: "Connect Timeout (seconds)",
+    mqttMaxPacketSize: "Max Packet Size (bytes)",
     mqttConsoleTitle: "MQTT Console",
     mqttTopics: "Topics",
     mqttMessages: "Messages",

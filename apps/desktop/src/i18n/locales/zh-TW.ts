@@ -982,6 +982,7 @@ export default withEnglishFallback({
     mqttWsPath: "WebSocket Path",
     mqttWsPathPlaceholder: "/mqtt",
     mqttConnectTimeout: "Connect Timeout (seconds)",
+    mqttMaxPacketSize: "Max Packet Size (bytes)",
     nacosMetrics: "Prometheus 指標",
     nacosMetricsAuto: "自動偵測",
     nacosMetricsDisabled: "關閉",

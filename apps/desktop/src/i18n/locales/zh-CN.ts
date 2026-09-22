@@ -1032,6 +1032,7 @@ export default withEnglishFallback({
     mqttWsPath: "WebSocket 路径",
     mqttWsPathPlaceholder: "/mqtt",
     mqttConnectTimeout: "连接超时（秒）",
+    mqttMaxPacketSize: "最大报文（字节）",
     mqttConsoleTitle: "MQTT 控制台",
     mqttTopics: "Topics",
     mqttMessages: "消息",

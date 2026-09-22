@@ -952,6 +952,7 @@ export default withEnglishFallback({
     mqttWsPath: "WebSocket Yolu",
     mqttWsPathPlaceholder: "/mqtt",
     mqttConnectTimeout: "Bağlantı Zaman Aşımı (saniye)",
+    mqttMaxPacketSize: "Maksimum Paket Boyutu (bayt)",
     mqttConsoleTitle: "MQTT Konsolu",
     mqttTopics: "Konular",
     mqttMessages: "Mesajlar",

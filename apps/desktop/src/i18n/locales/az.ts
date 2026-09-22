@@ -950,6 +950,7 @@ export default withEnglishFallback({
     mqttWsPath: "WebSocket yolu",
     mqttWsPathPlaceholder: "/mqtt",
     mqttConnectTimeout: "Əlaqə üçün vaxt limiti (saniyə)",
+    mqttMaxPacketSize: "Maksimal paket ölçüsü (bayt)",
     mqttConsoleTitle: "MQTT konsolu",
     mqttTopics: "Mövzular",
     mqttMessages: "Mesajlar",

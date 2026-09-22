@@ -1,3 +1,4 @@
+import type { SqlParameterSyntax } from "@/lib/sql/sqlParameters";
 import type { EditorState } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 
@@ -171,6 +172,8 @@ export interface SqlSemanticModel {
 }
 
 export interface SqlSemanticBuildOptions {
+  /** Undefined keeps DBX's default enabled syntaxes; [] disables substitution. */
+  enabledSyntaxes?: readonly SqlParameterSyntax[];
   databaseType?: DatabaseType;
   dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris";
   /**

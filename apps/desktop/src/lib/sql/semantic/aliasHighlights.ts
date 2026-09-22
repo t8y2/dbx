@@ -35,6 +35,7 @@ export function sqlAliasHighlightGroups(sql: string, options: SqlSemanticBuildOp
   if (sql.length > MAX_ALIAS_HIGHLIGHT_SQL_LENGTH) return [];
   const dialect = sqlSemanticDialectFor(options);
   const allTokens = tokenizeSqlSemantic(sql, dialect.id, {
+    enabledSyntaxes: options.enabledSyntaxes,
     mysqlDashCommentRequiresWhitespace: dialect.id === "mysql",
     mysqlBackslashEscape: dialect.id === "mysql",
     mysqlDoubleQuoteIsString: dialect.id === "mysql",

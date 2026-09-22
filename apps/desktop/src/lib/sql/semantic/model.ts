@@ -154,7 +154,7 @@ function updateIntroducesMutationTarget(tokens: readonly SqlSemanticToken[], upd
  */
 export function sqlSemanticTableNameSpans(sql: string, options: SqlSemanticBuildOptions = {}): SqlSemanticSpan[] {
   const dialect = sqlSemanticDialectFor(options);
-  const tokens = significantTokens(tokenizeSqlSemantic(sql, dialect.id));
+  const tokens = significantTokens(tokenizeSqlSemantic(sql, dialect.id, options));
   const spans: SqlSemanticSpan[] = [];
   const seen = new Set<string>();
   const commaContinuesTableListByDepth = new Map<number, boolean>();
@@ -1071,7 +1071,7 @@ export function buildSqlSemanticModel(sql: string, cursor: number, options: SqlS
   const window = resolveSqlStatementWindow(sql, safeCursor, options.editorState, dialect.id);
   const windowSql = sql.slice(window.from, window.to);
   const windowCursor = safeCursor - window.from;
-  const localTokens = tokenizeSqlSemantic(windowSql, dialect.id);
+  const localTokens = tokenizeSqlSemantic(windowSql, dialect.id, options);
   const localStatementSpan = findActiveSqlStatementSpan(windowSql, localTokens, windowCursor);
   const allTokens = localTokens.map((token) => ({
     ...token,

@@ -80,3 +80,22 @@ describe("sqlSemanticTokens", () => {
     expect(tokens.some((token) => token.kind === "string" && token.text === '"it\\"s ok"')).toBe(true);
   });
 });
+
+describe("MyBatis semantic tokens (#9878)", () => {
+  it.each(["mysql", "doris"])("does not suppress SQL following a valid placeholder in %s", (dialect) => {
+    const sql = "SELECT * FROM t WHERE code IN (#{工厂编号}) AND del_flag = 0;";
+    const tokens = tokenizeSqlSemantic(sql, dialect);
+    expect(tokens.filter((token) => token.kind === "parameter").map((token) => token.text)).toEqual(["#{工厂编号}"]);
+    expect(isSuppressedSqlSemanticContext(tokens, sql.indexOf("del_flag") + 1)).toBe(false);
+    expect(tokens.find((token) => token.text === "del_flag")?.kind).toBe("word");
+  });
+
+  it("respects disabled MyBatis syntax and real comments", () => {
+    const sql = "SELECT #{params.id} AND active = 1 # real #{other}";
+    const enabled = tokenizeSqlSemantic(sql, "mysql", { enabledSyntaxes: ["mybatis"] });
+    expect(enabled.filter((token) => token.kind === "parameter").map((token) => token.text)).toEqual(["#{params.id}"]);
+    expect(enabled.find((token) => token.kind === "comment")?.text).toBe("# real #{other}");
+    const disabled = tokenizeSqlSemantic(sql, "mysql", { enabledSyntaxes: [] });
+    expect(disabled.find((token) => token.kind === "comment")?.text).toBe("#{params.id} AND active = 1 # real #{other}");
+  });
+});

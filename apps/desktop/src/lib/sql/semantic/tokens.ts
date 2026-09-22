@@ -1,3 +1,4 @@
+import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import type { SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
 
 const WORD_START = /[A-Za-z_@$#\p{ID_Start}]/u;
@@ -103,7 +104,7 @@ export function matchDollarQuoteTag(input: string, index: number): string | unde
  * decides string-vs-identifier per token position instead of per dialect (see that function's doc
  * comment) -- but the option stays available as a general tokenizer capability.
  */
-export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?: { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean }): SqlSemanticToken[] {
+export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?: Pick<SqlParameterOptions, "enabledSyntaxes"> & { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean }): SqlSemanticToken[] {
   const tokens: SqlSemanticToken[] = [];
   const mysqlDashCommentRequiresWhitespace = !!options?.mysqlDashCommentRequiresWhitespace;
   const mysqlBackslashEscape = !!options?.mysqlBackslashEscape;
@@ -126,6 +127,15 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       while (index < input.length && input[index] !== "\n" && input[index] !== "\r") index += 1;
       tokens.push(token("comment", input.slice(start, index), start, index, depth));
       continue;
+    }
+
+    if (ch === "#" && next === "{") {
+      const parameter = readSqlBracedParameterAt(input, index, options);
+      if (parameter) {
+        index = parameter.end;
+        tokens.push(token("parameter", parameter.token, start, index, depth));
+        continue;
+      }
     }
 
     if (ch === "#" && (dialectId === "mysql" || dialectId === "doris")) {

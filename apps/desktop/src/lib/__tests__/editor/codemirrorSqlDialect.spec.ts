@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as langSql from "@codemirror/lang-sql";
+import { Compartment, EditorState } from "@codemirror/state";
+import { ensureSyntaxTree } from "@codemirror/language";
 import { createDbxCodeMirrorSqlDialect, postgresKeywordSyntaxTerms, sqlServerBuiltinSyntaxTerms } from "@/lib/editor/codemirrorSqlDialect";
 import type { DatabaseType } from "@/types/database";
 
@@ -144,5 +146,60 @@ describe("codemirrorSqlDialect", () => {
     const doubleQuoteStatement = 'SELECT "escaped\\"quote", col FROM tbl';
     expect(nodeNameAt(dialect, doubleQuoteStatement, '"escaped\\"quote"')).toBe("String");
     expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
+  });
+});
+
+describe("MyBatis placeholders in the SQL editor (#9878)", () => {
+  it.each(["mysql", "doris"] as const)("keeps SQL after a Chinese placeholder visible in %s", (databaseType) => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
+    const sql = "SELECT * FROM t WHERE code IN (#{工厂编号}) AND del_flag = 0;";
+    expect(nodeNameAt(dialect, sql, "AND")).toBe("Keyword");
+    expect(nodeNameAt(dialect, sql, "del_flag")).toBe("Identifier");
+    const errors: number[] = [];
+    dialect.language.parser.parse(sql).iterate({
+      enter: (node) => {
+        if (node.type.isError) errors.push(node.from);
+      },
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it("retains genuine comments and quoted text around valid placeholders", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    const sql = "SELECT '#{literal}', `#{column}` FROM t WHERE id = #{params.id} AND active = 1 # real #{comment}\nLIMIT 100;";
+    expect(nodeNameAt(dialect, sql, "'#{literal}'")).toBe("String");
+    expect(nodeNameAt(dialect, sql, "`#{column}`")).toBe("QuotedIdentifier");
+    expect(nodeNameAt(dialect, sql, "AND")).toBe("Keyword");
+    expect(nodeNameAt(dialect, sql, "# real #{comment}")).toBe("LineComment");
+    expect(nodeNameAt(dialect, sql, "LIMIT")).toBe("Keyword");
+  });
+
+  it("treats malformed placeholders as real hash comments", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    for (const text of ["#{missing AND active = 1", "#{1invalid} AND active = 1", "#{invalid-name} AND active = 1"]) {
+      expect(nodeNameAt(dialect, `SELECT 1 ${text}`, text)).toBe("LineComment");
+    }
+  });
+
+  it("reconfigures the real editor parser when MyBatis substitution is toggled", () => {
+    const compartment = new Compartment();
+    const sql = "SELECT * FROM t WHERE id = #{id} AND active = 1";
+    const language = (enabledSyntaxes: Array<"mybatis">) => langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql", undefined, { enabledSyntaxes }) });
+    let state = EditorState.create({ doc: sql, extensions: [compartment.of(language(["mybatis"]))] });
+    const tokenAtAnd = () => ensureSyntaxTree(state, sql.length, 500)!.resolveInner(sql.indexOf("AND") + 1).name;
+    expect(tokenAtAnd()).toBe("Keyword");
+    state = state.update({ effects: compartment.reconfigure(language([])) }).state;
+    expect(tokenAtAnd()).toBe("LineComment");
+    state = state.update({ effects: compartment.reconfigure(language(["mybatis"])) }).state;
+    expect(tokenAtAnd()).toBe("Keyword");
+  });
+
+  it("updates the syntax tree when an incomplete placeholder becomes valid", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    const sql = "SELECT * FROM t WHERE id = #{id AND active = 1";
+    let state = EditorState.create({ doc: sql, extensions: [langSql.sql({ dialect })] });
+    expect(ensureSyntaxTree(state, sql.length, 500)!.resolveInner(sql.indexOf("AND") + 1).name).toBe("LineComment");
+    state = state.update({ changes: { from: sql.indexOf(" AND"), insert: "}" } }).state;
+    expect(ensureSyntaxTree(state, state.doc.length, 500)!.resolveInner(state.doc.toString().indexOf("AND") + 1).name).toBe("Keyword");
   });
 });

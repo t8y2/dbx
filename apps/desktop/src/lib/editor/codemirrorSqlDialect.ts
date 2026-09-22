@@ -1,4 +1,6 @@
 import type { SQLDialect } from "@codemirror/lang-sql";
+import { sqlPlaceholderParserInput } from "@/lib/editor/codemirrorSqlPlaceholderInput";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
 
@@ -227,7 +229,7 @@ function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dialectName
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 
-export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
+export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string, parameterOptions?: SqlParameterOptions): SQLDialect {
   const baseDialect = codeMirrorBaseDialect(langSql, dialectName, databaseType);
   const isPostgres = baseDialect === langSql.PostgreSQL;
   const isMysql = baseDialect === langSql.MySQL;
@@ -243,7 +245,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const commonKeywords = isClickHouse ? DBX_COMMON_SQL_KEYWORDS.toLowerCase() : DBX_COMMON_SQL_KEYWORDS;
   const baseBuiltin = isSqlServer ? sqlServerBuiltinSyntaxTerms(baseDialect.spec.builtin || "") : baseDialect.spec.builtin || "";
 
-  return langSql.SQLDialect.define({
+  const dialect = langSql.SQLDialect.define({
     ...baseDialect.spec,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
@@ -267,5 +269,10 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
       : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),
     doubleDollarQuotedStrings: false,
+  });
+  if (!isMysql || (parameterOptions?.enabledSyntaxes && !parameterOptions.enabledSyntaxes.includes("mybatis"))) return dialect;
+  const parser = dialect.language.parser;
+  return dialect.configureLanguage({
+    wrap: (_inner, input, fragments, ranges) => parser.startParse(sqlPlaceholderParserInput(input, parameterOptions), fragments, ranges),
   });
 }

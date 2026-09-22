@@ -616,6 +616,17 @@ test("parses every INSERT ... VALUES inside a semicolon-less statement group", (
   );
 });
 
+test("does not split a statement at the INSERT() string function", () => {
+  // MySQL/MariaDB expose INSERT(str, pos, len, newstr); an `insert` word without a following
+  // INTO is a function call, not a statement start.
+  const sql = "INSERT INTO t1 (id, name) SELECT id, INSERT('ab', 1, 2, 'xy') FROM src\nINSERT INTO t2 (id, name) VALUES (1, INSERT('ab', 1, 2, 'xy'))";
+  const clauses = parseInsertValuesClauses(sql, "mysql");
+  assert.deepEqual(
+    clauses.map((clause) => clause.table),
+    ["t1", "t2"],
+  );
+});
+
 test("parses each batch of a GO-separated SQL Server script", () => {
   const sql = ["INSERT INTO t1 (id, name) SELECT src_id, src_name FROM staging1", "GO", "INSERT INTO t2 (id, name) SELECT src_id, src_name FROM staging2", "GO"].join("\n");
   const clauses = parseInsertValuesClauses(sql, "sqlserver");

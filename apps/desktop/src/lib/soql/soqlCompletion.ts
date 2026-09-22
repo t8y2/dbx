@@ -125,11 +125,11 @@ const SOQL_FUNCTIONS: Array<{ label: string; detail: string; apply?: string }> =
   { label: "FISCAL_QUARTER", detail: "Fiscal quarter from date", apply: "FISCAL_QUARTER()" },
 ];
 
-/** FIELDS() selectors — SOQL's "expand all fields" (requires LIMIT ≤ 200). */
+/** FIELDS() selectors — SOQL's "expand all fields" (LIMIT ≤ 200; the driver auto-appends LIMIT 200 when missing). */
 const SOQL_FIELDS_SELECTORS: Array<{ label: string; detail: string }> = [
-  { label: "FIELDS(ALL)", detail: "All fields (requires LIMIT ≤ 200)" },
+  { label: "FIELDS(ALL)", detail: "All fields (LIMIT 200 auto-added if missing)" },
   { label: "FIELDS(STANDARD)", detail: "All standard fields" },
-  { label: "FIELDS(CUSTOM)", detail: "All custom fields (requires LIMIT ≤ 200)" },
+  { label: "FIELDS(CUSTOM)", detail: "All custom fields (LIMIT 200 auto-added if missing)" },
 ];
 
 /** SOQL date literals offered in value position for date/datetime fields. */
@@ -172,24 +172,33 @@ const WORD_CHAR = /[A-Za-z0-9_]/;
 /**
  * Scan the text under the cursor and classify the SOQL completion context.
  * Pure and synchronous — metadata resolution happens in the provider.
+ *
+ * All backward scanning is scoped to the CURRENT statement (text after the last
+ * `;`): a completed statement's `WHERE x > 1` must not make the next statement's
+ * `SELECT F|` look like a value context, and its FROM/clauses must not leak in.
+ * Returned `from` positions are always absolute document offsets.
  */
 export function getSoqlCompletionContext(text: string, cursor: number): SoqlCompletionContext {
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
+  const statementStart = beforeCursor.lastIndexOf(";") + 1;
+  const statement = beforeCursor.slice(statementStart);
 
   const fromObject = findFromObject(text, safeCursor);
-  const clause = findClause(beforeCursor);
+  const clause = findClause(statement);
 
   // Value context: cursor sits inside an open single-quoted string, or right after
-  // a comparison operator (optionally a just-opened quote).
-  const stringStart = openSingleQuoteStart(beforeCursor);
-  const valueTarget = parseValueTarget(beforeCursor, stringStart);
+  // a comparison operator (optionally a just-opened quote). `stringStart` is
+  // statement-relative; convert to an absolute offset before returning.
+  const stringStart = openSingleQuoteStart(statement);
+  const valueTarget = parseValueTarget(statement, stringStart);
   if (valueTarget) {
     const insideString = stringStart != null;
+    const trailing = readTrailingPrefix(statement);
     return {
       mode: "value",
-      prefix: insideString ? beforeCursor.slice(stringStart + 1) : readTrailingPrefix(beforeCursor).prefix,
-      from: insideString ? stringStart + 1 : safeCursor - readTrailingPrefix(beforeCursor).prefix.length,
+      prefix: insideString ? statement.slice(stringStart + 1) : trailing.prefix,
+      from: insideString ? statementStart + stringStart + 1 : safeCursor - trailing.prefix.length,
       fromObject,
       clause,
       valueField: { path: valueTarget.path, name: valueTarget.name },
@@ -199,34 +208,44 @@ export function getSoqlCompletionContext(text: string, cursor: number): SoqlComp
 
   // Object context: the cursor is in the FROM clause completing an sObject name.
   if (clause === "from") {
-    const { prefix, from } = readTrailingPrefix(beforeCursor);
-    return { mode: "object", prefix, from, fromObject, clause };
+    const { prefix, from } = readTrailingPrefix(statement);
+    return { mode: "object", prefix, from: statementStart + from, fromObject, clause };
   }
 
   // Field context: SELECT / WHERE / ORDER BY / GROUP BY / HAVING (clause === "from"
   // already returned above, so any remaining clause is a field clause).
   if (clause) {
-    const { prefix, from, path } = readTrailingPrefix(beforeCursor);
-    return { mode: "field", prefix, from, fromObject, relationshipPath: path, clause };
+    const { prefix, from, path } = readTrailingPrefix(statement);
+    return { mode: "field", prefix, from: statementStart + from, fromObject, relationshipPath: path, clause };
   }
 
-  // No clause yet (empty statement, or only whitespace/keywords typed): offer clauses.
-  const { prefix, from } = readTrailingPrefix(beforeCursor);
-  if (prefix || beforeCursor.trim().length === 0) {
-    return { mode: "keyword", prefix, from, fromObject, clause: null };
+  // No clause yet (empty/fresh statement, or only whitespace typed): offer clauses.
+  const { prefix, from } = readTrailingPrefix(statement);
+  if (prefix || statement.trim().length === 0) {
+    return { mode: "keyword", prefix, from: statementStart + from, fromObject, clause: null };
   }
   return { mode: "none", prefix: "", from: safeCursor, fromObject, clause };
 }
 
-/** Find the FROM object of the statement nearest the cursor (before it, else after). */
+/**
+ * Find the FROM object of the statement containing the cursor. Scoped to the
+ * current statement (`;`-separated) so a neighbouring query's FROM never leaks
+ * field candidates into this one; within the statement prefer the nearest FROM
+ * before the cursor, else the first one after it (the user is often still
+ * typing the projection when FROM exists only ahead of the cursor).
+ */
 function findFromObject(text: string, cursor: number): string | undefined {
+  const statementStart = text.lastIndexOf(";", cursor - 1) + 1;
+  const semicolonAfter = text.indexOf(";", cursor);
+  const statementEnd = semicolonAfter === -1 ? text.length : semicolonAfter;
+  const statement = text.slice(statementStart, statementEnd);
   const re = /\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
   let lastBefore: string | undefined;
   let firstAfter: string | undefined;
   let match: RegExpExecArray | null;
-  while ((match = re.exec(text)) !== null) {
+  while ((match = re.exec(statement)) !== null) {
     const name = match[1];
-    if (match.index < cursor) lastBefore = name;
+    if (statementStart + match.index < cursor) lastBefore = name;
     else if (firstAfter == null) firstAfter = name;
   }
   return lastBefore ?? firstAfter;

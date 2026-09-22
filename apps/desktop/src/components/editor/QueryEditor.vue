@@ -5207,7 +5207,12 @@ async function provideSoqlCompletions(currentState: import("@codemirror/state").
 
   const completionContext = getSoqlCompletionContext(fullDoc, position);
   if (completionContext.mode === "none") return null;
-  const database = props.database;
+  // The Salesforce backend ignores the database parameter for metadata (the whole
+  // org is one synthesized database), so completion must not gate on props.database
+  // being populated — a restored/toolbar-opened tab can carry an empty database
+  // while the connection works fine. Pass it through (possibly "") and let the
+  // store/backend resolve it.
+  const database = props.database ?? "";
 
   let objects: SoqlCompletionObject[] = [];
   let fields: SoqlCompletionField[] = [];
@@ -5215,20 +5220,23 @@ async function provideSoqlCompletions(currentState: import("@codemirror/state").
 
   // Field loader backed by the store (which reads the backend describe cache), so
   // relationship traversal costs at most one describe per distinct sObject.
-  const loadFields = (objectName: string) => (database ? connectionStore.listSoqlCompletionFields(props.connectionId!, database, objectName) : Promise.resolve<SoqlCompletionField[]>([]));
+  const loadFields = (objectName: string) => connectionStore.listSoqlCompletionFields(props.connectionId!, database, objectName);
 
   try {
-    if (database && soqlCompletionNeedsObjects(completionContext.mode)) {
+    if (soqlCompletionNeedsObjects(completionContext.mode)) {
       objects = await connectionStore.listSoqlCompletionObjects(props.connectionId, database);
     }
-    if (database && completionContext.mode === "field") {
+    if (completionContext.mode === "field") {
       fields = await resolveSoqlFieldCandidates(completionContext, loadFields);
     }
-    if (database && completionContext.mode === "value") {
+    if (completionContext.mode === "value") {
       valueField = await resolveSoqlValueField(completionContext, loadFields);
     }
-  } catch {
-    // Metadata load failed (offline, no describe cache yet): fall back to keyword-only.
+  } catch (error) {
+    // Metadata load failed (offline, describe error, no cache yet): fall back to
+    // keyword/function-only completion. Logged so a persistent empty field list is
+    // diagnosable instead of silently looking like "custom fields are excluded".
+    console.debug("[soql-completion] metadata load failed", error);
     objects = [];
     fields = [];
     valueField = null;

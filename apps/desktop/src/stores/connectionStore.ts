@@ -8390,7 +8390,9 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function listSoqlCompletionObjects(connectionId: string, database: string): Promise<SoqlCompletionObject[]> {
-    if (!database) return [];
+    // No `database` guard: the Salesforce backend ignores the database parameter
+    // (the whole org is one synthesized database), and a restored query tab can
+    // legitimately carry an empty database while the connection still works.
     const cacheKey = `${connectionId}:${database}`;
     const cached = soqlCompletionObjectsCache.value[cacheKey];
     if (cached) return cached;
@@ -8399,14 +8401,18 @@ export const useConnectionStore = defineStore("connection", () => {
       const tables = await api.listTables(connectionId, database, "");
       const labelByName = new Map(tables.map((t) => [t.name, t.comment ?? undefined]));
       const objects = sortSidebarNames(tables.map((t) => t.name)).map((name) => ({ name, label: labelByName.get(name) }));
-      soqlCompletionObjectsCache.value[cacheKey] = objects;
-      evictOldestCacheEntries(soqlCompletionObjectsCache.value, COMPLETION_CACHE_MAX);
+      // Never cache an empty list: a transient failure would otherwise stick for the
+      // whole session and silently degrade SOQL completion to keywords-only.
+      if (objects.length > 0) {
+        soqlCompletionObjectsCache.value[cacheKey] = objects;
+        evictOldestCacheEntries(soqlCompletionObjectsCache.value, COMPLETION_CACHE_MAX);
+      }
       return objects;
     });
   }
 
   async function listSoqlCompletionFields(connectionId: string, database: string, objectName: string): Promise<SoqlCompletionField[]> {
-    if (!database || !objectName) return [];
+    if (!objectName) return [];
     const cacheKey = `${connectionId}:${database}:${objectName}`;
     const cached = soqlCompletionFieldsCache.value[cacheKey];
     if (cached) return cached;
@@ -8416,8 +8422,12 @@ export const useConnectionStore = defineStore("connection", () => {
       // per keystroke while traversing a relationship) do not re-hit the Salesforce API.
       const columns = await api.getColumns(connectionId, database, "", objectName);
       const fields = columns.map(soqlFieldFromColumnInfo);
-      soqlCompletionFieldsCache.value[cacheKey] = fields;
-      evictOldestCacheEntries(soqlCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
+      // Never cache an empty list: a transient describe failure would otherwise stick
+      // and make field completion silently vanish for this object all session.
+      if (fields.length > 0) {
+        soqlCompletionFieldsCache.value[cacheKey] = fields;
+        evictOldestCacheEntries(soqlCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
+      }
       return fields;
     });
   }

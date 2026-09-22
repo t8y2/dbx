@@ -387,7 +387,8 @@ impl SfClient {
     /// stay behind `has_more` + QueryLocator (`session_id`).
     pub async fn execute_query(&self, soql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
         let started = Instant::now();
-        let url = format!("{}/query?q={}", self.api_base(), urlencoded(soql));
+        let soql = apply_fields_function_limit(soql);
+        let url = format!("{}/query?q={}", self.api_base(), urlencoded(&soql));
         let value = self.api_get(&url).await?;
         let limit = max_rows.unwrap_or(SALESFORCE_MAX_ROWS_PER_BATCH).max(1);
         Ok(parse_soql_response(value, started.elapsed().as_millis(), limit))
@@ -789,6 +790,81 @@ fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
         .unwrap_or_default()
 }
 
+/// SOQL's `FIELDS(ALL)` / `FIELDS(STANDARD)` / `FIELDS(CUSTOM)` selectors require the
+/// query to carry `LIMIT n` with n ≤ 200 (a Salesforce REST rule). Users writing
+/// `SELECT FIELDS(ALL) FROM Account` hit `MALFORMED_QUERY` otherwise. When the query
+/// uses a FIELDS function and has no LIMIT clause yet, append `LIMIT 200` so the common
+/// "select everything" intent just works. If a LIMIT is already present we never touch
+/// it (Salesforce's own error explains a too-large limit better than we could).
+///
+/// Detection is a lightweight case-insensitive scan; it intentionally skips content
+/// inside single-quoted string literals so a `WHERE Name = 'LIMIT'` does not suppress
+/// the append, and so `FIELDS(ALL)` inside a literal does not trigger it.
+fn apply_fields_function_limit(soql: &str) -> std::borrow::Cow<'_, str> {
+    fn scan(outside_literals: &str) -> (bool, bool) {
+        let upper = outside_literals.to_ascii_uppercase();
+        // Compact away whitespace so both `FIELDS(ALL)` and `FIELDS ( ALL )` match.
+        let compact: String = upper.chars().filter(|c| !c.is_whitespace()).collect();
+        let has_fields = ["FIELDS(ALL)", "FIELDS(STANDARD)", "FIELDS(CUSTOM)"].iter().any(|n| compact.contains(n));
+        // Word-boundary LIMIT search on the original (spacing-preserving) masked text.
+        let bytes = upper.as_bytes();
+        let mut has_limit = false;
+        for (i, _) in upper.match_indices("LIMIT") {
+            let before_ok = i == 0 || (!bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_');
+            let after = i + "LIMIT".len();
+            let after_ok = after >= bytes.len() || (!bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_');
+            if before_ok && after_ok {
+                has_limit = true;
+                break;
+            }
+        }
+        (has_fields, has_limit)
+    }
+
+    // Build a copy of the query with single-quoted literal bodies blanked out, so the
+    // keyword scan ignores them. SOQL escapes a quote inside a literal by backslash.
+    let mut masked = String::with_capacity(soql.len());
+    let chars: Vec<char> = soql.chars().collect();
+    let mut i = 0;
+    let mut in_literal = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_literal {
+            if c == '\\' {
+                masked.push(' ');
+                if i + 1 < chars.len() {
+                    masked.push(' ');
+                }
+                i += 2;
+                continue;
+            }
+            if c == '\'' {
+                in_literal = false;
+                masked.push(' ');
+            } else {
+                masked.push(' ');
+            }
+            i += 1;
+            continue;
+        }
+        if c == '\'' {
+            in_literal = true;
+            masked.push(' ');
+            i += 1;
+            continue;
+        }
+        masked.push(c);
+        i += 1;
+    }
+
+    let (has_fields, has_limit) = scan(&masked);
+    if !has_fields || has_limit {
+        return std::borrow::Cow::Borrowed(soql);
+    }
+    let trimmed = soql.trim_end_matches(|c: char| c.is_whitespace() || c == ';');
+    std::borrow::Cow::Owned(format!("{trimmed} LIMIT 200"))
+}
+
 fn map_salesforce_error(status: StatusCode, body: &str) -> String {
     let mut message = format!("Salesforce API error (HTTP {status})");
     if !body.is_empty() {
@@ -809,7 +885,13 @@ fn salesforce_error_message(status: StatusCode, body: &Value) -> String {
         "INVALID_SESSION_ID" | "INVALID_AUTH_HEADER" => {
             Some("Access token is invalid or expired — reconnect or paste a fresh token.")
         }
-        "MALFORMED_QUERY" => Some("SOQL syntax error — check the query near the position Salesforce reports."),
+        "MALFORMED_QUERY" => {
+            if message.contains("FIELDS function must have a LIMIT") {
+                Some("FIELDS(ALL/STANDARD/CUSTOM) requires LIMIT 200 or less — lower the explicit LIMIT value (DBX auto-appends LIMIT 200 only when the query has no LIMIT at all).")
+            } else {
+                Some("SOQL syntax error — check the query near the position Salesforce reports.")
+            }
+        }
         "INVALID_FIELD" | "INVALID_TYPE" | "INVALID_COLUMN" => {
             Some("Unknown object/field, or it is not visible to your user (field-level security).")
         }
@@ -1029,6 +1111,73 @@ mod tests {
         let message = salesforce_error_message(StatusCode::BAD_REQUEST, &body);
         assert!(message.contains("MALFORMED_QUERY"));
         assert!(message.contains("SOQL syntax error"));
+    }
+
+    #[test]
+    fn error_message_hints_fields_limit_rule() {
+        let body = serde_json::json!([{
+            "errorCode": "MALFORMED_QUERY",
+            "message": "The SOQL FIELDS function must have a LIMIT of at most 200"
+        }]);
+        let message = salesforce_error_message(StatusCode::BAD_REQUEST, &body);
+        assert!(message.contains("requires LIMIT 200 or less"));
+    }
+
+    #[test]
+    fn fields_function_appends_limit_when_missing() {
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account"),
+            "SELECT FIELDS(ALL) FROM Account LIMIT 200"
+        );
+        assert_eq!(
+            apply_fields_function_limit("select fields(standard) from Contact"),
+            "select fields(standard) from Contact LIMIT 200"
+        );
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS ( CUSTOM ) FROM Account"),
+            "SELECT FIELDS ( CUSTOM ) FROM Account LIMIT 200"
+        );
+        // Trailing semicolon/whitespace is trimmed before appending.
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account;  "),
+            "SELECT FIELDS(ALL) FROM Account LIMIT 200"
+        );
+    }
+
+    #[test]
+    fn fields_function_keeps_existing_limit_untouched() {
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account LIMIT 5"),
+            "SELECT FIELDS(ALL) FROM Account LIMIT 5"
+        );
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account LIMIT 5000"),
+            "SELECT FIELDS(ALL) FROM Account LIMIT 5000"
+        );
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account limit 10"),
+            "SELECT FIELDS(ALL) FROM Account limit 10"
+        );
+    }
+
+    #[test]
+    fn non_fields_queries_are_untouched() {
+        assert_eq!(apply_fields_function_limit("SELECT Id, Name FROM Account"), "SELECT Id, Name FROM Account");
+        // `LIMIT` inside a string literal must not suppress the append.
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account WHERE Name = 'LIMIT'"),
+            "SELECT FIELDS(ALL) FROM Account WHERE Name = 'LIMIT' LIMIT 200"
+        );
+        // `FIELDS(ALL)` inside a string literal must not trigger the append.
+        assert_eq!(
+            apply_fields_function_limit("SELECT Id FROM Account WHERE Name = 'FIELDS(ALL)'"),
+            "SELECT Id FROM Account WHERE Name = 'FIELDS(ALL)'"
+        );
+        // A word containing LIMIT (e.g. a custom field) is not a LIMIT clause.
+        assert_eq!(
+            apply_fields_function_limit("SELECT FIELDS(ALL) FROM Account ORDER BY LIMIT__c"),
+            "SELECT FIELDS(ALL) FROM Account ORDER BY LIMIT__c LIMIT 200"
+        );
     }
 
     #[test]

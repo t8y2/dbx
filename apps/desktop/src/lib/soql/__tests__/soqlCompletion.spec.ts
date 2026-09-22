@@ -123,6 +123,54 @@ describe("getSoqlCompletionContext", () => {
   });
 });
 
+describe("getSoqlCompletionContext statement boundaries", () => {
+  it("does not inherit a value context from a completed statement", () => {
+    // The previous statement's `> 1000` (unquoted literal) must not make the new
+    // statement's `SELECT F|` a value context.
+    const text = "SELECT Id FROM Account WHERE AnnualRevenue > 1000; SELECT F FROM Account";
+    const cursor = "SELECT Id FROM Account WHERE AnnualRevenue > 1000; SELECT F".length;
+    const ctx = getSoqlCompletionContext(text, cursor);
+    expect(ctx.mode).toBe("field");
+    expect(ctx.clause).toBe("select");
+    expect(ctx.prefix).toBe("F");
+    expect(ctx.fromObject).toBe("Account");
+    expect(ctx.from).toBe(cursor - 1);
+  });
+
+  it("starts a fresh keyword context right after a semicolon", () => {
+    const text = "SELECT Id FROM Account; SEL";
+    const ctx = getSoqlCompletionContext(text, text.length);
+    expect(ctx.mode).toBe("keyword");
+    expect(ctx.prefix).toBe("SEL");
+    expect(ctx.from).toBe("SELECT Id FROM Account; ".length);
+  });
+
+  it("scopes FROM detection to the current statement", () => {
+    const text = "SELECT Id FROM Contact; SELECT Na FROM Account";
+    const cursor = "SELECT Id FROM Contact; SELECT Na".length;
+    const ctx = getSoqlCompletionContext(text, cursor);
+    expect(ctx.mode).toBe("field");
+    expect(ctx.fromObject).toBe("Account");
+  });
+
+  it("does not borrow the previous statement's FROM when the current one has none yet", () => {
+    const text = "SELECT Id FROM Contact; SELECT Na";
+    const ctx = getSoqlCompletionContext(text, text.length);
+    expect(ctx.mode).toBe("field");
+    expect(ctx.fromObject).toBeUndefined();
+  });
+
+  it("keeps absolute from positions for value mode inside a later statement's string", () => {
+    const text = "SELECT Id FROM Account; SELECT Id FROM Opportunity WHERE StageName = 'Clo";
+    const ctx = getSoqlCompletionContext(text, text.length);
+    expect(ctx.mode).toBe("value");
+    expect(ctx.insideString).toBe(true);
+    expect(ctx.from).toBe(text.indexOf("'Clo") + 1);
+    expect(ctx.valueField).toEqual({ path: [], name: "StageName" });
+    expect(ctx.fromObject).toBe("Opportunity");
+  });
+});
+
 describe("resolveSoqlFieldCandidates", () => {
   const load = loader({ Account: ACCOUNT_FIELDS, User: USER_FIELDS });
 

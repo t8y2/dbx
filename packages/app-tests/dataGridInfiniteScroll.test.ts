@@ -53,6 +53,7 @@ test("load-all selects the last loaded row only after a valid append completes",
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
   const contentAreaSource = readFileSync("apps/desktop/src/components/layout/ContentArea.vue", "utf8");
   const querySurfacesSource = readFileSync("apps/desktop/src/components/layout/querySurfaces.ts", "utf8");
+  const appSource = readFileSync("apps/desktop/src/App.vue", "utf8");
   const documentBrowserSource = readFileSync("apps/desktop/src/components/document/DocumentBrowser.vue", "utf8");
   const loadAllFn = source.match(/function loadAllRowsAndGoToLast\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(loadAllFn, /gridSurfaceBusy\.value \|\| infiniteScrollLoading\.value/);
@@ -64,8 +65,12 @@ test("load-all selects the last loaded row only after a valid append completes",
   assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset[\s\S]*?return;[\s\S]*?if \(shouldSelectLastRow\) selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /function selectAndRevealLastLoadedRow\(\)[\s\S]*?selectRow\(rowIndex\)[\s\S]*?remainingFrames = 12[\s\S]*?scrollCanvasRowIntoView\(rowIndex, "end"\)[\s\S]*?scrollDomRowIntoView\(rowIndex, "end"\)[\s\S]*?requestAnimationFrame\(revealWhenReady\)/);
   assert.match(source, /\(\) => \[props\.countSql \?\? ""[\s\S]*?manualTotalRowCount\.value = undefined/);
+  assert.match(source, /if \(infiniteScrollLoadAllPending\) \{[\s\S]*?infiniteScrollLoadAllPending = false;[\s\S]*?selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /dataGridInfiniteScrollAppendCompletion\(previousResult, result,[\s\S]*?loadAllRowsActive\.value = false/);
   assert.match(querySurfacesSource, /paginate: \[tabId: string, offset: number, limit: number, whereInput\?: string, orderBy\?: string, appendResult\?: boolean\]/);
+  // App.vue's inline handler must forward appendResult, or "load all" silently
+  // degrades into replacing the result with the fetched segment.
+  assert.match(appSource, /@paginate="\(tabId: string, offset: number, limit: number, whereInput\?: string, orderBy\?: string, appendResult\?: boolean\) => onPaginate\(tabId, offset, limit, whereInput, orderBy, appendResult\)"/);
   assert.equal(contentAreaSource.match(/emit\('paginate', activeTab\.id, offset, limit, whereInput, orderBy, appendResult\)/g)?.length, 2);
   assert.match(documentBrowserSource, /:load-all-rows-enabled="false"/);
 });

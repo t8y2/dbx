@@ -10029,6 +10029,13 @@ watch(
         infiniteScrollLoading.value = false;
         isInfiniteScrollPaginating.value = false;
       }
+      // The append completion above already reset `infiniteScrollLoading`, so the
+      // post-flush loading watcher cannot observe this append; a "load all" run
+      // must still reveal its last row from here.
+      if (infiniteScrollLoadAllPending) {
+        infiniteScrollLoadAllPending = false;
+        selectAndRevealLastLoadedRow();
+      }
       return;
     }
     // A non-append result replaces the whole data set, so a running "load all" is over.

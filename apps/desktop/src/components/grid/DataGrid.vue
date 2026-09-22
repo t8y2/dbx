@@ -3082,6 +3082,15 @@ const manualTotalRowCount = ref<number | undefined>(undefined);
 const manualTotalRowCountLoading = ref(false);
 const esDeepPageJumpConfirmOpen = ref(false);
 const pendingEsDeepPageJump = ref<{ targetPage: number; requestCount: number; updateCurrentPage: boolean }>();
+// One "load all" click fetches the whole remaining segment in a single request;
+// with the result-row cap disabled that segment is effectively unbounded, so a
+// large shot needs an explicit confirmation the way ES deep page jumps do.
+const LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD = 100_000;
+const loadAllRowsConfirmOpen = ref(false);
+const pendingLoadAllRows = ref<{ remaining: number }>();
+watch(loadAllRowsConfirmOpen, (open) => {
+  if (!open) pendingLoadAllRows.value = undefined;
+});
 watch(esDeepPageJumpConfirmOpen, (open) => {
   if (!open) {
     pendingEsDeepPageJump.value = undefined;
@@ -3440,13 +3449,31 @@ function selectAndRevealLastLoadedRow() {
 
 function loadAllRowsAndGoToLast() {
   if (!props.loadAllRowsEnabled || gridSurfaceBusy.value || infiniteScrollLoading.value || props.result.rows.length === 0) return;
-  loadAllRowsActive.value = true;
+  // search_after cursor paging fetches page by page; a single giant append
+  // against those cursors is untested, so ES/Easysearch grids keep the
+  // reveal-only shortcut instead of loading everything.
+  if (isResultsContext.value && (resolvedDatabaseType.value === "elasticsearch" || resolvedDatabaseType.value === "easysearch")) return;
   const segment = dataGridLoadAllSegment(props.result.rows.length, infiniteScrollMaxRows.value, !infiniteScrollAllLoaded && canFetchNextInfiniteScrollSegment.value);
   if (!segment) {
+    loadAllRowsActive.value = true;
     infiniteScrollAllLoaded = true;
     selectAndRevealLastLoadedRow();
     return;
   }
+  const knownTotal = displayedTotalRowCount.value;
+  const remaining = typeof knownTotal === "number" && Number.isFinite(knownTotal) && knownTotal >= props.result.rows.length
+    ? knownTotal - props.result.rows.length
+    : segment.limit;
+  if (remaining > LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD) {
+    pendingLoadAllRows.value = { remaining };
+    loadAllRowsConfirmOpen.value = true;
+    return;
+  }
+  startLoadAllRows(segment);
+}
+
+function startLoadAllRows(segment: { offset: number; limit: number }) {
+  loadAllRowsActive.value = true;
   infiniteScrollLoadAllPending = true;
   infiniteScrollLoading.value = true;
   isInfiniteScrollPaginating.value = true;
@@ -3454,6 +3481,15 @@ function loadAllRowsAndGoToLast() {
   infiniteScrollRequestedLimit = segment.limit;
   currentPage.value++;
   emit("paginate", segment.offset, segment.limit, currentWhereInput(), currentOrderBy(), true);
+}
+
+function confirmLoadAllRows() {
+  const pending = pendingLoadAllRows.value;
+  if (!pending) return;
+  pendingLoadAllRows.value = undefined;
+  loadAllRowsConfirmOpen.value = false;
+  const segment = dataGridLoadAllSegment(props.result.rows.length, infiniteScrollMaxRows.value, !infiniteScrollAllLoaded && canFetchNextInfiniteScrollSegment.value);
+  if (segment) startLoadAllRows(segment);
 }
 function checkInfiniteScroll(scroller: HTMLElement) {
   if (!infiniteScrollEnabled.value || infiniteScrollLoading.value || props.loading) return;
@@ -10043,6 +10079,10 @@ watch(
     }
     // A non-append result replaces the whole data set, so a running "load all" is over.
     loadAllRowsActive.value = false;
+    // The replacement also invalidates the all-loaded marker: a filter change or
+    // page jump swaps in a fresh first page whose remaining segments must be
+    // re-derived instead of being silently skipped.
+    infiniteScrollAllLoaded = false;
     if (getResetScrollAfterResult()) {
       clearResetScrollAfterResult();
       resetGridVerticalScroll();
@@ -14057,6 +14097,24 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         <DialogFooter>
           <Button variant="outline" @click="esDeepPageJumpConfirmOpen = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button @click="confirmEsDeepPageJump">{{ t("grid.esDeepPageJumpContinue") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="loadAllRowsConfirmOpen">
+      <DialogContent class="sm:max-w-[480px]">
+        <DialogHeader>
+          <DialogTitle class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+            <AlertTriangle class="h-5 w-5" />
+            {{ t("grid.loadAllRowsConfirmTitle") }}
+          </DialogTitle>
+        </DialogHeader>
+        <p class="py-3 text-sm leading-6 text-muted-foreground">
+          {{ t("grid.loadAllRowsConfirmMessage", { count: pendingLoadAllRows?.remaining ?? 0 }) }}
+        </p>
+        <DialogFooter>
+          <Button variant="outline" @click="loadAllRowsConfirmOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button @click="confirmLoadAllRows">{{ t("grid.loadAllRowsContinue") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

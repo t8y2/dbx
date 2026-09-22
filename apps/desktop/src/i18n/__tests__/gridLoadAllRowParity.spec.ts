@@ -25,7 +25,7 @@ const locales: Array<[string, Record<string, unknown>]> = [
 
 // The grid toolbar renders in whatever locale the user runs, so a missing key
 // would leak a raw key next to the "load all" button.
-const GRID_LOAD_ALL_KEYS = ["loadAllAndGoToLastRow", "allLoaded"] as const;
+const GRID_LOAD_ALL_KEYS = ["loadAllAndGoToLastRow", "allLoaded", "loadAllRowsConfirmTitle", "loadAllRowsConfirmMessage", "loadAllRowsContinue"] as const;
 
 describe("grid load-all locale parity", () => {
   it.each(locales)("%s exposes the load-all copy", (_name, locale) => {

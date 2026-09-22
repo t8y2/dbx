@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { dataGridScrollPosition, isDataGridNearScrollBottom, isDataGridPrefixAppend, shouldCheckInfiniteScrollAfterScroll } from "../../apps/desktop/src/lib/dataGrid/dataGridInfiniteScroll.ts";
 
@@ -45,10 +46,14 @@ test("load-all selects the last loaded row only after a valid append completes",
   const querySurfacesSource = readFileSync("apps/desktop/src/components/layout/querySurfaces.ts", "utf8");
   const appSource = readFileSync("apps/desktop/src/App.vue", "utf8");
   const documentBrowserSource = readFileSync("apps/desktop/src/components/document/DocumentBrowser.vue", "utf8");
-  const loadAllFn = source.match(/function loadAllRowsAndGoToLast\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+  // loadAllRowsAndGoToLast hands the actual fetch to startLoadAllRows after the
+  // ES guard and the large-shot confirmation, so extract both bodies.
+  const loadAllFn = source.match(/function loadAllRowsAndGoToLast\(\) \{[\s\S]*?\nfunction confirmLoadAllRows\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
   assert.match(loadAllFn, /gridSurfaceBusy\.value \|\| infiniteScrollLoading\.value/);
   assert.match(loadAllFn, /dataGridLoadAllSegment/);
   assert.match(loadAllFn, /if \(!segment\) \{[\s\S]*?selectAndRevealLastLoadedRow\(\);[\s\S]*?return;/);
+  assert.match(loadAllFn, /resolvedDatabaseType\.value === "elasticsearch" \|\| resolvedDatabaseType\.value === "easysearch"/);
+  assert.match(loadAllFn, /LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD/);
   assert.match(loadAllFn, /infiniteScrollLoadAllPending = true/);
   assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), currentOrderBy\(\), true\)/);
   assert.match(source, /\(\) => \[props\.loading, props\.result\.rows\.length, props\.result\.appended_from_row_count\] as const[\s\S]*?\{ flush: "post" \}/);
@@ -63,4 +68,9 @@ test("load-all selects the last loaded row only after a valid append completes",
   assert.match(appSource, /@paginate="\(tabId: string, offset: number, limit: number, whereInput\?: string, orderBy\?: string, appendResult\?: boolean\) => onPaginate\(tabId, offset, limit, whereInput, orderBy, appendResult\)"/);
   assert.equal(contentAreaSource.match(/emit\('paginate', activeTab\.id, offset, limit, whereInput, orderBy, appendResult\)/g)?.length, 2);
   assert.match(documentBrowserSource, /:load-all-rows-enabled="false"/);
+  // A non-append result replacement must clear the all-loaded marker (stale all-loaded
+  // used to lock scrolling and degrade the load-all button to locate-only after WHERE edits).
+  const nonAppendIdx = source.indexOf("// A non-append result replaces the whole data set");
+  assert.ok(nonAppendIdx > 0, "non-append replacement branch must exist");
+  assert.match(source.slice(nonAppendIdx, nonAppendIdx + 420), /infiniteScrollAllLoaded = false;/);
 });

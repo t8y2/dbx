@@ -2,6 +2,7 @@
 
 pub use dbx_types::{database_manifest, models, types};
 
+pub mod dameng_dump;
 pub mod data_grid_extractors;
 pub mod data_grid_sql;
 pub mod database_search_sql;

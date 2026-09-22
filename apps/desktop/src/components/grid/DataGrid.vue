@@ -6479,10 +6479,10 @@ function dataGridRowStyle(item: RowItem): CSSProperties {
   return {
     "--data-grid-cell-bg": rowBg,
     "--data-grid-row-number-bg": rowNumberBg,
-    "--data-grid-cell-selected-bg": dark ? "rgb(20, 40, 60)" : "rgb(239, 246, 255)",
+    "--data-grid-cell-selected-bg": dark ? "rgb(30, 64, 100)" : "rgb(179, 208, 254)",
     "--data-grid-cell-selected-single-bg": dark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)",
     "--data-grid-cell-selected-dirty-bg": dark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)",
-    "--data-grid-cell-selected-border": dark ? "rgb(96, 165, 250)" : "rgb(59, 130, 246)",
+    "--data-grid-cell-selected-border": dark ? "rgb(96, 165, 250)" : "rgb(37, 99, 235)",
     "--data-grid-row-number-active-bg": activeRowBg,
     "--data-grid-row-number-selected-bg": dark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)",
   } as CSSProperties;
@@ -14086,10 +14086,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-cell-crosshair-row-bg: rgb(174, 195, 224);
   --data-grid-cell-crosshair-col-bg: rgb(142, 170, 210);
   --data-grid-cell-dirty-bg: rgb(255, 248, 230);
-  --data-grid-cell-selected-bg: rgb(239, 246, 255);
+  --data-grid-cell-selected-bg: rgb(179, 208, 254);
   --data-grid-cell-selected-single-bg: rgb(191, 219, 254);
   --data-grid-cell-selected-dirty-bg: rgb(235, 224, 184);
-  --data-grid-cell-selected-border: rgb(59, 130, 246);
+  --data-grid-cell-selected-border: rgb(37, 99, 235);
   --data-grid-cell-hover-bg: rgb(245, 245, 245);
   --data-grid-cell-search-bg: rgb(253, 245, 184);
   --data-grid-cell-current-search-bg: rgba(253, 224, 71, 0.52);
@@ -14120,7 +14120,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
   --data-grid-cell-crosshair-row-bg: rgb(75, 84, 98);
   --data-grid-cell-crosshair-col-bg: rgb(98, 111, 130);
   --data-grid-cell-dirty-bg: rgb(94, 75, 26);
-  --data-grid-cell-selected-bg: rgb(20, 40, 60);
+  --data-grid-cell-selected-bg: rgb(30, 64, 100);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
   --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
   --data-grid-cell-selected-border: rgb(96, 165, 250);
@@ -14154,10 +14154,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     --data-grid-cell-dirty-bg: color-mix(in oklab, rgb(240 177 0) 10%, transparent);
     --data-grid-cell-crosshair-row-bg: color-mix(in srgb, var(--primary) 34%, var(--background));
     --data-grid-cell-crosshair-col-bg: color-mix(in srgb, var(--primary) 50%, var(--background));
-    --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 12%, var(--background));
+    --data-grid-cell-selected-bg: color-mix(in oklab, rgb(59 130 246) 28%, var(--background));
     --data-grid-cell-selected-single-bg: color-mix(in oklab, rgb(59 130 246) 30%, var(--background));
     --data-grid-cell-selected-dirty-bg: color-mix(in oklab, rgb(234 181 50) 30%, color-mix(in oklab, rgb(59 130 246) 18%, var(--background)));
-    --data-grid-cell-selected-border: color-mix(in oklab, rgb(59 130 246) 75%, transparent);
+    --data-grid-cell-selected-border: color-mix(in oklab, rgb(37 99 235) 75%, transparent);
     --data-grid-cell-hover-bg: color-mix(in oklab, var(--accent) 50%, transparent);
     --data-grid-row-number-new-bg: color-mix(in oklab, rgb(16 185 129) 15%, var(--background));
     --data-grid-row-number-edited-bg: color-mix(in oklab, rgb(245 158 11) 15%, var(--background));
@@ -14210,7 +14210,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
 }
 
 :global(.dark) [data-grid-root] {
-  --data-grid-cell-selected-bg: rgb(20, 40, 60);
+  --data-grid-cell-selected-bg: rgb(30, 64, 100);
   --data-grid-cell-selected-single-bg: rgb(30, 64, 96);
   --data-grid-cell-selected-dirty-bg: rgb(76, 66, 38);
   --data-grid-cell-selected-border: rgb(96, 165, 250);

@@ -77,7 +77,7 @@ import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGr
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
 import { estimateQueryResultsBytes, selectInactiveResultEvictions } from "@/lib/tabs/queryResultSize";
-import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
+import { queryResultBaseSql, queryResultExecutionSql, resultGridInstanceKey, syncTabTitleNumbers, tabDisplayTitle } from "@/lib/tabs/tabPresentation";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { batchSqlRecoverySql, batchSqlRecoveryState, mergeBatchQueryResults, offsetBatchQueryResultIndexes, prepareBatchSqlRecovery, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/query/queryResultArchive";
@@ -919,6 +919,15 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
   watch(() => tabs.value.map((tab) => tab.id), ensureTabCreationTimes, { immediate: true, flush: "sync" });
+  // 重名标签的编号同样在这里集中分配：编号只在标签首次重名时发一次，关闭标签不会
+  // 让幸存标签改名（#9938），新建的标签接着最大编号往后排。放在 store 的 watcher
+  // 里而不是渲染函数里，是为了避免在 computed 求值过程中写标签状态；getter 只读
+  // 参与标题计算的字段（id + 显示标题），分配编号本身不会再次触发它。
+  watch(
+    () => tabs.value.map((tab) => `${tab.id}\u0000${tabDisplayTitle(tab, t)}`),
+    () => syncTabTitleNumbers(tabs.value, t),
+    { immediate: true, flush: "sync" },
+  );
   // Default auto-commit for a fresh query tab follows the user's global
   // "默认事务提交方式" setting (Settings > Editor), not a hard-coded constant.
   const defaultAutoCommitForDbTypeWithSetting = (dbType?: string) => defaultAutoCommitForDbType(dbType, settingsStore.editorSettings.defaultTransactionMode);

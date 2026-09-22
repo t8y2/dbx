@@ -1665,6 +1665,16 @@ export interface QueryTab {
   createdAt?: number;
   title: string;
   customTitle?: boolean;
+  /**
+   * 同名标签之间用来区分的稳定编号，以及分配编号时的那个显示标题。
+   *
+   * 编号只在标签首次出现重名时分配一次，之后即使其它重名标签被关闭也不再回收到
+   * 其它标签上：关闭中间的标签不会让后面的标签改名（#9938）。因为标签的显示标题
+   * 会随库名切换、重命名、紧凑标题设置而变，所以用 titleNumberKey 记住分配时的
+   * 标题，标题变了就重新参与分配。
+   */
+  titleNumber?: number;
+  titleNumberKey?: string;
   /** Force the editor to word-wrap regardless of the global setting, e.g. for auto-generated single-line templates. */
   forceWordWrap?: boolean;
   connectionId: string;

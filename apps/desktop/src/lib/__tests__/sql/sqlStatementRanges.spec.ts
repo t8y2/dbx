@@ -2105,6 +2105,23 @@ WHERE t2.product_name = '12345'
 
     expect(rangeSqlTexts(ranges)).toEqual(["IF @x = 1 BEGIN SELECT 1; END", "SELECT 999"]);
   });
+
+  // T-SQL semicolons are optional: when the ELSE branch tail carries none, the
+  // branch's own `END` and the next statement share one `;`-fragment, and the
+  // second closure must replace the `ELSE`-continuing first one.
+  it("ends a SQL Server IF/ELSE batch at the ELSE branch END without a semicolon", () => {
+    const batch = ["IF @x = 1", "BEGIN", "    SELECT 1;", "END", "ELSE", "BEGIN", "    SELECT 2", "END"].join("\n");
+    const ranges = executableStatementRanges(`${batch}\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
+  });
+
+  it("keeps the comment after a SQL Server batch out of the next statement", () => {
+    const batch = ["IF @x = 1", "BEGIN", "    SELECT 1;", "END"].join("\n");
+    const ranges = executableStatementRanges(`${batch}\n-- gap\nSELECT 999;`, "sqlserver");
+
+    expect(rangeSqlTexts(ranges)).toEqual([batch, "SELECT 999"]);
+  });
 });
 
 describe("hasMultipleExecutionTargets", () => {

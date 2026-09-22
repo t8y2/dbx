@@ -944,8 +944,12 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
       openBlocks -= 1;
       // Only the closure of the *carried* block is a statement boundary: a
       // block opened and closed inside this fragment (`IF ... BEGIN ... END`
-      // in one piece) belongs to the statement that contains it.
-      if (initialOpenBlocks > 0 && closedAt === null && openBlocks === 0) {
+      // in one piece) belongs to the statement that contains it. A closure
+      // followed by `ELSE` only continues the same IF, so a later closure in
+      // the same fragment (the ELSE branch's own `END`, reachable when the
+      // branch tail carries no semicolon) must still be able to replace it;
+      // a closure followed by anything else is final.
+      if (initialOpenBlocks > 0 && openBlocks === 0 && (closedAt === null || wordAfterClose === "ELSE")) {
         closedAt = ends[index];
         wordAfterClose = next ?? "";
       }
@@ -1022,7 +1026,7 @@ function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[
       merged.push(first);
     }
     if (closedAt !== null) {
-      const remainderFrom = skipSqlWhitespace(sql, closedAt, last.to);
+      const remainderFrom = skipSqlTrivia(sql, closedAt, last.to, databaseType, parameterOptions);
       if (remainderFrom < last.to) {
         pending.unshift({ hitFrom: closedAt, from: remainderFrom, to: last.to, sql: sql.slice(remainderFrom, last.to) });
       }
@@ -1037,6 +1041,31 @@ function skipSqlWhitespace(sql: string, from: number, to: number): number {
   let index = from;
   while (index < to && isSqlWhitespace(sql[index])) index += 1;
   return index;
+}
+
+/**
+ * First offset in `sql[from, to)` that is neither whitespace nor a comment,
+ * clamped to `to`. The `;`-split path keeps the comment between two statements
+ * out of both of them; the control-flow remainder re-queue must do the same so
+ * a comment after a closing `END` is not glued onto the next statement's range.
+ */
+function skipSqlTrivia(sql: string, from: number, to: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number {
+  let index = from;
+  for (;;) {
+    while (index < to && isSqlWhitespace(sql[index])) index += 1;
+    if (index >= to) return index;
+    if (startsLineComment(sql, index, databaseType, parameterOptions)) {
+      while (index < to && sql[index] !== "\n") index += 1;
+      continue;
+    }
+    if (startsBlockComment(sql, index)) {
+      const close = sql.indexOf("*/", index + 2);
+      if (close === -1 || close + 2 > to) return to;
+      index = close + 2;
+      continue;
+    }
+    return index;
+  }
 }
 
 function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): Array<{ hitFrom: number; from: number; keyword: string }> {

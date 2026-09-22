@@ -215,6 +215,7 @@ export default withEnglishFallback({
     rollback: "Geri qaytar",
     txnAutoRolledBack: "5 dəqiqə fəaliyyətsizlikdən sonra tranzaksiya avtomatik geri qaytarıldı",
     autoCommitTxnRolledBack: 'Bu nişanın açıq qoyduğu tranzaksiya avtomatik geri qaytarıldı; icralar arasında saxlamaq üçün ayarlarda "Avtomatik commit rejimində açıq tranzaksiyaları saxla" seçimini aktivləşdirin',
+    autoCommitSessionTxnRolledBack: "Bu bağlantı autocommit söndürülmüş (SET autocommit = 0) işləyir, ona görə örtük tranzaksiya icradan sonra geri qaytarıldı; DBX bunu hər bağlantı üçün bir dəfə bildirir",
     previewSql: "SQL önbaxışı",
     previewQuery: "Sorğu önbaxışı",
     hidePreviewSql: "SQL önbaxışını gizlət",

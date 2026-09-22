@@ -55,6 +55,9 @@ const props = defineProps<{
   /** Auto-commit tab: the backend rolled back an explicit transaction this tab
    *  left open (the tab did not opt into keeping them). */
   autoCommitTxnRolledBack?: boolean;
+  /** Auto-commit tab: the backend rolled back an implicitly opened transaction
+   *  (`SET autocommit = 0`), reported once per connection. */
+  autoCommitSessionTxnRolledBack?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -84,6 +87,7 @@ const emit = defineEmits<{
   rollback: [];
   dismissTxnRolledBack: [];
   dismissAutoCommitTxnRolledBack: [];
+  dismissAutoCommitSessionTxnRolledBack: [];
 }>();
 
 const { t } = useI18n();
@@ -874,6 +878,13 @@ async function changeCatalog(selectedCatalog: string) {
     <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
     <span>{{ t("toolbar.autoCommitTxnRolledBack") }}</span>
     <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="emit('dismissAutoCommitTxnRolledBack')">
+      <X class="h-3 w-3" />
+    </Button>
+  </div>
+  <div v-else-if="autoCommitSessionTxnRolledBack" data-auto-commit-session-txn-rolled-back class="flex items-center gap-2 px-3 py-1 text-xs bg-amber-500/10 text-amber-700 dark:text-amber-300 border-b border-amber-500/20">
+    <AlertTriangle class="h-3.5 w-3.5 shrink-0" />
+    <span>{{ t("toolbar.autoCommitSessionTxnRolledBack") }}</span>
+    <Button variant="ghost" size="icon" class="h-5 w-5 ml-auto" @click="emit('dismissAutoCommitSessionTxnRolledBack')">
       <X class="h-3 w-3" />
     </Button>
   </div>

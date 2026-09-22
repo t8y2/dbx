@@ -375,6 +375,7 @@ export default withEnglishFallback({
     rollback: "回溯",
     txnAutoRolledBack: "事務已因 5 分鐘無操作而自動回溯",
     autoCommitTxnRolledBack: "該分頁遺留的顯式交易已被自動回溯；如需跨多次執行保留交易，可在設定中開啟「自動提交模式下保留顯式交易」",
+    autoCommitSessionTxnRolledBack: "該連線處於 autocommit=0，本次執行留下的隱式交易已被自動回溯；同一連線只提示一次",
     previewSql: "預覽 SQL",
     previewQuery: "預覽查詢",
     hidePreviewSql: "隱藏 SQL 預覽",

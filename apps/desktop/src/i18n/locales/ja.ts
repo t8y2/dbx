@@ -372,6 +372,7 @@ export default withEnglishFallback({
     rollback: "ロールバック",
     txnAutoRolledBack: "5分間操作がなかったため、トランザクションは自動的にロールバックされました",
     autoCommitTxnRolledBack: "このタブに残っていた明示的トランザクションは自動的にロールバックされました。実行をまたいで保持するには設定の「自動コミットでも明示的なトランザクションを保持」を有効にしてください",
+    autoCommitSessionTxnRolledBack: "この接続は autocommit=0 で動作しているため、実行後に暗黙のトランザクションがロールバックされました（同じ接続では一度だけ通知します）",
     previewSql: "SQLをプレビュー",
     previewQuery: "クエリをプレビュー",
     hidePreviewSql: "SQLプレビューを非表示",

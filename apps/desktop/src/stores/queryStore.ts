@@ -904,6 +904,39 @@ function getI18nT() {
   }
 }
 
+/** Mirrors the MySQL auto-commit settlement the backend reported for this
+ *  execution onto the tab. Absent markers (non-MySQL connections, executions
+ *  that never touched a tab connection) leave the previous state untouched.
+ *
+ *  The two rollback notices are deliberately different: a `BEGIN` the user
+ *  typed is reported on every execution (the tab just lost real work), while a
+ *  session sitting on `SET autocommit = 0` has an implicit transaction rolled
+ *  back after *every* execution — that one is raised once per connection and
+ *  re-armed only after the connection stops reporting it, so dismissing it
+ *  does not bring it back on the next keystroke batch. */
+export function applyAutoCommitTransactionReport(tab: QueryTab, results: QueryResult[]) {
+  const openTransaction = results.find((result) => result.auto_commit_open_transaction !== undefined)?.auto_commit_open_transaction;
+  if (openTransaction !== undefined) tab.autoCommitOpenTransaction = openTransaction;
+  const explicitRolledBack = results.some((result) => result.auto_commit_explicit_transaction_rolled_back === true);
+  const sessionRolledBack = results.some((result) => result.auto_commit_session_autocommit_rolled_back === true);
+  if (explicitRolledBack) {
+    tab.autoCommitTxnRolledBack = true;
+    tab.autoCommitSessionTxnRolledBackNotified = false;
+    return;
+  }
+  if (sessionRolledBack) {
+    if (!tab.autoCommitSessionTxnRolledBackNotified) {
+      tab.autoCommitSessionTxnRolledBack = true;
+      tab.autoCommitSessionTxnRolledBackNotified = true;
+    }
+    return;
+  }
+  // This execution rolled nothing back: the auto-commit-off session may be gone
+  // (or the execution never used the tab connection), so re-arm the notice for
+  // the next time it happens.
+  tab.autoCommitSessionTxnRolledBackNotified = false;
+}
+
 export const useQueryStore = defineStore("query", () => {
   const redisMonitors = new Map<string, () => void>();
   const t = getI18nT();
@@ -4876,18 +4909,16 @@ export const useQueryStore = defineStore("query", () => {
    *  transaction. The flag is dropped whenever the tab stops pointing at the
    *  connection that reported it (target switch, tab close), so a stale badge
    *  can never outlive the session it describes. */
-  function clearAutoCommitOpenTransaction(tab: { autoCommitOpenTransaction?: boolean }) {
+  function clearAutoCommitOpenTransaction(tab: {
+    autoCommitOpenTransaction?: boolean;
+    autoCommitSessionTxnRolledBack?: boolean;
+    autoCommitSessionTxnRolledBackNotified?: boolean;
+  }) {
     if (tab.autoCommitOpenTransaction !== undefined) tab.autoCommitOpenTransaction = false;
+    tab.autoCommitSessionTxnRolledBack = undefined;
+    tab.autoCommitSessionTxnRolledBackNotified = undefined;
   }
 
-  /** Mirrors the MySQL auto-commit settlement the backend reported for this
-   *  execution onto the tab. Absent markers (non-MySQL connections, executions
-   *  that never touched a tab connection) leave the previous state untouched. */
-  function applyAutoCommitTransactionReport(tab: QueryTab, results: QueryResult[]) {
-    const openTransaction = results.find((result) => result.auto_commit_open_transaction !== undefined)?.auto_commit_open_transaction;
-    if (openTransaction !== undefined) tab.autoCommitOpenTransaction = openTransaction;
-    if (results.some((result) => result.auto_commit_explicit_transaction_rolled_back === true)) tab.autoCommitTxnRolledBack = true;
-  }
 
   /** Centralized manual-session cleanup. Clears every field tied to a manual
    *  transaction session exactly when that session is conclusively ended or

@@ -264,10 +264,20 @@ pub struct ExecuteMultiResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_commit_open_transaction: Option<bool>,
     /// MySQL auto-commit tab: set on every result of the batch when DBX rolled
-    /// back a transaction the user opened explicitly and left open. Lets the UI
-    /// report the cleanup instead of discarding the transaction silently.
+    /// back a transaction the user opened explicitly (`BEGIN` /
+    /// `START TRANSACTION`) and left open. Lets the UI report the cleanup
+    /// instead of discarding the transaction silently.
     #[serde(skip_serializing_if = "is_false")]
     pub auto_commit_explicit_transaction_rolled_back: bool,
+    /// MySQL auto-commit tab: set on every result of the batch when DBX rolled
+    /// back a transaction nobody opened explicitly — the session turned
+    /// auto-commit off (`SET autocommit = 0`), so its transactions are implicit.
+    /// Reported separately from the explicit case: the user never asked for a
+    /// transaction, so the tab shows a distinct notice that is raised once per
+    /// connection instead of repeating "your explicit transaction was rolled
+    /// back" after every execution.
+    #[serde(skip_serializing_if = "is_false")]
+    pub auto_commit_session_autocommit_rolled_back: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -318,6 +328,7 @@ impl ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -335,6 +346,7 @@ impl ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -354,6 +366,7 @@ impl ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -369,6 +382,7 @@ impl ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -395,6 +409,7 @@ impl ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -420,6 +435,7 @@ impl ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 
@@ -723,6 +739,7 @@ impl From<db::QueryResult> for ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 }
@@ -740,6 +757,7 @@ impl From<db::sqlserver::SqlServerBatchResult> for ExecuteMultiResult {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         }
     }
 }
@@ -3784,19 +3802,35 @@ pub(crate) enum MysqlAutoCommitTransaction {
     Preserved,
     /// DBX rolled back a transaction the user opened explicitly.
     RolledBackExplicit,
+    /// DBX rolled back a transaction the session opened implicitly because
+    /// auto-commit was turned off (`SET autocommit = 0`).
+    RolledBackSessionAutocommit,
 }
 
 impl MysqlAutoCommitTransaction {
     fn mark(self, result: &mut ExecuteMultiResult) {
         result.auto_commit_open_transaction = Some(self == Self::Preserved);
         result.auto_commit_explicit_transaction_rolled_back = self == Self::RolledBackExplicit;
+        result.auto_commit_session_autocommit_rolled_back = self == Self::RolledBackSessionAutocommit;
     }
+}
+
+/// What the settlement did with the transaction that was still open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlAutoCommitRollback {
+    /// Nothing was rolled back.
+    None,
+    /// A transaction the batch opened explicitly (`BEGIN` / `START TRANSACTION`).
+    Explicit,
+    /// A transaction the session opened implicitly: auto-commit was off
+    /// (`SET autocommit = 0`), so every statement starts one.
+    SessionAutocommit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MysqlAutoCommitDecision {
     preserve: bool,
-    ended_explicit_transaction: bool,
+    rollback: MysqlAutoCommitRollback,
 }
 
 /// Decides what to do with a transaction that is still open when an
@@ -3825,12 +3859,22 @@ fn decide_mysql_auto_commit_transaction(
         None => explicit_start_in_batch || already_preserved,
     };
     if !transaction_open {
-        return MysqlAutoCommitDecision { preserve: false, ended_explicit_transaction: false };
+        return MysqlAutoCommitDecision { preserve: false, rollback: MysqlAutoCommitRollback::None };
     }
     if already_preserved || (allow_preserve && explicit_transaction) {
-        return MysqlAutoCommitDecision { preserve: true, ended_explicit_transaction: false };
+        return MysqlAutoCommitDecision { preserve: true, rollback: MysqlAutoCommitRollback::None };
     }
-    MysqlAutoCommitDecision { preserve: false, ended_explicit_transaction: explicit_transaction }
+    // Distinguish who opened it: only a batch with its own `BEGIN` /
+    // `START TRANSACTION` is a user transaction; `autocommit = 0` opens
+    // transactions implicitly for every statement.
+    let rollback = if explicit_start_in_batch {
+        MysqlAutoCommitRollback::Explicit
+    } else if status.is_some_and(|status| !status.autocommit) {
+        MysqlAutoCommitRollback::SessionAutocommit
+    } else {
+        MysqlAutoCommitRollback::None
+    };
+    MysqlAutoCommitDecision { preserve: false, rollback }
 }
 
 /// Type-erased entry point for [`settle_mysql_auto_commit_transaction`].
@@ -3881,10 +3925,10 @@ async fn settle_mysql_auto_commit_transaction(
     // Historical cleanup: `ROLLBACK` is a server no-op when no transaction is
     // open, and releases the read view when one is.
     db::mysql::rollback_open_transaction(conn).await?;
-    Ok(if decision.ended_explicit_transaction {
-        MysqlAutoCommitTransaction::RolledBackExplicit
-    } else {
-        MysqlAutoCommitTransaction::None
+    Ok(match decision.rollback {
+        MysqlAutoCommitRollback::Explicit => MysqlAutoCommitTransaction::RolledBackExplicit,
+        MysqlAutoCommitRollback::SessionAutocommit => MysqlAutoCommitTransaction::RolledBackSessionAutocommit,
+        MysqlAutoCommitRollback::None => MysqlAutoCommitTransaction::None,
     })
 }
 
@@ -11805,14 +11849,25 @@ for line in sys.stdin:
         // can tell the user instead of discarding the transaction silently.
         let decision = decide_mysql_auto_commit_transaction(false, false, true, Some(mysql_status(true, true)));
         assert!(!decision.preserve);
-        assert!(decision.ended_explicit_transaction);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::Explicit);
     }
 
     #[test]
     fn mysql_auto_commit_opt_in_keeps_an_explicitly_opened_transaction() {
+        // The opt-in decision is made from the *submitted* statement list, not
+        // from how much of the batch actually ran. A batch that opens a
+        // transaction and is then cancelled (or aborted by an error) has only
+        // executed a prefix of its statements, yet the opener is still part of
+        // the batch, so the connection keeps whatever the prefix did and stays
+        // in the transaction. Preserving is what makes the abandoned work
+        // visible — the tab shows the open-transaction badge and the manual
+        // rollback action — instead of silently rolling back a transaction the
+        // user asked for. `decide(true, false, true, ..)` below is exactly that
+        // cancelled-batch case: the caller still passes the opener it was
+        // about to run, so the decision must be preserve, not roll back.
         let decision = decide_mysql_auto_commit_transaction(true, false, true, Some(mysql_status(true, true)));
         assert!(decision.preserve);
-        assert!(!decision.ended_explicit_transaction);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]
@@ -11821,14 +11876,14 @@ for line in sys.stdin:
         // the batch itself carries no opener: the kept state is the only signal.
         let decision = decide_mysql_auto_commit_transaction(true, true, false, Some(mysql_status(true, true)));
         assert!(decision.preserve);
-        assert!(!decision.ended_explicit_transaction);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
 
         // The kept state survives even when the caller does not pass the option
         // (auxiliary queries, result paging): an open user transaction is never
         // destroyed from another code path.
         let no_option = decide_mysql_auto_commit_transaction(false, true, false, Some(mysql_status(true, true)));
         assert!(no_option.preserve);
-        assert!(!no_option.ended_explicit_transaction);
+        assert_eq!(no_option.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]
@@ -11836,11 +11891,21 @@ for line in sys.stdin:
         let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, false)));
         assert!(decision.preserve);
 
-        // Without the opt-in the same connection is cleaned up as before, and
-        // reported as an explicit transaction the user opened.
+        // Without the opt-in the same connection is cleaned up as before, but
+        // reported as a session-level implicit transaction: nobody typed
+        // `BEGIN`, the connection simply runs with auto-commit off.
         let default = decide_mysql_auto_commit_transaction(false, false, false, Some(mysql_status(true, false)));
         assert!(!default.preserve);
-        assert!(default.ended_explicit_transaction);
+        assert_eq!(default.rollback, MysqlAutoCommitRollback::SessionAutocommit);
+    }
+
+    #[test]
+    fn mysql_auto_commit_reports_a_batch_opener_ahead_of_autocommit_off() {
+        // Both signals at once: a `BEGIN` in the batch wins, so the notice is
+        // the explicit-transaction one.
+        let decision = decide_mysql_auto_commit_transaction(false, false, true, Some(mysql_status(true, false)));
+        assert!(!decision.preserve);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::Explicit);
     }
 
     #[test]
@@ -11849,7 +11914,7 @@ for line in sys.stdin:
         // transaction (cancelled or aborted batch), not a user transaction.
         let decision = decide_mysql_auto_commit_transaction(true, false, false, Some(mysql_status(true, true)));
         assert!(!decision.preserve);
-        assert!(!decision.ended_explicit_transaction);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]
@@ -11857,13 +11922,13 @@ for line in sys.stdin:
         // `BEGIN; ...; COMMIT;` in one batch ends with nothing open.
         let decision = decide_mysql_auto_commit_transaction(true, false, true, Some(mysql_status(false, true)));
         assert!(!decision.preserve);
-        assert!(!decision.ended_explicit_transaction);
+        assert_eq!(decision.rollback, MysqlAutoCommitRollback::None);
 
         // A kept transaction that the user committed in this batch must be
         // forgotten, so later executions are auto-commit again.
         let after_commit = decide_mysql_auto_commit_transaction(true, true, false, Some(mysql_status(false, true)));
         assert!(!after_commit.preserve);
-        assert!(!after_commit.ended_explicit_transaction);
+        assert_eq!(after_commit.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]
@@ -11872,15 +11937,15 @@ for line in sys.stdin:
         // and the COM_PING refresh failed.
         let kept = decide_mysql_auto_commit_transaction(true, false, true, None);
         assert!(kept.preserve);
-        assert!(!kept.ended_explicit_transaction);
+        assert_eq!(kept.rollback, MysqlAutoCommitRollback::None);
 
         let cleaned = decide_mysql_auto_commit_transaction(false, false, true, None);
         assert!(!cleaned.preserve);
-        assert!(cleaned.ended_explicit_transaction);
+        assert_eq!(cleaned.rollback, MysqlAutoCommitRollback::Explicit);
 
         let unknown_without_opener = decide_mysql_auto_commit_transaction(true, false, false, None);
         assert!(!unknown_without_opener.preserve);
-        assert!(!unknown_without_opener.ended_explicit_transaction);
+        assert_eq!(unknown_without_opener.rollback, MysqlAutoCommitRollback::None);
     }
 
     #[test]

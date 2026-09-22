@@ -1128,6 +1128,11 @@ export interface QueryResult {
   /** MySQL auto-commit tab: the backend rolled back a transaction the user
    *  opened explicitly and left open (the tab did not opt into keeping them). */
   auto_commit_explicit_transaction_rolled_back?: true;
+  /** MySQL auto-commit tab: the backend rolled back a transaction the session
+   *  opened implicitly because auto-commit was off (`SET autocommit = 0`).
+   *  Nobody typed `BEGIN`, so the tab reports it separately — and only once per
+   *  connection instead of after every execution. */
+  auto_commit_session_autocommit_rolled_back?: true;
   /** Structured backend error; authoritative when execution_error is true. */
   error?: BackendError;
   /** Zero-based index of the submitted statement that produced this result. */
@@ -2013,6 +2018,16 @@ export interface QueryTab {
   /** Auto-commit tab: show the notice that the backend rolled back an explicit
    *  transaction this tab left open, so the cleanup is never silent. */
   autoCommitTxnRolledBack?: boolean;
+  /** Same cleanup, but the rolled-back transaction came from a session with
+   *  auto-commit turned off (`SET autocommit = 0`) rather than from a `BEGIN`
+   *  the user typed. Shown with its own wording so the notice is not mistaken
+   *  for a lost explicit transaction. */
+  autoCommitSessionTxnRolledBack?: boolean;
+  /** Dedupe marker for {@link autoCommitSessionTxnRolledBack}: an
+   *  auto-commit-off session rolls back an implicit transaction after *every*
+   *  execution, so the notice is raised once and re-armed only after the
+   *  connection stops reporting that rollback. */
+  autoCommitSessionTxnRolledBackNotified?: boolean;
 }
 
 export interface SavedSqlFolder {

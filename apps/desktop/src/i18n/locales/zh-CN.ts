@@ -297,6 +297,7 @@ export default withEnglishFallback({
     rollback: "回滚",
     txnAutoRolledBack: "事务已因 5 分钟无操作而自动回滚",
     autoCommitTxnRolledBack: "该标签页遗留的显式事务已被自动回滚；如需跨多次执行保留事务，可在设置中开启「自动提交模式下保留显式事务」",
+    autoCommitSessionTxnRolledBack: "该连接处于 autocommit=0，本次执行留下的隐式事务已被自动回滚；同一连接只提示一次",
     previewSql: "预览 SQL",
     previewQuery: "预览查询",
     hidePreviewSql: "隐藏 SQL 预览",

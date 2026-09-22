@@ -381,6 +381,7 @@ export default {
     rollback: "Rollback",
     txnAutoRolledBack: "Transaction auto-rolled back after 5 minutes of inactivity",
     autoCommitTxnRolledBack: 'An explicit transaction left open by this tab was rolled back automatically; turn on "Keep explicit auto-commit transactions" to keep it across executions',
+    autoCommitSessionTxnRolledBack: "This connection runs with auto-commit off (SET autocommit = 0), so its implicit transaction was rolled back after the execution; DBX reports that once per connection",
     previewSql: "Preview SQL",
     previewQuery: "Preview query",
     hidePreviewSql: "Hide SQL Preview",

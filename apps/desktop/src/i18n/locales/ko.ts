@@ -380,6 +380,7 @@ export default withEnglishFallback({
     rollback: "롤백",
     txnAutoRolledBack: "5분간 활동이 없어 트랜잭션이 자동으로 롤백되었습니다",
     autoCommitTxnRolledBack: '이 탭에 남아 있던 명시적 트랜잭션이 자동으로 롤백되었습니다. 실행 간에 유지하려면 설정에서 "자동 커밋 모드에서 명시적 트랜잭션 유지"를 켜세요',
+    autoCommitSessionTxnRolledBack: "이 연결은 autocommit=0 상태이므로 실행 후 암시적 트랜잭션이 롤백되었습니다(같은 연결에서는 한 번만 알립니다)",
     previewSql: "SQL 미리보기",
     previewQuery: "쿼리 미리보기",
     hidePreviewSql: "SQL 미리보기 숨기기",

@@ -372,6 +372,7 @@ export default withEnglishFallback({
     rollback: "Revertir",
     txnAutoRolledBack: "Transacción revertida automáticamente tras 5 minutos de inactividad",
     autoCommitTxnRolledBack: 'La transacción explícita que esta pestaña dejó abierta se revirtió automáticamente; activa "Mantener transacciones explícitas en modo autocommit" para conservarla entre ejecuciones',
+    autoCommitSessionTxnRolledBack: "Esta conexión trabaja con autocommit desactivado (SET autocommit = 0), así que su transacción implícita se revirtió tras la ejecución; DBX lo avisa una vez por conexión",
     previewSql: "Vista previa de SQL",
     previewQuery: "Vista previa de la consulta",
     hidePreviewSql: "Ocultar vista previa de SQL",

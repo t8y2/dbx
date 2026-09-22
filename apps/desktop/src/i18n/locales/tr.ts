@@ -217,6 +217,7 @@ export default withEnglishFallback({
     rollback: "Rollback",
     txnAutoRolledBack: "İşlem, 5 dakikalık hareketsizlik sonrası otomatik olarak geri alındı",
     autoCommitTxnRolledBack: 'Bu sekmenin açık bıraktığı açık işlem otomatik olarak geri alındı; yürütmeler arasında korumak için ayarlardan "Otomatik işlemede açık işlemleri koru" seçeneğini açın',
+    autoCommitSessionTxnRolledBack: "Bu bağlantı autocommit kapalı (SET autocommit = 0) çalışıyor; bu nedenle örtük işlem yürütmeden sonra geri alındı. DBX bunu bağlantı başına bir kez bildirir",
     previewSql: "SQL Önizleme",
     previewQuery: "Sorguyu önizle",
     hidePreviewSql: "SQL Önizlemesini Gizle",

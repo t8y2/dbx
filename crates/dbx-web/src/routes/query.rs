@@ -1418,6 +1418,7 @@ mod tests {
             manual_transaction_no_statement: false,
             auto_commit_open_transaction: None,
             auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         };
 
         let response = execute_multi_response(vec![result], 17).unwrap();

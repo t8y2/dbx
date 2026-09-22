@@ -371,6 +371,7 @@ export default withEnglishFallback({
     rollback: "Rollback",
     txnAutoRolledBack: "Transazione annullata automaticamente dopo 5 minuti di inattività",
     autoCommitTxnRolledBack: 'La transazione esplicita lasciata aperta da questa scheda è stata annullata automaticamente; attiva "Mantieni le transazioni esplicite in autocommit" per conservarla tra le esecuzioni',
+    autoCommitSessionTxnRolledBack: "Questa connessione lavora con autocommit disattivato (SET autocommit = 0), quindi la sua transazione implicita è stata annullata dopo l'esecuzione; DBX lo segnala una volta per connessione",
     previewSql: "Anteprima SQL",
     previewQuery: "Anteprima query",
     hidePreviewSql: "Nascondi anteprima SQL",

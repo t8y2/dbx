@@ -539,6 +539,13 @@ struct PoolRoutingControl {
     connections: Arc<RwLock<ConnectionPoolRegistry>>,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    /// The same set as [`AppState::mysql_preserved_transactions`]. Every detach
+    /// path (including `ClientSessionPoolCleanupGuard`'s `Drop`, which never
+    /// reaches `AppState`) has to clear the marker together with the pool:
+    /// otherwise a pool rebuilt under the same key would read a stale
+    /// `already_preserved` and keep a leftover transaction the way #9479
+    /// described, even with the opt-in turned off.
+    mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
     task_supervisor: TaskSupervisor,
 }
 
@@ -695,9 +702,11 @@ impl PoolRoutingControl {
         {
             let mut activity = self.pool_activity.write().await;
             let mut cancel_contexts = self.postgres_cancel_contexts.write().await;
+            let mut preserved = self.mysql_preserved_transactions.write().await;
             for (key, _) in &removed {
                 activity.remove(key);
                 cancel_contexts.remove(key);
+                preserved.remove(key);
             }
         }
         self.close_removed_in_background(removed);
@@ -1403,6 +1412,7 @@ impl AppState {
             connections: self.connections.clone(),
             pool_activity: self.pool_activity.clone(),
             postgres_cancel_contexts: self.postgres_cancel_contexts.clone(),
+            mysql_preserved_transactions: self.mysql_preserved_transactions.clone(),
             task_supervisor: self.task_supervisor.clone(),
         }
     }
@@ -9866,10 +9876,15 @@ for line in sys.stdin:
         let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
         state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(pool));
         state.pool_activity.write().await.insert(pool_key.to_string(), super::PoolActivity::now());
+        // A tab that kept a user transaction and was then detached: the marker
+        // must not outlive the pool, otherwise rebuilding the same pool key
+        // would look like "already preserved".
+        state.mark_preserved_explicit_transaction(pool_key).await;
 
         assert!(state.detach_pool_by_key(pool_key, false).await);
         assert!(!state.connections.read().await.contains_key(pool_key));
         assert!(!state.pool_activity.read().await.contains_key(pool_key));
+        assert!(!state.has_preserved_explicit_transaction(pool_key).await);
 
         for _ in 0..100 {
             if state.supervised_task_count() == 0 {

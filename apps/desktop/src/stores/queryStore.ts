@@ -67,7 +67,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, stripMysqlClientDisplayCommand } from "@/lib/sql/sqlStatementRanges";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, sqlServerUseDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
+import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, switchesDatabaseWithUseStatement, useDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
 import { classifySqlRisk } from "@/lib/sql/sqlRisk";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
@@ -369,16 +369,7 @@ function preservedResultIndex(results: QueryResult[], currentIndex: number | und
   return currentIndex;
 }
 
-function annotateQueryResultSources(
-  results: QueryResult[],
-  sql: string,
-  database: string | undefined,
-  databaseType?: DatabaseType,
-  sourceOffset?: number,
-  parameterOptions?: SqlParameterOptions,
-  executedSql?: string,
-  sourceDocumentSql?: string,
-): { results: QueryResult[]; sqlServerUseDatabase?: string } {
+function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType, sourceOffset?: number, parameterOptions?: SqlParameterOptions, executedSql?: string, sourceDocumentSql?: string): { results: QueryResult[]; useDatabase?: string } {
   const statements = splitSqlStatementRanges(sql, databaseType, parameterOptions);
   // The backend positions errors against the SQL it actually received. When the
   // sent SQL was rewritten (pagination wrapper, injected hidden keys…), record
@@ -389,7 +380,7 @@ function annotateQueryResultSources(
   const documentStatements = sourceDocumentSql && sourceOffset !== undefined ? splitSqlStatementRanges(sourceDocumentSql, databaseType, parameterOptions) : [];
   let statementIndex = 0;
   let sourceDatabase = database;
-  let sqlServerUseDatabase: string | undefined;
+  let useDatabase: string | undefined;
   for (const result of results) {
     const explicitIndex = Number.isInteger(result.statement_index) && result.statement_index! >= 0 ? result.statement_index : undefined;
     const sourceIndex = explicitIndex ?? statementIndex;
@@ -420,13 +411,13 @@ function annotateQueryResultSources(
     const preamble = documentStatement ? sourceDocumentSql!.slice(documentStatement.hitFrom, documentStatement.from) : sql.slice(statement.hitFrom, statement.from);
     const customName = queryResultNameFromPreamble(preamble, { databaseType });
     if (customName) result.sourceLabel = customName;
-    const successfulUseDatabase = databaseType === "sqlserver" && result.execution_error !== true ? sqlServerUseDatabaseFromStatement(statement.sql) : undefined;
+    const successfulUseDatabase = result.execution_error !== true ? useDatabaseFromStatement(statement.sql, databaseType) : undefined;
     if (successfulUseDatabase) {
       sourceDatabase = successfulUseDatabase;
-      sqlServerUseDatabase = successfulUseDatabase;
+      useDatabase = successfulUseDatabase;
     }
   }
-  return { results, sqlServerUseDatabase };
+  return { results, useDatabase };
 }
 
 /**
@@ -7491,7 +7482,11 @@ export const useQueryStore = defineStore("query", () => {
       }
       const successfulOracleSchemaChanges = usesOracleStickyTransactionState(effectiveDbType) ? results.filter((result) => result.execution_error !== true && isOracleCurrentSchemaStatement(result.sourceStatement)).length : 0;
       const successfulSapHanaSchemaChanges = effectiveDbType === "saphana" ? results.filter((result) => result.execution_error !== true && isSapHanaSetSchemaStatement(result.sourceStatement)).length : 0;
-      const sqlServerUseDatabase = effectiveDbType === "sqlserver" ? annotatedResults.sqlServerUseDatabase : undefined;
+      const sqlServerUseDatabase = effectiveDbType === "sqlserver" ? annotatedResults.useDatabase : undefined;
+      // MySQL 家族（含 Doris/StarRocks）的 `USE db` 同样会切走会话的当前库，标签库名
+      // 要跟着走，否则工具栏、标签标题和侧栏仍指向旧库（#9941）。SQL Server 走上面的
+      // 分支，它有额外的事务与 reset 语义。
+      const mysqlUseDatabase = switchesDatabaseWithUseStatement(effectiveDbType) ? annotatedResults.useDatabase : undefined;
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
         const hiddenIndexes = hiddenResultColumnIndexes(results[0]!.columns, hiddenPrimaryKeys);
         if (hiddenIndexes.length > 0) results[0]!.hidden_column_indexes = hiddenIndexes;
@@ -7532,6 +7527,16 @@ export const useQueryStore = defineStore("query", () => {
           rollbackTabTransaction(current);
           void closeClientConnectionSession(current);
           current.database = sqlServerUseDatabase;
+          current.schema = undefined;
+        }
+        if (mysqlUseDatabase && !usesExternalExecutionTarget && current.database !== mysqlUseDatabase) {
+          // 切库后旧库的池（池按「连接 + 库」分桶）不再被这个标签复用，旧会话却已经在
+          // server 端停在新库上；不关掉它，用户切回旧库时会被重新用上，出现「标签写着 A、
+          // 实际在 B」的错配。标签上挂着的显式事务在切库后同样不可达，一并收掉（与 SQL
+          // Server 分支一致）。
+          rollbackTabTransaction(current);
+          void closeClientConnectionSession(current);
+          current.database = mysqlUseDatabase;
           current.schema = undefined;
         }
         const activeGroupIndex = current.activeResultIndex;

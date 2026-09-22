@@ -6612,6 +6612,29 @@ async fn execute_manual_txn_mysql_statement(
         let mut result = conn.query_iter(sql).await.map_err(|e| format!("Query failed: {e}"))?;
         let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
         let column_types: Vec<String> = result.columns_ref().iter().map(db::mysql::mysql_column_type_name).collect();
+        // Some statements only *may* return rows — `EXECUTE` of a prepared DML statement
+        // finishes with a plain OK packet instead — so report the affected rows rather than
+        // failing on the missing result set.
+        if columns.is_empty() {
+            let affected_rows = result.affected_rows();
+            result.drop_result().await.map_err(|e| format!("Query failed: {e}"))?;
+            return Ok(db::QueryResult {
+                columns: Vec::new(),
+                column_types: Vec::new(),
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![],
+                affected_rows,
+                execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+                messages: Vec::new(),
+            });
+        }
         let mut data: Vec<Vec<serde_json::Value>> = Vec::with_capacity(row_limit.min(1024));
         let mut stream = result
             .stream::<mysql_async::Row>()

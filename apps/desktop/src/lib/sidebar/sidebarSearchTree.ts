@@ -6,11 +6,11 @@ import { stripTableVGroupsFromChildren } from "@/lib/table/tableVGroup";
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
 // Synthetic connection utility entries (the isConnectionUtilityNode types in
 // connectionStore) are admin/navigation shortcuts, not schema objects. Their
-// labels are i18n keys that can never match a text query, so the only way they
-// surface in a search is as preserved children — where they make a closed
-// connection look like it holds hits and turn the first double-click into a
-// collapse. saved-sql-root is exempt: its saved queries are real searchable
-// files rather than a shortcut.
+// labels are i18n keys that can never match a text query, so they never
+// self-match — but a few of them (oracle-db-links, group-tablespaces) are
+// groups whose children ARE real objects, so their children stay searchable
+// and the group only survives through a child hit. saved-sql-root is exempt:
+// its saved queries are real searchable files rather than a shortcut.
 const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-users", "dameng-roles", "dameng-job-admin", "group-tablespaces", "oracle-db-links"]);
 
 function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null, aliases?: readonly string[]) {
@@ -367,7 +367,11 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
-    if (matchLabel && hiddenSearchNodeTypes.has(node.type)) continue;
+    // Utility groups never match by their own label; groups without children
+    // (or not yet loaded) drop out entirely, while groups that hold real
+    // objects (db links, tablespaces) survive through a matching child.
+    const hiddenUtility = !!matchLabel && hiddenSearchNodeTypes.has(node.type);
+    if (hiddenUtility && !node.children?.length) continue;
     if (node.type === "object-browser" && node.hiddenChildren) {
       const matches = node.hiddenChildren.flatMap((child) => {
         if (searchableNodeTypes && !searchableNodeTypes.has(child.type)) return [];
@@ -380,7 +384,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     }
 
     const label = normalizedLabel(node, resolveLabel);
-    const canSelfMatch = !searchableNodeTypes || searchableNodeTypes.has(node.type);
+    const canSelfMatch = (!searchableNodeTypes || searchableNodeTypes.has(node.type)) && !hiddenUtility;
     const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment, node.searchAliases) : { score: 0 }) : null;
     // Type-only filtering keeps matching rows and their ancestor path, but not
     // unrelated descendants that would make the selected type appear ignored.

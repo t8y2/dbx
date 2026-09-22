@@ -798,7 +798,12 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
         format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
     } else {
-        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+        // `WHERE 1=0` rather than `WHERE 0`: PostgreSQL-family engines (HighGo, Kingbase,
+        // Vastbase, ...) and DuckDB require a boolean in WHERE and reject a bare integer
+        // with "argument of WHERE must be type boolean, not type integer" (#9950).
+        // `1=0` is a valid false predicate in every dialect, including the permissive
+        // MySQL/SQLite-style engines that also accepted `0`.
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0;")
     };
 
     let mut comment_sql = Vec::new();
@@ -2265,6 +2270,51 @@ mod tests {
             })
             .unwrap(),
             "ALTER TABLE `orders` DROP COLUMN `status`;"
+        );
+    }
+
+    #[test]
+    fn duplicate_table_structure_uses_boolean_false_predicate_for_pg_family_fallbacks() {
+        // Regression for #9950: the generic fallback used `WHERE 0`. PostgreSQL-family
+        // engines require a boolean there, so cloning a HighGo/Kingbase/Vastbase table
+        // failed with "argument of WHERE must be type boolean, not type integer".
+        for database_type in [
+            DatabaseType::Highgo,
+            DatabaseType::Kingbase,
+            DatabaseType::Vastbase,
+            DatabaseType::DuckDb,
+            DatabaseType::Sqlite,
+        ] {
+            assert_eq!(
+                build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                    database_type: Some(database_type),
+                    schema: Some("public".to_string()),
+                    source_name: "users".to_string(),
+                    target_name: "users_copy".to_string(),
+                    table_comment: None,
+                    column_comments: vec![],
+                    primary_key_columns: vec![],
+                    primary_key_constraint_name: None,
+                    identifier_quote: None,
+                }),
+                "CREATE TABLE \"public\".\"users_copy\" AS SELECT * FROM \"public\".\"users\" WHERE 1=0;",
+                "{database_type:?}"
+            );
+        }
+        // MySQL keeps the LIKE form, so the shared fallback must not have swallowed it.
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                schema: None,
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec![],
+                primary_key_constraint_name: None,
+                identifier_quote: None,
+            }),
+            "CREATE TABLE `users_copy` LIKE `users`;"
         );
     }
 

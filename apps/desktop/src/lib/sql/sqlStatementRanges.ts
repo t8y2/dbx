@@ -1036,13 +1036,6 @@ function mergeSqlServerControlFlowBatches(sql: string, statements: RawStatement[
   return merged;
 }
 
-/** First non-whitespace offset in `sql[from, to)`, clamped to `to`. */
-function skipSqlWhitespace(sql: string, from: number, to: number): number {
-  let index = from;
-  while (index < to && isSqlWhitespace(sql[index])) index += 1;
-  return index;
-}
-
 /**
  * First offset in `sql[from, to)` that is neither whitespace nor a comment,
  * clamped to `to`. The `;`-split path keeps the comment between two statements

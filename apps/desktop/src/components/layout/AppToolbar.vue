@@ -78,6 +78,7 @@ const { t } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
+const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 const updateTooltip = computed(() => {
   if (props.hasUpdateAvailable && props.updateReady) return t("updates.restartRequiredTooltip");
@@ -194,7 +195,7 @@ const collapsibleRightItemDefs = computed(() => {
     disabled: boolean;
   }
   const items: ItemDef[] = [];
-  if (toolbarItems.value.checkUpdates) {
+  if (showToolbarUpdateEntry.value) {
     items.push({
       key: "checkUpdates",
       label: t("updates.check"),
@@ -620,7 +621,7 @@ const toolbarStyle = computed(() => {
 
     <!-- Right-side items wrapped in overflow-aware container -->
     <div ref="rightWrapper" class="flex min-w-0 items-center gap-1 overflow-hidden">
-      <template v-if="toolbarItems.checkUpdates">
+      <template v-if="showToolbarUpdateEntry">
         <Tooltip>
           <TooltipTrigger as-child>
             <Button

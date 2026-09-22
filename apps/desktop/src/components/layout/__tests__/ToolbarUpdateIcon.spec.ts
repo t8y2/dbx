@@ -22,6 +22,15 @@ describe("silent toolbar update icon", () => {
     expect(source).toContain('t("updates.updateAction")');
   });
 
+  it("keeps the update entry visible when the appearance setting is off but an update is available", () => {
+    const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/layout/AppToolbar.vue"), "utf8");
+
+    expect(source).toContain("const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);");
+    expect(source).toContain("if (showToolbarUpdateEntry.value) {");
+    expect(source).toContain('<template v-if="showToolbarUpdateEntry">');
+    expect(source).not.toContain('<template v-if="toolbarItems.checkUpdates">');
+  });
+
   it("passes only opt-out component badges to their separate toolbar entries", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/App.vue"), "utf8");
 

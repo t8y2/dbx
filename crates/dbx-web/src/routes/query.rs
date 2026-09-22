@@ -36,6 +36,11 @@ pub struct ExecuteQueryRequest {
     pub use_transaction: Option<bool>,
     pub continue_on_error: Option<bool>,
     pub execution_mode: Option<dbx_core::query::QueryExecutionMode>,
+    /// MySQL auto-commit tabs: keep a transaction the user opened explicitly
+    /// (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
+    /// ROLLBACK. Defaults to the historical cleanup when omitted.
+    #[serde(default)]
+    pub preserve_explicit_transaction: bool,
 }
 
 #[derive(Deserialize)]
@@ -600,6 +605,7 @@ pub async fn execute_multi(
             use_transaction: req.use_transaction,
             continue_on_error: req.continue_on_error.unwrap_or(false),
             execution_mode: req.execution_mode.unwrap_or_default(),
+            preserve_explicit_transaction: req.preserve_explicit_transaction,
         },
     )
     .await;
@@ -1410,6 +1416,9 @@ mod tests {
             server_message: false,
             manual_transaction_proven_read_only: false,
             manual_transaction_no_statement: false,
+            auto_commit_open_transaction: None,
+            auto_commit_explicit_transaction_rolled_back: false,
+            auto_commit_session_autocommit_rolled_back: false,
         };
 
         let response = execute_multi_response(vec![result], 17).unwrap();

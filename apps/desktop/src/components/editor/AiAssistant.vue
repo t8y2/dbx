@@ -5985,11 +5985,11 @@ async function openExternalUrl(url: string) {
             <button v-if="isGenerating" class="h-7 w-7 shrink-0 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center" :title="t('ai.stopGenerating')" @click="cancelStream">
               <Square class="h-3.5 w-3.5" />
             </button>
-            <button v-else-if="hasActiveRunForCurrentConversation" class="h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background disabled:opacity-30 flex" :disabled="!canSubmitPrompt" :title="t('ai.queueSendHint')" @click="onSendClick">
+            <button v-else-if="hasActiveRunForCurrentConversation" class="h-7 shrink-0 items-center gap-1 rounded-full bg-foreground px-2.5 text-[11px] font-medium text-background-solid disabled:opacity-30 flex" :disabled="!canSubmitPrompt" :title="t('ai.queueSendHint')" @click="onSendClick">
               <Hourglass class="h-3.5 w-3.5" />
               <span>{{ t("ai.queueSend") }}</span>
             </button>
-            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
+            <button v-else class="h-7 w-7 shrink-0 rounded-full bg-foreground text-background-solid flex items-center justify-center disabled:opacity-30" :disabled="!canSubmitPrompt" @click="send">
               <ArrowUp class="h-4 w-4" />
             </button>
           </div>

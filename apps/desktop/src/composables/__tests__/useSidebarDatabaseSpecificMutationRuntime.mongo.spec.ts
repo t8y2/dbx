@@ -277,7 +277,8 @@ describe("MongoDB sidebar mutation runtime", () => {
     activeNode.value = mongoCollectionNode();
     expect(feature.canDropMongoCollection.value).toBe(true);
     expect(feature.canDropAllMongoIndexes.value).toBe(false);
-    expect(feature.canRenameMongoCollection.value).toBe(false);
+    // The Legacy Agent supports renameCollection (capability-gated in the backend).
+    expect(feature.canRenameMongoCollection.value).toBe(true);
     expect(feature.canCloneMongoCollection.value).toBe(true);
     expect(feature.canCreateMongoIndex.value).toBe(false);
     activeNode.value = mongoIndexesGroupNode();

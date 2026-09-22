@@ -283,7 +283,17 @@ pub fn build_export_object_source_sql(
     if source.is_empty() {
         return String::new();
     }
-    if is_mysql_like(database_type) && matches!(object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+    // MySQL routine bodies, trigger bodies and event bodies may contain `;`, so the
+    // exported statements need a client-side delimiter the same way `mysqldump` emits one.
+    if is_mysql_like(database_type)
+        && matches!(
+            object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Trigger
+                | ObjectSourceKind::Event
+        )
+    {
         return mysql_delimited_routine_source(source);
     }
     ensure_semicolon(source)
@@ -2195,6 +2205,32 @@ mod tests {
         assert_eq!(
             sql,
             "DELIMITER //\nCREATE DEFINER=`root`@`%` PROCEDURE `refresh_cache`()\nBEGIN\n  SELECT 1;\nEND//\nDELIMITER ;"
+        );
+    }
+
+    #[test]
+    fn mysql_trigger_and_event_export_use_delimiter_script() {
+        let trigger = build_export_object_source_sql(
+            DatabaseType::Mysql,
+            ObjectSourceKind::Trigger,
+            "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW\nBEGIN\n  INSERT INTO audit_log(msg) VALUES ('x');\nEND",
+        );
+
+        assert_eq!(
+            trigger,
+            "DELIMITER //\nCREATE DEFINER=`root`@`%` TRIGGER `trg_orders_ai` AFTER INSERT ON `orders` FOR EACH ROW\nBEGIN\n  INSERT INTO audit_log(msg) VALUES ('x');\nEND//\nDELIMITER ;"
+        );
+
+        // An event body already carries its schedule, so only the terminator changes.
+        let event = build_export_object_source_sql(
+            DatabaseType::Mysql,
+            ObjectSourceKind::Event,
+            "CREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0;",
+        );
+
+        assert_eq!(
+            event,
+            "DELIMITER //\nCREATE DEFINER=`root`@`%` EVENT `ev_purge` ON SCHEDULE EVERY 1 DAY DO DELETE FROM audit_log WHERE id < 0//\nDELIMITER ;"
         );
     }
 

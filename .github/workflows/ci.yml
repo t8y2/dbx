@@ -507,7 +507,7 @@ jobs:
       - name: Show sccache stats
         if: always()
         continue-on-error: true
-        run: ${SCCACHE_PATH} --show-stats
+        run: sccache --show-stats
 
       - name: Upload Windows 7 test installer
         uses: actions/upload-artifact@v6

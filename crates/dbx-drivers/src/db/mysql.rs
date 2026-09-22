@@ -161,6 +161,33 @@ pub async fn rollback_open_transaction(conn: &mut mysql_async::Conn) -> Result<(
     conn.query_drop("ROLLBACK").await.map_err(|error| error.to_string())
 }
 
+/// Session state reported by the final status packet of the last statement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MySqlSessionStatus {
+    /// `SERVER_STATUS_IN_TRANS`: a multi-statement transaction is open.
+    pub in_transaction: bool,
+    /// `SERVER_STATUS_AUTOCOMMIT`: the session still commits every statement.
+    /// `false` means auto-commit was disabled for the session (or for this
+    /// batch), so the next statement opens a transaction that only an explicit
+    /// `COMMIT`/`ROLLBACK` ends.
+    pub autocommit: bool,
+}
+
+/// Reads the status flags of the last final OK/EOF packet.
+///
+/// `None` means the server reported no usable status: mysql_async clears its
+/// cached packet when a statement ends with an ERR packet, so callers must not
+/// read "no transaction is open" out of a missing packet.
+pub fn session_status_from_last_ok(conn: &mysql_async::Conn) -> Option<MySqlSessionStatus> {
+    conn.last_ok_packet().map(|packet| {
+        let flags = packet.status_flags();
+        MySqlSessionStatus {
+            in_transaction: flags.contains(StatusFlags::SERVER_STATUS_IN_TRANS),
+            autocommit: flags.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT),
+        }
+    })
+}
+
 const MYSQL_TCP_KEEPALIVE_MS: u32 = 30_000;
 const MYSQL_SQL_PACKET_MARGIN_MAX_BYTES: usize = 64 * 1024;
 
@@ -219,8 +246,8 @@ fn transaction_error_from_mysql_error(error: mysql_async::Error) -> MySqlTransac
 }
 
 fn transaction_status_from_last_ok(conn: &mysql_async::Conn) -> Result<bool, MySqlTransactionError> {
-    conn.last_ok_packet()
-        .map(|packet| packet.status_flags().contains(StatusFlags::SERVER_STATUS_IN_TRANS))
+    session_status_from_last_ok(conn)
+        .map(|status| status.in_transaction)
         .ok_or_else(|| MySqlTransactionError::Transport("MySQL did not return a final status packet".to_string()))
 }
 
@@ -228,8 +255,17 @@ fn transaction_status_from_last_ok(conn: &mysql_async::Conn) -> Result<bool, MyS
 /// intentionally clears the cached OK packet for ERR, so COM_PING is required
 /// to obtain fresh status from the same physical connection.
 pub async fn ping_transaction_status_on_conn(conn: &mut mysql_async::Conn) -> Result<bool, MySqlTransactionError> {
+    ping_session_status_on_conn(conn).await.map(|status| status.in_transaction)
+}
+
+/// Read the full session status after a recoverable server ERR packet. See
+/// [`ping_transaction_status_on_conn`].
+pub async fn ping_session_status_on_conn(
+    conn: &mut mysql_async::Conn,
+) -> Result<MySqlSessionStatus, MySqlTransactionError> {
     conn.ping().await.map_err(transaction_error_from_mysql_error)?;
-    transaction_status_from_last_ok(conn)
+    session_status_from_last_ok(conn)
+        .ok_or_else(|| MySqlTransactionError::Transport("MySQL did not return a final status packet".to_string()))
 }
 
 impl MySqlQueryResult {
@@ -1297,6 +1333,12 @@ impl MySqlTcpKeepaliveMode {
 
 const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
 
+/// Charset used by the built-in `SET NAMES` setup when the connection config carries no
+/// `charset=` parameter, and the one written into MySQL connection URLs by the config layer.
+const MYSQL_DEFAULT_CHARSET: &str = "utf8mb4";
+/// Charset older (pre-5.5.3) servers do know; the fallback for [`MYSQL_DEFAULT_CHARSET`].
+const MYSQL_LEGACY_CHARSET: &str = "utf8";
+
 impl MySqlSetupMode {
     fn group_concat_max_len_query(self, url: &str) -> Option<String> {
         match self {
@@ -1333,28 +1375,100 @@ async fn verify_pool_connection_with_setup_fallback(
     eof_mode: MySqlEofMode,
     tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
-    match verify_pool_connection(&pool, timeout).await {
-        Ok(()) => Ok(pool),
-        Err(err) => {
-            let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &err) else {
-                return Err(err);
-            };
-            log::info!(
-                "MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode"
-            );
-            let fallback_pool = create_pool(
-                url,
-                ca_cert_path,
-                max_connections,
-                idle_timeout_secs,
-                setup_database,
-                extra_setup_queries,
-                fallback_mode,
-                eof_mode,
-                tcp_keepalive_mode,
-            )?;
-            verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
+    // The retry URL only changes when a fallback was actually applied, so a
+    // connection that works on the first attempt never pays for the extra pool.
+    let mut retry_url = url.to_string();
+    let mut error = match verify_pool_connection(&pool, timeout).await {
+        Ok(()) => return Ok(pool),
+        Err(err) => err,
+    };
+
+    if let Some(charset_url) = mysql_legacy_charset_fallback_url(&retry_url, &error) {
+        log::info!("MySQL server does not support the built-in utf8mb4 charset; retrying with charset=utf8");
+        let charset_pool = create_pool(
+            &charset_url,
+            ca_cert_path,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            setup_mode,
+            eof_mode,
+            tcp_keepalive_mode,
+        )?;
+        match verify_pool_connection(&charset_pool, timeout).await {
+            Ok(()) => return Ok(charset_pool),
+            Err(charset_error) => {
+                retry_url = charset_url;
+                error = charset_error;
+            }
         }
+    }
+
+    let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &error) else {
+        return Err(error);
+    };
+    log::info!("MySQL server rejected optional group_concat_max_len setup; retrying with {fallback_mode:?} mode");
+    let fallback_pool = create_pool(
+        &retry_url,
+        ca_cert_path,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        fallback_mode,
+        eof_mode,
+        tcp_keepalive_mode,
+    )?;
+    verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
+}
+
+/// MySQL older than 5.5.3 has no `utf8mb4` charset, so the built-in `SET NAMES utf8mb4`
+/// setup is rejected with `ERROR 1115 (42000): Unknown character set: 'utf8mb4'` and the
+/// whole connection fails (issue #9285, MySQL 5.1.73). Retry such a connection with the
+/// three-byte `utf8` charset those servers do know; newer servers keep `utf8mb4`.
+///
+/// `utf8mb4` is dbx's own built-in default — it is what `SET NAMES` uses when the
+/// connection config carries no `charset=` parameter, and the config layer writes it into
+/// the URL for every MySQL connection. So the retry only applies to that default: a
+/// connection that explicitly asks for another charset keeps it and reports the server
+/// error as-is.
+fn mysql_legacy_charset_fallback_url(url: &str, error: &str) -> Option<String> {
+    if mysql_connection_charset(url).is_some_and(|charset| !charset.eq_ignore_ascii_case(MYSQL_DEFAULT_CHARSET)) {
+        return None;
+    }
+
+    let lower = error.to_ascii_lowercase();
+    // 1115 is ER_UNKNOWN_CHARACTER_SET; MySQL-compatible servers may report the
+    // same rejection with a different code but the same message.
+    if !lower.contains("unknown character set") && !lower.contains("1115") {
+        return None;
+    }
+
+    Some(mysql_url_with_charset(url, MYSQL_LEGACY_CHARSET))
+}
+
+fn mysql_url_with_charset(url: &str, charset: &str) -> String {
+    let (base_url, fragment) = url.split_once('#').map_or((url, ""), |(base, fragment)| (base, fragment));
+    let charset_param = format!("charset={charset}");
+    let base = match base_url.split_once('?') {
+        Some((prefix, query)) => {
+            let mut params: Vec<String> = query
+                .split('&')
+                .filter(|part| !part.trim().is_empty())
+                .filter(|part| !part.split_once('=').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("charset")))
+                .map(str::to_string)
+                .collect();
+            params.push(charset_param);
+            format!("{prefix}?{}", params.join("&"))
+        }
+        None => format!("{base_url}?{charset_param}"),
+    };
+
+    if fragment.is_empty() {
+        base
+    } else {
+        format!("{base}#{fragment}")
     }
 }
 
@@ -1582,7 +1696,7 @@ fn mysql_setup_queries_for_database_with_mode(
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
 ) -> Vec<String> {
-    let charset = mysql_connection_charset(url).unwrap_or("utf8mb4");
+    let charset = mysql_connection_charset(url).unwrap_or(MYSQL_DEFAULT_CHARSET);
     let database = setup_database.map(ToOwned::to_owned).or_else(|| mysql_connection_database(url));
     let mut queries = Vec::new();
     if let Some(database) = database.as_deref() {
@@ -2993,6 +3107,17 @@ pub(super) struct TableStatusMeta {
 
 const MYSQL_FRESH_TABLE_STATUS_SESSION_SQL: &str = "/*!80000 SET SESSION information_schema_stats_expiry = 0 */";
 
+/// MySQL 8 caches `information_schema.TABLES` statistics per session for
+/// `information_schema_stats_expiry` seconds (86400 by default), so a table
+/// that was read while still empty keeps reporting its old `TABLE_ROWS`
+/// estimate long after rows were inserted (#9736). The version comment turns
+/// the directive into a no-op on MySQL 5.7.
+async fn enable_fresh_table_statistics(conn: &mut mysql_async::Conn, context: &str) {
+    if let Err(error) = conn.query_drop(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL).await {
+        log::debug!("Failed to disable cached MySQL table statistics before {context}: {error}");
+    }
+}
+
 async fn list_table_status_show(pool: &MySqlPool, database: &str) -> Result<HashMap<String, TableStatusMeta>, String> {
     query_table_status_show(pool, database, None).await
 }
@@ -3058,9 +3183,7 @@ pub async fn get_table_auto_increment(pool: &MySqlPool, database: &str, table: &
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
     // MySQL 8 caches SHOW TABLE STATUS statistics by default, including the
     // counter after ALTER TABLE. The version comment is a no-op on MySQL 5.7.
-    if let Err(error) = conn.query_drop(MYSQL_FRESH_TABLE_STATUS_SESSION_SQL).await {
-        log::debug!("Failed to disable cached MySQL table statistics before reading AUTO_INCREMENT: {error}");
-    }
+    enable_fresh_table_statistics(&mut conn, "reading AUTO_INCREMENT").await;
     let status = query_table_status_sql_with_conn(&mut conn, &show_table_status_exact_sql(database, table)).await?;
     Ok(status.into_values().next().and_then(|meta| meta.auto_increment))
 }
@@ -3700,6 +3823,9 @@ pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<
         quote_value(database),
     );
     let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    // The session-scoped statistics cache is what makes the tree keep showing
+    // a stale row count for tables written after the first read (#9736).
+    enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
     let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
     Ok(rows
@@ -8020,6 +8146,89 @@ mod tests {
                 Some(MySqlSetupMode::Compatible)
             );
         }
+    }
+
+    #[test]
+    fn mysql_legacy_charset_fallback_retries_with_utf8_for_old_servers() {
+        let error = "MySQL connection failed: Server error: `ERROR 1115 (42000): Unknown character set: 'utf8mb4''";
+
+        assert_eq!(
+            mysql_legacy_charset_fallback_url("mysql://root:pw@host:3306/app", error),
+            Some("mysql://root:pw@host:3306/app?charset=utf8".to_string())
+        );
+        assert_eq!(
+            mysql_legacy_charset_fallback_url("mysql://root:pw@host:3306/app?ssl-mode=disabled#session", error),
+            Some("mysql://root:pw@host:3306/app?ssl-mode=disabled&charset=utf8#session".to_string())
+        );
+        // MySQL-compatible servers may report the same rejection with another code.
+        assert!(mysql_legacy_charset_fallback_url(
+            "mysql://root@host:9030/app",
+            "Server error: Unknown character set: 'utf8mb4'"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn mysql_legacy_charset_fallback_retries_the_built_in_default_charset() {
+        let error = "MySQL connection failed: Server error: `ERROR 1115 (42000): Unknown character set: 'utf8mb4''";
+
+        // The config layer writes the built-in default into every MySQL URL, so the
+        // default spelling must stay retryable.
+        assert_eq!(
+            mysql_legacy_charset_fallback_url(
+                "mysql://root:secret@127.0.0.1:3306/app?ssl-mode=disabled&charset=utf8mb4",
+                error
+            ),
+            Some("mysql://root:secret@127.0.0.1:3306/app?ssl-mode=disabled&charset=utf8".to_string())
+        );
+        assert_eq!(
+            mysql_legacy_charset_fallback_url("mysql://root@host/app?charset=UTF8MB4", error),
+            Some("mysql://root@host/app?charset=utf8".to_string())
+        );
+    }
+
+    #[test]
+    fn mysql_legacy_charset_fallback_keeps_another_configured_charset() {
+        let error = "MySQL connection failed: Server error: `ERROR 1115 (42000): Unknown character set: 'utf8mb4''";
+
+        // A charset other than the built-in default is the user's own choice; the
+        // retry must not override it.
+        assert_eq!(mysql_legacy_charset_fallback_url("mysql://root@host/app?charset=latin1", error), None);
+        assert_eq!(mysql_legacy_charset_fallback_url("mysql://root@host/app?charset=gbk", error), None);
+    }
+
+    #[test]
+    fn mysql_legacy_charset_fallback_ignores_unrelated_connection_errors() {
+        // A credential failure has nothing to do with the built-in charset setup.
+        assert_eq!(
+            mysql_legacy_charset_fallback_url(
+                "mysql://root@host/app",
+                "MySQL connection failed: Server error: `ERROR 1045 (28000): Access denied for user 'root'@'host'`"
+            ),
+            None
+        );
+
+        // A server-side rejection of another setup statement must not rewrite the charset.
+        assert_eq!(
+            mysql_legacy_charset_fallback_url(
+                "mysql://root@host/app",
+                "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@group_concat_max_len = 1048576'"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mysql_url_with_charset_replaces_an_existing_charset_param() {
+        assert_eq!(mysql_url_with_charset("mysql://root@host/app", "utf8"), "mysql://root@host/app?charset=utf8");
+        assert_eq!(
+            mysql_url_with_charset("mysql://root@host/app?charset=utf8mb4&ssl-mode=disabled", "utf8"),
+            "mysql://root@host/app?ssl-mode=disabled&charset=utf8"
+        );
+        assert_eq!(
+            mysql_url_with_charset("mysql://root@host/app?ssl-mode=disabled#session", "utf8"),
+            "mysql://root@host/app?ssl-mode=disabled&charset=utf8#session"
+        );
     }
 
     #[test]

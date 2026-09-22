@@ -3069,7 +3069,7 @@ useUpdateBlocker(() =>
                     :key="format"
                     type="button"
                     class="shrink-0 rounded border px-2 py-0.5 text-[11px] font-medium transition-colors"
-                    :class="configType === format ? 'border-foreground/80 bg-foreground text-background' : 'border-transparent text-muted-foreground hover:border-border hover:bg-background hover:text-foreground'"
+                    :class="configType === format ? 'border-foreground/80 bg-foreground text-background-solid' : 'border-transparent text-muted-foreground hover:border-border hover:bg-background hover:text-foreground'"
                     :disabled="readOnly"
                     :aria-pressed="configType === format"
                     @click="setConfigFormat(format)"

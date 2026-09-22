@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useComponentUpdates } from "@/composables/useComponentUpdates";
 import { runPendingComponentUpdatePlan, type PendingComponentUpdates } from "@/lib/updates/componentUpdateOrchestration";
+import { showToolbarUpdateAction } from "@/lib/updates/updateBadges";
 
 const mocks = vi.hoisted(() => ({
   listInstalledAgents: vi.fn(),
@@ -213,6 +214,36 @@ describe("useComponentUpdates", () => {
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
     expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
+  });
+
+  it("keeps the toolbar update action hidden while a persisted restart plan is still installing", async () => {
+    const jdbcInstall = deferred<{ installed: boolean; update_available: boolean }>();
+    mocks.installJdbcPlugin.mockReturnValue(jdbcInstall.promise);
+    const updates = useComponentUpdates({ isDesktop: true });
+    const pending: PendingComponentUpdates = {
+      fromVersion: "0.6.18",
+      targetVersion: "0.6.19",
+      plan: { kind: "manual", categories: ["jdbc"] },
+    };
+
+    const updateOperation = runPendingComponentUpdatePlan(pending, updates);
+    await vi.waitFor(() => expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce());
+
+    const toolbarOptions = {
+      appUpdateAvailable: false,
+      driverUpdateCount: updates.driverUpdateCount.value,
+      jdbcUpdateAvailable: updates.jdbcUpdateAvailable.value,
+      mcpUpdateAvailable: updates.mcpUpdateAvailable.value,
+      pluginUpdateCount: updates.pluginUpdateCount.value,
+    };
+    expect(updates.updating.value).toBe(true);
+    expect(showToolbarUpdateAction({ ...toolbarOptions, componentUpdatesRunning: updates.updating.value })).toBe(false);
+
+    jdbcInstall.resolve({ installed: true, update_available: false });
+    await updateOperation;
+
+    expect(updates.updating.value).toBe(false);
+    expect(showToolbarUpdateAction({ ...toolbarOptions, componentUpdatesRunning: updates.updating.value })).toBe(true);
   });
 
   it("skips blocked agent updates while allowing other component updates", async () => {

@@ -945,6 +945,12 @@ export interface EditorSettings {
   clickTableNavigationTarget: ClickTableNavigationTarget;
   completionTriggerMode: SqlCompletionTriggerMode;
   defaultTransactionMode: DefaultTransactionMode;
+  /** Auto-commit (`Tx:A`) tabs with a MySQL-family connection: keep a
+   *  transaction the user opens explicitly (`BEGIN` / `START TRANSACTION`) open
+   *  across executions until COMMIT / ROLLBACK instead of rolling it back when
+   *  each execution ends. Off by default: the rollback is what stops a leftover
+   *  transaction from pinning the tab's read snapshot (#9479). */
+  keepExplicitTransactionInAutoCommit: boolean;
 }
 
 export interface ToolbarItems {
@@ -1202,6 +1208,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   clickTableNavigationTarget: "data",
   completionTriggerMode: "positional",
   defaultTransactionMode: "auto",
+  keepExplicitTransactionInAutoCommit: false,
 };
 
 export const STORAGE_KEY = "dbx-editor-settings";
@@ -1790,6 +1797,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
     completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
     defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
+    keepExplicitTransactionInAutoCommit: settings.keepExplicitTransactionInAutoCommit === true,
     backgroundImage: normalizeBackgroundImageSettings(settings.backgroundImage),
   };
 }
@@ -2542,6 +2550,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     if (partial.defaultTransactionMode !== undefined) editorSettings.value.defaultTransactionMode = normalizeDefaultTransactionMode(partial.defaultTransactionMode);
+    if (partial.keepExplicitTransactionInAutoCommit !== undefined) editorSettings.value.keepExplicitTransactionInAutoCommit = partial.keepExplicitTransactionInAutoCommit === true;
     if (partial.flatteningMultiLineText !== undefined) editorSettings.value.flatteningMultiLineText = partial.flatteningMultiLineText;
     if (partial.dataGridShowWhitespace !== undefined) editorSettings.value.dataGridShowWhitespace = partial.dataGridShowWhitespace;
   }

@@ -113,6 +113,25 @@ export function backgroundImageStyle(settings: Pick<BackgroundImageSettings, "di
  */
 export const BACKGROUND_IMAGE_SURFACE_VARS = ["--background", "--sidebar", "--muted", "--secondary", "--accent", "--dbx-chrome", "--dbx-chrome-muted", "--dbx-content", "--dbx-editor-toolbar", "--dbx-gutter", "--dbx-sidebar-header"] as const;
 
+/**
+ * Surface variables that are also consumed as *foreground* colors, and
+ * therefore need an opaque companion while the surface itself turns
+ * translucent.
+ *
+ * `--background` backs `text-background`, the inverted text painted on
+ * `bg-foreground` widgets (tooltips, toasts, grid chips). Tinting it for the
+ * wallpaper also tints those glyphs, so a toolbar tooltip ends up with washed
+ * out gray text on its own opaque bubble — reported as "the popup background
+ * and the text color merged" in #8678. Consumers of the inverted text read
+ * `text-background-solid` (tokens.css) instead.
+ */
+export const BACKGROUND_IMAGE_INVERTED_TEXT_VARS = ["--background"] as const;
+
+/** Opaque companion variable published for an inverted-text surface var. */
+export function backgroundImageSolidVarName(varName: string): string {
+  return `${varName}-solid`;
+}
+
 /** Alpha for the surface variables derived from the surface-opacity setting. */
 export function backgroundImageSurfaceAlpha(settings: Pick<BackgroundImageSettings, "opacity">): number {
   return clampNumber(settings.opacity, BACKGROUND_IMAGE_MIN_OPACITY, BACKGROUND_IMAGE_MAX_OPACITY, BACKGROUND_IMAGE_DEFAULT_OPACITY);

@@ -79,6 +79,25 @@ export function clearPendingComponentUpdatesAfterAppUpdate() {
   safeLocalStorageRemove(PENDING_COMPONENT_UPDATES_STORAGE_KEY);
 }
 
+export function hasPendingComponentUpdatesAfterAppRestart(): boolean {
+  return parsePendingComponentUpdates(safeLocalStorageGet(PENDING_COMPONENT_UPDATES_STORAGE_KEY)) !== null;
+}
+
+export async function runPendingComponentUpdatesBeforePluginReconnect(options: { hasPendingComponentUpdates: () => boolean; prepareStartup: () => Promise<void>; consumePendingComponentUpdates: () => Promise<void>; reconnectRestoredPluginTabs: () => Promise<void> }): Promise<void> {
+  if (!options.hasPendingComponentUpdates()) {
+    void options.reconnectRestoredPluginTabs();
+    await options.prepareStartup();
+    return;
+  }
+
+  try {
+    await options.prepareStartup();
+    await options.consumePendingComponentUpdates();
+  } finally {
+    void options.reconnectRestoredPluginTabs();
+  }
+}
+
 export function takePendingComponentUpdatesAfterAppRestart(currentVersion: string): PendingComponentUpdates | null {
   const pending = parsePendingComponentUpdates(safeLocalStorageGet(PENDING_COMPONENT_UPDATES_STORAGE_KEY));
   if (!pending) {

@@ -121,7 +121,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
-- `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export.
+- `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
 - `backend.transport` defaults to `stdio-jsonl`. Use `stdio-framed` for binary frames and declare `host.binary` as well.
 - `backend.executable`, `ui.root`, and `ui.entry` must point to package files. Native packages need a matching executable for every target.
@@ -298,8 +298,8 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `capabilities` | `{ downloadFile, planApi, storage }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
-| `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai`. |
+| `capabilities` | `{ downloadFile, planApi, storage, ai }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai` and is advertised as `capabilities.ai` — gate on it instead of probing, since older hosts omit it. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
 | `fileTransfer` | Streams local files and OS drops (desktop only); see below. |
@@ -431,7 +431,7 @@ await dbxPlugin.ai.openConversation({
 });
 ```
 
-`title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object; the complete request is limited to 2 MiB. The host binds the installed plugin identity and copies the snapshot. Quote refreshes or database tab changes do not replace conversation data. The snapshot is stored as conversation data for history restoration and export. Include source, data timestamp, delays and missing fields; AI does not fetch market data itself.
+`title` allows 200 characters and `prompt` allows 32000. `context` must be a plain JSON object and is limited to 2 MiB. The host binds the installed plugin identity and copies the snapshot. Quote refreshes or database tab changes do not replace conversation data. The snapshot is stored as conversation data for history restoration and export. Include source, data timestamp, delays and missing fields; AI does not fetch market data itself.
 
 This method opens the built-in conversation and returns no model response or AI configuration to the plugin. The initial implementation uses text-only Ask through DBX's HTTP providers and Ollama, without database tools or CLI Agents. If no model is configured, the prompt remains an editable draft so the user can select a model and continue.
 

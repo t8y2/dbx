@@ -93,6 +93,30 @@ describe("PluginHostBridge", () => {
     expect(api.invoke).not.toHaveBeenCalled();
   });
 
+  it("advertises the ai capability group in the init message", () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const withAi = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      openAiConversation: vi.fn().mockResolvedValue(undefined),
+    });
+    withAi.sendInit();
+    expect(messages[0].capabilities.ai).toBe(true);
+
+    messages.length = 0;
+    const withoutAdapter = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    withoutAdapter.sendInit();
+    expect(messages[0].capabilities.ai).toBe(false);
+  });
+
   it("binds backend calls to the owning plugin identity", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

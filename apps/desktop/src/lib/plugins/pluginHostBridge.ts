@@ -250,6 +250,7 @@ export class PluginHostBridge {
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         storage: !!this.api.storageGet && !!this.api.storageSet && !!this.api.storageDelete,
+        ai: !!this.api.openAiConversation,
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });

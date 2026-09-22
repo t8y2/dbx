@@ -1,3 +1,4 @@
+import { uuid } from "@/lib/common/utils";
 import type { ConnectionConfig } from "@/types/database";
 import type { NacosAdminConfig, NacosNamespaceScope } from "@/types/nacos";
 import { applyNacosContentReplacePlan, rollbackNacosContentReplace, type NacosContentReplaceApi, type NacosContentReplacePlan, type NacosContentReplaceReport, type NacosContentRollbackReport } from "./nacosContentReplace";
@@ -55,7 +56,7 @@ export function nacosHistoryRollbackCandidates(entry: NacosReplaceHistoryEntry) 
 export async function applyWithNacosHistory(connectionId: string, target: string, scope: NacosReplaceHistoryEntry["scope"], plan: NacosContentReplacePlan, api: NacosContentReplaceApi): Promise<NacosReplaceHistoryEntry> {
   const entry: NacosReplaceHistoryEntry = {
     version: 1,
-    id: crypto.randomUUID(),
+    id: uuid(),
     connectionId,
     target,
     scope,

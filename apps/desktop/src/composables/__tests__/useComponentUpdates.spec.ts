@@ -131,7 +131,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledWith({ repositoryId: "official", pluginId: "example", version: "1.1.0" });
-    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [], blockedPlugins: [] });
   });
 
   it("shares one update operation between automatic and manual callers", async () => {
@@ -172,7 +172,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).not.toHaveBeenCalled();
     expect(mocks.installMcpServer).not.toHaveBeenCalled();
     expect(mocks.installMarketplacePlugin).not.toHaveBeenCalled();
-    expect(result).toEqual({ drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [] });
+    expect(result).toEqual({ drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [], blockedPlugins: [] });
   });
 
   it("installs every manually selected category when no DBX update exists and automatic updates are disabled", async () => {
@@ -190,7 +190,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
-    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [], blockedPlugins: [] });
   });
 
   it("resumes a persisted manual update-all plan after restart while automatic updates are disabled", async () => {
@@ -213,7 +213,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
-    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [] });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [], blockedPlugins: [] });
   });
 
   it("keeps the toolbar update action hidden while a persisted restart plan is still installing", async () => {
@@ -302,6 +302,32 @@ describe("useComponentUpdates", () => {
     const result = await updates.installCategory("jdbc");
 
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
-    expect(result).toEqual({ drivers: 0, jdbc: true, mcp: false, plugins: 0, skippedDrivers: 0, failed: [] });
+    expect(result).toEqual({ drivers: 0, jdbc: true, mcp: false, plugins: 0, skippedDrivers: 0, failed: [], blockedPlugins: [] });
+  });
+
+  it("reports the blocking connections when a K8S plugin update cannot start", async () => {
+    mocks.buildMarketplacePluginListings.mockReturnValue([
+      {
+        ...pluginUpdate,
+        plugin: { id: "io.dbx.k8s", latestVersion: "0.1.3" },
+        name: "Kubernetes 管理",
+      },
+    ]);
+    mocks.installMarketplacePlugin.mockRejectedValue(new Error("Plugin update blocked by active connections: market测试环境"));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategory("plugins");
+
+    expect(result.blockedPlugins).toEqual([{ pluginName: "Kubernetes 管理", reason: "connections", connections: "market测试环境" }]);
+    expect(result.failed).toEqual(["Kubernetes 管理: Plugin update blocked by active connections: market测试环境"]);
+  });
+
+  it("reports active operations separately from connections", async () => {
+    mocks.installMarketplacePlugin.mockRejectedValue(new Error("Plugin update blocked by active operations. Please wait for them to finish."));
+    const updates = useComponentUpdates({ isDesktop: true });
+
+    const result = await updates.installCategory("plugins");
+
+    expect(result.blockedPlugins).toEqual([{ pluginName: "Example plugin", reason: "operations" }]);
   });
 });

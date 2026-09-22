@@ -11,6 +11,8 @@ import type { JdbcPluginStatus } from "@/types/database";
 
 export type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
 
+export type PluginUpdateBlock = { pluginName: string; reason: "connections"; connections: string } | { pluginName: string; reason: "operations" | "inProgress" };
+
 export interface ComponentUpdateResult {
   drivers: number;
   jdbc: boolean;
@@ -18,6 +20,7 @@ export interface ComponentUpdateResult {
   plugins: number;
   skippedDrivers: number;
   failed: string[];
+  blockedPlugins: PluginUpdateBlock[];
 }
 
 interface ComponentUpdateRefreshOptions {
@@ -25,7 +28,21 @@ interface ComponentUpdateRefreshOptions {
 }
 
 function emptyResult(): ComponentUpdateResult {
-  return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [] };
+  return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [], blockedPlugins: [] };
+}
+
+function pluginUpdateBlock(pluginName: string, message: string): PluginUpdateBlock | null {
+  const connectionsPrefix = "Plugin update blocked by active connections: ";
+  if (message.startsWith(connectionsPrefix)) {
+    return { pluginName, reason: "connections", connections: message.slice(connectionsPrefix.length) };
+  }
+  if (message === "Plugin update blocked by active operations. Please wait for them to finish.") {
+    return { pluginName, reason: "operations" };
+  }
+  if (message === "Plugin update is in progress. Please try again after it finishes.") {
+    return { pluginName, reason: "inProgress" };
+  }
+  return null;
 }
 
 export function useComponentUpdates(options: { isDesktop: boolean }) {
@@ -167,7 +184,10 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
         });
         result.plugins += 1;
       } catch (error) {
-        result.failed.push(`${listing.name}: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        const block = pluginUpdateBlock(listing.name, message);
+        if (block) result.blockedPlugins.push(block);
+        result.failed.push(`${listing.name}: ${message}`);
       }
     }
   }

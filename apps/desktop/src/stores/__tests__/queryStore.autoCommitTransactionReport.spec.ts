@@ -123,10 +123,7 @@ describe("applyAutoCommitTransactionReport", () => {
   it("prefers the explicit notice when a batch carries both markers", async () => {
     const { applyAutoCommitTransactionReport } = await import("@/stores/queryStore");
     const tab = emptyTab();
-    applyAutoCommitTransactionReport(
-      tab as never,
-      [{ auto_commit_explicit_transaction_rolled_back: true, auto_commit_session_autocommit_rolled_back: true }] as never,
-    );
+    applyAutoCommitTransactionReport(tab as never, [{ auto_commit_explicit_transaction_rolled_back: true, auto_commit_session_autocommit_rolled_back: true }] as never);
     expect(tab.autoCommitTxnRolledBack).toBe(true);
     expect(tab.autoCommitSessionTxnRolledBack).toBeUndefined();
   });

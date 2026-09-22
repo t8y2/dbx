@@ -4909,16 +4909,11 @@ export const useQueryStore = defineStore("query", () => {
    *  transaction. The flag is dropped whenever the tab stops pointing at the
    *  connection that reported it (target switch, tab close), so a stale badge
    *  can never outlive the session it describes. */
-  function clearAutoCommitOpenTransaction(tab: {
-    autoCommitOpenTransaction?: boolean;
-    autoCommitSessionTxnRolledBack?: boolean;
-    autoCommitSessionTxnRolledBackNotified?: boolean;
-  }) {
+  function clearAutoCommitOpenTransaction(tab: { autoCommitOpenTransaction?: boolean; autoCommitSessionTxnRolledBack?: boolean; autoCommitSessionTxnRolledBackNotified?: boolean }) {
     if (tab.autoCommitOpenTransaction !== undefined) tab.autoCommitOpenTransaction = false;
     tab.autoCommitSessionTxnRolledBack = undefined;
     tab.autoCommitSessionTxnRolledBackNotified = undefined;
   }
-
 
   /** Centralized manual-session cleanup. Clears every field tied to a manual
    *  transaction session exactly when that session is conclusively ended or

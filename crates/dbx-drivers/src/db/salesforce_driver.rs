@@ -656,9 +656,11 @@ fn flatten_record(value: &Value, prefix: &str, out: &mut Vec<(String, Value)>, d
         }
         let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
         match child {
-            Value::Object(_) if child.get("records").is_none() && depth < 2 => {
-                flatten_record(child, &path, out, depth + 1);
-            }
+            // Recurse for every object so the rule above decides the shape: a
+            // compound field flattens (BillingAddress.city) while a subquery
+            // locator — or anything already two levels deep — stays one JSON
+            // string cell.
+            Value::Object(_) => flatten_record(child, &path, out, depth + 1),
             _ => out.push((path, child.clone())),
         }
     }

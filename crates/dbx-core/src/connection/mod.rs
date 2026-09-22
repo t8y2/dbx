@@ -8766,7 +8766,6 @@ mod tests {
             DatabaseType::SqlServer,
             DatabaseType::Elasticsearch,
             DatabaseType::Easysearch,
-            DatabaseType::Salesforce,
             DatabaseType::Kwdb,
         ] {
             let mut config = mysql_config(Some("app"));
@@ -8778,6 +8777,20 @@ mod tests {
             assert!(!uses_tcp_probe(&config, "192.0.2.10", config.port), "{db_type:?} ip");
             assert!(uses_tcp_probe(&config, "127.0.0.1", 54000), "{db_type:?} forwarded");
         }
+    }
+
+    #[test]
+    fn salesforce_connections_never_use_a_tcp_probe() {
+        // Salesforce reaches a cloud HTTPS endpoint through one pooled client, so the
+        // manifest sets skipTcpProbe: a raw TCP pre-flight is meaningless even for a
+        // forwarded local endpoint.
+        let mut config = mysql_config(Some("app"));
+        config.db_type = DatabaseType::Salesforce;
+        config.host = "acme.my.salesforce.com".to_string();
+        config.port = 443;
+
+        assert!(!uses_tcp_probe(&config, "acme.my.salesforce.com", 443), "instance url");
+        assert!(!uses_tcp_probe(&config, "127.0.0.1", 54000), "forwarded");
     }
 
     #[test]

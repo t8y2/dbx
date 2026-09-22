@@ -176,6 +176,13 @@ fn browser_flow_lock() -> &'static Mutex<()> {
 /// Resolve the login host for the flow. Custom hosts must be https and are
 /// normalized (no trailing slash, no path/query).
 pub fn login_base_url(params: &SfOauthParams) -> Result<String, String> {
+    login_base_url_with_policy(params, EndpointPolicy::HttpsOnly)
+}
+
+/// Same as [`login_base_url`], but the caller's endpoint policy decides whether a
+/// custom login URL may be loopback HTTP — test builds only, so the mock OAuth
+/// server the tests run is reachable while production stays HTTPS-only.
+fn login_base_url_with_policy(params: &SfOauthParams, policy: EndpointPolicy) -> Result<String, String> {
     let base = match params.environment {
         SfLoginEnvironment::Production => "https://login.salesforce.com".to_string(),
         SfLoginEnvironment::Sandbox => "https://test.salesforce.com".to_string(),
@@ -189,10 +196,7 @@ pub fn login_base_url(params: &SfOauthParams) -> Result<String, String> {
             } else {
                 format!("https://{raw}")
             };
-            let parsed = Url::parse(&url).map_err(|err| oauth_error(format!("invalid custom login URL: {err}")))?;
-            if parsed.scheme() != "https" {
-                return Err(oauth_error("custom login URL must use HTTPS"));
-            }
+            let parsed = policy.parse_url(&url, "custom login URL")?;
             format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or_default())
                 + &parsed.port().map(|port| format!(":{port}")).unwrap_or_default()
         }
@@ -230,7 +234,7 @@ fn build_authorize_url(
     code_challenge: &str,
     policy: EndpointPolicy,
 ) -> Result<Url, String> {
-    let base = login_base_url(params)?;
+    let base = login_base_url_with_policy(params, policy)?;
     let mut url = policy.parse_url(&authorize_endpoint(&base), "authorization endpoint")?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -358,7 +362,7 @@ async fn post_token_form(
     form: &[(&str, &str)],
     policy: EndpointPolicy,
 ) -> Result<Value, TokenEndpointError> {
-    let base = login_base_url(params).map_err(TokenEndpointError::Other)?;
+    let base = login_base_url_with_policy(params, policy).map_err(TokenEndpointError::Other)?;
     let endpoint = policy.parse_url(&token_endpoint(&base), "token endpoint").map_err(TokenEndpointError::Other)?;
     let client = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -726,8 +730,16 @@ mod tests {
     }
 
     async fn write_json_response(stream: &mut tokio::net::TcpStream, body: &str) {
+        // Salesforce answers OAuth refusals (`invalid_grant`, `authorization_pending`, …)
+        // with HTTP 400 plus an `error` body, and `post_token_form` branches on the
+        // status — so the mock has to reproduce that instead of always saying 200.
+        let is_oauth_error = serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|value| value.get("error").and_then(Value::as_str).map(|error| !error.is_empty()))
+            .unwrap_or(false);
+        let status = if is_oauth_error { "400 Bad Request" } else { "200 OK" };
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(response.as_bytes()).await.unwrap();

@@ -2002,6 +2002,27 @@ fn concurrent_metadata_prefetch_allowed(pool_kind: Option<&crate::connection::Po
     )
 }
 
+/// 预取实际使用的连接池能同时 checkout 出来的请求数。
+///
+/// 并发预取只有在池真的能同时服务多条请求时才有意义：会话级连接池
+/// （PostgreSQL/MySQL 的导出会话、标签页会话）只有一个物理连接，超出容量的并发
+/// 只会把请求排到同一个连接后面，排队时间一旦超过 checkout 超时，该表的元数据
+/// 就会以 "DBX metadata pool is busy; please retry" 失败（issue #10018）。
+fn metadata_prefetch_pool_capacity(pool: Option<&crate::connection::PoolKind>) -> usize {
+    match pool {
+        Some(crate::connection::PoolKind::Postgres(pool)) => pool.status().max_size,
+        Some(crate::connection::PoolKind::Mysql(pool, _)) => {
+            // 会话级 MySQL 池同样只有一个连接；`None` 表示驱动未暴露上限，
+            // 交由 `database_export_metadata_prefetch_concurrency` 按类型收敛。
+            crate::db::mysql::MySqlPoolAccess::checkout_max_connections(pool).unwrap_or(usize::MAX)
+        }
+        // ClickHouse 走 HTTP，不存在按物理连接排队的上限。
+        Some(crate::connection::PoolKind::ClickHouse(_)) => usize::MAX,
+        // 其余驱动（含串行客户端与单连接句柄）一律按单连接处理，回退逐表串行直查。
+        _ => 1,
+    }
+}
+
 fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize {
     // PostgreSQL exports can hold a snapshot connection while metadata and UI
     // requests share the base pool. Keep enough capacity available for normal
@@ -2011,6 +2032,14 @@ fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize
     } else {
         8
     }
+}
+
+/// 预取的实际并发度 = 数据库类型的上限 ∩ 预取所用连接池的容量。
+///
+/// 池容量为 1（会话级 PostgreSQL/MySQL 池）时并发度收敛到 1；调用方只在容量
+/// 大于 1 时才启用预取，因此这里返回 1 意味着走逐表串行直查的回退路径。
+fn metadata_prefetch_concurrency(db_type: DatabaseType, pool_capacity: usize) -> usize {
+    database_export_metadata_prefetch_concurrency(db_type).min(pool_capacity.max(1))
 }
 
 fn record_export_error<W: Write>(
@@ -3165,15 +3194,28 @@ async fn export_database_sql_core_inner(
     // legacy profile、PrestoSQL 等路由结果）的插件请求超时覆盖排队时间且超时会
     // 终止 sidecar；SQLite/DuckDB 等为单连接。被挡住的场景预取 Vec 保持全 None，
     // 写出循环内的 None 回退路径即原有的逐表串行直查行为。
+    //
+    // 这里必须检查预取**真正使用**的那个池：下面的 DDL/列元数据都带
+    // `client_session_id`，走的是导出会话的元数据池，而不是基础池。PostgreSQL
+    // 的会话池只有一个物理连接，若按基础池（10 连接）放行 4 路预取，每张表的
+    // `pg_ddl` 还会各自并发 8 个 checkout，32 个 checkout 挤在一条连接上，队尾
+    // 等待超过 checkout 超时后整张表的 DDL 就会以 "DBX metadata pool is busy;
+    // please retry" 失败（issue #10018）。
+    let metadata_prefetch_pool = match state
+        .get_or_create_metadata_pool_for_session(
+            &request.connection_id,
+            Some(&request.database),
+            Some(&client_session_id),
+        )
+        .await
+    {
+        Ok(metadata_pool_key) => state.pool_handle(&metadata_pool_key).await,
+        // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
+        Err(_) => None,
+    };
+    let metadata_prefetch_capacity = metadata_prefetch_pool_capacity(metadata_prefetch_pool.as_ref());
     let concurrent_prefetch_is_safe =
-        match state.get_or_create_pool(&request.connection_id, Some(&request.database)).await {
-            Ok(metadata_pool_key) => {
-                let pool = state.pool_handle(&metadata_pool_key).await;
-                concurrent_metadata_prefetch_allowed(pool.as_ref())
-            }
-            // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
-            Err(_) => false,
-        };
+        metadata_prefetch_capacity > 1 && concurrent_metadata_prefetch_allowed(metadata_prefetch_pool.as_ref());
     if concurrent_prefetch_is_safe
         && exports_database_tables(request)
         && !tables.is_empty()
@@ -3230,7 +3272,7 @@ async fn export_database_sql_core_inner(
                 (index, PrefetchedTableMetadata { ddl, columns })
             })
         }))
-        .buffer_unordered(database_export_metadata_prefetch_concurrency(db_type));
+        .buffer_unordered(metadata_prefetch_concurrency(db_type, metadata_prefetch_capacity));
         while let Some((index, metadata)) = prefetch_stream.next().await {
             if metadata
                 .ddl
@@ -3968,8 +4010,9 @@ mod tests {
     use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
-        emit_database_export_cancelled, postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled,
-        snapshot_batch_cancelled, ExportStatus, EXPORT_CANCELLED_ERROR,
+        emit_database_export_cancelled, metadata_prefetch_concurrency, metadata_prefetch_pool_capacity,
+        postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled, snapshot_batch_cancelled,
+        ExportStatus, EXPORT_CANCELLED_ERROR,
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
@@ -4422,6 +4465,65 @@ mod tests {
     fn postgres_metadata_prefetch_reserves_pool_capacity() {
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Postgres), 4);
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Mysql), 8);
+    }
+
+    #[tokio::test]
+    async fn metadata_prefetch_capacity_follows_the_pool_the_prefetch_uses() {
+        use crate::connection::PoolKind;
+
+        let postgres_pool = |max_size: usize| {
+            let manager = deadpool_postgres::Manager::new(tokio_postgres::Config::new(), tokio_postgres::NoTls);
+            PoolKind::Postgres(
+                deadpool_postgres::Pool::builder(manager)
+                    .runtime(deadpool_postgres::Runtime::Tokio1)
+                    .max_size(max_size)
+                    .build()
+                    .expect("build PostgreSQL test pool"),
+            )
+        };
+        // 导出会话池（issue #10018）：PostgreSQL 会话池只有一条物理连接，
+        // 并发预取只会把 checkout 排到同一个连接后面。
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&postgres_pool(1))), 1);
+        // 基础池（无会话）保留多连接并发。
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&postgres_pool(10))), 10);
+
+        // 会话级 MySQL 池同样单连接；非会话池按连接数放行。
+        let session_mysql = PoolKind::Mysql(
+            crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:1/app", 1),
+            crate::connection::MysqlMode::Bare,
+        );
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&session_mysql)), 1);
+        let shared_mysql = PoolKind::Mysql(
+            crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:1/app", 10),
+            crate::connection::MysqlMode::Bare,
+        );
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&shared_mysql)), 10);
+
+        let clickhouse = PoolKind::ClickHouse(crate::db::clickhouse_driver::ChClient::new(
+            "http://127.0.0.1:1",
+            None,
+            None,
+            std::time::Duration::from_secs(1),
+        ));
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&clickhouse)), usize::MAX);
+
+        let agent = PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub());
+        assert_eq!(metadata_prefetch_pool_capacity(Some(&agent)), 1);
+        assert_eq!(metadata_prefetch_pool_capacity(None), 1);
+    }
+
+    #[test]
+    fn metadata_prefetch_concurrency_never_exceeds_one_for_single_connection_pools() {
+        // 会话级 PostgreSQL/MySQL 池只有一条连接：并发预取在这里没有任何收益，
+        // 只会把 checkout 排到同一个连接后面并最终超时（issue #10018）。
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Postgres, 1), 1);
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Mysql, 1), 1);
+        // 多连接池保留原有上限。
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Postgres, 10), 4);
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Mysql, 10), 8);
+        // 池容量小于类型上限时按池容量收敛。
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Mysql, 3), 3);
+        assert_eq!(metadata_prefetch_concurrency(DatabaseType::Postgres, usize::MAX), 4);
     }
 
     #[test]

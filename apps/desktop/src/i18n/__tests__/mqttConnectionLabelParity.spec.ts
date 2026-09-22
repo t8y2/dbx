@@ -1,5 +1,16 @@
 import { readFileSync } from "node:fs";
+import { createI18n } from "vue-i18n";
 import { describe, expect, it } from "vitest";
+import az from "@/i18n/locales/az";
+import en from "@/i18n/locales/en";
+import es from "@/i18n/locales/es";
+import itLocale from "@/i18n/locales/it";
+import ja from "@/i18n/locales/ja";
+import ko from "@/i18n/locales/ko";
+import ptBR from "@/i18n/locales/pt-BR";
+import tr from "@/i18n/locales/tr";
+import zhCN from "@/i18n/locales/zh-CN";
+import zhTW from "@/i18n/locales/zh-TW";
 
 // These assertions read the locale SOURCES as text instead of importing the modules.
 // Every non-English locale is `export default withEnglishFallback({ ... })`, and
@@ -51,6 +62,35 @@ describe("mqtt max packet size label i18n parity", () => {
     expect(declaredString(source, "mqttMaxPacketSize")).toBeTruthy();
     expect(declaredString(source, "mqttKeepAlive")).toBeUndefined();
     expect(declaredString(source, "mqttConnectTimeout")).toBeUndefined();
+  });
+});
+
+// Layer (a) from the PRD: the label must also resolve through vue-i18n at runtime. This is
+// weaker than the source-level check above — the deep-merge hands a locale that drops the
+// key the english text, so it cannot see drift — but it is what catches a locale module
+// that fails to declare or parse the key at all, and the "key path leaks into the UI"
+// failure mode that a missing translation produces.
+const localeModules: Array<[string, Record<string, unknown>]> = [
+  ["az", az],
+  ["en", en],
+  ["es", es],
+  ["it", itLocale],
+  ["ja", ja],
+  ["ko", ko],
+  ["pt-BR", ptBR],
+  ["tr", tr],
+  ["zh-CN", zhCN],
+  ["zh-TW", zhTW],
+];
+
+describe("mqtt max packet size label resolution", () => {
+  it.each(localeModules)("%s resolves the label to a translated string", (name, messages) => {
+    const connection = (messages.connection ?? {}) as typeof en.connection;
+    const i18n = createI18n({ legacy: false, locale: name, messages: { [name]: { connection } } });
+    const label = i18n.global.t("connection.mqttMaxPacketSize");
+    expect(label).not.toBe("connection.mqttMaxPacketSize");
+    expect(label.trim()).not.toBe("");
+    i18n.dispose();
   });
 });
 

@@ -924,17 +924,27 @@ fn read_identifier(text: &str, start: usize) -> Option<Identifier> {
         return None;
     }
 
-    if !is_identifier_start(first) {
+    // MySQL/MariaDB let an unquoted identifier start with a digit as long as it is not a pure
+    // number, so `01_tablename` is a table name while `123` / `1e3` stay literals (#9992).
+    // Every other dialect that reaches this lenient analyzer rejects a leading digit at parse
+    // time, so accepting the token here cannot mis-bind a statement the server would run.
+    if !is_identifier_start(first) && !first.is_ascii_digit() {
         return None;
     }
     let mut end = pos + first.len_utf8();
+    let mut value_end = text.len();
     for (offset, ch) in text[end..].char_indices() {
         if !is_identifier_char(ch) {
-            return Some(Identifier { value: text[pos..end + offset].to_string(), quoted: false, end: end + offset });
+            value_end = end + offset;
+            break;
         }
     }
-    end = text.len();
-    Some(Identifier { value: text[pos..end].to_string(), quoted: false, end })
+    end = value_end;
+    let value = &text[pos..end];
+    if first.is_ascii_digit() && is_number_shaped(value) {
+        return None;
+    }
+    Some(Identifier { value: value.to_string(), quoted: false, end })
 }
 
 fn skip_whitespace(text: &str, pos: usize) -> usize {
@@ -1076,6 +1086,25 @@ fn is_identifier_start(ch: char) -> bool {
     ch == '_' || unicode_ident::is_xid_start(ch)
 }
 
+/// Numeric literals keep their meaning even though MySQL allows an unquoted identifier to begin
+/// with a digit: `123`, `1e3`, `0x1f` and `0b11` are numbers, `01_tablename` is not (#9992).
+fn is_number_shaped(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix(|ch: char| ch.is_ascii_digit()) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    if let Some(hex) = rest.strip_prefix('x') {
+        return !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit());
+    }
+    if let Some(bits) = rest.strip_prefix('b') {
+        return !bits.is_empty() && bits.chars().all(|ch| ch == '0' || ch == '1');
+    }
+    rest.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, 'e' | '+' | '-'))
+}
+
 fn is_identifier_char(ch: char) -> bool {
     ch == '$' || unicode_ident::is_xid_continue(ch)
 }
@@ -1083,6 +1112,55 @@ fn is_identifier_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_digit_leading_identifiers_per_issue_9992() {
+        // MySQL/MariaDB allow an unquoted identifier that starts with a digit as long as it is
+        // not a pure number, so `01_tablename` must resolve like any other table name.
+        assert_eq!(read_identifier("01_tablename", 0).map(|ident| ident.value), Some("01_tablename".to_string()));
+        assert_eq!(
+            read_identifier("`01_tablename`", 0).map(|ident| (ident.value, ident.quoted)),
+            Some(("01_tablename".to_string(), true))
+        );
+        // Number-shaped tokens stay literals instead of becoming identifiers.
+        assert!(read_identifier("123", 0).is_none());
+        assert!(read_identifier("1e3", 0).is_none());
+        assert!(read_identifier("0x1f", 0).is_none());
+        assert!(is_number_shaped("123"));
+        assert!(is_number_shaped("1e3"));
+        assert!(is_number_shaped("0x1f"));
+        assert!(is_number_shaped("0b101"));
+        assert!(!is_number_shaped("01_tablename"));
+        assert!(!is_number_shaped("1abc"));
+        assert!(!is_number_shaped("t1"));
+
+        let result = analyze_editable_query_editability("select * from 01_tablename");
+        assert!(result.editable, "{:?}", result.reason);
+        let analysis = result.analysis.expect("analysis");
+        assert_eq!(analysis.table_name, "01_tablename");
+        assert!(!analysis.table_name_quoted);
+        assert!(analysis.select_star);
+
+        let qualified = analyze_editable_query_editability("select id, name from app.01_tablename");
+        assert!(qualified.editable, "{:?}", qualified.reason);
+        let qualified_analysis = qualified.analysis.expect("analysis");
+        assert_eq!(qualified_analysis.schema.as_deref(), Some("app"));
+        assert_eq!(qualified_analysis.table_name, "01_tablename");
+        assert_eq!(
+            qualified_analysis.columns,
+            vec![
+                column(Some("id"), false, None, None, "id", "id"),
+                column(Some("name"), false, None, None, "name", "name"),
+            ]
+        );
+
+        // A pure numeric projection stays an expression, not a column reference.
+        let literal = analyze_editable_query_editability("select 123 from 01_tablename");
+        let literal_analysis = literal.analysis.expect("analysis");
+        assert_eq!(literal_analysis.columns.len(), 1);
+        assert_eq!(literal_analysis.columns[0].source_name, None);
+        assert_eq!(literal_analysis.columns[0].expression, "123");
+    }
 
     #[test]
     fn recognizes_simple_single_table_select_as_editable() {

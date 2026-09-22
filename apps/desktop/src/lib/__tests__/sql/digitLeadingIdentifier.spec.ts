@@ -38,9 +38,7 @@ describe("digit-leading identifiers (#9992)", () => {
     const sql = "select * from 01_tablename";
 
     expect(extractIdentifierAt(sql, sql.indexOf("01_tablename"))).toBe("01_tablename");
-    expect(extractQualifiedIdentifierAt(sql, sql.indexOf("01_tablename"))?.parts).toEqual([
-      { value: "01_tablename", quoted: false },
-    ]);
+    expect(extractQualifiedIdentifierAt(sql, sql.indexOf("01_tablename"))?.parts).toEqual([{ value: "01_tablename", quoted: false }]);
   });
 
   it("does not extract numeric literals as identifiers", () => {

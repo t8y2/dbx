@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye } from "@lucide/vue";
+import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, Layers, MoreHorizontal, BetweenVerticalStart, Eye, WrapText } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -254,6 +254,11 @@ const explainAnalyzeTooltip = computed(() => {
 const canSaveSql = computed(() => canSaveSqlTab(props.activeTab));
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
+const wordWrapEnabled = computed(() => props.activeTab.forceWordWrap === true || settingsStore.editorSettings.wordWrap);
+function toggleWordWrap() {
+  if (props.activeTab.forceWordWrap) return;
+  settingsStore.updateEditorSettings({ wordWrap: !wordWrapEnabled.value });
+}
 const sqlSemanticDiagnosticsEnabled = computed(() => settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const sqlSemanticDiagnosticsToggleTooltip = computed(() => (sqlSemanticDiagnosticsEnabled.value ? t("toolbar.sqlSemanticDiagnosticsToggleOn") : t("toolbar.sqlSemanticDiagnosticsToggleOff")));
 const supportsSqlSemanticDiagnosticsToggle = computed(() => {
@@ -359,6 +364,7 @@ const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value 
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
 const showCompressButton = computed(() => toolbarTier.value < 1);
 const showKeywordCaseButton = computed(() => toolbarTier.value < 1);
+const showWordWrapButton = computed(() => toolbarTier.value < 1);
 const showSemanticDiagnosticsButton = computed(() => supportsSqlSemanticDiagnosticsToggle.value && toolbarTier.value < 1);
 const showPreviewButton = computed(() => previewButtonVisible.value && toolbarTier.value < 1);
 const showInsertValueHintsButton = computed(() => supportsInsertValueHintsToggle.value && toolbarTier.value < 1);
@@ -509,6 +515,23 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ keywordCaseToggleTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="showWordWrapButton">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6"
+            :class="wordWrapEnabled ? 'bg-sky-500/10 text-sky-700 hover:bg-sky-500/20 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200' : 'text-muted-foreground/50 hover:bg-muted hover:text-muted-foreground'"
+            :disabled="activeTab.forceWordWrap === true"
+            :aria-label="t('settings.wordWrap')"
+            :aria-pressed="wordWrapEnabled"
+            @click="toggleWordWrap"
+          >
+            <WrapText class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("settings.wordWrap") }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="showSemanticDiagnosticsButton">
         <TooltipTrigger as-child>
           <Button
@@ -613,6 +636,10 @@ async function changeCatalog(selectedCatalog: string) {
             </span>
             {{ keywordCaseToggleTooltip }}
           </DropdownMenuItem>
+          <DropdownMenuCheckboxItem :model-value="wordWrapEnabled" :disabled="activeTab.forceWordWrap === true" @select.prevent="toggleWordWrap">
+            <WrapText class="h-3.5 w-3.5" />
+            {{ t("settings.wordWrap") }}
+          </DropdownMenuCheckboxItem>
           <DropdownMenuCheckboxItem v-if="supportsSqlSemanticDiagnosticsToggle" :model-value="sqlSemanticDiagnosticsEnabled" @select.prevent="toggleSqlSemanticDiagnostics">
             <SpellCheck2 class="h-3.5 w-3.5" />
             {{ t("settings.sqlSemanticDiagnosticsEnabled") }}

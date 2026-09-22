@@ -63,6 +63,7 @@ vi.mock("@/components/common/ProductionContextBadge.vue", () => ({
 
 import EditorToolbar from "../EditorToolbar.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { resolveExecutableSql, type SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import { EditorView } from "@codemirror/view";
@@ -302,6 +303,98 @@ describe("EditorToolbar mount contract", () => {
 
     expect(pendingSnapshot?.selectedSql).toBe(selectedSql);
     expect(executedSql).toBe(selectedSql);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("toggles word wrap from the SQL toolbar and updates the mounted editor", async () => {
+    const connectionStore = useConnectionStore();
+    const settingsStore = useSettingsStore();
+    const connection = {
+      id: "conn-1",
+      name: "conn",
+      db_type: "mysql",
+      color: "",
+    } as never;
+    connectionStore.connections = [connection];
+    settingsStore.editorSettings.wordWrap = false;
+
+    const sql = "SELECT this_is_a_very_long_column_name FROM this_is_a_very_long_table_name";
+    const forceWordWrap = ref(false);
+    const host = createHost();
+    const app = createApp({
+      setup() {
+        return () =>
+          h("div", [
+            h(QueryEditor, {
+              modelValue: sql,
+              tabId: "tab-1",
+              connectionId: "conn-1",
+              database: "db",
+              databaseType: "mysql",
+              dialect: "mysql",
+              forceWordWrap: forceWordWrap.value,
+              autoFocus: false,
+            }),
+            h(EditorToolbar, {
+              activeTab: {
+                id: "tab-1",
+                title: "SQL",
+                connectionId: "conn-1",
+                database: "db",
+                sql,
+                mode: "query",
+                isExecuting: false,
+                isCancelling: false,
+                isExplaining: false,
+                forceWordWrap: forceWordWrap.value,
+              },
+              activeConnection: connection,
+              executableSql: sql,
+              explainMode: "explain",
+              blockDangerousRedisCommands: false,
+              sqlKeywordCase: "preserve",
+              databaseRequiredSignal: 0,
+              autoCommit: true,
+              txnSessionId: undefined,
+              txnAutoRolledBack: false,
+              txnPossiblyDirty: false,
+              stickyProvenReadOnlyState: false,
+            }),
+          ]);
+      },
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await vi.waitFor(() => expect(host.querySelector(".cm-editor")).not.toBeNull(), { timeout: 5000 });
+
+    const view = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    expect(view.contentDOM.classList.contains("cm-lineWrapping")).toBe(false);
+
+    const wordWrapButton = host.querySelector<HTMLButtonElement>('button[aria-label="settings.wordWrap"]');
+    expect(wordWrapButton).not.toBeNull();
+    expect(wordWrapButton?.getAttribute("aria-pressed")).toBe("false");
+    wordWrapButton?.click();
+
+    await vi.waitFor(() => expect(settingsStore.editorSettings.wordWrap).toBe(true));
+    await nextTick();
+    await vi.waitFor(() => expect(view.contentDOM.classList.contains("cm-lineWrapping")).toBe(true));
+    expect(wordWrapButton?.getAttribute("aria-pressed")).toBe("true");
+
+    wordWrapButton?.click();
+    await vi.waitFor(() => expect(settingsStore.editorSettings.wordWrap).toBe(false));
+    await vi.waitFor(() => expect(view.contentDOM.classList.contains("cm-lineWrapping")).toBe(false));
+    expect(wordWrapButton?.getAttribute("aria-pressed")).toBe("false");
+
+    forceWordWrap.value = true;
+    await nextTick();
+    await vi.waitFor(() => expect(view.contentDOM.classList.contains("cm-lineWrapping")).toBe(true));
+    expect(wordWrapButton?.disabled).toBe(true);
+    expect(wordWrapButton?.getAttribute("aria-pressed")).toBe("true");
+    wordWrapButton?.click();
+    expect(settingsStore.editorSettings.wordWrap).toBe(false);
 
     app.unmount();
     host.remove();

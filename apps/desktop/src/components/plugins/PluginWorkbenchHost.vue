@@ -60,15 +60,17 @@ let loadGeneration = 0;
 
 // --- Plugin file-transfer bridge (native dialogs + OS file drops) ---------
 // The sandboxed iframe cannot reach local files, so handles live here: Tauri
-// handles wrap the plugin_file registry in Rust (`t<n>` ids); the web host
-// keeps File objects and in-memory save buffers (`w<n>` ids). Only paths that
-// came from a native dialog or an OS drop reach plugin_file_open — never a
-// plugin-supplied string.
+// handles wrap the plugin_file registry in Rust (`t<uuid>` ids); the web host
+// keeps File objects and in-memory save buffers (`w<n>` ids). Handle ids are
+// opaque strings end to end — never run them through Number(): ids above
+// Number.MAX_SAFE_INTEGER silently round, and the registry then rejects every
+// read with "unknown plugin file handle". Only paths that came from a native
+// dialog or an OS drop reach plugin_file_open — never a plugin-supplied string.
 
 let webFileSequence = 0;
 const webPickedFiles = new Map<string, File>();
 const webSaveBuffers = new Map<string, { name: string; contentType: string; chunks: Map<number, Uint8Array> }>();
-const openTauriHandles = new Set<number>();
+const openTauriHandles = new Set<string>();
 const tauriHandlePrefix = "t";
 const webHandlePrefix = "w";
 
@@ -81,9 +83,9 @@ function encodeBytesBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function parseHandleId(handleId: string): { source: "tauri" | "web"; numericId: number } {
-  if (handleId.startsWith(tauriHandlePrefix)) return { source: "tauri", numericId: Number(handleId.slice(tauriHandlePrefix.length)) };
-  if (handleId.startsWith(webHandlePrefix)) return { source: "web", numericId: Number(handleId.slice(webHandlePrefix.length)) };
+function parseHandleId(handleId: string): { source: "tauri" | "web"; rawId: string } {
+  if (handleId.startsWith(tauriHandlePrefix)) return { source: "tauri", rawId: handleId.slice(tauriHandlePrefix.length) };
+  if (handleId.startsWith(webHandlePrefix)) return { source: "web", rawId: handleId.slice(webHandlePrefix.length) };
   throw new Error("Unknown file handle");
 }
 
@@ -149,7 +151,7 @@ async function readPluginFileChunkById(pluginId: string, handleId: string, offse
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { readPluginLocalFileChunk } = await tauriFileApi();
-    return readPluginLocalFileChunk(pluginId, parsed.numericId, offset, length);
+    return readPluginLocalFileChunk(pluginId, parsed.rawId, offset, length);
   }
   const file = webPickedFiles.get(handleId);
   if (!file) throw new Error("Unknown file handle");
@@ -217,7 +219,7 @@ async function writePluginFileChunkById(pluginId: string, handleId: string, offs
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { writePluginLocalFileChunk } = await tauriFileApi();
-    return writePluginLocalFileChunk(pluginId, parsed.numericId, offset, encodeBytesBase64(bytes));
+    return writePluginLocalFileChunk(pluginId, parsed.rawId, offset, encodeBytesBase64(bytes));
   }
   const buffer = webSaveBuffers.get(handleId);
   if (!buffer) throw new Error("Unknown file handle");
@@ -229,8 +231,8 @@ async function finishPluginFileSave(pluginId: string, handleId: string): Promise
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
-    openTauriHandles.delete(parsed.numericId);
-    await closePluginLocalFile(pluginId, parsed.numericId);
+    openTauriHandles.delete(parsed.rawId);
+    await closePluginLocalFile(pluginId, parsed.rawId);
     return;
   }
   const buffer = webSaveBuffers.get(handleId);
@@ -256,8 +258,8 @@ async function closePluginFileHandleById(pluginId: string, handleId: string): Pr
   const parsed = parseHandleId(handleId);
   if (parsed.source === "tauri") {
     const { closePluginLocalFile } = await tauriFileApi();
-    openTauriHandles.delete(parsed.numericId);
-    await closePluginLocalFile(pluginId, parsed.numericId);
+    openTauriHandles.delete(parsed.rawId);
+    await closePluginLocalFile(pluginId, parsed.rawId);
     return;
   }
   webPickedFiles.delete(handleId);

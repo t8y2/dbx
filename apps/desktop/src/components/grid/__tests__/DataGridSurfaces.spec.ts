@@ -183,8 +183,7 @@ describe("DataGrid canvas surfaces", () => {
     expect(dataGridSource).toContain("return canvasOverlayRef.value ?? null;");
     expect(dataGridSource).toContain("const measurementSurface = canvasMeasurementSurface();");
     expect(dataGridSource).toContain("getSurface: canvasMeasurementSurface,");
-    expect(dataGridSource).toContain("const canvas = inactiveCanvasSurface();");
-    expect(dataGridSource).toContain("canvasUsingBackSurface.value = !canvasUsingBackSurface.value;");
+    expect(dataGridSource).toContain("const canvas = canvasRef.value;");
   });
 
   it("uses the canvas that actually received the event during a surface flip", () => {

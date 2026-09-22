@@ -16,7 +16,6 @@ describe("DataGrid cell detail selection", () => {
     expect(dataGridSource).toContain("function isCanvasGridInteractionTarget(target: Node): boolean");
     expect(dataGridSource).toContain("canvasOverlayRef.value?.contains(target) === true");
     expect(dataGridSource).toContain("canvasRef.value?.contains(target) === true");
-    expect(dataGridSource).toContain("canvasBackRef.value?.contains(target) === true");
 
     const canvasLeave = dataGridSource.match(/function onCanvasMouseLeave[\s\S]*?\n\}/)?.[0];
     const detailLeave = dataGridSource.match(/function clearCanvasDetailHover[\s\S]*?\n\}/)?.[0];

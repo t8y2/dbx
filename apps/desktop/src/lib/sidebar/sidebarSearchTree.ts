@@ -4,7 +4,14 @@ import { buildTableTreeNodes } from "@/lib/table/tableTree";
 import { stripTableVGroupsFromChildren } from "@/lib/table/tableVGroup";
 
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
-const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-job-admin"]);
+// Synthetic connection utility entries (the isConnectionUtilityNode types in
+// connectionStore) are admin/navigation shortcuts, not schema objects. Their
+// labels are i18n keys that can never match a text query, so the only way they
+// surface in a search is as preserved children — where they make a closed
+// connection look like it holds hits and turn the first double-click into a
+// collapse. saved-sql-root is exempt: its saved queries are real searchable
+// files rather than a shortcut.
+const hiddenSearchNodeTypes = new Set<TreeNodeType>(["user-admin", "dameng-users", "dameng-roles", "dameng-job-admin", "group-tablespaces", "oracle-db-links"]);
 
 function bestMatch(matchLabel: SidebarLabelMatcher, label: string, comment?: string | null, aliases?: readonly string[]) {
   let best = matchLabel(label);

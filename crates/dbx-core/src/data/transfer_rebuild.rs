@@ -566,8 +566,10 @@ async fn detect_parsed_view_dependencies(
     } else if matches!(database_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
         // `VIEW_DEFINITION` is the resolved SELECT, and a MySQL database *is* the schema
         // DBX rebuilds in, so the row's `TABLE_SCHEMA` decides which namespace an
-        // unqualified relation belongs to.
-        (String::new(), schema.to_string(), mysql_view_definition_dependencies_sql(database))
+        // unqualified relation belongs to. The 8.0 catalog path keys on the database, so
+        // the fallback keeps the same spelling: dropping the database here would leave
+        // qualified references unmatched whenever the caller passes an empty schema.
+        (database.to_string(), schema.to_string(), mysql_view_definition_dependencies_sql(database))
     } else {
         let schema = resolve_sqlite_dependency_schema(state, pool_key, database, schema, database_type).await?;
         let mut sql = format!(
@@ -1396,6 +1398,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(qualified.into_iter().collect::<Vec<_>>(), vec!["orders".to_string()]);
+
+        // A bare API call can reach the MySQL fallback with an empty target schema; the
+        // qualified reference must then match on the database spelling alone, exactly as
+        // the 8.0 catalog path filters `TABLE_SCHEMA` by database.
+        let empty_schema =
+            mysql_view_definition_target_references("select `id` from `shop`.`orders`", "shop", "", "shop", &targets)
+                .unwrap();
+        assert_eq!(empty_schema.into_iter().collect::<Vec<_>>(), vec!["orders".to_string()]);
 
         let unqualified = mysql_view_definition_target_references(
             "select `id` from `shop`.`orders` join `customers` on 1 = 1",

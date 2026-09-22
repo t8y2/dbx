@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { ArrowLeft, Minus, Square, Copy, X, Grip, Pin, PinOff } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useWindowControls } from "@/composables/useWindowControls";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 defineProps<{
   title: string;
@@ -18,6 +20,10 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { isMac, isMaximized, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop } = useWindowControls();
+const settingsStore = useSettingsStore();
+// Mirrors the main toolbar: the pin control is opt-in, and it keeps showing
+// whenever this window is pinned so the user can always unpin it again.
+const showAlwaysOnTopButton = computed(() => settingsStore.editorSettings.toolbarItems.alwaysOnTop || isAlwaysOnTop.value);
 
 let dragging = false;
 
@@ -74,6 +80,7 @@ async function handleDragEnd(event: PointerEvent) {
       <span>{{ t("tabs.returnToMainWindow") }}</span>
     </button>
     <button
+      v-if="showAlwaysOnTopButton"
       type="button"
       class="mr-1 inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
       :class="{ 'bg-accent text-foreground': isAlwaysOnTop }"

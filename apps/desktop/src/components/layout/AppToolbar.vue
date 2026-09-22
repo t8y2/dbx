@@ -80,6 +80,11 @@ const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, isAlwaysOnTop, minimize, toggleMaximize, toggleAlwaysOnTop, close } = useWindowControls();
+// The always-on-top control is opt-in (外观 → 工具栏): the right side of the
+// toolbar is the most crowded strip in the app. It stays visible while the
+// window is actually pinned even with the setting off, so turning the setting
+// off can never leave the user with a pinned window and no way to unpin it.
+const showAlwaysOnTopButton = computed(() => isDesktop && (toolbarItems.value.alwaysOnTop || isAlwaysOnTop.value));
 const updateTooltip = computed(() => {
   if (props.hasUpdateAvailable && props.updateReady) return t("updates.restartRequiredTooltip");
   if (props.hasUpdateAvailable && props.updateReadyToInstall) return t("updates.downloadedReady", { version: props.updateVersion ?? "" });
@@ -645,7 +650,7 @@ const toolbarStyle = computed(() => {
         </Tooltip>
       </template>
 
-      <Tooltip v-if="isDesktop">
+      <Tooltip v-if="showAlwaysOnTopButton">
         <TooltipTrigger as-child>
           <Button
             variant="ghost"

@@ -4537,11 +4537,18 @@ public final class DbxJdbcPlugin {
             // wasNull() 区分 SQL NULL 与「驱动不支持按字节读取」。
             return rs.wasNull() ? null : BIT_COLUMN_UNSUPPORTED;
         }
-        if (payload.length == 1 && (payload[0] == 't' || payload[0] == 'f')) {
-            // GaussDB/金仓的布尔位串按 't'/'f' 返回，保持布尔语义。
+        int precision = bitColumnPrecision(meta, index);
+        if (payload.length == 1 && precision <= 1 && (payload[0] == 't' || payload[0] == 'f')) {
+            // GaussDB/金仓的布尔位串按 't'/'f' 返回，保持布尔语义；位宽大于 1 的列是位字段而不是布尔。
             return payload[0] == 't';
         }
-        String bitString = bitStringFromPayload(payload, bitColumnPrecision(meta, index));
+        if (payload.length == 1 && precision == 1 && payload[0] != 0x00 && payload[0] != 0x01
+            && payload[0] != '0' && payload[0] != '1') {
+            // Connector/J 默认把 tinyint(1) 上报成 Types.BIT 且位宽为 1，载荷超出 0/1 说明是数值列：
+            // 截成单个比特会静默丢数据，按有符号字节十进制展示（`'0'`/`'1'` 文本是驱动的位串形式，除外）。
+            return payload[0];
+        }
+        String bitString = bitStringFromPayload(payload, precision);
         // 位宽不可信时 bitStringFromPayload 返回 null（不是 SQL NULL），交给通用分支保持 `0x..` 展示。
         return bitString == null ? BIT_COLUMN_UNSUPPORTED : bitString;
     }

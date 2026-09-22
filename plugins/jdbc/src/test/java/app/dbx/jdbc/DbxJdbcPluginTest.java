@@ -792,6 +792,29 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void readValueRendersTinyInt1BitColumnsAsNumbers() throws Exception {
+        Method method = bitStringReadValue();
+
+        // Connector/J 默认把 tinyint(1) 上报成 Types.BIT（位宽 1），超出 0/1 的载荷是数值列，
+        // 截成单个比特会静默丢数据（2 显示成 "0"、3 显示成 "1"），必须按有符号字节十进制展示。
+        assertEquals(Byte.valueOf((byte) 2), method.invoke(null, bytesResultSet(new byte[] { 2 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals(Byte.valueOf((byte) 127), method.invoke(null, bytesResultSet(new byte[] { 127 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals(Byte.valueOf((byte) -1), method.invoke(null, bytesResultSet(new byte[] { (byte) 0xff }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        // 真正的 bit(1) 载荷仍是 0/1，按位串展示。
+        assertEquals("0", method.invoke(null, bytesResultSet(new byte[] { 0x00 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+        assertEquals("1", method.invoke(null, bytesResultSet(new byte[] { 0x01 }), columnMeta(Types.BIT, "BIT", 1), 1, false, null, true));
+    }
+
+    @Test
+    void readValueDoesNotTreatMultiBitPayloadsAsBooleanText() throws Exception {
+        Method method = bitStringReadValue();
+
+        // bit(8) 的裸载荷恰好等于 't'/'f' 的字节值时是位字段而不是布尔文本，按位串展开。
+        assertEquals("01110100", method.invoke(null, bytesResultSet(new byte[] { 't' }), columnMeta(Types.BIT, "BIT", 8), 1, false, null, true));
+        assertEquals("01100110", method.invoke(null, bytesResultSet(new byte[] { 'f' }), columnMeta(Types.BIT, "BIT", 8), 1, false, null, true));
+    }
+
+    @Test
     void readValueKeepsDriverBooleanWhenBitColumnCannotBeReadAsBytes() throws Exception {
         Method method = bitStringReadValue();
         // mssql-jdbc 拒绝把 BIT 读成 byte[]，此时必须保持驱动返回的布尔值。

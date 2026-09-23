@@ -406,8 +406,7 @@ fn command_cursor_id(cursor: &Document) -> Result<i64, String> {
 
 async fn dump_client(state: &AppState, id: &str, database: &str) -> Result<DumpClient, String> {
     metadata::validate_database(database)?;
-    state.get_or_create_pool(id, Some(database)).await?;
-    match state.pool_handle(id).await {
+    match crate::mongodb_import_export::mongo_pool_for_database(state, id, database).await.ok() {
         Some(PoolKind::MongoDb(client)) => Ok(DumpClient::Native(client.clone())),
         Some(PoolKind::Agent(client)) => {
             // Check what every dump, restore, or preview shares up front, so an outdated

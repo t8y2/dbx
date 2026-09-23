@@ -1527,9 +1527,11 @@ export const useConnectionStore = defineStore("connection", () => {
   /**
    * 后台搜索重连失败：按被动断链处理（连接确实不可用了），但把驱动错误换成一行提示，
    * 这样节点上只留一句“搜索已跳过该连接”，用户显式连接时仍能看到完整错误。
+   * markLost=false：查询阶段连接仍然存活（如权限拒绝），只留一行跳过提示，
+   * 不替用户断开正在使用的连接。
    */
-  function recordSidebarSearchConnectionFailure(connectionId: string, error: unknown) {
-    markConnectionLost(connectionId, error);
+  function recordSidebarSearchConnectionFailure(connectionId: string, error: unknown, markLost = true) {
+    if (markLost) markConnectionLost(connectionId, error);
     setConnectionError(connectionId, sidebarSearchSkipMessage(error));
   }
 
@@ -1539,7 +1541,9 @@ export const useConnectionStore = defineStore("connection", () => {
     // 搜索驱动的后台加载失败按“搜索跳过该连接”降级：搜索只是投影动作，不能把驱动原始错误
     // （旧版 SQL Server 会附带整段 TLS/加密提示）留在连接节点上。取消/被取代的尝试沿用原有清错处理。
     if (isSidebarSearchLoad(connectionId) && !isCancelledConnectionAttempt(error) && !isSupersededConnectionAttempt(error)) {
-      recordSidebarSearchConnectionFailure(connectionId, error);
+      // 元数据查询失败未必意味着连接已死：只有连接级错误（与 recordConnectionLostError 同一判定）
+      // 才被动断链；权限拒绝等查询期错误保持连接，只降级为一行跳过提示。
+      recordSidebarSearchConnectionFailure(connectionId, error, shouldMarkDisconnected(error));
       return;
     }
     if (recordConnectionLostError(connectionId, error)) return;
@@ -5172,7 +5176,10 @@ export const useConnectionStore = defineStore("connection", () => {
     );
   }
 
-  async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
+  async function loadConnectedConnectionRootForSidebarSearch(connectionId: string, options?: { sidebarSearch?: boolean }): Promise<void> {
+    if (options?.sidebarSearch) {
+      return withSidebarSearchLoad(connectionId, () => loadConnectedConnectionRootForSidebarSearch(connectionId, { ...options, sidebarSearch: false }));
+    }
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
     if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;

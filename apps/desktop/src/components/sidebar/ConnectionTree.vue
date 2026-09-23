@@ -387,7 +387,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     if (connectionIsConnected && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       const connectionId = node.connectionId;
       scheduledNodeIds?.add(node.id);
-      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId));
+      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId, { sidebarSearch: true }));
     }
     // 搜索不得替用户建连：只有连接中的连接（含当前激活的那个）才继续刷新子树。
     // 断开或连不上的连接直接跳过，后台搜索不会因此弹出凭据输入或写入整段连接错误。

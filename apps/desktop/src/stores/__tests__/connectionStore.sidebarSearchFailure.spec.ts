@@ -70,7 +70,7 @@ function connectionTree(connection: ConnectionConfig): { connectionNode: TreeNod
   return { connectionNode, tablesGroup };
 }
 
-function mockBackend(connectDb: ReturnType<typeof vi.fn>) {
+function mockBackend(connectDb: ReturnType<typeof vi.fn>, overrides: Record<string, unknown> = {}) {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockRejectedValue(new Error("back end pool is gone")),
@@ -81,6 +81,7 @@ function mockBackend(connectDb: ReturnType<typeof vi.fn>) {
     saveConnections: vi.fn().mockResolvedValue(undefined),
     saveSchemaCache: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
   }));
 }
 
@@ -134,5 +135,55 @@ describe("connectionStore sidebar search connection failures", () => {
 
     // An explicit action keeps the whole error so the user can read the real cause.
     expect(store.connectionErrors[connection.id]).toBe(LEGACY_SQLSERVER_CONNECT_ERROR);
+  }, 15_000);
+
+  // A live connection whose metadata query fails with a query-level error (SQL
+  // Server code 229, SELECT permission denied) must survive a background search:
+  // before the markConnectionLost gate, any non-cancelled search-driven failure
+  // silently disconnected it and cleared activeConnectionId.
+  const PERMISSION_DENIED_ERROR = 'SQL Server query failed: Token error: \'The SELECT permission was denied on the object "tables", database "cwxt2025", schema "dbo".\' on server iZw1wl8nyooomlZ (code: 229, state: 1, class: 16)';
+
+  const CONNECTION_LEVEL_ERROR = "SQL Server connection failed: An error occured during the attempt of performing I/O: connection reset by peer";
+
+  async function connectStoreWithLiveConnection(listTablesError: string) {
+    const connectDb = vi.fn();
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+    const listTables = vi.fn().mockRejectedValue(new Error(listTablesError));
+    mockBackend(connectDb, { checkConnectionHealth, listTables });
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = sqlServerConnection();
+    const { connectionNode, tablesGroup } = connectionTree(connection);
+    store.connections = [connection];
+    store.treeNodes = [connectionNode];
+    store.connectedIds = new Set([connection.id]);
+    store.activeConnectionId = connection.id;
+    return { store, connection, tablesGroup, connectDb };
+  }
+
+  it("keeps a live connection connected when a search load fails with a query-level permission error", async () => {
+    const { store, connection, tablesGroup, connectDb } = await connectStoreWithLiveConnection(PERMISSION_DENIED_ERROR);
+
+    await expect(store.loadObjectGroupChildren(tablesGroup, { force: true, sidebarSearch: true })).rejects.toThrow(PERMISSION_DENIED_ERROR);
+
+    // A permission error is a query-level problem: the search records its one-line
+    // skip hint but must not disconnect the user's live connection.
+    expect(connectDb).not.toHaveBeenCalled();
+    expect(store.connectionErrors[connection.id]).toBe(`Search skipped this connection: ${PERMISSION_DENIED_ERROR}`);
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+    expect(store.activeConnectionId).toBe(connection.id);
+  }, 15_000);
+
+  it("still marks a live connection lost when a search load fails with a connection-level error", async () => {
+    const { store, connection, tablesGroup } = await connectStoreWithLiveConnection(CONNECTION_LEVEL_ERROR);
+
+    await expect(store.loadObjectGroupChildren(tablesGroup, { force: true, sidebarSearch: true })).rejects.toThrow(CONNECTION_LEVEL_ERROR);
+
+    // A transport-level failure really did kill the connection: passive
+    // disconnect (and the one-line skip hint) still applies.
+    expect(store.connectionErrors[connection.id]).toBe(`Search skipped this connection: ${CONNECTION_LEVEL_ERROR}`);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.activeConnectionId).toBeNull();
   }, 15_000);
 });

@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/composables/useToast";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import PluginReleaseInfo from "@/components/plugins/PluginReleaseInfo.vue";
 import * as api from "@/lib/backend/api";
 import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
 import { loadPinnedPluginIds, savePinnedPluginIds, sortPluginsPinnedFirst } from "@/lib/plugins/pluginPinning";
@@ -1031,25 +1032,28 @@ onBeforeUnmount(() => {
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
               </Tooltip>
-              <div class="mt-auto flex items-center justify-between gap-3 pt-4">
-                <div class="text-[11px] text-muted-foreground">
-                  <span v-if="listing.status === 'unsupported'">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
-                  <!-- In the update state the left line states both versions: the badge above shows the
-                       catalog latest version, which otherwise reads as the installed one. -->
-                  <span v-else-if="listing.installed && listing.status === 'update'">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
-                  <span v-else-if="listing.installed">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
-                  <span v-else>{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}</span>
+              <div class="mt-auto pt-3">
+                <PluginReleaseInfo :release="listing.latestRelease" class="border-t border-border/60 pt-2.5" />
+                <div class="mt-3 flex items-center justify-between gap-3">
+                  <div class="text-[11px] text-muted-foreground">
+                    <span v-if="listing.status === 'unsupported'">{{ t("pluginPlatform.unsupportedTarget", { target: listing.target }) }}</span>
+                    <!-- In the update state the left line states both versions: the badge above shows the
+                         catalog latest version, which otherwise reads as the installed one. -->
+                    <span v-else-if="listing.installed && listing.status === 'update'">{{ t("pluginPlatform.installedVersionUpdatable", { installed: listing.installed.manifest.version, latest: listing.plugin.latestVersion }) }}</span>
+                    <span v-else-if="listing.installed">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
+                    <span v-else>{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                    :class="marketplaceActionClass(listing)"
+                    :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
+                    @click="installMarketplaceListing(listing)"
+                  >
+                    <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
+                    {{ t(`pluginPlatform.marketplaceStatus.${listing.status}`) }}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
-                  :class="marketplaceActionClass(listing)"
-                  :disabled="listing.status === 'installed' || listing.status === 'unsupported' || mutationRunning"
-                  @click="installMarketplaceListing(listing)"
-                >
-                  <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
-                  {{ t(`pluginPlatform.marketplaceStatus.${listing.status}`) }}
-                </button>
               </div>
             </article>
           </div>
@@ -1103,6 +1107,7 @@ onBeforeUnmount(() => {
                   </TooltipTrigger>
                   <TooltipContent side="bottom" class="max-w-md whitespace-pre-wrap break-words">{{ listing.description || t("pluginPlatform.noDescription") }}</TooltipContent>
                 </Tooltip>
+                <PluginReleaseInfo :release="listing.latestRelease" class="mt-2 border-t border-border/60 pt-2" />
               </div>
               <div class="hidden max-w-52 shrink-0 gap-1.5 lg:flex">
                 <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>

@@ -500,6 +500,7 @@ describe("UpdateDialog aggregate update center", () => {
           artifact: { target: "universal", url: "https://example.com/plugin.dbxp", sha256: "hash" },
           repository: { id: "official" },
           plugin: { id: "example", latestVersion: "1.1.0" },
+          latestRelease: { version: "1.1.0", releasedAt: "2026-07-28T00:00:00Z", releaseNotes: "Added plugin update details.\nSecond line.", artifacts: [] },
           name: "Example plugin",
         },
       ],
@@ -512,6 +513,17 @@ describe("UpdateDialog aggregate update center", () => {
     expect(document.body.querySelector('[data-update-tab="jdbc"]')?.textContent).toContain("JDBC");
     expect(document.body.querySelector('[data-update-tab="mcp"]')?.textContent).toContain("MCP");
     expect(document.body.querySelector('[data-update-tab="plugins"]')?.textContent).toContain("Plugins");
+    const pluginsTab = document.body.querySelector<HTMLButtonElement>('[data-update-tab="plugins"]');
+    pluginsTab?.click();
+    await flushDialog();
+    expect(document.body.textContent).toContain("Updated Jul 28, 2026");
+    expect(document.body.textContent).not.toContain("Added plugin update details.");
+    const releaseNotesToggle = document.body.querySelector<HTMLButtonElement>('[aria-label="View release notes"]');
+    expect(releaseNotesToggle).not.toBeNull();
+    releaseNotesToggle?.click();
+    await flushDialog();
+    expect(document.body.textContent).toContain("Added plugin update details.");
+    expect(releaseNotesToggle?.getAttribute("aria-expanded")).toBe("true");
     expect(document.body.querySelector<HTMLElement>("[data-update-scroll-region]")?.classList.contains("overflow-auto")).toBe(true);
     expect(document.body.querySelector<HTMLElement>("[data-update-footer]")?.className).toContain("mx-0");
     expect(document.body.querySelector<HTMLElement>("[data-update-footer]")?.className).toContain("px-[22px]");

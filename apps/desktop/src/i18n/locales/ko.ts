@@ -190,6 +190,11 @@ export default withEnglishFallback({
     licenseUnknown: "라이선스 미지정",
     sourceRepository: "소스 저장소",
     pluginHomepage: "홈페이지",
+    updatedOn: "{date}에 업데이트됨",
+    showReleaseNotes: "릴리스 노트 보기",
+    hideReleaseNotes: "릴리스 노트 숨기기",
+    releaseNotesTitle: "릴리스 노트",
+    versionLabel: "버전 {version}",
     marketplaceStatus: {
       install: "설치",
       installed: "설치됨",

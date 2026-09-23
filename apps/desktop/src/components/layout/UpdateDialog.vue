@@ -5,10 +5,12 @@ import { AlertTriangle, CheckCircle2, Loader2, RefreshCw } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import PluginReleaseInfo from "@/components/plugins/PluginReleaseInfo.vue";
 import type { UpdateInfo } from "@/lib/backend/api";
 import type { AgentDriverInfo, McpServerStatus, UpdateDownloadSource } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
 import { pluginSourceChange, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
+import { renderReleaseNotes } from "@/lib/markdown/releaseNotes";
 import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
@@ -136,26 +138,8 @@ function handleReleaseNotesClick(event: MouseEvent) {
 
 watch(
   () => props.updateInfo?.release_notes,
-  async (notes) => {
-    if (!notes) {
-      renderedNotes.value = "";
-      return;
-    }
-    const { Marked } = await import("marked");
-    const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-    const marked = new Marked({
-      breaks: true,
-      gfm: true,
-      renderer: {
-        html: ({ text }) => escapeHtml(text),
-        link({ href, tokens }) {
-          const text = this.parser.parseInline(tokens);
-          return /^https?:\/\//i.test(href) ? `<a href="${escapeHtml(href)}" rel="noopener noreferrer">${text}</a>` : text;
-        },
-        image: ({ text }) => escapeHtml(text),
-      },
-    });
-    renderedNotes.value = marked.parse(notes) as string;
+  (notes) => {
+    renderedNotes.value = notes ? renderReleaseNotes(notes) : "";
   },
   { immediate: true },
 );
@@ -302,6 +286,7 @@ watch(
                   <div class="min-w-0">
                     <div class="truncate font-medium">{{ plugin.name }}</div>
                     <div class="mt-0.5 text-xs text-muted-foreground">{{ plugin.installed?.manifest.version || t("updates.notInstalled") }} → {{ plugin.plugin.latestVersion }}</div>
+                    <PluginReleaseInfo :release="plugin.latestRelease" class="mt-2 border-t border-border/60 pt-2" />
                     <!-- "Update all" deliberately skips a changed source: the user has to confirm it in
                          the Plugin Center, so say so instead of leaving an item that never updates. -->
                     <div v-if="pluginSourceChange(plugin)" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ t("pluginPlatform.updateSourceChangeRequired") }}</div>

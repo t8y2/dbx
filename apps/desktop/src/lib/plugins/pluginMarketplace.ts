@@ -1,4 +1,4 @@
-import type { InstalledPlugin, PluginMarketplaceArtifact, PluginMarketplacePlugin, PluginRepository, PluginRepositoryCatalogResult } from "@/types/database";
+import type { InstalledPlugin, PluginMarketplaceArtifact, PluginMarketplacePlugin, PluginMarketplaceVersion, PluginRepository, PluginRepositoryCatalogResult } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 
 export type MarketplacePluginStatus = "install" | "installed" | "update" | "unsupported";
@@ -12,6 +12,7 @@ export interface MarketplacePluginListing {
   name: string;
   description: string;
   target: string;
+  latestRelease?: PluginMarketplaceVersion;
   artifact?: PluginMarketplaceArtifact;
   installed?: InstalledPlugin;
   verified: boolean;
@@ -36,8 +37,8 @@ export function buildMarketplacePluginListings(results: readonly PluginRepositor
     .flatMap((result) =>
       (result.catalog?.plugins || []).map((plugin) => {
         const localized = marketplacePluginLocalization(plugin, locale);
-        const latestVersion = plugin.versions.find((version) => version.version === plugin.latestVersion);
-        const artifact = latestVersion ? selectMarketplaceArtifact(latestVersion.artifacts, result.target) : undefined;
+        const latestRelease = plugin.versions.find((version) => version.version === plugin.latestVersion);
+        const artifact = latestRelease ? selectMarketplaceArtifact(latestRelease.artifacts, result.target) : undefined;
         const installed = installedById.get(plugin.id);
         const status: MarketplacePluginStatus = !artifact ? "unsupported" : !installed ? "install" : compareVersions(plugin.latestVersion, installed.manifest.version || "0.0.0") > 0 ? "update" : "installed";
         return {
@@ -47,6 +48,7 @@ export function buildMarketplacePluginListings(results: readonly PluginRepositor
           name: localized.name,
           description: localized.description,
           target: result.target,
+          latestRelease,
           artifact,
           installed,
           verified: plugin.verified && listingRepositoryCanVerify(result.repository),
@@ -59,6 +61,23 @@ export function buildMarketplacePluginListings(results: readonly PluginRepositor
 
 export function selectMarketplaceArtifact(artifacts: readonly PluginMarketplaceArtifact[], target: string): PluginMarketplaceArtifact | undefined {
   return artifacts.find((candidate) => candidate.target === target) || artifacts.find((candidate) => candidate.target === UNIVERSAL_PLUGIN_TARGET);
+}
+
+export function formatMarketplaceReleaseDate(value: string | undefined, locale: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  } catch {
+    return "";
+  }
 }
 
 export interface InstalledPluginUpdateEntry {

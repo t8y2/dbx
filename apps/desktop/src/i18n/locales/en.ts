@@ -188,6 +188,11 @@ export default {
     licenseUnknown: "License not specified",
     sourceRepository: "Source repository",
     pluginHomepage: "Homepage",
+    updatedOn: "Updated {date}",
+    showReleaseNotes: "View release notes",
+    hideReleaseNotes: "Hide release notes",
+    releaseNotesTitle: "Release notes",
+    versionLabel: "Version {version}",
     marketplaceStatus: {
       install: "Install",
       installed: "Installed",

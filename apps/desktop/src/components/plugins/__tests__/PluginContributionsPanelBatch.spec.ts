@@ -116,7 +116,7 @@ function installed(id: string, version = "1.0.0"): InstalledPlugin {
   };
 }
 
-function catalog(repositoryId: string, ids: string[], version = "3.0.0"): PluginRepositoryCatalogResult {
+function catalog(repositoryId: string, ids: string[], version = "3.0.0", includeReleaseInfo = false): PluginRepositoryCatalogResult {
   return {
     repository: { id: repositoryId, name: repositoryId, kind: "custom", enabled: true, managed: false },
     target: "darwin-arm64",
@@ -132,7 +132,13 @@ function catalog(repositoryId: string, ids: string[], version = "3.0.0"): Plugin
         tags: [],
         permissions: [],
         latestVersion: version,
-        versions: [{ version, artifacts: [{ target: "darwin-arm64", url: "https://example.invalid/plugin.dbxp", sha256: "a".repeat(64), signingKeyId: "test.key" }] }],
+        versions: [
+          {
+            version,
+            ...(includeReleaseInfo ? { releasedAt: "2026-07-28T00:00:00Z", releaseNotes: "Marketplace update notes.\nSecond line." } : {}),
+            artifacts: [{ target: "darwin-arm64", url: "https://example.invalid/plugin.dbxp", sha256: "a".repeat(64), signingKeyId: "test.key" }],
+          },
+        ],
       })),
     },
   };
@@ -282,6 +288,25 @@ describe("PluginContributionsPanel update center synchronization", () => {
     } finally {
       window.removeEventListener(COMPONENT_UPDATES_CHANGED_EVENT, listener);
     }
+  });
+});
+
+describe("PluginContributionsPanel marketplace release information", () => {
+  it.each(["grid", "list"] as const)("renders release information in %s view", async (view) => {
+    state.batchMode = false;
+    state.marketplaceViewMode = view;
+    state.catalogResults = [catalog("first", ["a"], "3.0.0", true)];
+    await nextTick();
+
+    expect(host.textContent).toContain("2026");
+    expect(host.textContent).not.toContain("Marketplace update notes.");
+    const toggle = host.querySelector<HTMLButtonElement>('[aria-label^="pluginPlatform.showReleaseNotes"]');
+    expect(toggle).not.toBeNull();
+
+    toggle?.click();
+    await nextTick();
+    expect(document.body.textContent).toContain("Marketplace update notes.");
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
   });
 });
 

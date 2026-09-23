@@ -13,12 +13,15 @@ import zhTW from "@/i18n/locales/zh-TW";
 
 describe("plugin batch messages", () => {
   it.each(Object.entries({ az, en, es, it: itLocale, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW }))("interpolates source conflicts and refresh errors in %s", (locale, messages) => {
-    const pluginPlatform = messages.pluginPlatform as Pick<typeof en.pluginPlatform, "batchDuplicateSources" | "batchRefreshFailed">;
+    const pluginPlatform = messages.pluginPlatform as Pick<typeof en.pluginPlatform, "batchDuplicateSources" | "batchRefreshFailed" | "updatedOn" | "showReleaseNotes" | "hideReleaseNotes">;
     const i18n = createI18n({ legacy: false, locale, messages: { [locale]: { pluginPlatform } } });
     expect(pluginPlatform.batchDuplicateSources.match(/\{[^}]+\}/g)).toEqual(["{names}"]);
     expect(pluginPlatform.batchRefreshFailed.match(/\{[^}]+\}/g)).toEqual(["{error}"]);
     expect(i18n.global.t("pluginPlatform.batchDuplicateSources", { names: "example.plugin" })).toContain("example.plugin");
     expect(i18n.global.t("pluginPlatform.batchRefreshFailed", { error: "refresh offline" })).toContain("refresh offline");
+    expect(pluginPlatform.updatedOn).toContain("{date}");
+    expect(pluginPlatform.showReleaseNotes).toBeTypeOf("string");
+    expect(pluginPlatform.hideReleaseNotes).toBeTypeOf("string");
     i18n.dispose();
   });
 });

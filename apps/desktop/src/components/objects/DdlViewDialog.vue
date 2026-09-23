@@ -8,6 +8,7 @@ import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
@@ -208,6 +209,7 @@ async function initDdlEditor(content: string) {
         },
       }),
       basicSetup,
+      editorClipboardLineEndingsExtension(EditorView),
       EditorState.allowMultipleSelections.of(true),
       langSql.sql({ dialect }),
       themeExt,

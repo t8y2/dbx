@@ -1918,6 +1918,19 @@ export const useSettingsStore = defineStore("settings", () => {
     persistedAlwaysOnTopToolbarVisibility = visible;
   }
 
+  // Whether the editor-settings blob loaded from disk actually carried a global
+  // timeout value. A normalized number is not enough to tell a user's saved
+  // choice apart from the built-in default filled in by normalizeEditorSettings,
+  // and the timeout-inheritance migration relies on that distinction: a persisted
+  // value must win over the localStorage backup, while a value that was never on
+  // disk (a downgrade, where the older build predated the setting) is recovered
+  // from the backup. Tracked here at load time and read by the migration.
+  const persistedGlobalTimeoutScopes = ref({ connect: false, query: false });
+
+  function hasPersistedGlobalTimeout(scope: "connect" | "query"): boolean {
+    return persistedGlobalTimeoutScopes.value[scope];
+  }
+
   function enqueueEditorSettingsOperation<T>(operation: () => Promise<T>): Promise<T> {
     const queuedOperation = editorSettingsOperationQueue ? editorSettingsOperationQueue.then(operation) : operation();
     const trackedOperation = queuedOperation.then(
@@ -1996,6 +2009,10 @@ export const useSettingsStore = defineStore("settings", () => {
           }
           editorSettings.value = normalized;
           persistedAlwaysOnTopToolbarVisibility = normalized.toolbarItems.alwaysOnTop;
+          persistedGlobalTimeoutScopes.value = {
+            connect: typeof savedSettings.globalConnectTimeoutSecs === "number",
+            query: typeof savedSettings.globalQueryTimeoutSecs === "number" || typeof (savedSettings as { queryTimeoutSecs?: unknown }).queryTimeoutSecs === "number",
+          };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
@@ -2805,6 +2822,7 @@ export const useSettingsStore = defineStore("settings", () => {
     isConfigured,
     isEditorSettingsLoaded,
     editorSettings,
+    hasPersistedGlobalTimeout,
     desktopSettings,
     mcpGlobalPolicy,
     initEditorSettings,

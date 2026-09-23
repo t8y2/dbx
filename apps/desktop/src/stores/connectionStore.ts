@@ -9002,8 +9002,15 @@ export const useConnectionStore = defineStore("connection", () => {
     const backup = loadTimeoutInheritanceBackup();
     const connectIdsBefore = new Set(settingsStore.editorSettings.connectTimeoutInheritConnectionIds);
     const queryIdsBefore = new Set(settingsStore.editorSettings.queryTimeoutInheritConnectionIds);
-    const globalConnectTimeoutSecs = migrationVersion < 2 && backup ? backup.globalConnectTimeoutSecs : settingsStore.editorSettings.globalConnectTimeoutSecs;
-    const globalQueryTimeoutSecs = migrationVersion < 2 && backup ? backup.globalQueryTimeoutSecs : settingsStore.editorSettings.globalQueryTimeoutSecs;
+    // Recover the global timeout from the localStorage backup only when the
+    // settings blob on disk never carried one — the downgrade case, where an
+    // older build predated the setting. When the user's persisted value exists it
+    // is authoritative and must win over a backup that can lag behind it (the
+    // upgrade case, where a stale backup otherwise reset a saved timeout).
+    const recoverGlobalConnectFromBackup = migrationVersion < 2 && !!backup && !settingsStore.hasPersistedGlobalTimeout("connect");
+    const recoverGlobalQueryFromBackup = migrationVersion < 2 && !!backup && !settingsStore.hasPersistedGlobalTimeout("query");
+    const globalConnectTimeoutSecs = recoverGlobalConnectFromBackup ? backup!.globalConnectTimeoutSecs : settingsStore.editorSettings.globalConnectTimeoutSecs;
+    const globalQueryTimeoutSecs = recoverGlobalQueryFromBackup ? backup!.globalQueryTimeoutSecs : settingsStore.editorSettings.globalQueryTimeoutSecs;
 
     const resolveInheritance = (connection: ConnectionConfig, scope: "connect" | "query") => {
       const explicit = scope === "connect" ? connection.connect_timeout_inherit : connection.query_timeout_inherit;

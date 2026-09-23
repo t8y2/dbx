@@ -187,6 +187,7 @@ import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlF
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
@@ -1359,13 +1360,19 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
-async function insertRedisCommand(command: string): Promise<boolean> {
-  if (props.activeTab.mode !== "redis") return false;
+// The Redis console is bound to the visible tab and logical database. Refuse
+// any other AI target before passing a command to the key browser (#9902).
+function isRedisConsoleReady(target: AiConversationBinding): boolean {
+  return isAiRedisConsoleTarget(props.activeTab, target) && !!redisKeyBrowserRef.value;
+}
+
+async function insertRedisCommand(command: string, target: AiConversationBinding): Promise<boolean> {
+  if (!isRedisConsoleReady(target)) return false;
   return (await redisKeyBrowserRef.value?.insertCommand?.(command)) ?? false;
 }
 
-async function executeRedisCommand(command: string): Promise<boolean> {
-  if (props.activeTab.mode !== "redis") return false;
+async function executeRedisCommand(command: string, target: AiConversationBinding): Promise<boolean> {
+  if (!isRedisConsoleReady(target)) return false;
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
 }
 
@@ -1470,6 +1477,7 @@ defineExpose({
   applyTableStructureChanges,
   insertRedisCommand,
   executeRedisCommand,
+  isRedisConsoleReady,
   previewStatementRange,
   focusStatementRange,
   focusErrorPosition,

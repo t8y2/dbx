@@ -75,7 +75,7 @@ describe("Auto picker entry", () => {
     expect(resolveSelection).toContain("settings.defaultAutoRouting");
     expect(resolveSelection.indexOf('return "auto";')).toBeGreaterThanOrEqual(0);
     expect(resolveSelection.indexOf('return "auto";')).toBeLessThan(resolveSelection.indexOf("resolveDefaultAction(mode)"));
-    expect(resolveSelection).toContain("isVectorDbType(props.connection.db_type)");
+    expect(resolveSelection).toContain("isVectorDbType(boundConnection.value.db_type)");
   });
 
   it("lands new conversations, mode switches and mount init on the settings-driven default", () => {
@@ -97,7 +97,9 @@ describe("Auto picker entry", () => {
     const templateGuardIdx = source.lastIndexOf('<template v-if="showActionButtons">', listStart);
     expect(templateGuardIdx).toBeGreaterThanOrEqual(0);
 
-    const vectorWatchStart = source.indexOf("() => props.connection?.db_type,");
+    // Keyed by the conversation's bound connection, not the visible tab: the
+    // hidden action must match whichever database this chat actually targets.
+    const vectorWatchStart = source.indexOf("() => boundConnection.value?.db_type,");
     const vectorWatch = source.slice(vectorWatchStart, source.indexOf("{ immediate: true },", vectorWatchStart));
     expect(vectorWatch).toContain('activeAction.value = "generate";');
   });
@@ -115,7 +117,9 @@ describe("Auto routing at send time", () => {
     // Auto is only routed when it was actually selected; every explicit
     // selection is passed through untouched.
     expect(sendBody).toContain("requestedAction = requestedSelection;");
-    expect(sendBody).toContain("requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible());");
+    // The send pipeline hands the router its frozen run target, so a background
+    // send cannot route on the visible conversation's SQL or last error.
+    expect(sendBody).toContain("requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible(), tab);");
     // A confirmed-write turn replies with component copy, so the router must not
     // run on it: the mode default keeps the pre-Auto confirmation contract.
     expect(sendBody).toContain("const confirmationContinuation = allowWriteSqlForNextRun || resumingConfirmedWrite;");
@@ -130,7 +134,7 @@ describe("Auto routing at send time", () => {
     expect(sendBody).toContain('userMessage.routedFrom = "auto";');
     expect(sendBody).toContain("userMessage.routedAction = requestedAction;");
 
-    const resolveBody = bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean): Promise<AiAction>");
+    const resolveBody = bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean, target: AiContextTarget = aiContextTarget.value): Promise<AiAction>");
     // Zero-latency rule layer first; the classifier (network) only on a miss.
     expect(resolveBody.indexOf("routeIntentByRules(input)")).toBeLessThan(resolveBody.indexOf("classifyIntentByLlm(input,"));
     expect(resolveBody).toContain("if (showProgress) routingInFlight.value = true;");
@@ -156,7 +160,7 @@ describe("Auto routing at send time", () => {
     // normal path, so clearMessages()/selectConversation()/onUnmounted must drop
     // the flag synchronously via resetPendingRequestState().
     expect(bodyOf("function resetPendingRequestState()")).toContain("routingInFlight.value = false;");
-    expect(bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean): Promise<AiAction>")).toContain("if (showProgress) routingInFlight.value = false;");
+    expect(bodyOf("async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean, target: AiContextTarget = aiContextTarget.value): Promise<AiAction>")).toContain("if (showProgress) routingInFlight.value = false;");
   });
 
   it("keeps external explicit triggers on the direct path", () => {

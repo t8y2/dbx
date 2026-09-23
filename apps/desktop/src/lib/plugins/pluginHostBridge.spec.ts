@@ -3,9 +3,9 @@ import { reactive, readonly } from "vue";
 import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginResultViewContribution, PluginWorkbenchContribution } from "@/types/database";
 
-function plugin(permissions: string[] = []): InstalledPlugin {
+function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
-    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions: [] },
+    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions },
     compatibility: { compatible: true },
   };
 }
@@ -14,6 +14,30 @@ const workbench: PluginWorkbenchContribution = { type: "workbench", id: "sample.
 const resultView: PluginResultViewContribution = { type: "result-view", id: "sample.graph", label: "Graph" };
 
 describe("PluginHostBridge", () => {
+  it("host.listConnections returns a read-only secret-free list scoped to the calling plugin", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const listConnections = vi.fn(() => [{ id: "conn-1", name: "Prod", providerId: "sample.connection", connectionType: "sample", readOnly: true }]);
+    const contributions = [
+      { type: "connection-provider", id: "sample.connection", label: "Sample", database_type: "sample", fields: [] },
+      { type: "workbench", id: "sample.main", label: "Sample" },
+    ] as InstalledPlugin["manifest"]["contributions"];
+    const bridge = new PluginHostBridge(plugin(["host.workbench"], contributions), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listConnections,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "9", method: "host.listConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(listConnections).toHaveBeenCalledWith("sample"));
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "response", id: "9", result: [{ id: "conn-1", name: "Prod", providerId: "sample.connection", readOnly: true }] });
+  });
+
   it("streams downloads under the owning plugin, scopes cancellation and reports native capability", async () => {
     const messages: any[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -1296,5 +1320,47 @@ describe("plugin SDK source", () => {
     expect(source).toContain("onDragState");
     expect(source).toContain("type === 'filedrop'");
     expect(source).toContain("type === 'dragstate'");
+  });
+
+  it("sdk wires the workbench/close handshake: onClose listeners, ack and ready feature flag", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("workbench.close");
+    expect(source).toContain("onClose");
+    expect(source).toContain("type === 'workbench/close'");
+    expect(source).toContain("'workbench/close-ack'");
+  });
+
+  it("requestWorkbenchClose posts the close message and resolves true on the plugin ack", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, { workbenchId: "wb-1" }, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    // The new SDK advertises the handshake on ready.
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    const pending = bridge.requestWorkbenchClose(200);
+    expect(messages.some((message) => message.type === "workbench/close" && message.workbenchId === "wb-1")).toBe(true);
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack", workbenchId: "wb-1" } } as MessageEvent);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("requestWorkbenchClose resolves false after the deadline when the plugin never acks", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5)).resolves.toBe(false);
+    // A late ack after the deadline is ignored and must not throw.
+    expect(() => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack" } } as MessageEvent)).not.toThrow();
+  });
+
+  it("requestWorkbenchClose skips the wait for SDKs without the handshake feature", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5000)).resolves.toBe(false);
+    expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
   });
 });

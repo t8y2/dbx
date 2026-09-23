@@ -100,6 +100,12 @@ export interface PluginHostBridgeApi {
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
   /**
+   * PR-A4 generic extension point: a read-only, secret-free connection list scoped to the calling plugin's own
+   * connection-providers, so plugins can implement their own connection switching inside panels/workbenches and
+   * their own business (the host stays unaware of the purpose).
+   */
+  listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
+  /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
    * config; it never connects or probes the server.
@@ -176,7 +182,16 @@ export class PluginHostBridge {
     if (!target || event.source !== target || !isRecord(event.data)) return false;
     if (event.data.source !== PLUGIN_MESSAGE_SOURCE || event.data.version !== BRIDGE_VERSION) return false;
     if (event.data.type === "ready") {
+      // Feature flags the SDK advertises at boot; unknown flags are ignored so
+      // host/plugin can evolve independently.
+      this.advertisedFeatures = new Set(Array.isArray(event.data.features) ? event.data.features.filter((feature): feature is string => typeof feature === "string") : []);
       void this.handleReady();
+      return true;
+    }
+    if (event.data.type === "workbench/close-ack") {
+      // Two-phase close handshake (§8.3): the plugin released its workbench scope.
+      this.pendingCloseAck?.();
+      this.pendingCloseAck = undefined;
       return true;
     }
     if (event.data.type === "shortcut" && event.data.shortcut === "closeTab") {
@@ -236,6 +251,39 @@ export class PluginHostBridge {
   private initGeneration = 0;
   private initSignals = { load: false, ready: false };
   private initStarted = false;
+  private advertisedFeatures = new Set<string>();
+  private pendingCloseAck?: () => void;
+
+  /**
+   * §8.3/§7.4 two-phase workbench close: give the plugin a chance to release
+   * its workbench scope (PTY sessions, subscriptions, temporary state) before
+   * the webview is torn down. Resolves true when the plugin acked; false when
+   * the handshake is unsupported (legacy SDK advertises no "workbench.close"
+   * feature) or the ack did not arrive inside the deadline. Either way the
+   * caller proceeds with teardown.
+   */
+  requestWorkbenchClose(timeoutMs = 400): Promise<boolean> {
+    if (this.disposed || !this.targetWindow()) return Promise.resolve(false);
+    const supported = this.advertisedFeatures.has("workbench.close");
+    if (!supported) {
+      // Legacy SDK: the message is inert, so do not stall the close on it.
+      this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "workbench/close", workbenchId: "" });
+      return Promise.resolve(false);
+    }
+    const workbenchId = typeof this.context.workbenchId === "string" ? this.context.workbenchId : "";
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (acked: boolean) => {
+        if (settled) return;
+        settled = true;
+        this.pendingCloseAck = undefined;
+        resolve(acked);
+      };
+      this.pendingCloseAck = () => settle(true);
+      this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "workbench/close", workbenchId });
+      setTimeout(() => settle(false), timeoutMs);
+    });
+  }
 
   private postInit(): void {
     this.post({
@@ -384,6 +432,11 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.reopenConnection params");
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
+    }
+    if (method === "host.listConnections") {
+      this.requirePermission("host.workbench");
+      if (!this.api.listConnections) throw new Error("Connection enumeration is unavailable on this host");
+      return this.api.listConnections(this.plugin.manifest.id);
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
@@ -695,7 +748,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
     .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set(), filedrop: new Set(), dragstate: new Set(), close: new Set() };
     let sequence = 0;
     let context;
     let locale = 'en';
@@ -863,6 +916,13 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
       onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
+      // §8.3 workbench/close handshake: the host sends workbench/close before
+      // tearing the webview down; the plugin releases its workbench scope (PTY
+      // sessions, subscriptions) in the listeners and the SDK acks once every
+      // listener has settled. The host bounds the wait on its side.
+      workbench: Object.freeze({
+        onClose: (listener) => { listeners.close.add(listener); return () => listeners.close.delete(listener); },
+      }),
       decodeBase64: decode,
       encodeBase64: encode,
     });
@@ -909,6 +969,12 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         const active = message.active === true;
         listeners.dragstate.forEach((listener) => listener(active));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
+      } else if (message.type === 'workbench/close') {
+        const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
+        Promise.allSettled([...listeners.close].map(notifyClose)).finally(() => {
+          const workbenchId = context && typeof context.workbenchId === 'string' ? context.workbenchId : '';
+          parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'workbench/close-ack', workbenchId }, '*');
+        });
       }
     });
     addEventListener('keydown', (event) => {
@@ -918,7 +984,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
     }, true);
-    parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready' }, '*');
+    parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }
 

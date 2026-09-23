@@ -2,13 +2,29 @@ import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/upd
 import { defineStore } from "pinia";
 import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
-import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, watch } from "vue";
+import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
 import type { DeletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionTabs";
-import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, ObjectSource, ObjectSourceKind, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
+import type {
+  BatchSqlExecution,
+  BatchStatementExecutionItem,
+  ConnectionConfig,
+  DatabaseType,
+  IndexInfo,
+  NacosConfigEditorViewport,
+  ObjectBrowserFilter,
+  ObjectBrowserViewport,
+  ObjectSource,
+  ObjectSourceKind,
+  QueryResult,
+  QueryResultSourceColumnRef,
+  QueryTab,
+  TableInfoTab,
+  TableStructureEditorTarget,
+} from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition, sqlErrorHasMessagePosition, sqlErrorMessageText } from "@/lib/sql/errorPosition";
@@ -444,6 +460,13 @@ function annotateSingleStatementErrorResult(errorResult: QueryResult, sourceSql:
 
 const NON_STREAMING_BATCH_DATABASE_TYPES = new Set<DatabaseType>(["sqlserver", "turso", "cloudflare-d1"]);
 const liveBatchSqlExecutions = new WeakMap<QueryTab, BatchSqlExecution>();
+// Per running batch: statements before this index are already settled by an
+// earlier progress event of the same run.
+const batchSqlProgressSettledEnds = new WeakMap<BatchSqlExecution, number>();
+
+function isCompletedBatchStatement(item: BatchStatementExecutionItem): boolean {
+  return item.status === "success" || item.status === "error";
+}
 
 function cloneBatchSqlExecution(batch: BatchSqlExecution | undefined): BatchSqlExecution | undefined {
   return batch ? { ...batch, executionTarget: batch.executionTarget ? { ...batch.executionTarget } : undefined, items: batch.items.map((item) => ({ ...item })) } : undefined;
@@ -503,20 +526,29 @@ function applyBatchSqlProgress(
   const statementIndex = statementOffset + progress.statementIndex;
   const item = batch.items[statementIndex];
   if (!item) return;
-  if (progress.completed > 1) {
-    for (let index = statementOffset; index < statementOffset + progress.completed - 1; index += 1) {
-      const completedItem = batch.items[index];
-      if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
-        completedItem.status = "success";
-      }
+  // Statements complete in order and the desktop backend coalesces successful
+  // ones, so an event also settles every statement since the previous event.
+  // Walking only that gap and counting incrementally keeps a batch linear;
+  // rescanning every statement per event made large scripts O(N²).
+  const rawBatch = toRaw(batch);
+  const settledStart = Math.max(statementOffset, batchSqlProgressSettledEnds.get(rawBatch) ?? statementOffset);
+  const settledEnd = statementOffset + progress.completed - 1;
+  let completed = batch.completed;
+  for (let index = settledStart; index < settledEnd; index += 1) {
+    const completedItem = batch.items[index];
+    if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
+      completedItem.status = "success";
+      completed += 1;
     }
   }
+  if (settledEnd > settledStart) batchSqlProgressSettledEnds.set(rawBatch, settledEnd);
+  if (!isCompletedBatchStatement(item)) completed += 1;
   item.status = progress.success ? "success" : "error";
   item.executionTimeMs = progress.executionTimeMs;
   item.affectedRows = progress.affectedRows;
   item.errorDetails = progress.error;
   item.error = progress.error ? translateBackendError(i18n.global.t, progress.error) : undefined;
-  batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
+  batch.completed = completed;
   if ((progress.success || continueOnError) && progress.completed < progress.total) {
     const next = batch.items[statementOffset + progress.completed];
     if (next?.status === "pending") next.status = "running";
@@ -539,7 +571,7 @@ function reconcileBatchSqlResults(tab: QueryTab, executionId: string, results: Q
     item.errorDetails = failed ? result.error : undefined;
     item.error = failed ? (result.error ? translateBackendError(i18n.global.t, result.error, result.rows[0]?.[0]) : String(result.rows[0]?.[0] ?? "")) : undefined;
   }
-  batch.completed = batch.items.filter((item) => item.status === "success" || item.status === "error").length;
+  batch.completed = batch.items.filter(isCompletedBatchStatement).length;
 }
 
 function failBatchSqlExecution(tab: QueryTab, executionId: string, error: unknown, cancelled: boolean) {
@@ -550,7 +582,7 @@ function failBatchSqlExecution(tab: QueryTab, executionId: string, error: unknow
   item.status = cancelled ? "cancelled" : "error";
   item.errorDetails = cancelled ? undefined : (normalizeBackendError(error) ?? undefined);
   item.error = cancelled ? undefined : translateBackendError(i18n.global.t, error, error instanceof Error ? error.message : undefined);
-  batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
+  batch.completed = batch.items.filter(isCompletedBatchStatement).length;
 }
 
 function finishBatchSqlExecution(tab: QueryTab, executionId: string, cancelled: boolean) {
@@ -572,7 +604,7 @@ function finishBatchSqlExecution(tab: QueryTab, executionId: string, cancelled: 
       item.status = "skipped";
     }
   }
-  batch.completed = batch.items.filter((item) => item.status === "success" || item.status === "error").length;
+  batch.completed = batch.items.filter(isCompletedBatchStatement).length;
   batch.finishedAt = Date.now();
 }
 

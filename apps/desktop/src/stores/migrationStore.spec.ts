@@ -48,6 +48,20 @@ describe("migration store", () => {
     await store.initialize();
     expect(store.completed.value).toBe(true);
     expect(store.blocking.value).toBe(false);
+    expect(store.state.entered).toBe(false);
+  });
+
+  it("does not block a restart when migration is not required", async () => {
+    const store = useMigrationStore({
+      migrationStatus: vi.fn().mockResolvedValue({ ...done(), state: "not_required" }),
+      migrationStart: vi.fn(),
+      migrationRetry: vi.fn(),
+      migrationCleanupBackups: vi.fn(),
+    });
+    await store.initialize();
+    expect(store.completed.value).toBe(true);
+    expect(store.blocking.value).toBe(false);
+    expect(store.state.entered).toBe(false);
   });
 
   it("keeps status failures on the status retry path", async () => {
@@ -127,10 +141,10 @@ describe("migration store", () => {
     expect(store.state.busy).toBe(true);
     await store.cleanup();
     expect(cleanup).toHaveBeenCalledTimes(2);
-    store.enter();
-    expect(store.state.entered).toBe(true);
     finishCleanup();
     await cleanupAttempt;
+    store.enter();
+    expect(store.state.entered).toBe(true);
     expect(store.state.busy).toBe(false);
     expect(store.state.step).toBe(3);
     expect(store.state.error).toBeNull();
@@ -140,11 +154,30 @@ describe("migration store", () => {
   });
 
   it("recovers when a lost action response is followed by verified completion", async () => {
-    const store = useMigrationStore({ migrationStatus: vi.fn().mockResolvedValue(done()), migrationStart: vi.fn().mockRejectedValue(new Error("response lost")), migrationRetry: vi.fn(), migrationCleanupBackups: vi.fn() });
+    const store = useMigrationStore({ migrationStatus: vi.fn().mockResolvedValueOnce(pending()).mockResolvedValue(done()), migrationStart: vi.fn().mockRejectedValue(new Error("response lost")), migrationRetry: vi.fn(), migrationCleanupBackups: vi.fn() });
+    await store.initialize();
     await store.start();
     expect(store.state.step).toBe(3);
     expect(store.state.error).toBeNull();
     expect(store.state.busy).toBe(false);
+    expect(store.state.report).toBeNull();
+    expect(store.blocking.value).toBe(true);
+    store.enter();
+    expect(store.blocking.value).toBe(false);
+  });
+
+  it("keeps the success page after retrying a failed status check in the same session", async () => {
+    const status = vi.fn().mockResolvedValueOnce(pending()).mockRejectedValueOnce(new Error("status unavailable")).mockResolvedValueOnce(done());
+    const store = useMigrationStore({ migrationStatus: status, migrationStart: vi.fn().mockRejectedValue(new Error("response lost")), migrationRetry: vi.fn(), migrationCleanupBackups: vi.fn() });
+    await store.initialize();
+    await store.start();
+    expect(store.state.error).toBe("statusFailed");
+    await store.initialize();
+    expect(store.completed.value).toBe(true);
+    expect(store.state.report).toBeNull();
+    expect(store.blocking.value).toBe(true);
+    store.enter();
+    expect(store.blocking.value).toBe(false);
   });
   it("retries a failed migration and completes without losing the error report", async () => {
     const failed = { ...pending(), state: "failed" as const, errorCode: "BACKUP_FAILED", errorMessage: "Cannot create backup" };

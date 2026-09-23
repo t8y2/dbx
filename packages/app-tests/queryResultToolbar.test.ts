@@ -230,16 +230,18 @@ test("embedded and standalone result toolbars share the same fixed height", () =
   const contentArea = source(contentAreaPath);
   const dataGrid = source(dataGridPath);
   const standaloneClasses = contentArea.match(/ref="standaloneResultToolbarRef" class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
-  const embeddedClasses = dataGrid.match(/ref="dataGridTopbarRef"[^>]+class="([^"]+)"/)?.[1].split(/\s+/) ?? [];
+  // The embedded topbar picks its height from the toolbar layout toggle; the
+  // default single-row branch must match the standalone toolbar's fixed row.
+  const embeddedLayoutClasses = dataGrid.match(/ref="dataGridTopbarRef"[\s\S]{0,300}?:class="([^"]+)"/)?.[1] ?? "";
 
   assert.ok(standaloneClasses.includes("h-8"));
-  assert.ok(embeddedClasses.includes("h-8"));
+  assert.ok(embeddedLayoutClasses.includes("h-8"));
   assert.ok(standaloneClasses.includes("items-center"));
-  assert.ok(embeddedClasses.includes("items-center"));
+  assert.ok(embeddedLayoutClasses.includes("items-center"));
   assert.ok(!standaloneClasses.includes("h-7"));
-  assert.ok(!embeddedClasses.includes("h-7"));
+  assert.ok(!embeddedLayoutClasses.includes("h-7"));
   assert.ok(!standaloneClasses.includes("min-h-7"));
-  assert.ok(!embeddedClasses.includes("min-h-7"));
+  assert.ok(!embeddedLayoutClasses.includes("min-h-7"));
 });
 
 test("embedded result toolbar cannot scroll vertically", () => {

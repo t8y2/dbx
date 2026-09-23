@@ -77,6 +77,13 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes the data grid toolbar layout", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridToolbarLayout");
+
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridToolbarLayout: "single" }));
+    expect(draft.dataGridToolbarLayout).toBe("single");
+  });
+
   it("includes generated SQL identifier quote preference", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("generateSqlQuoteIdentifiers");
   });
@@ -110,6 +117,7 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the data grid filter view", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridToolbarLayout");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridKeepFilterEditorExpanded");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });

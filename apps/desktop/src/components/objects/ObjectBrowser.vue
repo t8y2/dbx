@@ -121,6 +121,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { treeNodePinIdentity, type PinnedTreeNodeIdentity } from "@/lib/app/pinnedItems";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { formatSidebarTableNamesForCopy, type SidebarTableCopyTarget } from "@/lib/sidebar/sidebarTableNameCopy";
 import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
@@ -2472,7 +2473,29 @@ async function confirmDuplicateStructure() {
   }
 }
 
-function copySelectedTablesToClipboard() {
+function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): string {
+  const targets = rows.map(
+    (row) =>
+      ({
+        id: row.name,
+        label: row.name,
+        type: "table",
+        connectionId: props.connection.id,
+        database: props.database,
+        catalog: props.catalog,
+        schema: row.schema || selectedSchema.value || undefined,
+      }) as SidebarTableCopyTarget,
+  );
+  return formatSidebarTableNamesForCopy(targets, {
+    separator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    includeSchema: settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema,
+    databaseType: effectiveDatabaseType.value,
+    driverProfile: props.connection.driver_profile,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
+  });
+}
+
+async function copySelectedTablesToClipboard() {
   const selectedRows = selectedTableRows.value;
   if (selectedRows.length === 0) return;
   connectionStore.treeClipboard = {
@@ -2485,7 +2508,12 @@ function copySelectedTablesToClipboard() {
       tableComment: row.comment,
     })),
   };
-  toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+  try {
+    await copyToClipboard(objectBrowserTableNamesCopyText(selectedRows));
+    toast(t("contextMenu.pasteTableClipboardUpdated"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function canPasteTableClipboard(): boolean {
@@ -2586,7 +2614,7 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
     if (selectedTableCount.value === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    copySelectedTablesToClipboard();
+    void copySelectedTablesToClipboard();
     return;
   }
   if (eventTargetAllowsAppClipboardShortcut(event, "v")) {

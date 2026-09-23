@@ -89,12 +89,14 @@ import {
   type AiAction,
   type AiActionSelection,
   type AiAssistantMode,
+  type AiContextTarget,
   type AiCsvFileContext,
   type AiTextAttachmentEncoding,
   type AiTextAttachmentResolvedEncoding,
   type AiSqlFileContext,
   type CustomPromptContext,
 } from "@/lib/ai/ai";
+import { activeAiRunBinding, aiContextTargetFor, bindingForSnapshot, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import {
   AI_IMAGE_ATTACHMENT_MAX_BYTES,
   AI_IMAGE_ATTACHMENT_TYPES_BY_EXTENSION,
@@ -254,6 +256,8 @@ interface ChatMessage {
   content: string;
   /** Connection that produced this assistant response; ephemeral export metadata. */
   sourceConnectionName?: string;
+  /** Frozen target for this assistant turn, including a pending Web confirmation. */
+  sourceBinding?: AiConversationBinding;
   mentions?: AiMessageMention[];
   /** Ephemeral text file content used only when this message is edited in the current session. */
   csvAttachments?: AiCsvFileContext[];
@@ -287,14 +291,18 @@ const props = defineProps<{
   maximized?: boolean;
 }>();
 
+// Every AI-initiated action carries the *target* it must run against: the
+// conversation's bound connection (#9902). Without it the host resolved the
+// active tab, so AI-generated SQL could be written into, and executed on,
+// another connection's editor.
 const emit = defineEmits<{
-  appendSql: [sql: string];
-  executeSql: [sql: string];
-  tempRunSql: [sql: string];
-  requestAutoExecuteSql: [sql: string];
-  insertRedisCommand: [command: string];
-  executeRedisCommand: [command: string];
-  openExplainPlan: [sql: string];
+  appendSql: [sql: string, target: AiConversationBinding];
+  executeSql: [sql: string, target: AiConversationBinding];
+  tempRunSql: [sql: string, target: AiConversationBinding];
+  requestAutoExecuteSql: [sql: string, target: AiConversationBinding];
+  insertRedisCommand: [command: string, target: AiConversationBinding];
+  executeRedisCommand: [command: string, target: AiConversationBinding];
+  openExplainPlan: [sql: string, target: AiConversationBinding];
   toggleMaximize: [];
   close: [];
   openSettings: [];
@@ -335,6 +343,52 @@ watch(
 const currentSessionId = ref("");
 const conversationId = ref("");
 const conversations = ref<AiConversation[]>([]);
+
+/** The persisted conversation currently shown, if it has been saved yet. */
+const activeConversation = computed(() => conversations.value.find((item) => item.id === conversationId.value));
+
+/** Binding chosen for a chat that has no persisted conversation yet (the user
+ *  picked a connection before sending anything); superseded by the
+ *  conversation's own binding as soon as one exists. */
+const draftBinding = ref<(AiConversationBinding & { connectionName: string }) | null>(null);
+
+/** Connection the shown conversation talks to (#9902). The conversation owns it,
+ *  so it survives switching conversations, working in another editor tab, and
+ *  restarting. See `resolveConversationBinding` for why an empty id must never
+ *  fall back to the active tab. */
+const conversationBinding = computed(() =>
+  resolveConversationBinding(activeConversation.value, draftBinding.value, {
+    connectionId: props.connection?.id,
+    database: props.tab?.database,
+    schema: props.tab?.schema,
+  }),
+);
+const boundConnectionId = computed(() => conversationBinding.value.connectionId);
+const boundConnection = computed(() => (boundConnectionId.value ? connectionStore.getConfig(boundConnectionId.value) : undefined));
+const boundDatabase = computed(() => conversationBinding.value.database);
+const boundSchema = computed(() => conversationBinding.value.schema);
+
+/**
+ * Binding the visible conversation's *active run* is executing against.
+ *
+ * A run's target is frozen when it starts (see `send()`), so everything that acts
+ * on that run's behalf — intent routing, the write-confirmation round trip, the
+ * write grant, the production badge — must read this rather than the
+ * conversation's live binding. Rebinding a conversation mid-run, or while its
+ * confirmation card is up, would otherwise judge and execute that run's SQL
+ * against the new connection (#9902 review).
+ *
+ * With no run in flight this is just the conversation's own binding.
+ */
+const activeRunBinding = computed<AiConversationBinding>(() => {
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conversationId.value) : undefined;
+  // Web has no run registry. The assistant turn carries its original target so
+  // a visible confirmation keeps that target after rebinding or panel remount.
+  return activeAiRunBinding(conversationBinding.value, run, messages.value, !backgroundAiRunsEnabled && !!proposalConfirmMessage.value);
+});
+
+const aiContextTarget = computed<AiContextTarget>(() => aiContextTargetFor(conversationBinding.value, props.tab));
+
 function restoreInitialConversation() {
   if (!assistantViewMounted || initialConversationRestored || !initialConversationStateLoaded || !settings.isAiConfigLoaded) return;
   initialConversationRestored = true;
@@ -382,7 +436,17 @@ const queuedInputs = reactive(new Map<string, QueuedConversationInput>());
  * one background run can settle in the same event turn; this must be FIFO, not
  * a single "next send" slot, or the later completion silently drops the first
  * conversation's queued input. */
-type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiActionSelection; pluginContext?: AiPluginContext };
+type PendingAutoSend = {
+  conversationId: string;
+  text: string;
+  messages: ChatMessage[];
+  mode: AiAssistantMode;
+  action: AiActionSelection;
+  pluginContext?: AiPluginContext;
+  /** Frozen at enqueue time: the auto-send runs while another conversation may
+   *  be the visible one, so it cannot read the live binding (#9902). */
+  binding: AiConversationBinding;
+};
 const pendingAutoSends: PendingAutoSend[] = [];
 
 /** Highest event `seq` the user has read per conversation (parent PRD §8). Set
@@ -411,6 +475,8 @@ interface ConversationRowDetail {
   reason: string | null;
   canRetry: boolean;
   hasQueuedInput: boolean;
+  /** The conversation's bound connection no longer exists (#9902). */
+  connectionMissing: boolean;
 }
 
 function runPhaseText(run: DesktopAiRunRuntime<ChatMessage>, t: (key: string, params?: Record<string, unknown>) => string): string {
@@ -464,6 +530,7 @@ function conversationRowDetail(conv: AiConversation): ConversationRowDetail {
     reason,
     canRetry: status === "failed" || status === "interrupted",
     hasQueuedInput: queuedInputs.has(conv.id),
+    connectionMissing: !!conv.connectionId && !connectionStore.getConfig(conv.connectionId),
   };
 }
 
@@ -597,8 +664,8 @@ watch(showTemplateSelector, (open) => {
 // inferred dialect) so resolution matches the dialect the AI pipeline and
 // prompt selection actually use — the same axis aiDatabaseTypeForConnection
 // established for schema selection.
-const templateDbType = computed(() => (!pluginContext.value && props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));
-const aiTemplateNamespaceKey = computed(() => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`);
+const templateDbType = computed(() => (!pluginContext.value && boundConnection.value ? aiDatabaseTypeForConnection(boundConnection.value) : undefined));
+const aiTemplateNamespaceKey = computed(() => `${boundConnectionId.value}::${boundDatabase.value}::${boundSchema.value ?? ""}`);
 let autoTemplatesInitialized = false;
 function applyResolvedTemplateIds(ids: string[]) {
   activeTemplateIds.value = capTemplateIdsToCharLimit(ids, promptTemplateStore.templates, ACTIVE_TEMPLATES_TOTAL_MAX);
@@ -852,7 +919,7 @@ function submitEdit(visibleIndex: number) {
   if (!content && !editingMentions.value.length && !editingCsvAttachments.value.length && !editingImageAttachments.value.length) return;
   const actualIndex = visibleToActualIndex(messages.value, visibleIndex);
   if (actualIndex < 0) return;
-  if (!pluginContext.value && (!props.connection || !props.tab)) return;
+  if (!pluginContext.value && !aiContextTarget.value.connectionId) return;
   if (!activeFullConfig.value) {
     toast(t("ai.noConfig"));
     return;
@@ -1185,8 +1252,8 @@ const canSubmitPrompt = computed(() =>
     prompt: prompt.value,
     contextItemCount: selectedMentions.value.length + selectedSqlFileMentions.value.length + selectedCsvAttachments.value.length + selectedImageAttachments.value.length,
     isAttachmentProcessing: isAttachmentProcessing.value,
-    hasTab: !!pluginContext.value || !!props.tab,
-    hasConnection: !!pluginContext.value || !!props.connection,
+    hasTab: !!pluginContext.value || !!aiContextTarget.value.connectionId,
+    hasConnection: !!pluginContext.value || !!boundConnection.value,
   }),
 );
 let browserAttachmentDragDepth = 0;
@@ -1257,12 +1324,12 @@ const agentActionButtons: AiActionButton[] = [
 ];
 
 const actionButtons = computed<AiActionButton[]>(() => (assistantMode.value === "agent" ? agentActionButtons : askActionButtons));
-const isRedisConnection = computed(() => props.connection?.db_type === "redis");
+const isRedisConnection = computed(() => boundConnection.value?.db_type === "redis");
 
 // Vector DBs hide the action menu and only expose collection tools.
 // Keep their action at `generate` so the task contract doesn't tell the LLM to call execute_query.
 function resolveDefaultAction(mode: AiAssistantMode): AiAction {
-  if (props.connection && isVectorDbType(props.connection.db_type)) return "generate";
+  if (boundConnection.value && isVectorDbType(boundConnection.value.db_type)) return "generate";
   return defaultActionForMode(mode);
 }
 
@@ -1271,7 +1338,7 @@ function resolveDefaultAction(mode: AiAssistantMode): AiAction {
 // request. Vector DBs keep the concrete `generate` action because their action
 // menu is hidden entirely.
 function resolveDefaultActionSelection(mode: AiAssistantMode): AiActionSelection {
-  if (settings.defaultAutoRouting && !(props.connection && isVectorDbType(props.connection.db_type))) return "auto";
+  if (settings.defaultAutoRouting && !(boundConnection.value && isVectorDbType(boundConnection.value.db_type))) return "auto";
   return resolveDefaultAction(mode);
 }
 
@@ -1292,11 +1359,11 @@ watch(assistantMode, (mode) => {
 });
 
 watch(
-  () => props.connection?.db_type,
+  () => boundConnection.value?.db_type,
   () => {
     // Vector DBs hide the action picker, so keep the hidden action aligned with
     // the collection-oriented prompt contract on initial render and connection changes.
-    if (props.connection && isVectorDbType(props.connection.db_type)) {
+    if (boundConnection.value && isVectorDbType(boundConnection.value.db_type)) {
       activeAction.value = "generate";
     }
   },
@@ -1305,9 +1372,9 @@ watch(
 
 function selectAction(action: AiActionSelection) {
   activeAction.value = action;
-  if (action === "fix" && props.tab?.result) {
-    if (isQueryExecutionErrorResult(props.tab.result)) {
-      const errVal = props.tab.result.rows[0]?.[0];
+  if (action === "fix" && aiContextTarget.value.result) {
+    if (isQueryExecutionErrorResult(aiContextTarget.value.result)) {
+      const errVal = aiContextTarget.value.result.rows[0]?.[0];
       if (errVal != null) prompt.value = String(errVal);
     }
   }
@@ -1342,8 +1409,8 @@ function switchToRoutedAction(action: AiAction | null | undefined) {
 }
 
 /** Mirrors `buildAiContext`'s `lastError`: only a real failed execution counts. */
-function tabHasLastError(): boolean {
-  const result = props.tab?.result;
+function tabHasLastError(target: AiContextTarget = aiContextTarget.value): boolean {
+  const result = target.result;
   return !!result && isQueryExecutionErrorResult(result) && result.rows[0]?.[0] != null;
 }
 
@@ -1357,8 +1424,13 @@ function tabHasLastError(): boolean {
  * `showProgress` is only true for the conversation actually on screen — a
  * background auto-send must not flash "识别中" over an unrelated chat.
  */
-async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean): Promise<AiAction> {
-  const input: AiIntentRouteInput = { text, mode, hasCurrentSql: !!props.tab?.sql.trim(), hasLastError: tabHasLastError() };
+/**
+ * `target` is the caller's frozen run target. Reading the live one instead would
+ * feed a background send of conversation A the SQL and last error of whatever
+ * conversation is on screen, and route the intent on that (#9902 review).
+ */
+async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgress: boolean, target: AiContextTarget = aiContextTarget.value): Promise<AiAction> {
+  const input: AiIntentRouteInput = { text, mode, hasCurrentSql: !!target.sql?.trim(), hasLastError: tabHasLastError(target) };
   const byRules = routeIntentByRules(input);
   if (byRules) return byRules;
   const config = activeFullConfig.value;
@@ -1485,6 +1557,8 @@ let confirmedWriteSqlText: string | undefined = undefined;
 let confirmedConnectionId: string | undefined = undefined;
 let confirmedDatabase: string | undefined = undefined;
 let confirmedSchema: string | undefined = undefined;
+/** One-shot target passed from a proposal button into the normal send path. */
+let confirmationBindingForNextRun: AiConversationBinding | undefined;
 
 /** Clear all pending write-confirmation state. Call on every early-return
  *  and failure path so a stale grant cannot leak into a subsequent send(). */
@@ -1494,22 +1568,42 @@ function clearPendingWriteGrant() {
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
   confirmedSchema = undefined;
+  confirmationBindingForNextRun = undefined;
 }
 
-const productionContext = computed(() => {
-  const target = props.connection && props.tab ? resolveAiDatabaseTarget(props.tab, props.connection) : undefined;
-  return productionContextForDatabase(props.connection, target?.database);
-});
+/** Production context of a specific binding — the connection a write would land on. */
+function productionContextOf(binding: AiConversationBinding) {
+  const connection = binding.connectionId ? connectionStore.getConfig(binding.connectionId) : undefined;
+  if (!connection) return productionContextForDatabase(undefined, undefined);
+  const target = resolveAiDatabaseTarget({ database: binding.database, schema: binding.schema }, connection);
+  return productionContextForDatabase(connection, target.database);
+}
+
+/**
+ * Production write protection must judge the connection the SQL will actually run
+ * on. For a run in flight that is the run's frozen binding, not the conversation's
+ * live one — otherwise rebinding (or waiting on a confirmation card while
+ * rebinding) could grant `allowWriteSql` for a production database, or deny it for
+ * a non-production one (#9902 review).
+ */
+const productionContext = computed(() => productionContextOf(activeRunBinding.value));
 
 function sendProposalReply(positive: boolean) {
   // Disable while a stream is in flight or no proposal is currently active.
   if (isGenerating.value) return;
   const target = proposalConfirmMessage.value;
   if (!target) return;
+  // The proposal belongs to a run, so its target is that run's frozen binding —
+  // not the conversation's live one. Rebinding while the card is up would
+  // otherwise append the SQL to, and record the write confirmation for, another
+  // connection; the backend verifies the confirmed namespace against the actual
+  // execution target, so it would also fail the confirmation (#9902 review).
+  const runBinding = activeRunBinding.value;
+  const runConnection = runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const isWriteConfirmation = isActionableWriteProposalMessage(target);
   if (positive && productionContext.value.active && (target.kind === "writeSqlConfirmation" || looksLikeWriteSqlProposal(target.content))) {
     const sql = extractFirstSqlCodeBlock(target.content);
-    if (sql) emit("appendSql", sql);
+    if (sql) emit("appendSql", sql, runBinding);
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
@@ -1527,11 +1621,11 @@ function sendProposalReply(positive: boolean) {
     confirmedWriteSqlText = extractSingleSqlCodeBlock(target.content);
     if (confirmedWriteSqlText) {
       allowWriteSqlForNextRun = true;
-      confirmedConnectionId = props.connection?.id;
-      if (props.tab && props.connection) {
-        const target = resolveAiDatabaseTarget(props.tab, props.connection);
-        confirmedDatabase = target.database;
-        confirmedSchema = target.schema;
+      confirmedConnectionId = runBinding.connectionId;
+      if (runConnection) {
+        const resolved = resolveAiDatabaseTarget({ database: runBinding.database, schema: runBinding.schema }, runConnection);
+        confirmedDatabase = resolved.database;
+        confirmedSchema = resolved.schema;
       }
     }
     // When no SQL code block is found in the proposal, treat the
@@ -1539,6 +1633,7 @@ function sendProposalReply(positive: boolean) {
     // specific SQL statement, so we must not grant blanket write access.
   }
   // Use the existing send pipeline so the message is added to history, persisted, etc.
+  confirmationBindingForNextRun = runBinding;
   send();
 }
 
@@ -1555,8 +1650,8 @@ function openCodeSnapshot(seg: { content: string; lang: string }) {
 }
 
 const showActionButtons = computed(() => {
-  if (!props.connection) return true;
-  return !isVectorDbType(props.connection.db_type);
+  if (!boundConnection.value) return true;
+  return !isVectorDbType(boundConnection.value.db_type);
 });
 
 const modeIcon = computed<Component>(() => (assistantMode.value === "agent" ? Bot : MessageSquarePlus));
@@ -1591,14 +1686,14 @@ const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas } = useSchema
 const aiDatabaseOptions = ref<Record<string, string[]>>({});
 
 const dbOptions = computed(() => {
-  const connection = props.connection;
+  const connection = boundConnection.value;
   if (!connection) return [];
   if (connection.db_type === "dameng") return aiDatabaseOptions.value[connection.id] || [];
   return databaseOptions.value[connection.id] || [];
 });
 
 const dbSelectOptions = computed(() => {
-  const connection = props.connection;
+  const connection = boundConnection.value;
   if (!connection) return [];
   return dbOptions.value.map((database) => ({
     database,
@@ -1622,7 +1717,7 @@ const filteredDbSelectOptions = computed(() => {
 
 const selectedDatabaseValues = computed(() => new Set(selectedDatabases.value));
 const selectedDatabaseLabel = computed(() => {
-  if (!props.connection) return t("editor.selectDatabase");
+  if (!boundConnection.value) return t("editor.selectDatabase");
   const labels = dbSelectOptions.value.filter((option) => selectedDatabaseValues.value.has(option.database)).map((option) => option.label);
   if (labels.length) return labels.join(", ");
   // The options list loads asynchronously (on popover open or connection
@@ -1635,7 +1730,7 @@ const selectedDatabaseLabel = computed(() => {
   if (raw.length) {
     return raw
       .map((database) =>
-        formatDatabaseLabel(props.connection, database, {
+        formatDatabaseLabel(boundConnection.value, database, {
           defaultDatabase: t("editor.defaultDatabase"),
           noDatabase: t("editor.noDatabase"),
         }),
@@ -1661,10 +1756,18 @@ function toggleDatabase(database: string) {
   }
 }
 
-const selectedNamespace = computed(() => (props.connection && props.tab ? resolveAiNamespaceSelection(props.tab, props.connection).value : ""));
+const selectedNamespace = computed(() => (boundConnection.value ? resolveAiNamespaceSelection({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value).value : ""));
 
+// Reset the composer's database multi-select whenever the *namespace* changes.
+//
+// `selectedDatabases` is a single ref for the whole panel, and the key used to be
+// `connection:tab` — so switching to another conversation kept the previous one's
+// selection, i.e. the "bound database" leaked between chats (#9902). The
+// conversation id belongs in the key; the namespace keeps a fresh, unsaved chat
+// following the visible tab. A bound conversation's namespace no longer depends
+// on the visible tab, so switching tabs inside it no longer resets the selection.
 watch(
-  () => `${props.connection?.id ?? ""}:${props.tab?.id ?? ""}`,
+  () => `${boundConnectionId.value}\u0000${boundDatabase.value}\u0000${boundSchema.value ?? ""}\u0000${conversationId.value}`,
   () => {
     selectedDatabases.value = selectedNamespace.value ? [selectedNamespace.value] : [];
   },
@@ -1672,30 +1775,29 @@ watch(
 watch([dbSelectOptions, selectedNamespace], syncSelectedDatabases, { immediate: true });
 
 const showAiSchemaSelector = computed(() => {
-  const connection = props.connection;
+  const connection = boundConnection.value;
   return !!connection && connection.db_type !== "dameng" && aiSchemaSelectionSupported(connection);
 });
 
 const aiSchemaDatabaseKey = computed(() => {
-  const connection = props.connection;
-  const tab = props.tab;
-  if (!connection || !tab) return "";
-  return tab.database || (isSingleDatabase(connection.db_type) ? "_" : "");
+  const connection = boundConnection.value;
+  if (!connection) return "";
+  return boundDatabase.value || (isSingleDatabase(connection.db_type) ? "_" : "");
 });
 
 const aiSchemaOptions = computed(() => {
-  const connection = props.connection;
+  const connection = boundConnection.value;
   if (!connection) return [];
   return getSchemaOptionsForDb(connection.id, aiSchemaDatabaseKey.value);
 });
 
 async function loadAiSchemas() {
-  const connection = props.connection;
+  const connection = boundConnection.value;
   if (!connection || !showAiSchemaSelector.value) return;
   await loadSchemaOptions(connection.id, aiSchemaDatabaseKey.value);
 }
 
-async function loadDatabases(connection = props.connection): Promise<string[]> {
+async function loadDatabases(connection = boundConnection.value): Promise<string[]> {
   if (!connection) return [];
   if (connection.db_type !== "dameng") {
     await loadDatabaseOptions(connection.id);
@@ -1707,35 +1809,69 @@ async function loadDatabases(connection = props.connection): Promise<string[]> {
   return options;
 }
 
+/**
+ * Rebind the shown conversation to another connection (#9902).
+ *
+ * This deliberately leaves the editor alone. The previous implementation set
+ * `connectionStore.activeConnectionId` and called `queryStore.updateConnection`
+ * on the active tab, which is precisely what made one connection global: picking
+ * a connection in the AI panel rewrote the tab the user was working in, so every
+ * conversation shared it.
+ */
 async function changeConnection(connectionId: string) {
   const conn = connectionStore.getConfig(connectionId);
-  if (!conn) return;
-  if (props.connection?.id === connectionId) return;
+  if (!conn || !connectionId) return;
+  if (boundConnectionId.value === connectionId) return;
   clearContextReferences();
-  connectionStore.activeConnectionId = connectionId;
-  const tab = props.tab;
-  const tabId = tab ? tab.id : queryStore.createTab(connectionId, resolveDefaultDatabase(conn, []));
-  if (tab) {
-    queryStore.updateConnection(tab.id, connectionId, resolveDefaultDatabase(conn, []));
-  }
+  let database = resolveDefaultDatabase(conn, []);
+  let schema: string | undefined;
   try {
     const options = await loadDatabases(conn);
     if (conn.db_type === "dameng") {
-      queryStore.updateSchema(tabId, resolveDefaultAiSchema(conn, options));
+      schema = resolveDefaultAiSchema(conn, options);
+      database = schema ? resolveDefaultDatabase(conn, []) : database;
     } else {
-      queryStore.updateDatabase(tabId, resolveDefaultDatabase(conn, options));
+      database = resolveDefaultDatabase(conn, options);
     }
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     toast(t("connection.connectFailed", { message: translateBackendError(t, message) }), 5000);
   }
+  await rebindConversation(conn, database, schema);
+}
+
+/** Writes a new binding onto the shown conversation and persists it. */
+async function rebindConversation(connection: ConnectionConfig, database: string, schema: string | undefined) {
+  const index = conversations.value.findIndex((item) => item.id === conversationId.value);
+  if (index < 0) {
+    // No persisted conversation yet (a chat with no messages): hold the choice
+    // locally until the first snapshot writes it into the conversation record.
+    draftBinding.value = { connectionId: connection.id, connectionName: connection.name, database, schema };
+    return;
+  }
+  const updated: AiConversation = {
+    ...conversations.value[index],
+    connectionId: connection.id,
+    connectionName: connection.name,
+    database,
+    schema,
+    updatedAt: new Date().toISOString(),
+  };
+  conversations.value.splice(index, 1, updated);
+  if (conversationId.value === updated.id && messages.value.length) {
+    // Persist through the snapshot path so the live transcript is what lands on
+    // disk, not the copy loaded when the conversation list was fetched.
+    await persistConversation().catch(() => {});
+  } else {
+    await saveAiConversation(updated).catch(() => {});
+  }
 }
 
 function changeSchema(schema: string) {
-  const tab = props.tab;
-  if (!tab || tab.schema === schema) return;
+  const connection = boundConnection.value;
+  if (!connection || boundSchema.value === (schema || undefined)) return;
   clearContextReferences();
-  queryStore.updateSchema(tab.id, schema || undefined);
+  void rebindConversation(connection, boundDatabase.value, schema || undefined);
 }
 
 function flushAssistantDeltas() {
@@ -2165,7 +2301,7 @@ function mentionCacheKey(connectionId: string, database: string, query: string) 
 }
 
 function mentionSchemaOrder(schemas: string[]): string[] {
-  const currentSchema = props.tab?.tableMeta?.schema;
+  const currentSchema = aiContextTarget.value.tableMeta?.schema;
   const preferred = [currentSchema, "public", "dbo", "main"].filter((value): value is string => !!value);
   return [...schemas].sort((a, b) => {
     const ai = preferred.indexOf(a);
@@ -2195,14 +2331,15 @@ function normalizeMentionQuery(query: string): { schemaPrefix: string; tableFilt
 }
 
 function mentionTargetDatabase(): string {
-  return props.tab && props.connection ? resolveAiMentionDatabase(props.tab, props.connection, selectedDatabases.value) : "";
+  return boundConnection.value ? resolveAiMentionDatabase({ database: boundDatabase.value, schema: boundSchema.value }, boundConnection.value, selectedDatabases.value) : "";
 }
 
 async function loadMentionCandidates(query: string) {
+  const connection = boundConnection.value;
   const mentionDatabase = mentionTargetDatabase();
-  if (pluginContext.value || !props.connection || !props.tab?.connectionId || !mentionDatabase) return;
+  if (pluginContext.value || !connection || !boundConnectionId.value || !mentionDatabase) return;
 
-  const key = mentionCacheKey(props.tab.connectionId, mentionDatabase, query);
+  const key = mentionCacheKey(boundConnectionId.value, mentionDatabase, query);
   if (mentionCache.value[key]) {
     mentionCandidates.value = mentionCache.value[key];
     return;
@@ -2216,14 +2353,14 @@ async function loadMentionCandidates(query: string) {
 
   try {
     sqlFileCandidates = await loadSqlFileMentionCandidates(query);
-    await connectionStore.ensureConnected(props.tab.connectionId);
+    await connectionStore.ensureConnected(boundConnectionId.value);
     let tableCandidates: AiMentionCandidate[] = [];
-    if (isSchemaAware(props.connection.db_type)) {
-      const schemas = mentionSchemaOrder(await listSchemas(props.tab.connectionId, mentionDatabase));
+    if (isSchemaAware(connection.db_type)) {
+      const schemas = mentionSchemaOrder(await listSchemas(boundConnectionId.value, mentionDatabase));
       const filteredSchemas = schemaPrefix ? schemas.filter((schema) => schema.toLowerCase().includes(schemaPrefix.toLowerCase())) : schemas;
       const results = await Promise.all(
         filteredSchemas.slice(0, AI_TABLE_MENTION_SCHEMA_LIMIT).map(async (schema) => {
-          const tables = await listTables(props.tab!.connectionId, mentionDatabase, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+          const tables = await listTables(boundConnectionId.value, mentionDatabase, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
           return filterAiTableMentionCandidates(
             tables.map((table) => mentionCandidateFromTable(table, schema)),
             tableFilter,
@@ -2233,9 +2370,9 @@ async function loadMentionCandidates(query: string) {
       );
       tableCandidates = filterAiTableMentionCandidates(results.flat(), "", AI_TABLE_MENTION_CANDIDATE_LIMIT);
     } else {
-      const database = props.connection.db_type === "sqlite" ? normalizeSqliteNamespace(mentionDatabase || props.connection.database, props.connection) : mentionDatabase;
-      const schema = database || props.connection.database || "main";
-      const tables = await listTables(props.tab.connectionId, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
+      const database = connection.db_type === "sqlite" ? normalizeSqliteNamespace(mentionDatabase || connection.database, connection) : mentionDatabase;
+      const schema = database || connection.database || "main";
+      const tables = await listTables(boundConnectionId.value, database, schema, tableFilter || undefined, AI_TABLE_MENTION_CANDIDATE_LIMIT);
       tableCandidates = filterAiTableMentionCandidates(
         tables.map((table) => mentionCandidateFromTable(table)),
         tableFilter,
@@ -2265,7 +2402,7 @@ async function loadMentionCandidates(query: string) {
 }
 
 async function loadSqlFileMentionCandidates(query: string): Promise<AiSqlFileMentionCandidate[]> {
-  const connectionId = props.tab?.connectionId;
+  const connectionId = boundConnectionId.value;
   if (!connectionId) return [];
   await savedSqlStore.initFromStorage();
   const normalizedQuery = normalizeSqlFileMentionQuery(query);
@@ -2466,8 +2603,10 @@ function imageAttachmentSupportErrorMessage(error: "provider" | "format"): strin
 }
 
 function selectedMessageMentions(tableMentions: AiTableMention[], sqlFileMentions: AiSqlFileMention[], csvAttachments: AiCsvFileContext[] = [], imageAttachments: AiImageAttachment[] = []): AiMessageMention[] {
-  const connectionId = props.tab?.connectionId || props.connection?.id || "";
-  const database = mentionTargetDatabase() || props.connection?.database || "";
+  // Only ever reached for the visible conversation: every caller passes empty
+  // arrays for a background/auto send (see the `auto ? [] : …` locals in send()).
+  const connectionId = boundConnectionId.value;
+  const database = mentionTargetDatabase() || boundConnection.value?.database || "";
   return [
     ...tableMentions.map((mention) => ({
       kind: "table" as const,
@@ -2502,8 +2641,8 @@ async function openMessageMention(mention: AiMessageMention) {
     }
     if (mention.kind !== "table") return;
     await openTableTarget({
-      connectionId: mention.connectionId || props.tab?.connectionId || props.connection?.id || "",
-      database: mention.database || props.tab?.database || props.connection?.database || "",
+      connectionId: mention.connectionId || boundConnectionId.value,
+      database: mention.database || boundDatabase.value || boundConnection.value?.database || "",
       schema: mention.schema,
       tableName: mention.table,
     });
@@ -2568,7 +2707,7 @@ function refreshMentionState() {
   commandOpen.value = false;
 
   const mention = activeMentionAtCursor();
-  if (!mention || !props.connection || !mentionTargetDatabase()) {
+  if (!mention || !boundConnection.value || !mentionTargetDatabase()) {
     mentionOpen.value = false;
     return;
   }
@@ -3009,13 +3148,15 @@ function onTauriFileDrop(event: Event) {
 function onTableReferenceDropEvent(event: Event) {
   if (pluginContext.value) return;
   handleAiTableReferenceDropEvent(event, {
-    context: {
-      connectionId: props.tab?.connectionId || props.connection?.id,
-      database: props.tab?.database || props.connection?.database || "",
-    },
     assistantRoot: assistantRootRef.value,
     elementFromPoint: (x, y) => document.elementFromPoint(x, y),
     onMention: (mention, payload) => {
+      // A table dragged in from another connection retargets the conversation:
+      // the mention only resolves against the database it came from, and a drop
+      // is an explicit gesture. (This reverses the old "reject a foreign table"
+      // contract, which existed only because the panel's connection was whatever
+      // tab was active and there was nothing to retarget — #9902.)
+      void bindConversation({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema });
       addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "table" });
       clearActiveTableReferencePayload(payload);
       nextTick(() => promptTextareaRef.value?.focus());
@@ -3024,6 +3165,8 @@ function onTableReferenceDropEvent(event: Event) {
 }
 
 async function send() {
+  const confirmationBinding = confirmationBindingForNextRun;
+  confirmationBindingForNextRun = undefined;
   // Auto-send (queued input / retry) overrides the view: the send runs against
   // the target conversation's own history instead of the visible chat. Consumed
   // once so a second unrelated send() cannot inherit a stale target.
@@ -3037,14 +3180,43 @@ async function send() {
     // `isGenerating` (slots arbitrate concurrency); only block when it would
     // stream into the visible conversation that is busy.
     if (autoSendVisible && isGenerating.value) return;
-  } else if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length && !selectedCsvAttachments.value.length && !selectedImageAttachments.value.length) || isGenerating.value) return;
-  if (isAttachmentProcessing.value) return;
+  } else if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length && !selectedCsvAttachments.value.length && !selectedImageAttachments.value.length) || isGenerating.value) {
+    if (confirmationBinding) clearPendingWriteGrant();
+    return;
+  }
+  if (isAttachmentProcessing.value) {
+    if (confirmationBinding) clearPendingWriteGrant();
+    return;
+  }
 
   // Snapshot the target connection/database before any async work so that
   // suspension points during context loading cannot cause a TOCTOU target switch.
   const runPluginContext = auto ? (pluginContextFromMessages(auto.messages) ?? auto.pluginContext) : pluginContext.value;
-  const connection = runPluginContext ? undefined : props.connection;
-  const tab = runPluginContext ? undefined : props.tab;
+  // A fresh send uses the current conversation. A queued send or confirmation
+  // continuation uses its own frozen target, including typed short replies.
+  const resumableBinding = backgroundAiRunsEnabled && desktopAiRun<ChatMessage>(conversationId.value)?.status === "awaiting_write_confirmation" ? activeRunBinding.value : undefined;
+  const typedConfirmation =
+    !auto &&
+    !confirmationBinding &&
+    shouldGrantWriteSqlOnShortAffirmative({
+      mode: assistantMode.value,
+      alreadyGranted: false,
+      isProduction: false,
+      userText: text,
+      messages: messages.value,
+    });
+  const typedConfirmationBinding = typedConfirmation ? activeAiRunBinding(conversationBinding.value, undefined, messages.value, true) : undefined;
+  const confirmationTarget = confirmationBinding ?? typedConfirmationBinding;
+  const runBinding = auto ? auto.binding : (confirmationTarget ?? resumableBinding ?? conversationBinding.value);
+  // A confirmation continues the target its card was created on. The composer's
+  // own context (mentions, attachments, database selection) still describes
+  // that target only while the chat has not been rebound since — otherwise it
+  // belongs to another namespace, and sending it would answer from the wrong
+  // database. When it still matches, dropping it would silently discard what
+  // the user attached alongside the affirmative.
+  const confirmationRetargets = !!confirmationTarget && !sameConversationBinding(runBinding, conversationBinding.value);
+  const connection = runPluginContext ? undefined : runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
+  const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
   const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
   if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
@@ -3052,7 +3224,9 @@ async function send() {
   }
   // Capture the selection before context loading or queued run scheduling can
   // yield to another conversation. Dameng's top-level selector is a schema.
-  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
+  // A background auto-send has no composer of its own, so it runs on the
+  // conversation's own database.
+  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? (auto || confirmationRetargets ? [runBinding.database] : [...selectedDatabases.value]) : [];
   const activeConfig = activeFullConfig.value;
   if (!activeConfig) {
     clearPendingWriteGrant();
@@ -3063,7 +3237,7 @@ async function send() {
     toast(t("ai.pluginHttpModelOnly"));
     return;
   }
-  const imageError = imageAttachmentSupportError(activeConfig.provider, auto ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
+  const imageError = imageAttachmentSupportError(activeConfig.provider, auto || confirmationTarget ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
   if (imageError) {
     toast(imageAttachmentSupportErrorMessage(imageError), 5000);
     return;
@@ -3226,10 +3400,10 @@ async function send() {
     settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);
   }
 
-  const selectedTableMentions = auto || runPluginContext ? [] : [...selectedMentions.value];
-  const selectedSqlFiles = auto || runPluginContext ? [] : [...selectedSqlFileMentions.value];
-  const csvAttachments = auto ? [] : [...selectedCsvAttachments.value];
-  const imageAttachments = auto ? [] : [...selectedImageAttachments.value];
+  const selectedTableMentions = auto || confirmationRetargets || runPluginContext ? [] : [...selectedMentions.value];
+  const selectedSqlFiles = auto || confirmationRetargets || runPluginContext ? [] : [...selectedSqlFileMentions.value];
+  const csvAttachments = auto || confirmationRetargets ? [] : [...selectedCsvAttachments.value];
+  const imageAttachments = auto || confirmationRetargets ? [] : [...selectedImageAttachments.value];
   const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
   const modelInstruction = buildAiModelInstruction({
     tableMentionRaws: selectedTableMentions.map((mention) => mention.raw),
@@ -3288,7 +3462,7 @@ async function send() {
     // already explains what this turn does).
     requestedAction = resolveDefaultAction(requestedMode);
   } else {
-    requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible());
+    requestedAction = await resolveAutoAction(text, requestedMode, runIsVisible(), tab);
     // Keep the outcome on the message so the "Auto · <action>" chip can explain
     // (and re-select) what the router chose.
     userMessage.routedFrom = "auto";
@@ -3308,7 +3482,7 @@ async function send() {
     allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
       mode: requestedMode,
       alreadyGranted: false,
-      isProduction: productionContext.value.active,
+      isProduction: productionContextOf(runBinding).active,
       userText: text,
       // Pass the history BEFORE the just-pushed user message so the function skips it.
       messages: runMessages.slice(0, -1),
@@ -3346,7 +3520,7 @@ async function send() {
     }
   }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
-  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContextOf(runBinding).active;
   const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
   // Capture the confirmed target snapshot before clearing the one-shot grant
   // state, so the values survive to be passed through to the backend.
@@ -3387,7 +3561,7 @@ async function send() {
       return;
     }
   }
-  runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName });
+  runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName, sourceBinding: runBinding });
   const assistantIdx = runMessages.length - 1;
   if (requestedMode === "agent" && sendSkillSnapshot?.length) {
     runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
@@ -3643,7 +3817,7 @@ async function send() {
           database: tab.database,
         });
         if (msg && requestedMode === "agent") msg.agentSteps = [...(msg.agentSteps ?? []), ...buildAiAgentStepItems(agentPlan)];
-        if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql);
+        if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql, runBinding);
       }
       if (runIsVisible()) {
         currentSessionId.value = "";
@@ -3737,7 +3911,19 @@ async function send() {
  *  input is consumed by the send pipeline once it actually starts, so a failed
  *  early bail (no config, superseded) does not silently drop it. */
 function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[], context = pluginContextFromMessages(messages)) {
-  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action, pluginContext: context });
+  // A conversation without a persisted record has no authoritative binding;
+  // falling back to the visible conversation's binding would recreate the
+  // cross-conversation leak this change removes.
+  if (!conversations.value.some((conversation) => conversation.id === convId)) return;
+  pendingAutoSends.push({
+    conversationId: convId,
+    text: queued.text,
+    messages,
+    mode: queued.mode,
+    action: queued.action,
+    pluginContext: context,
+    binding: bindingForSnapshot(conversations.value, convId, conversationBinding.value),
+  });
   void send();
 }
 
@@ -3998,26 +4184,26 @@ function abandonInFlightRequest(alreadyCancelledSessionId?: string) {
 
 function applySql(code: string) {
   if (isRedisConnection.value) {
-    emit("insertRedisCommand", code);
+    emit("insertRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("appendSql", code);
+  emit("appendSql", code, conversationBinding.value);
 }
 
 function executeSql(code: string) {
   if (isRedisConnection.value) {
-    emit("executeRedisCommand", code);
+    emit("executeRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("executeSql", code);
+  emit("executeSql", code, conversationBinding.value);
 }
 
 function tempRunSql(code: string) {
   if (isRedisConnection.value) {
-    emit("executeRedisCommand", code);
+    emit("executeRedisCommand", code, conversationBinding.value);
     return;
   }
-  emit("tempRunSql", code);
+  emit("tempRunSql", code, conversationBinding.value);
 }
 
 const copiedContentKey = ref("");
@@ -4062,7 +4248,7 @@ async function exportMessageAsMarkdown(msg: ChatMessage) {
 
   try {
     const result = buildAiAnalysisExport({
-      connectionName: msg.sourceConnectionName ?? props.connection?.name,
+      connectionName: msg.sourceConnectionName ?? boundConnection.value?.name,
       content: msg.content,
       analysisLabel: t("ai.analysis"),
       dateLabel: new Date().toLocaleString(),
@@ -4115,7 +4301,7 @@ async function exportConversationAs(format: AiConversationExportFormat) {
       }
     }
     const result = buildAiConversationExport({
-      connectionName: pluginContext.value?.pluginName ?? props.connection?.name,
+      connectionName: pluginContext.value?.pluginName ?? boundConnection.value?.name,
       dateLabel: new Date().toLocaleString(),
       messages: visibleMessages.value.map((msg) => ({
         role: msg.role,
@@ -4165,6 +4351,9 @@ function clearMessages() {
   cancelEdit();
   clearAttachmentDraftState();
   conversationId.value = "";
+  // The draft binding belonged to the chat being discarded; a new one starts
+  // from the ambient tab again (#9902).
+  draftBinding.value = null;
   isGenerating.value = false;
   currentSessionId.value = "";
   currentAssistantMessageIndex = -1;
@@ -4187,16 +4376,32 @@ function clearAttachmentDraftState() {
   browserAttachmentDragDepth = 0;
 }
 
-function buildConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString()): AiConversation | null {
+/**
+ * Binding to persist for `targetConversationId` (#9902). A conversation that
+ * already exists keeps its own binding; a chat that has not been saved yet takes
+ * the composer's current choice.
+ */
+function snapshotBinding(targetConversationId: string, fallback = conversationBinding.value): AiConversationBinding {
+  return bindingForSnapshot(conversations.value, targetConversationId, fallback);
+}
+
+function buildConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString(), fallbackBinding = conversationBinding.value): AiConversation | null {
   if (!targetConversationId || !targetMessages.length) return null;
   const first = targetMessages.find((m) => m.role === "user" && m.kind !== "contextSummary");
   const existingConversation = conversations.value.find((conversation) => conversation.id === targetConversationId);
+  const binding = snapshotBinding(targetConversationId, fallbackBinding);
   return {
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
     pluginContext: pluginContextFromMessages(targetMessages),
-    connectionName,
-    database,
+    // Name and id must come from the same source: taking the name from the caller
+    // (a run, so possibly connection A) while the id comes from the conversation
+    // record (possibly B after a mid-run rebind) saves a record that *displays* A
+    // but targets B (#9902 review).
+    connectionName: binding.connectionId ? (connectionStore.getConfig(binding.connectionId)?.name ?? connectionName) : connectionName,
+    connectionId: binding.connectionId,
+    database: existingConversation ? binding.database : database,
+    schema: binding.schema,
     messages: targetMessages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -4204,6 +4409,7 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
       ...(m.failed ? { failed: true } : {}),
+      ...(m.sourceBinding ? { sourceBinding: m.sourceBinding } : {}),
     })),
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
@@ -4213,8 +4419,8 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
   };
 }
 
-async function persistConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString()) {
-  const conversation = buildConversationSnapshot(targetConversationId, targetMessages, connectionName, database, createdAt);
+async function persistConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString(), fallbackBinding = conversationBinding.value) {
+  const conversation = buildConversationSnapshot(targetConversationId, targetMessages, connectionName, database, createdAt, fallbackBinding);
   if (!conversation) return;
   await saveAiConversation(conversation)
     .then(() => syncPersistedConversation(conversation))
@@ -4222,7 +4428,9 @@ async function persistConversationSnapshot(targetConversationId: string, targetM
 }
 
 async function persistDesktopRunSnapshot(run: DesktopAiRunRuntime<ChatMessage>) {
-  const conversation = buildConversationSnapshot(run.conversationId, run.messages, run.connectionName, run.database, run.createdAt);
+  // The first snapshot can land after the visible editor or conversation changed.
+  // A not-yet-persisted conversation must take the run's frozen target.
+  const conversation = buildConversationSnapshot(run.conversationId, run.messages, run.connectionName, run.database, run.createdAt, { connectionId: run.connectionId, database: run.database, schema: run.schema });
   if (!conversation) return;
   await saveAiRunState(conversation, {
     runId: run.runId,
@@ -4317,7 +4525,9 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
     title: conversation.pluginContext?.title || renamedConversationTitles.get(conversation.id) || conversation.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
     pluginContext: conversation.pluginContext,
     connectionName: conversation.connectionName,
+    connectionId: conversation.connectionId,
     database: conversation.database,
+    schema: conversation.schema,
     messages: messages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -4325,6 +4535,7 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
       ...(m.failed ? { failed: true } : {}),
+      ...(m.sourceBinding ? { sourceBinding: m.sourceBinding } : {}),
     })),
     queuedInput: conversation.queuedInput,
     createdAt: conversation.createdAt,
@@ -4338,9 +4549,11 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
 }
 
 async function persistConversation() {
-  if (!messages.value.length || (!pluginContext.value && !props.connection)) return;
+  const binding = activeRunBinding.value;
+  const connection = binding.connectionId ? connectionStore.getConfig(binding.connectionId) : undefined;
+  if (!messages.value.length || (!pluginContext.value && !connection)) return;
   if (!conversationId.value) conversationId.value = uuid();
-  await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? props.connection?.name ?? "", pluginContext.value ? "" : props.tab?.database || "");
+  await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? connection?.name ?? "", pluginContext.value ? "" : binding.database, new Date().toISOString(), binding);
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -4398,6 +4611,9 @@ function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
     reasoning: m.reasoning,
     kind: m.kind,
     failed: m.failed === true ? true : undefined,
+    // Old transcripts have no per-turn target. Capture the conversation's
+    // current binding on load so a later rebind cannot retarget a pending card.
+    sourceBinding: m.sourceBinding ?? (m.role === "assistant" && conv.connectionId ? { connectionId: conv.connectionId, database: conv.database, schema: conv.schema } : undefined),
   }));
 }
 
@@ -4413,6 +4629,9 @@ function selectConversation(conv: AiConversation) {
   // summaries are filtered out of rendering) so the anchor matches row indices.
   if (conversationId.value) conversationReadMessageCount.set(conversationId.value, visibleMessages.value.length);
   conversationId.value = conv.id;
+  // The chosen conversation owns its connection from here on (#9902); any
+  // binding staged for the unsaved chat we are leaving is now irrelevant.
+  draftBinding.value = null;
   draftPluginContext.value = conv.pluginContext;
   clearContextReferences();
   clearPendingWriteGrant();
@@ -4886,10 +5105,31 @@ function setPrompt(text: string, fromPlugin = false) {
   nextTick(() => promptTextareaRef.value?.focus());
 }
 
-function addTableMention(target: { schema?: string; table: string }) {
+/**
+ * Retarget the shown conversation at a connection an external entrypoint named —
+ * e.g. "Ask AI" on a table picked in another connection's tree (#9902).
+ *
+ * The pick is explicit, so the conversation follows it. The editor is left
+ * alone: the host used to assign `connectionStore.activeConnectionId` and
+ * switch/create a tab for that connection, which moved the whole workspace onto
+ * whatever the AI panel was asked about.
+ */
+async function bindConversation(binding: AiConversationBinding) {
+  if (!binding.connectionId || sameConversationBinding(binding, conversationBinding.value)) return;
+  const connection = connectionStore.getConfig(binding.connectionId);
+  if (!connection) return;
+  // Mentions and schema options belonged to the previous target.
+  clearContextReferences();
+  await rebindConversation(connection, binding.database, binding.schema);
+}
+
+function addTableMention(target: { schema?: string; table: string }, binding?: AiConversationBinding) {
   if (pluginContext.value) startNewChat();
   const table = target.table.trim();
   if (!table) return;
+  // Clearing the old references happens synchronously inside
+  // bindConversation(), before this call adds the new mention.
+  if (binding) void bindConversation(binding);
   addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
   nextTick(() => promptTextareaRef.value?.focus());
 }
@@ -4908,7 +5148,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, triggerAction, setPrompt, addTableMention, bindConversation, clearContextReferences, selectConversationById, focusSearch });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -5013,7 +5253,14 @@ async function openExternalUrl(url: string) {
                 @keydown.esc.stop.prevent="cancelRenameConversation"
                 @blur="commitRenameConversation(conv)"
               />
-              <span v-else class="min-w-0 flex-1 truncate" :title="conv.title">{{ conv.title }}</span>
+              <!-- The bound connection belongs on the row: a conversation keeps
+                   its own database (#9902), so which one it talks to must be
+                   readable without opening it. `isConnectionMissing` marks a
+                   binding whose connection was deleted or renamed away. -->
+              <span v-else class="min-w-0 flex-1">
+                <span class="block truncate" :title="conv.title">{{ conv.title }}</span>
+                <span v-if="conv.connectionName" class="block truncate text-[10px]" :class="conversationRowDetail(conv).connectionMissing ? 'text-destructive/80' : 'text-muted-foreground/70'">{{ conv.connectionName }}</span>
+              </span>
               <button v-if="renamingConversationId !== conv.id" type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground" :title="t('ai.renameConversation')" @click.stop="startRenameConversation(conv)"><Pencil class="h-3 w-3" /></button>
               <span v-if="conversationRowDetail(conv).hasQueuedInput" class="shrink-0 rounded border border-primary/40 bg-primary/10 px-1 py-px text-[10px] text-primary" :aria-label="t('ai.rowQueuedInput')" :title="t('ai.rowQueuedInput')">{{ t("ai.rowQueuedInput") }}</span>
               <span v-if="conversationRowDetail(conv).status === 'preparing' || conversationRowDetail(conv).status === 'running'" class="flex min-w-0 shrink-0 items-center gap-1 text-muted-foreground" :aria-label="t('ai.runStatusRunning')" :title="t('ai.runStatusRunning')">
@@ -5289,12 +5536,12 @@ async function openExternalUrl(url: string) {
                     </button>
                     <div v-if="expandedSteps.has(step.key)" class="border-t border-current/10 px-2 pb-2 pt-1">
                       <div v-if="step.toolArgs?.sql" class="mb-1 rounded bg-background/50 px-2 py-1 font-mono text-[10px] text-foreground/80 whitespace-pre-wrap">{{ step.toolArgs.sql }}</div>
-                      <Button v-if="step.toolName === 'explain_query' && step.toolArgs?.sql" size="sm" variant="outline" class="mb-1 h-6 gap-1 text-[10px]" @click="emit('openExplainPlan', step.toolArgs.sql as string)">
+                      <Button v-if="step.toolName === 'explain_query' && step.toolArgs?.sql" size="sm" variant="outline" class="mb-1 h-6 gap-1 text-[10px]" @click="emit('openExplainPlan', step.toolArgs.sql as string, conversationBinding)">
                         <GitBranch class="h-3 w-3" />
                         {{ t("explain.title") }}
                       </Button>
-                      <div v-if="step.toolName === 'explain_query' && step.explainData && connection?.db_type" class="mb-1 h-64 overflow-hidden rounded border">
-                        <ExplainPlanViewer :plan="parseExplainFromData(step.explainData, connection.db_type)" />
+                      <div v-if="step.toolName === 'explain_query' && step.explainData && boundConnection?.db_type" class="mb-1 h-64 overflow-hidden rounded border">
+                        <ExplainPlanViewer :plan="parseExplainFromData(step.explainData, boundConnection.db_type)" />
                       </div>
                       <div v-else-if="step.isError && step.toolResult" class="text-[10px] text-red-600 dark:text-red-400">{{ step.toolResult }}</div>
                       <div v-else-if="step.toolResult" class="max-h-48 overflow-auto text-[10px] text-muted-foreground whitespace-pre-wrap">{{ step.toolResult }}</div>
@@ -5472,10 +5719,10 @@ async function openExternalUrl(url: string) {
               <pre class="max-h-56 overflow-auto whitespace-pre-wrap break-all p-2 text-[11px]">{{ pluginContextText(pluginContext) }}</pre>
             </details>
             <template v-else-if="connectionStore.connections.length">
-              <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
+              <DatabaseIcon v-if="boundConnection" :db-type="connectionIconType(boundConnection)" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
               <ConnectionTreeSelect
-                :model-value="connection?.id || ''"
+                :model-value="boundConnectionId"
                 :connections="connectionStore.connections"
                 :layout="connectionStore.sidebarLayout"
                 :placeholder="t('editor.selectConnection')"
@@ -5486,7 +5733,7 @@ async function openExternalUrl(url: string) {
                 list-class="w-72 max-w-[calc(100vw-2rem)]"
                 @update:model-value="(v) => changeConnection(v)"
               />
-              <template v-if="connection">
+              <template v-if="boundConnection">
                 <Database class="h-3 w-3 shrink-0 text-foreground/40" />
                 <Popover
                   @update:open="
@@ -5518,13 +5765,13 @@ async function openExternalUrl(url: string) {
                 <template v-if="showAiSchemaSelector">
                   <Layers class="h-3 w-3 shrink-0 text-foreground/40" />
                   <SearchableSelect
-                    :model-value="tab?.schema || ''"
-                    :options="aiSchemaOptions.length ? aiSchemaOptions : tab?.schema ? [tab.schema] : []"
+                    :model-value="boundSchema || ''"
+                    :options="aiSchemaOptions.length ? aiSchemaOptions : boundSchema ? [boundSchema] : []"
                     :placeholder="t('editor.selectSchema')"
                     :search-placeholder="t('editor.searchSchema')"
                     :empty-text="t('grid.noSearchResults')"
                     :loading-text="t('common.loading')"
-                    :loading="isLoadingSchemas(connection.id, aiSchemaDatabaseKey)"
+                    :loading="isLoadingSchemas(boundConnection.id, aiSchemaDatabaseKey)"
                     trigger-variant="ghost"
                     trigger-class="h-5 min-w-0 max-w-36 flex-1 p-0 px-1 text-foreground/80"
                     trigger-icon-class="h-3 w-3"

@@ -50,7 +50,6 @@ async fn live_starrocks_group_concat_setup_fallback() {
     let invalid_setup = ["SET dbx_nonexistent_setup_variable = 1".to_string()];
     let error = mysql::connect_with_ca_cert_pool_limit_idle_and_setup(&url, None, timeout, 2, None, &invalid_setup)
         .await
-        .err()
-        .expect("invalid user setup must not be swallowed by the compatibility retry");
+        .expect_err("invalid user setup must not be swallowed by the compatibility retry");
     assert!(error.contains("dbx_nonexistent_setup_variable"), "{error}");
 }

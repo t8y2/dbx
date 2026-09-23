@@ -11,6 +11,9 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import ToolbarUpdateIcon from "@/components/layout/ToolbarUpdateIcon.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import { setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { usePluginToolbarCommands, type PluginToolbarCommandEntry } from "@/lib/plugins/pluginCommandRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 
@@ -76,6 +79,28 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+
+// PR-A4 appToolbar surface (HOST_PLUGIN_UI_SPEC §5.1): plugin commands render as icons
+// surface (next to Settings/AI); clicking runs the command (presentation: panel -> the global bottom dock),
+// clicking again collapses an open dock command.
+const { entries: pluginCommandEntries, open: openPluginCommand } = usePluginToolbarCommands();
+const { entries: pluginDockEntries, visible: dockVisible } = usePluginBottomDock();
+// The toolbar icon toggles panel visibility (panel hide keeps the webviews
+// mounted, so sessions and height survive); with a hidden-but-populated dock
+// the first click just restores it, and only an empty dock runs the command
+// (otherwise "getting the panel back" would keep spawning new terminals).
+function togglePluginCommand(entry: PluginToolbarCommandEntry) {
+  if (dockVisible.value) {
+    setDockVisible(false);
+    return;
+  }
+  if (pluginDockEntries.value.length) {
+    setDockVisible(true);
+    return;
+  }
+  const result = openPluginCommand(entry);
+  if (result.error) toast(result.error, 5000);
+}
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const showToolbarUpdateEntry = computed(() => toolbarItems.value.checkUpdates || props.hasUpdateAvailable);
@@ -770,6 +795,16 @@ const toolbarStyle = computed(() => {
           </Button>
         </TooltipTrigger>
         <TooltipContent>GitHub</TooltipContent>
+      </Tooltip>
+
+      <Tooltip v-for="entry in pluginCommandEntries" :key="`${entry.pluginId}.${entry.commandId}`">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': dockVisible }" :aria-label="entry.label" @click="togglePluginCommand(entry)">
+            <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="toolbar-action-icon h-4 w-4" />
+            <span v-if="dockVisible" class="toolbar-panel-status" aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ entry.label }} · {{ entry.pluginName }}</TooltipContent>
       </Tooltip>
     </div>
     <!-- /rightWrapper -->

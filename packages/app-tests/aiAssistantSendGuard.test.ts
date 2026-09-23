@@ -51,7 +51,10 @@ function functionBody(script: string, signature: string): string {
 test("send() acquires the guard synchronously before the first await", () => {
   const body = functionBody(scriptSetupContent(), "async function send()");
 
-  const entryCheck = body.search(/\|\|\s*isGenerating\.value\)\s*return/);
+  // Anchor on the condition, not on a one-line `return`: the branch may run a
+  // synchronous cleanup first (a declined write-confirmation grant), so the
+  // shape is a block now. The assertions below still require a return inside it.
+  const entryCheck = body.search(/\|\|\s*isGenerating\.value\)\s*\{/);
   const guardSet = body.indexOf("isGenerating.value = true");
   // `await` as a whole word (not the substring inside e.g. the
   // `awaiting_write_confirmation` run status), so the first suspension point is
@@ -61,6 +64,7 @@ test("send() acquires the guard synchronously before the first await", () => {
   assert.notEqual(entryCheck, -1, "send() should early-return when isGenerating is already set");
   assert.notEqual(guardSet, -1, "send() should set the isGenerating guard");
   assert.notEqual(firstAwait, -1, "send() should contain an await");
+  assert.ok(body.slice(entryCheck, guardSet).includes("return"), "the isGenerating branch must return before the guard set");
 
   // The entry check runs first, then the guard is set, then (and only then) the
   // first await suspends. Because nothing awaits between the check and the set,

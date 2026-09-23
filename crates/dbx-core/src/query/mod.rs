@@ -1,3 +1,4 @@
+pub mod batch_progress;
 pub mod document_ops;
 pub mod hbase_ops;
 pub mod mongo_ops;

@@ -485,6 +485,85 @@ export interface PluginResultViewContribution {
   icon?: string;
 }
 
+export type PluginCommandPresentation = "tab" | "panel";
+export type PluginCommandReuse = "singleton" | "new";
+export type PluginCommandRestore = "none";
+
+/** v1 ships exactly one action (HOST_PLUGIN_UI_SPEC §4.1): open a declared workbench. */
+export interface PluginOpenWorkbenchAction {
+  type: "open-workbench";
+  /** Workbench contribution of the SAME plugin. */
+  workbench: string;
+  presentation?: PluginCommandPresentation;
+  reuse?: PluginCommandReuse;
+  instance_key?: string;
+  restore?: PluginCommandRestore;
+  /** Opaque plugin payload; the host serves it under `context.plugin`. */
+  context?: Record<string, unknown>;
+  /**
+   * Generic launch-options extension point: sidecar method returning
+   * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
+   * The host renders labels and merges the chosen context into the
+   * host-authored panel context — never interpreting the business meaning.
+   */
+  options_action?: string;
+  /** When true, the host also offers the plugin's own saved connections as launch targets. */
+  connection_targets?: boolean;
+}
+
+export type PluginConditionOperator = "equals" | "notEquals" | "oneOf";
+
+/** §5.3 structured condition clause; key/operator are host-reserved word lists — unknown values were rejected at parse time. */
+export interface PluginConditionClause {
+  key: string;
+  operator: PluginConditionOperator;
+  value: string | boolean | string[];
+}
+
+/** enablement/when condition group: implicit AND within `all`; absent field defaults to true. */
+export interface PluginCommandEnablement {
+  all: PluginConditionClause[];
+}
+
+/** Context-key snapshot for condition evaluation (host-provided per scenario; clauses referencing a missing key are always false). */
+export type PluginConditionContextKeys = Record<string, string | boolean | undefined>;
+
+export interface PluginCommandLaunchOption {
+  label: string;
+  description?: string;
+  context?: Record<string, unknown>;
+}
+
+export interface PluginCommandContribution {
+  type: "command";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  action: PluginOpenWorkbenchAction;
+  enablement?: PluginCommandEnablement;
+}
+
+export type PluginMenuLocation = "commandPalette" | "appToolbar" | "appSidebar";
+
+export interface PluginMenuItem {
+  location: PluginMenuLocation;
+  /** Short command id of the SAME plugin. */
+  command: string;
+  group: string;
+  order: number;
+  /** Toolbar entries default to hidden; sidebar entries default to visible. */
+  default_visible?: boolean;
+  /** Placement visibility condition (defaults to true); evaluated independently from command.enablement. */
+  when?: PluginCommandEnablement;
+}
+
+export interface PluginMenusContribution {
+  type: "menus";
+  id: string;
+  items: PluginMenuItem[];
+}
+
 /**
  * Contribution types the host renders through the plugin's own UI entrypoint in
  * a plugin tab. A `workbench` is launched from the sidebar, the plugin center,
@@ -495,7 +574,7 @@ export interface PluginResultViewContribution {
  */
 export type PluginUiContribution = PluginWorkbenchContribution | PluginResultViewContribution;
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution;
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
 
 export interface PluginEngines {
   dbx: string;

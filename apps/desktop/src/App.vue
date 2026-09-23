@@ -31,6 +31,7 @@ import type { PluginUpdateBlock } from "@/composables/useComponentUpdates";
 import { COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge, showToolbarUpdateAction } from "@/lib/updates/updateBadges";
 import {
+  continuePreparedAppUpdate,
   hasPendingComponentUpdatesAfterAppRestart,
   markPendingComponentUpdatesAfterAppUpdate,
   resolveUpdateAllAction,
@@ -38,6 +39,7 @@ import {
   runPendingComponentUpdatePlan,
   shouldCloseUpdateCenterAfterComponentUpdate,
   takePendingComponentUpdatesAfterAppRestart,
+  updateBlockerLabels,
   type PendingComponentUpdatePlan,
 } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
@@ -1284,7 +1286,9 @@ function reportComponentUpdateResult(result: Awaited<ReturnType<typeof component
   if (result.failed.length === 0) syncToolbarComponentUpdateState();
   if (result.plugins > 0) notifyComponentPluginsUpdated();
   if (updatedComponents.length) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
-  if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
+  if (result.blockedDrivers.length) {
+    toast(t("driverStore.driverUpdateBlocked", { labels: updateBlockerLabels(result.blockedDrivers).join(", ") }), 8000);
+  } else if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
   const otherFailureCount = result.failed.length - result.blockedPlugins.length;
   const failureMessages = [result.blockedPlugins.map(pluginUpdateBlockMessage).join("\n"), otherFailureCount > 0 ? t("updates.componentsAutoUpdateFailed", { count: otherFailureCount }) : ""].filter(Boolean);
   if (failureMessages.length) toast(failureMessages.join("\n"), 8000);
@@ -1337,6 +1341,19 @@ function availableComponentUpdateCategories(): ComponentUpdateCategory[] {
   return categories;
 }
 
+function continueAppUpdateWithComponents(categories: ComponentUpdateCategory[]) {
+  return continuePreparedAppUpdate({
+    hasComponentUpdates: categories.length > 0,
+    restartOnly: updateReady.value,
+    rememberComponentUpdates: () => rememberComponentUpdatesForRestartedApp({ kind: "manual", categories }),
+    installComponents: async () => {
+      reportComponentUpdateResult(await componentUpdates.installCategories(categories));
+    },
+    installDownloadedUpdate,
+    restartApp,
+  });
+}
+
 async function updateAllAvailable() {
   if (updatingAllUpdates.value) return;
   updatingAllUpdates.value = true;
@@ -1354,17 +1371,9 @@ async function updateAllAvailable() {
       reportComponentUpdateResult(await componentUpdates.installCategories(categories));
       return;
     }
-    if (action === "defer-components") {
-      const remembered = await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
-      if (remembered) {
-        toast(t("settings.updateRestartHint"), 6000);
-        return;
-      }
-      reportComponentUpdateResult(await componentUpdates.installCategories(categories));
-      return;
-    }
+    if (action === "install-app") return continueAppUpdateWithComponents(categories);
     if (action === "download-app") await downloadUpdateInBackground();
-    if (updateDownloaded.value || updateReady.value) await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
+    if (updateDownloaded.value || updateReady.value) await continueAppUpdateWithComponents(categories);
   } finally {
     updatingAllUpdates.value = false;
   }

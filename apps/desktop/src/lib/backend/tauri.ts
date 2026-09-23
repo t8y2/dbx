@@ -179,6 +179,7 @@ export interface UpgradeAllAgentDriversResult {
 export interface AgentUpdateBlocker {
   db_type: string;
   label: string;
+  connections: string[];
 }
 
 export type AgentOfflineArtifactKind = "jar" | "native";

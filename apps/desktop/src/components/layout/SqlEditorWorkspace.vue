@@ -112,6 +112,7 @@ defineExpose({
   // driving another connection's console.
   insertRedisCommand: (command: string, connectionId?: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.insertRedisCommand(command, connectionId) ?? Promise.resolve(false),
   executeRedisCommand: (command: string, connectionId?: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.executeRedisCommand(command, connectionId) ?? Promise.resolve(false),
+  isRedisConsoleReady: (connectionId: string) => (groupForElement(commandTargetElement(null)) ?? activeEditorGroup())?.isRedisConsoleReady(connectionId) ?? false,
 });
 
 const { t } = useI18n();

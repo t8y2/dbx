@@ -41,6 +41,37 @@ describe("AI Redis console routing", () => {
     expect(handler).not.toContain("buildAppendedEditorSql(");
   });
 
+  it("brings the bound connection's Redis console on screen instead of dropping the command", () => {
+    // Redis has no headless path, so the bound connection's console is created
+    // (without stealing focus) and focused explicitly, then driven.
+    expect(appSource).toContain("const tabId = ensureRedisConsoleTab(target);");
+    expect(appSource).toContain('queryStore.createTab(target.connectionId, database, `db${database}`, "redis", undefined, undefined, undefined, { activate: false })');
+    expect(appSource).toContain("if (queryStore.activeTabId !== tabId) queryStore.switchTab(tabId);");
+  });
+
+  it("waits for the console to mount without re-issuing the command", () => {
+    const start = appSource.indexOf("async function deliverRedisAiCommand");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const deliver = appSource.slice(start, appSource.indexOf("\n}", start));
+
+    // Readiness is polled through a side-effect-free probe...
+    const probeIdx = deliver.indexOf("isRedisConsoleReady(target.connectionId)");
+    expect(probeIdx).toBeGreaterThanOrEqual(0);
+    expect(deliver).toContain("REDIS_CONSOLE_READY_TIMEOUT_MS");
+    // ...and the single route attempt happens only after the wait, so a command
+    // that ran but reported false (e.g. awaiting confirmation) cannot run twice.
+    const routeIdx = deliver.indexOf("executeRedisCommand(command, target.connectionId)");
+    expect(routeIdx).toBeGreaterThan(probeIdx);
+
+    // The probe itself must not execute anything.
+    const probeStart = contentAreaSource.indexOf("function isRedisConsoleReady");
+    expect(probeStart).toBeGreaterThanOrEqual(0);
+    const probe = contentAreaSource.slice(probeStart, contentAreaSource.indexOf("\n}", probeStart));
+    expect(probe).toContain('props.activeTab.mode === "redis" && props.activeTab.connectionId === connectionId && !!redisKeyBrowserRef.value');
+    expect(probe).not.toContain("executeCommand");
+    expect(probe).not.toContain("insertCommand");
+  });
+
   it("uses the console safety path and rejects unavailable command input", () => {
     expect(classifyRedisCommandSafety("CONFIG SET requirepass secret")).toBe("blocked");
     expect(classifyRedisCommandSafety("FLUSHDB")).toBe("confirm");

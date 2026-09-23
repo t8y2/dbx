@@ -30,6 +30,14 @@ export interface QueryEditorSurfaceHandle {
    *  another connection's console. */
   insertRedisCommand(command: string, connectionId?: string): Promise<boolean>;
   executeRedisCommand(command: string, connectionId?: string): Promise<boolean>;
+  /**
+   * Whether this surface's Redis console is mounted, on screen, and pointed at
+   * `connectionId`. Side-effect free — the AI panel polls it before routing a
+   * command, because the console is a lazily-loaded component rendered only for
+   * the active tab, and retrying the *command* to detect readiness could run it
+   * twice.
+   */
+  isRedisConsoleReady(connectionId: string): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;

@@ -1374,6 +1374,11 @@ async function executeRedisCommand(command: string, connectionId?: string): Prom
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
 }
 
+/** Side-effect-free readiness probe; see `QueryEditorSurfaceHandle`. */
+function isRedisConsoleReady(connectionId: string): boolean {
+  return props.activeTab.mode === "redis" && props.activeTab.connectionId === connectionId && !!redisKeyBrowserRef.value;
+}
+
 function previewStatementRange(range: { from: number; to: number } | null): boolean {
   if (!queryEditorRef.value) return false;
   queryEditorRef.value.previewStatementRange(range);
@@ -1475,6 +1480,7 @@ defineExpose({
   applyTableStructureChanges,
   insertRedisCommand,
   executeRedisCommand,
+  isRedisConsoleReady,
   previewStatementRange,
   focusStatementRange,
   focusErrorPosition,

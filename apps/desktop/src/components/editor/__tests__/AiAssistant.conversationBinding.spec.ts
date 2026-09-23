@@ -103,6 +103,17 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     expect(bodyOf("function conversationRowDetail(conv: AiConversation)")).toContain("connectionMissing: !!conv.connectionId && !connectionStore.getConfig(conv.connectionId)");
   });
 
+  it("retargets the conversation on a cross-connection table drop too", () => {
+    // Reverses the old "reject a foreign table" contract: with the conversation
+    // owning its binding, the drop can retarget it instead of being discarded.
+    const start = source.indexOf("function onTableReferenceDropEvent");
+    const body = source.slice(start, source.indexOf("\n}", start));
+
+    expect(body).toContain("void applyExternalBinding({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema })");
+    expect(body).toContain("addSelectedMention(");
+    expect(body).not.toContain("context:");
+  });
+
   it("retargets the conversation when a table is picked from another connection", () => {
     // Sliced between anchors rather than via bodyOf(): the parameter's
     // `{ schema?: string; table: string }` annotation is the first "{" after the

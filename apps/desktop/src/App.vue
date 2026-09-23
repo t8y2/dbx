@@ -3089,23 +3089,58 @@ function ensureQueryTabForConnection(target: AiConversationBinding): string {
   return queryStore.createTab(target.connectionId, database, undefined, "query", schema, undefined, undefined, { activate: false });
 }
 
+/** Bounded wait for the lazily-loaded Redis console to mount after a tab switch. */
+const REDIS_CONSOLE_READY_TIMEOUT_MS = 2000;
+const REDIS_CONSOLE_READY_POLL_MS = 50;
+
+/**
+ * The `mode === "redis"` tab for the target connection/database, created when
+ * absent. Redis "database" is the server-side db index.
+ */
+function ensureRedisConsoleTab(target: AiConversationBinding): string {
+  const database = target.database || "0";
+  const existing = queryStore.tabs.find((tab) => tab.mode === "redis" && tab.connectionId === target.connectionId && (tab.database || "0") === database);
+  if (existing) return existing.id;
+  return queryStore.createTab(target.connectionId, database, `db${database}`, "redis", undefined, undefined, undefined, { activate: false });
+}
+
 function routeAiRedisCommand(command: string, execute: boolean, target: AiConversationBinding): boolean {
   const connection = target.connectionId ? connectionStore.getConfig(target.connectionId) : undefined;
   if (connection?.db_type !== "redis") return false;
 
-  // Redis has a dedicated console. Falling through to ensureQueryTabForConnection()
-  // would recreate the original bug by opening a SQL tab for a Redis command.
-  // The console only drives the *visible* tab, so it refuses a target that is
-  // not the one on screen rather than sending the command to another server.
-  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command, target.connectionId) : contentAreaRef.value?.insertRedisCommand(command, target.connectionId);
-  if (!routed) {
-    console.warn("[DBX] Redis AI command could not reach the bound Redis console");
-    return true;
-  }
-  void routed.then((handled: any) => {
-    if (!handled) console.warn("[DBX] Redis AI command could not reach the bound Redis console");
-  });
+  // Redis has no headless command path — the console *is* the execution vehicle,
+  // and it is rendered only for the active tab. So bring the bound connection's
+  // console on screen and use it. This is the one deliberate exception to "an AI
+  // action never moves the editor": the alternative (used before the console
+  // refused foreign targets) is silently dropping the command, or worse, running
+  // it against another server.
+  const tabId = ensureRedisConsoleTab(target);
+  if (!tabId) return true;
+  if (queryStore.activeTabId !== tabId) queryStore.switchTab(tabId);
+  void deliverRedisAiCommand(command, execute, target);
   return true;
+}
+
+/**
+ * Waits for the console surface, then routes exactly once.
+ *
+ * The wait polls a side-effect-free readiness probe rather than re-issuing the
+ * command: a command that ran but reported `false` (e.g. a dangerous command
+ * awaiting confirmation) must not be executed a second time.
+ */
+async function deliverRedisAiCommand(command: string, execute: boolean, target: AiConversationBinding): Promise<void> {
+  const deadline = performance.now() + REDIS_CONSOLE_READY_TIMEOUT_MS;
+  while (!contentAreaRef.value?.isRedisConsoleReady(target.connectionId)) {
+    if (performance.now() >= deadline) {
+      console.warn("[DBX] Redis AI command could not reach the bound Redis console");
+      return;
+    }
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, REDIS_CONSOLE_READY_POLL_MS));
+  }
+  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command, target.connectionId) : contentAreaRef.value?.insertRedisCommand(command, target.connectionId);
+  const handled = await routed;
+  if (!handled) console.warn("[DBX] Redis AI command was not accepted by the bound Redis console");
 }
 
 /** Current editor text of the tab an AI action targets. */

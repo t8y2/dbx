@@ -3092,13 +3092,15 @@ function onTauriFileDrop(event: Event) {
 function onTableReferenceDropEvent(event: Event) {
   if (pluginContext.value) return;
   handleAiTableReferenceDropEvent(event, {
-    context: {
-      connectionId: boundConnectionId.value,
-      database: boundDatabase.value || boundConnection.value?.database || "",
-    },
     assistantRoot: assistantRootRef.value,
     elementFromPoint: (x, y) => document.elementFromPoint(x, y),
     onMention: (mention, payload) => {
+      // A table dragged in from another connection retargets the conversation:
+      // the mention only resolves against the database it came from, and a drop
+      // is an explicit gesture. (This reverses the old "reject a foreign table"
+      // contract, which existed only because the panel's connection was whatever
+      // tab was active and there was nothing to retarget — #9902.)
+      void applyExternalBinding({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema });
       addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "table" });
       clearActiveTableReferencePayload(payload);
       nextTick(() => promptTextareaRef.value?.focus());

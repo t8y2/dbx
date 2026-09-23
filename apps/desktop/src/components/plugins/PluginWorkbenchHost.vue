@@ -17,11 +17,11 @@ import {
   type PluginSaveFileResult,
   type PluginWorkbenchContext,
 } from "@/lib/plugins/pluginHostBridge";
+import { getCachedPluginUiHtml, getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
-import { getCachedPluginUiHtml, setCachedPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -477,65 +477,6 @@ async function savePluginFile(request: PluginSaveFileRequest, data: Uint8Array):
   return { path: fileName };
 }
 
-function localUiAssetPath(source: string): string | undefined {
-  const trimmed = source.trim();
-  if (!trimmed || /^(?:blob:|data:|https?:|\/\/)/i.test(trimmed)) return undefined;
-  try {
-    const resolved = new URL(trimmed, "https://dbx-plugin.invalid/");
-    if (resolved.origin !== "https://dbx-plugin.invalid") return undefined;
-    const path = decodeURIComponent(resolved.pathname).replace(/^\/+/, "");
-    if (!path || path.split("/").some((segment) => segment === "..")) return undefined;
-    return path;
-  } catch {
-    return undefined;
-  }
-}
-
-async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ html: string; entryDirectory: string }> {
-  // Shipped ui builds usually inline every asset into one HTML document.
-  // Parsing and re-serializing a multi-megabyte document is pure overhead when
-  // there is nothing local to inline — pre-check before touching DOMParser.
-  if (!/<script\b[^>]*\bsrc=/i.test(html) && !/<link\b[^>]*rel=["']?stylesheet/i.test(html)) {
-    return { html, entryDirectory: "" };
-  }
-  const document = new DOMParser().parseFromString(html, "text/html");
-  const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
-  // Dynamic-import chunks and CSS url() references live next to the entry
-  // script; its directory is the <base> the sandbox document needs to resolve
-  // them through the dbx-plugin scheme.
-  let entryDirectory = "";
-  // Fetch every referenced asset concurrently — these are bridge round-trips
-  // into the sidecar, and panels reopen this path on every workbench (re)load.
-  const fetched = await Promise.all(
-    resources.map((resource) => {
-      const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
-      const path = source ? localUiAssetPath(source) : undefined;
-      if (!path) return Promise.resolve({ resource, content: null });
-      if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
-        resource,
-        content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
-      }));
-    }),
-  );
-  for (const { resource, content } of fetched) {
-    if (content === null) continue;
-    if (resource.tagName === "SCRIPT") {
-      const script = document.createElement("script");
-      for (const attribute of [...resource.attributes]) {
-        if (attribute.name !== "src") script.setAttribute(attribute.name, attribute.value);
-      }
-      script.textContent = content;
-      resource.replaceWith(script);
-    } else {
-      const style = document.createElement("style");
-      style.textContent = content;
-      resource.replaceWith(style);
-    }
-  }
-  return { html: document.documentElement.outerHTML, entryDirectory };
-}
-
 /**
  * Base URL prefix for lazy-loaded plugin UI assets. wry serves custom schemes
  * natively on WKWebView/webkit2gtk but maps them onto http(s) subdomains on
@@ -547,8 +488,6 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
   const origin = location.protocol === "http:" || location.protocol === "https:" ? `${location.protocol}//dbx-plugin.localhost/${pluginId}/` : `dbx-plugin://localhost/${pluginId}/`;
   return entryDirectory ? `${origin}${entryDirectory}/` : origin;
 }
-
-// Inlined plugin ui html per `${pluginId}:${version}` (see loadWorkbench).
 
 async function loadWorkbench() {
   const generation = ++loadGeneration;
@@ -563,17 +502,13 @@ async function loadWorkbench() {
     // workbench open time; cache the inlined html per plugin id+version so
     // reopening panels (new dock entries, workbench reloads) skips it. Theme
     // is applied per load via the sandbox document, so the cache never pins a
-    // stale appearance.
+    // stale appearance. getOrLoadPluginUiHtml coalesces with an in-flight
+    // warm (dock "+" picker) so the panel never duplicates a running pipeline.
     const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
     let cachedHtml = getCachedPluginUiHtml(htmlCacheKey);
     if (!cachedHtml) {
-      const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
+      cachedHtml = await getOrLoadPluginUiHtml(htmlCacheKey, props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
-      const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-      const inlined = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
-      if (disposed || generation !== loadGeneration) return;
-      cachedHtml = inlined;
-      setCachedPluginUiHtml(htmlCacheKey, cachedHtml);
     }
     const { html, entryDirectory } = cachedHtml;
     source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {

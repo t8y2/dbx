@@ -30,6 +30,7 @@ import {
 import { useDockResize } from "@/composables/useDockResize";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
+import { getOrLoadPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { useQueryStore } from "@/stores/queryStore";
 import * as api from "@/lib/backend/api";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
@@ -96,22 +97,48 @@ const activeCommand = computed(() => {
   return createFrontendPluginRegistry(plugins.value).findCommand(entry.pluginId, entry.commandId)?.contribution ?? null;
 });
 
-watch(entries, () => void loadPluginData(), { deep: true, immediate: true });
+// The plugin list is loaded once at mount and refreshed only on the
+// dbx:plugins-changed event. It must NOT be re-fetched from an entries deep
+// watch: every dock entry mutation (open/rename/reorder/close) would reassign
+// `plugins.value`, and the transient state churn re-runs loadLaunchOptions and
+// re-patches every PluginWorkbenchHost prop — the visible "everything blinks
+// when one connection opens" bug.
+void loadPluginData();
 watch([activeEntry, activeCommand], () => void loadLaunchOptions());
 const onPluginsChanged = () => void loadPluginData();
 window.addEventListener("dbx:plugins-changed", onPluginsChanged);
 onScopeDispose(() => window.removeEventListener("dbx:plugins-changed", onPluginsChanged));
 
 async function loadPluginData() {
-  if (!entries.value.length) {
-    plugins.value = [];
-    return;
-  }
   try {
     plugins.value = await api.listPlugins();
+    schedulePanelUiWarm(plugins.value);
   } catch {
-    plugins.value = [];
+    // Keep the previous list: clearing it flips every panel's
+    // `v-if="definitionFor(...)"` false and unmounts live terminal webviews.
   }
+}
+
+// Generic first-open warm (any plugin, any entry point): plugins that declare
+// an open-workbench command with presentation:"panel" get their multi-megabyte
+// ui html read/inlined at idle time, so the FIRST panel the user opens — from
+// the "+" picker, a command menu, or a toolbar placement — mounts on a warm
+// cache instead of paying the pipeline after the click. Idle-scheduled so it
+// never competes with startup traffic; the module LRU bounds memory and
+// getOrLoadPluginUiHtml coalesces with real opens racing the warm.
+function schedulePanelUiWarm(definitions: InstalledPlugin[]) {
+  const candidates = definitions.filter((plugin) =>
+    (plugin.manifest.contributions || []).some(
+      (contribution) => contribution.type === "command" && contribution.action.type === "open-workbench" && contribution.action.presentation === "panel",
+    ),
+  );
+  if (!candidates.length) return;
+  const idle: (callback: () => void) => void = typeof window.requestIdleCallback === "function" ? window.requestIdleCallback : (callback) => void window.setTimeout(callback, 2000);
+  idle(() => {
+    for (const plugin of candidates) {
+      void getOrLoadPluginUiHtml(`${plugin.manifest.id}:${plugin.manifest.version}`, plugin.manifest.id).catch(() => undefined);
+    }
+  });
 }
 
 function definitionFor(pluginId: string): InstalledPlugin | undefined {
@@ -135,6 +162,10 @@ function workbenchContributionFor(entry: PluginDockEntry): PluginWorkbenchContri
 // - when connection_targets is on, the plugin's own saved connections.
 const connectionStore = useConnectionStore();
 const launchOptionEntries = ref<Array<{ key: string; label: string; description?: string; context?: Record<string, unknown> }>>([]);
+// Launch options per `${pluginId}:${commandId}`: sidecar options_action round
+// trips are pure overhead when re-opening the same picker, and re-fetching
+// with a pre-cleared list is what makes the open picker flash.
+const launchOptionsCache = new Map<string, Array<{ key: string; label: string; description?: string; context?: Record<string, unknown> }>>();
 const launchOptionsLoading = ref(false);
 
 const activeAction = computed(() => (activeCommand.value?.action.type === "open-workbench" ? activeCommand.value.action : null));
@@ -147,15 +178,28 @@ const activePluginProviders = computed(() => {
 async function loadLaunchOptions() {
   const action = activeAction.value;
   const pluginId = activeEntry.value?.pluginId;
-  launchOptionEntries.value = [];
-  if (!action || !pluginId || !action.options_action) return;
-  launchOptionsLoading.value = true;
+  const commandId = activeCommand.value?.id;
+  const cacheKey = action && pluginId && commandId ? `${pluginId}:${commandId}` : "";
+  if (!cacheKey) {
+    launchOptionEntries.value = [];
+    return;
+  }
+  // Stale-while-revalidate: paint the cached list immediately (same content,
+  // zero visual churn) and swap in the fresh one when it arrives. Clearing the
+  // list up front made the open "+" picker flash empty on every entry switch.
+  const cached = launchOptionsCache.get(cacheKey);
+  launchOptionEntries.value = cached ?? [];
+  launchOptionsLoading.value = !cached;
   try {
-    const result = await api.invokePlugin<{ entries?: Array<{ label: string; description?: string; context?: Record<string, unknown> }> }>(pluginId, action.options_action, {});
-    launchOptionEntries.value = (result?.entries ?? []).map((entry, index) => ({ key: `opt:${index}`, label: entry.label, description: entry.description, context: entry.context }));
+    const result = await api.invokePlugin<{ entries?: Array<{ label: string; description?: string; context?: Record<string, unknown> }> }>(pluginId!, action!.options_action!, {});
+    const next = (result?.entries ?? []).map((entry, index) => ({ key: `opt:${index}`, label: entry.label, description: entry.description, context: entry.context }));
+    launchOptionsCache.set(cacheKey, next);
+    // A stale response (entry switched while fetching) must not overwrite the
+    // now-active entry's list.
+    if (activeEntry.value?.pluginId === pluginId && activeCommand.value?.id === commandId) launchOptionEntries.value = next;
   } catch (cause) {
     console.warn("[DBX][plugin:dock] launch options unavailable", cause);
-    launchOptionEntries.value = [];
+    if (!cached && activeEntry.value?.pluginId === pluginId && activeCommand.value?.id === commandId) launchOptionEntries.value = [];
   } finally {
     launchOptionsLoading.value = false;
   }
@@ -168,6 +212,9 @@ const connectionTargets = computed(() => {
 });
 
 function onPlusAction(value: string) {
+  // Any selection closes the picker (documented behavior) before side effects:
+  // staying open let the entry switch refetch repaint it mid-air.
+  closePlusMenu();
   if (value === "replay") {
     rerunActiveCommand();
     return;
@@ -332,7 +379,22 @@ const plusRoot = ref<HTMLElement>();
 function togglePlusMenu() {
   plusOpen.value = !plusOpen.value;
   plusFilter.value = "";
-  if (plusOpen.value) void loadLaunchOptions();
+  if (plusOpen.value) {
+    void loadLaunchOptions();
+    warmActivePluginPanelHtml();
+  }
+}
+
+// Hide the first-open html pipeline under the time the user spends reading the
+// "+" picker: the read/decode/inline of a multi-megabyte ui build runs while
+// the menu is open, so whichever panel the user picks mounts on a warm cache
+// instead of paying the pipeline serially after the click. Coalesced and
+// idempotent — a panel mounting mid-warm joins the same in-flight promise.
+function warmActivePluginPanelHtml() {
+  const pluginId = activeEntry.value?.pluginId;
+  const plugin = pluginId ? definitionFor(pluginId) : undefined;
+  if (!plugin) return;
+  void getOrLoadPluginUiHtml(`${plugin.manifest.id}:${plugin.manifest.version}`, plugin.manifest.id).catch(() => undefined);
 }
 function closePlusMenu() {
   plusOpen.value = false;

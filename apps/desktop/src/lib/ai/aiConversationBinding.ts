@@ -68,17 +68,30 @@ export function bindingForSnapshot(conversations: readonly AiConversation[], tar
 }
 
 /**
+ * Whether two bindings name the same target.
+ *
+ * Compares the full namespace, not just the connection: two databases (or two
+ * schemas) on one server are different targets, and treating them as equal would
+ * let a conversation bound to `prod` inherit the editor state of `test`
+ * (#9902 follow-up).
+ */
+export function sameConversationBinding(a: AiConversationBinding, b: AiConversationBinding): boolean {
+  return a.connectionId === b.connectionId && (a.database ?? "") === (b.database ?? "") && (a.schema ?? "") === (b.schema ?? "");
+}
+
+/**
  * Context target for a request: the conversation's namespace, plus the visible
  * editor's SQL / result / focused table — but only when that tab sits on the
- * bound connection. Another connection's editor state is not context for this
- * chat, and carrying it would leak one database's SQL into another's request.
+ * *same namespace*. Another database's editor state is not context for this
+ * chat, and carrying it would leak one database's SQL and result rows into
+ * another's request.
  */
-export function aiContextTargetFor(binding: AiConversationBinding, visibleTab: Pick<QueryTab, "connectionId" | "sql" | "result" | "tableMeta"> | undefined): AiContextTarget {
-  const sameConnection = !!visibleTab && visibleTab.connectionId === binding.connectionId;
+export function aiContextTargetFor(binding: AiConversationBinding, visibleTab: Pick<QueryTab, "connectionId" | "database" | "schema" | "sql" | "result" | "tableMeta"> | undefined): AiContextTarget {
+  const sameTarget = !!visibleTab && sameConversationBinding(binding, { connectionId: visibleTab.connectionId, database: visibleTab.database ?? "", schema: visibleTab.schema });
   return {
     connectionId: binding.connectionId,
     database: binding.database,
     schema: binding.schema,
-    ...(sameConnection && visibleTab ? { sql: visibleTab.sql, result: visibleTab.result, tableMeta: visibleTab.tableMeta } : {}),
+    ...(sameTarget && visibleTab ? { sql: visibleTab.sql, result: visibleTab.result, tableMeta: visibleTab.tableMeta } : {}),
   };
 }

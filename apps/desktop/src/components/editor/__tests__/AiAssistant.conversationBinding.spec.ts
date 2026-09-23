@@ -67,10 +67,12 @@ describe("AI conversation owns its connection binding (#9902)", () => {
   it("sends against the bound connection, not the visible tab", () => {
     const body = bodyOf("async function send()");
 
-    expect(body).toContain("runPluginContext ? undefined : boundConnection.value");
-    expect(body).toContain("runPluginContext ? undefined : aiContextTarget.value");
+    // The visible tab may contribute editor state, but only through
+    // aiContextTargetFor(), which gates it on the same namespace; the target
+    // itself always comes from the binding.
+    expect(body).toContain("runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined");
+    expect(body).toContain("aiContextTargetFor(runBinding, props.tab)");
     expect(body).not.toContain("props.connection");
-    expect(body).not.toContain("props.tab");
   });
 
   it("judges production write protection against the bound connection", () => {
@@ -109,7 +111,7 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     const start = source.indexOf("function onTableReferenceDropEvent");
     const body = source.slice(start, source.indexOf("\n}", start));
 
-    expect(body).toContain("void applyExternalBinding({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema })");
+    expect(body).toContain("void bindConversation({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema })");
     expect(body).toContain("addSelectedMention(");
     expect(body).not.toContain("context:");
   });
@@ -121,16 +123,46 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     const start = source.indexOf("function addTableMention(");
     const body = source.slice(start, source.indexOf("function clearContextReferences", start));
 
-    expect(body).toContain("void applyExternalBinding(binding)");
+    expect(body).toContain("void bindConversation(binding)");
     expect(body).toContain("addSelectedMention(");
 
-    const apply = bodyOf("async function applyExternalBinding(binding: AiConversationBinding)");
-    // The previous connection's mentions and schema options no longer apply...
+    const apply = bodyOf("async function bindConversation(binding: AiConversationBinding)");
+    // The previous target's mentions and schema options no longer apply...
     expect(apply).toContain("clearContextReferences();");
     // ...and the new target goes onto the conversation, never the editor.
     expect(apply).toContain("rebindConversation(connection, binding.database, binding.schema)");
-    expect(apply).toContain("binding.connectionId === boundConnectionId.value");
     expect(apply).not.toContain("queryStore.");
     expect(apply).not.toContain("activeConnectionId");
+  });
+
+  it("freezes the binding for a background auto-send instead of reading the visible one", () => {
+    // An auto-send for conversation A runs while B may be on screen, so it must
+    // carry its own binding: reading the live one would target B's database.
+    expect(source).toContain("binding: AiConversationBinding;");
+    const schedule = bodyOf("function scheduleAutoSend(");
+    expect(schedule).toContain("binding: bindingForSnapshot(conversations.value, convId, conversationBinding.value)");
+  });
+
+  it("derives a run's target from the frozen binding, not the live one", () => {
+    const body = bodyOf("async function send()");
+
+    expect(body).toContain("const runBinding = auto ? auto.binding : conversationBinding.value;");
+    expect(body).toContain("aiContextTargetFor(runBinding, props.tab)");
+    // A background send has no composer of its own, so its database selection is
+    // the conversation's own database rather than the visible composer's.
+    expect(body).toContain("auto ? [runBinding.database] : [...selectedDatabases.value]");
+    // Nothing in the run pipeline may read the live binding: a rebind mid-flight
+    // would otherwise redirect the run's own SQL to the new connection.
+    expect(body).not.toContain("boundConnection.value");
+    expect(body).not.toMatch(/emit\("requestAutoExecuteSql", agentPlan\.handoffSql, conversationBinding\.value\)/);
+    expect(body).toContain('emit("requestAutoExecuteSql", agentPlan.handoffSql, runBinding)');
+  });
+
+  it("compares the whole namespace when deciding whether to retarget", () => {
+    // Comparing only the connection id would treat db1 -> db2 on one server as
+    // "no change" and skip the rebind.
+    const body = bodyOf("async function bindConversation(binding: AiConversationBinding)");
+    expect(body).toContain("sameConversationBinding(binding, conversationBinding.value)");
+    expect(body).not.toContain("binding.connectionId === boundConnectionId.value");
   });
 });

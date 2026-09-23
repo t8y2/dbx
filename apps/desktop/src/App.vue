@@ -196,6 +196,8 @@ type AiAssistantHandle = {
   triggerAction: (action: AiAction, instruction?: string) => void;
   setPrompt: (text: string) => void;
   addTableMention: (target: { schema?: string; table: string }, binding?: AiConversationBinding) => void;
+  /** Retarget the conversation on its own, for entries that add no mention. */
+  bindConversation: (binding: AiConversationBinding) => Promise<void>;
   clearContextReferences: () => void;
   focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */
@@ -1746,6 +1748,10 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
 
     openRightSidebarPanel("ai");
     invokeWhenAiReady((handle) => {
+      // Applied independently of the mentions: "Ask AI" on a *connection* or
+      // *database* node carries a target but adds no table mention, and it still
+      // has to retarget the conversation (#9902).
+      void handle.bindConversation(binding);
       for (const mention of tableMentions) handle.addTableMention(mention, binding);
     });
   } catch (e: any) {
@@ -3084,7 +3090,10 @@ function ensureQueryTabForConnection(target: AiConversationBinding): string {
   if (!target.connectionId) return "";
   const database = target.database || "";
   const schema = target.schema || undefined;
-  const existing = queryStore.tabs.find((tab) => tab.mode === "query" && tab.connectionId === target.connectionId && (tab.database || "") === database && (!schema || (tab.schema || undefined) === schema));
+  // Schema is matched exactly, empty included. Skipping the comparison when the
+  // target has no schema would reuse a tab on any schema, and execution inherits
+  // that tab's schema — silently running in the wrong namespace.
+  const existing = queryStore.tabs.find((tab) => tab.mode === "query" && tab.connectionId === target.connectionId && (tab.database || "") === database && (tab.schema || undefined) === schema);
   if (existing) return existing.id;
   return queryStore.createTab(target.connectionId, database, undefined, "query", schema, undefined, undefined, { activate: false });
 }

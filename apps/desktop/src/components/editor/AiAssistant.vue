@@ -96,7 +96,7 @@ import {
   type AiSqlFileContext,
   type CustomPromptContext,
 } from "@/lib/ai/ai";
-import { aiContextTargetFor, bindingForSnapshot, resolveConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { aiContextTargetFor, bindingForSnapshot, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import {
   AI_IMAGE_ATTACHMENT_MAX_BYTES,
   AI_IMAGE_ATTACHMENT_TYPES_BY_EXTENSION,
@@ -415,7 +415,17 @@ const queuedInputs = reactive(new Map<string, QueuedConversationInput>());
  * one background run can settle in the same event turn; this must be FIFO, not
  * a single "next send" slot, or the later completion silently drops the first
  * conversation's queued input. */
-type PendingAutoSend = { conversationId: string; text: string; messages: ChatMessage[]; mode: AiAssistantMode; action: AiActionSelection; pluginContext?: AiPluginContext };
+type PendingAutoSend = {
+  conversationId: string;
+  text: string;
+  messages: ChatMessage[];
+  mode: AiAssistantMode;
+  action: AiActionSelection;
+  pluginContext?: AiPluginContext;
+  /** Frozen at enqueue time: the auto-send runs while another conversation may
+   *  be the visible one, so it cannot read the live binding (#9902). */
+  binding: AiConversationBinding;
+};
 const pendingAutoSends: PendingAutoSend[] = [];
 
 /** Highest event `seq` the user has read per conversation (parent PRD §8). Set
@@ -3100,7 +3110,7 @@ function onTableReferenceDropEvent(event: Event) {
       // is an explicit gesture. (This reverses the old "reject a foreign table"
       // contract, which existed only because the panel's connection was whatever
       // tab was active and there was nothing to retarget — #9902.)
-      void applyExternalBinding({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema });
+      void bindConversation({ connectionId: payload.connectionId, database: payload.database, schema: payload.schema });
       addSelectedMention({ kind: "table", schema: mention.schema, name: mention.table, tableType: "table" });
       clearActiveTableReferencePayload(payload);
       nextTick(() => promptTextareaRef.value?.focus());
@@ -3128,9 +3138,14 @@ async function send() {
   // Snapshot the target connection/database before any async work so that
   // suspension points during context loading cannot cause a TOCTOU target switch.
   const runPluginContext = auto ? (pluginContextFromMessages(auto.messages) ?? auto.pluginContext) : pluginContext.value;
-  // The whole request targets the conversation's connection, not the visible tab (#9902).
-  const connection = runPluginContext ? undefined : boundConnection.value;
-  const tab = runPluginContext ? undefined : aiContextTarget.value;
+  // The request targets the *run's* binding — not the visible tab, and not
+  // whatever the visible conversation has been rebound to since (#9902). Two
+  // cases need the frozen copy: a background auto-send belongs to another
+  // conversation than the one on screen, and a run that is rebound mid-flight
+  // must keep emitting against the connection it actually started on.
+  const runBinding = auto ? auto.binding : conversationBinding.value;
+  const connection = runPluginContext ? undefined : runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
+  const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
   const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
   if (!runPluginContext && (!connection || !tab)) {
     clearPendingWriteGrant();
@@ -3138,7 +3153,9 @@ async function send() {
   }
   // Capture the selection before context loading or queued run scheduling can
   // yield to another conversation. Dameng's top-level selector is a schema.
-  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? [...selectedDatabases.value] : [];
+  // A background auto-send has no composer of its own, so it runs on the
+  // conversation's own database.
+  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? (auto ? [runBinding.database] : [...selectedDatabases.value]) : [];
   const activeConfig = activeFullConfig.value;
   if (!activeConfig) {
     clearPendingWriteGrant();
@@ -3729,7 +3746,7 @@ async function send() {
           database: tab.database,
         });
         if (msg && requestedMode === "agent") msg.agentSteps = [...(msg.agentSteps ?? []), ...buildAiAgentStepItems(agentPlan)];
-        if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql, conversationBinding.value);
+        if (agentPlan.handoffSql) emit("requestAutoExecuteSql", agentPlan.handoffSql, runBinding);
       }
       if (runIsVisible()) {
         currentSessionId.value = "";
@@ -3823,7 +3840,15 @@ async function send() {
  *  input is consumed by the send pipeline once it actually starts, so a failed
  *  early bail (no config, superseded) does not silently drop it. */
 function scheduleAutoSend(convId: string, queued: QueuedConversationInput, messages: ChatMessage[], context = pluginContextFromMessages(messages)) {
-  pendingAutoSends.push({ conversationId: convId, text: queued.text, messages, mode: queued.mode, action: queued.action, pluginContext: context });
+  pendingAutoSends.push({
+    conversationId: convId,
+    text: queued.text,
+    messages,
+    mode: queued.mode,
+    action: queued.action,
+    pluginContext: context,
+    binding: bindingForSnapshot(conversations.value, convId, conversationBinding.value),
+  });
   void send();
 }
 
@@ -5001,11 +5026,11 @@ function setPrompt(text: string, fromPlugin = false) {
  * switch/create a tab for that connection, which moved the whole workspace onto
  * whatever the AI panel was asked about.
  */
-async function applyExternalBinding(binding: AiConversationBinding) {
-  if (!binding.connectionId || binding.connectionId === boundConnectionId.value) return;
+async function bindConversation(binding: AiConversationBinding) {
+  if (!binding.connectionId || sameConversationBinding(binding, conversationBinding.value)) return;
   const connection = connectionStore.getConfig(binding.connectionId);
   if (!connection) return;
-  // Mentions and schema options belonged to the previous connection.
+  // Mentions and schema options belonged to the previous target.
   clearContextReferences();
   await rebindConversation(connection, binding.database, binding.schema);
 }
@@ -5015,8 +5040,8 @@ function addTableMention(target: { schema?: string; table: string }, binding?: A
   const table = target.table.trim();
   if (!table) return;
   // Clearing the old references happens synchronously inside
-  // applyExternalBinding(), before this call adds the new mention.
-  if (binding) void applyExternalBinding(binding);
+  // bindConversation(), before this call adds the new mention.
+  if (binding) void bindConversation(binding);
   addSelectedMention({ kind: "table", schema: target.schema, name: table, tableType: "TABLE" });
   nextTick(() => promptTextareaRef.value?.focus());
 }
@@ -5035,7 +5060,7 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, triggerAction, setPrompt, addTableMention, clearContextReferences, selectConversationById, focusSearch });
+defineExpose({ openPluginConversation, triggerAction, setPrompt, addTableMention, bindConversation, clearContextReferences, selectConversationById, focusSearch });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;

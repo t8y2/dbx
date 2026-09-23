@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AiConversation } from "@/lib/backend/tauri";
-import { aiContextTargetFor, bindingForSnapshot, isBindingUnresolved, resolveConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { aiContextTargetFor, bindingForSnapshot, isBindingUnresolved, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 function conversation(overrides: Partial<AiConversation> & { id: string }): AiConversation {
   return {
@@ -96,7 +96,7 @@ describe("aiContextTargetFor", () => {
     const result = { columns: ["id"], rows: [[1]] } as never;
     const tableMeta = { tableName: "users", schema: "public", columns: [] } as never;
 
-    const target = aiContextTargetFor(binding, { connectionId: "conn-a", sql: "select 1", result, tableMeta });
+    const target = aiContextTargetFor(binding, { connectionId: "conn-a", database: "db_a", sql: "select 1", result, tableMeta });
 
     expect(target.connectionId).toBe("conn-a");
     expect(target.database).toBe("db_a");
@@ -105,9 +105,29 @@ describe("aiContextTargetFor", () => {
     expect(target.tableMeta).toBe(tableMeta);
   });
 
+  it("drops the editor state of another database on the same connection", () => {
+    // Same server, different database: still a different target. Letting this
+    // through would send another database's SQL and result rows to the provider
+    // as "context" for a conversation bound elsewhere.
+    const target = aiContextTargetFor(binding, {
+      connectionId: "conn-a",
+      database: "db_b",
+      sql: "select * from other_db_only_table",
+      result: { columns: [], rows: [] } as never,
+      tableMeta: { tableName: "other_db_only_table", columns: [] } as never,
+    });
+
+    expect(target.connectionId).toBe("conn-a");
+    expect(target.database).toBe("db_a");
+    expect(target.sql).toBeUndefined();
+    expect(target.result).toBeUndefined();
+    expect(target.tableMeta).toBeUndefined();
+  });
+
   it("drops another connection's editor state so its SQL cannot leak into this chat", () => {
     const target = aiContextTargetFor(binding, {
       connectionId: "conn-b",
+      database: "db_a",
       sql: "delete from prod_orders",
       result: { columns: [], rows: [] } as never,
       tableMeta: { tableName: "prod_orders", columns: [] } as never,
@@ -121,5 +141,21 @@ describe("aiContextTargetFor", () => {
 
   it("omits editor state when no tab is visible", () => {
     expect(aiContextTargetFor(binding, undefined)).toEqual({ connectionId: "conn-a", database: "db_a", schema: undefined });
+  });
+});
+
+describe("sameConversationBinding", () => {
+  it("treats a different database or schema on the same server as a different target", () => {
+    const base: AiConversationBinding = { connectionId: "conn-a", database: "prod", schema: "public" };
+
+    expect(sameConversationBinding(base, { ...base })).toBe(true);
+    expect(sameConversationBinding(base, { ...base, database: "test" })).toBe(false);
+    expect(sameConversationBinding(base, { ...base, schema: "private" })).toBe(false);
+    expect(sameConversationBinding(base, { ...base, connectionId: "conn-b" })).toBe(false);
+  });
+
+  it("normalizes an absent database or schema to empty", () => {
+    expect(sameConversationBinding({ connectionId: "c", database: "" }, { connectionId: "c" })).toBe(true);
+    expect(sameConversationBinding({ connectionId: "c", database: "", schema: "" }, { connectionId: "c", database: "" })).toBe(true);
   });
 });

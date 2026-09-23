@@ -216,6 +216,38 @@ test("skips SELECT modifiers and does not split nested projection expressions", 
   assert.ok(sql.slice(hints[1]!.from).startsWith("COUNT(*)"));
 });
 
+test("does not split projection expressions using full-width parentheses (#10104)", () => {
+  const sql = "INSERT INTO dbo.users (birth_date, note) SELECT to_date（'2023-01-01', 'yyyy-mm-dd'）, note FROM staging";
+  const hints = parseInsertValueHints(sql);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["birth_date", "note"],
+  );
+  assert.ok(sql.slice(hints[0]!.from).startsWith("to_date（'2023-01-01', 'yyyy-mm-dd'）"));
+  assert.ok(sql.slice(hints[1]!.from).startsWith("note"));
+
+  // Full-width parentheses behavior matches ASCII parentheses exactly
+  const sqlAscii = "INSERT INTO dbo.users (birth_date, note) SELECT to_date('2023-01-01', 'yyyy-mm-dd'), note FROM staging";
+  const hintsAscii = parseInsertValueHints(sqlAscii);
+  assert.deepEqual(
+    hints.map((h) => h.column),
+    hintsAscii.map((h) => h.column),
+  );
+});
+
+test("recognises projection aliases with full-width closing parentheses (#10104)", () => {
+  const sql = "INSERT INTO t (created_at, note) SELECT to_date（'2023-01-01', 'yyyy-mm-dd'） created_at, src_note note FROM staging";
+  // Both projections alias their target column, so both hints should be skipped
+  assert.deepEqual(parseInsertValueHints(sql), []);
+
+  const sqlDiffAlias = "INSERT INTO t (created_at, note) SELECT to_date（'2023-01-01', 'yyyy-mm-dd'） my_date, src_note note FROM staging";
+  const hints = parseInsertValueHints(sqlDiffAlias);
+  assert.deepEqual(
+    hints.map((hint) => hint.column),
+    ["created_at"],
+  );
+});
+
 test("resolves filtered SQL Server target columns for INSERT ... SELECT without a column list", () => {
   const sql = "INSERT INTO dbo.users SELECT source_name, source_status FROM staging";
   const columns = insertValueHintColumnNames("sqlserver", [{ name: "id", is_identity: true }, { name: "name" }, { name: "doubled", is_computed: true }, { name: "status" }, { name: "valid_from", generated_always_type: 1 }]);
@@ -459,6 +491,13 @@ test("expandToSqlStatementWindow proves clean state when the cursor is more than
   const cursor = sql.indexOf(junk) + junk.length - 100;
   const window = expandToSqlStatementWindow(sql, cursor, cursor);
   assert.equal(window.from, 0, "a ';' more than 32KiB past unclosed '(' characters is still nested, not a top-level statement boundary");
+});
+
+test("expandToSqlStatementWindow tracks depth for full-width parentheses", () => {
+  const sql = "SELECT func（'arg1; arg2'）; SELECT 2;";
+  const cursor = sql.indexOf("arg1");
+  const window = expandToSqlStatementWindow(sql, cursor, cursor);
+  assert.equal(sql.slice(window.from, window.to), "SELECT func（'arg1; arg2'）", "the ';' inside full-width parens is not a statement boundary");
 });
 
 test("expandToSqlStatementWindow stays bounded (fast path) for many small statements even far into the document", () => {

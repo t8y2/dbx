@@ -232,10 +232,10 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if ("(),.;*".includes(ch)) {
-      if (ch === ")") depth = Math.max(0, depth - 1);
+    if ("(),.;*（）".includes(ch)) {
+      if (ch === ")" || ch === "）") depth = Math.max(0, depth - 1);
       tokens.push(token("punctuation", ch, start, start + 1, depth));
-      if (ch === "(") depth += 1;
+      if (ch === "(" || ch === "（") depth += 1;
       index += 1;
       continue;
     }

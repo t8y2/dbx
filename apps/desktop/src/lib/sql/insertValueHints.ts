@@ -110,13 +110,13 @@ export function readQualifiedName(tokens: readonly SqlSemanticToken[], startInde
 
 function parseColumnList(tokens: readonly SqlSemanticToken[], openIndex: number): { columns: string[]; nextIndex: number } | null {
   const open = tokens[openIndex];
-  if (!open || open.text !== "(") return null;
+  if (!open || (open.text !== "(" && open.text !== "（")) return null;
   const columns: string[] = [];
   let index = openIndex + 1;
   while (index < tokens.length) {
     const item = tokens[index];
     if (!item) break;
-    if (item.text === ")" && item.depth === open.depth) {
+    if ((item.text === ")" || item.text === "）") && item.depth === open.depth) {
       return { columns, nextIndex: index + 1 };
     }
     if (tokenIsIdentifier(item) && item.depth === open.depth + 1) {
@@ -131,7 +131,7 @@ function parseColumnList(tokens: readonly SqlSemanticToken[], openIndex: number)
 
 function valueStartsInRow(tokens: readonly SqlSemanticToken[], openIndex: number): { starts: InsertValueSource[]; nextIndex: number } | null {
   const open = tokens[openIndex];
-  if (!open || open.text !== "(") return null;
+  if (!open || (open.text !== "(" && open.text !== "（")) return null;
   const contentDepth = open.depth + 1;
   const starts: InsertValueSource[] = [];
   let expectValue = true;
@@ -140,7 +140,7 @@ function valueStartsInRow(tokens: readonly SqlSemanticToken[], openIndex: number
   while (index < tokens.length) {
     const item = tokens[index];
     if (!item) break;
-    if (item.text === ")" && item.depth === open.depth) {
+    if ((item.text === ")" || item.text === "）") && item.depth === open.depth) {
       return { starts, nextIndex: index + 1 };
     }
     if (expectValue && item.depth === contentDepth) {
@@ -162,7 +162,7 @@ function parseValuesRows(tokens: readonly SqlSemanticToken[], valuesIndex: numbe
     const item = tokens[index];
     if (!item) break;
     if (item.kind === "word" && (item.normalized === "returning" || item.normalized === "on" || item.normalized === "select")) break;
-    if (item.text === "(") {
+    if (item.text === "(" || item.text === "（") {
       const row = valueStartsInRow(tokens, index);
       if (!row) break;
       if (row.starts.length > 0) rows.push(row.starts);
@@ -189,7 +189,7 @@ function findWordIndexAtDepth(tokens: readonly SqlSemanticToken[], word: string,
 
 /** INSERT ... (SELECT ...) wraps the source query in an extra paren pair at sourceDepth. */
 function findInsertSourceSelectIndex(tokens: readonly SqlSemanticToken[], from: number, sourceDepth: number): number {
-  if (tokens[from]?.text === "(" && tokens[from + 1]?.depth === sourceDepth + 1 && tokens[from + 1]?.kind === "word" && tokens[from + 1]?.normalized === "select") {
+  if ((tokens[from]?.text === "(" || tokens[from]?.text === "（") && tokens[from + 1]?.depth === sourceDepth + 1 && tokens[from + 1]?.kind === "word" && tokens[from + 1]?.normalized === "select") {
     return from + 1;
   }
   return findWordIndexAtDepth(tokens, "select", from, sourceDepth);
@@ -197,10 +197,10 @@ function findInsertSourceSelectIndex(tokens: readonly SqlSemanticToken[], from: 
 
 function findClosingParenIndex(tokens: readonly SqlSemanticToken[], openIndex: number): number {
   const open = tokens[openIndex];
-  if (!open || open.text !== "(") return -1;
+  if (!open || (open.text !== "(" && open.text !== "（")) return -1;
   for (let index = openIndex + 1; index < tokens.length; index += 1) {
     const item = tokens[index];
-    if (item?.text === ")" && item.depth === open.depth) return index;
+    if ((item?.text === ")" || item?.text === "）") && item.depth === open.depth) return index;
   }
   return -1;
 }
@@ -230,7 +230,7 @@ function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex
   } else if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && tokens[index]?.normalized === "distinct") {
     index += 1;
     // PostgreSQL DISTINCT ON (cols) — skip the ON (...) clause before splitting projections.
-    if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && tokens[index]?.normalized === "on" && tokens[index + 1]?.text === "(") {
+    if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && tokens[index]?.normalized === "on" && (tokens[index + 1]?.text === "(" || tokens[index + 1]?.text === "（")) {
       const closeIndex = findClosingParenIndex(tokens, index + 1);
       if (closeIndex < 0) return [];
       index = closeIndex + 1;
@@ -239,10 +239,11 @@ function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex
 
   const maybeTop = tokens[index];
   const topValue = tokens[index + 1];
-  const hasTopModifier = maybeTop?.depth === depth && maybeTop.kind === "word" && maybeTop.normalized === "top" && topValue?.depth === depth && (topValue.text === "(" || topValue.kind === "number" || topValue.kind === "parameter" || (topValue.kind === "word" && topValue.text.startsWith("@")));
+  const hasTopModifier =
+    maybeTop?.depth === depth && maybeTop.kind === "word" && maybeTop.normalized === "top" && topValue?.depth === depth && (topValue.text === "(" || topValue.text === "（" || topValue.kind === "number" || topValue.kind === "parameter" || (topValue.kind === "word" && topValue.text.startsWith("@")));
   if (hasTopModifier) {
     index += 1;
-    if (tokens[index]?.text === "(") {
+    if (tokens[index]?.text === "(" || tokens[index]?.text === "（") {
       const closeIndex = findClosingParenIndex(tokens, index);
       if (closeIndex < 0) return [];
       index = closeIndex + 1;
@@ -288,7 +289,7 @@ function selectProjectionAlias(tokens: readonly SqlSemanticToken[], to: number, 
   if (!tokenIsIdentifier(last) || last.depth !== depth) return undefined;
   const previous = tokens[to - 2];
   if (!previous) return undefined;
-  const introducesAlias = previous.kind === "word" || previous.kind === "quoted_identifier" || previous.text === ")";
+  const introducesAlias = previous.kind === "word" || previous.kind === "quoted_identifier" || previous.text === ")" || previous.text === "）";
   return introducesAlias ? unquoteSqlSemanticIdentifier(last) : undefined;
 }
 
@@ -305,7 +306,7 @@ function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanti
   let columns: string[] | null = null;
 
   // SQL Server table hints appear between the target table and INSERT column list.
-  if (tokens[index]?.normalized === "with" && tokens[index + 1]?.text === "(") {
+  if (tokens[index]?.normalized === "with" && (tokens[index + 1]?.text === "(" || tokens[index + 1]?.text === "（")) {
     const hintList = parseColumnList(tokens, index + 1);
     if (!hintList) return null;
     index = hintList.nextIndex;
@@ -316,12 +317,12 @@ function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanti
     const maybeAs = tokens[index];
     if (maybeAs?.normalized === "as" && tokenIsIdentifier(tokens[index + 1])) {
       index += 2;
-    } else if (tokens[index]?.text !== "(") {
+    } else if (tokens[index]?.text !== "(" && tokens[index]?.text !== "（") {
       index += 1;
     }
   }
 
-  if (tokens[index]?.text === "(") {
+  if (tokens[index]?.text === "(" || tokens[index]?.text === "（") {
     const columnList = parseColumnList(tokens, index);
     if (!columnList) return null;
     columns = columnList.columns;
@@ -486,11 +487,11 @@ function stepLexState(sql: string, index: number, state: LexState, dialectId: st
     }
     return index + 1;
   }
-  if (ch === "(") {
+  if (ch === "(" || ch === "（") {
     state.depth += 1;
     return index + 1;
   }
-  if (ch === ")") {
+  if (ch === ")" || ch === "）") {
     state.depth = Math.max(0, state.depth - 1);
     return index + 1;
   }

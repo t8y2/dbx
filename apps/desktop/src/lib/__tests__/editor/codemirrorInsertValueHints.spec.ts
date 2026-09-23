@@ -26,3 +26,14 @@ test("a projection that already aliases its target column renders no hint widget
   assert.equal(isInsertValueHintDecorationAt(decorations, sql.indexOf("noprid.ruid")), false);
   assert.equal(isInsertValueHintDecorationAt(decorations, sql.indexOf("noprid.flag")), true);
 });
+
+test("does not misplace inlay hint widgets when projection uses full-width parentheses (#10104)", () => {
+  const sql = "INSERT INTO t (created_at, note) SELECT to_date（'2023-01-01', 'yyyy-mm-dd'）, note FROM staging";
+  const decorations = buildInsertValueHintDecorations(parseInsertValueHints(sql));
+  const toDatePos = sql.indexOf("to_date");
+  const notePos = sql.indexOf("note FROM");
+  const commaInsidePos = sql.indexOf("'yyyy-mm-dd'");
+  assert.equal(isInsertValueHintDecorationAt(decorations, toDatePos), true);
+  assert.equal(isInsertValueHintDecorationAt(decorations, notePos), true);
+  assert.equal(isInsertValueHintDecorationAt(decorations, commaInsidePos), false);
+});

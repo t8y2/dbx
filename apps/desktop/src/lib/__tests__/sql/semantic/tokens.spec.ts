@@ -79,4 +79,38 @@ describe("sqlSemanticTokens", () => {
 
     expect(tokens.some((token) => token.kind === "string" && token.text === '"it\\"s ok"')).toBe(true);
   });
+
+  it("tracks depth for full-width parentheses U+FF08 and U+FF09 matching ASCII parentheses", () => {
+    const sqlFullWidth = "SELECT to_date（'2023-01-01', 'yyyy-mm-dd'）, col2 FROM t";
+    const sqlAscii = "SELECT to_date('2023-01-01', 'yyyy-mm-dd'), col2 FROM t";
+    const tokensFullWidth = tokenizeSqlSemantic(sqlFullWidth);
+    const tokensAscii = tokenizeSqlSemantic(sqlAscii);
+
+    const openFullWidth = tokensFullWidth.find((t) => t.text === "（");
+    const closeFullWidth = tokensFullWidth.find((t) => t.text === "）");
+    expect(openFullWidth?.kind).toBe("punctuation");
+    expect(closeFullWidth?.kind).toBe("punctuation");
+    expect(openFullWidth?.depth).toBe(0);
+    expect(closeFullWidth?.depth).toBe(0);
+
+    const fullWidthArgComma = tokensFullWidth.find((t) => t.text === "," && t.span.start < closeFullWidth!.span.start);
+    const fullWidthTopComma = tokensFullWidth.find((t) => t.text === "," && t.span.start > closeFullWidth!.span.start);
+    expect(fullWidthArgComma?.depth).toBe(1);
+    expect(fullWidthTopComma?.depth).toBe(0);
+
+    // ASCII parentheses behavior remains identical
+    const openAscii = tokensAscii.find((t) => t.text === "(");
+    const closeAscii = tokensAscii.find((t) => t.text === ")");
+    expect(openAscii?.kind).toBe("punctuation");
+    expect(closeAscii?.kind).toBe("punctuation");
+    const asciiArgComma = tokensAscii.find((t) => t.text === "," && t.span.start < closeAscii!.span.start);
+    const asciiTopComma = tokensAscii.find((t) => t.text === "," && t.span.start > closeAscii!.span.start);
+    expect(asciiArgComma?.depth).toBe(1);
+    expect(asciiTopComma?.depth).toBe(0);
+
+    // Nested full-width and ASCII parentheses
+    const nestedTokens = tokenizeSqlSemantic("SELECT func1（func2(a, b), c）");
+    expect(nestedTokens.find((t) => t.text === "a")?.depth).toBe(2);
+    expect(nestedTokens.find((t) => t.text === "c")?.depth).toBe(1);
+  });
 });

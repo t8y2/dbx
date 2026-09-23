@@ -3,6 +3,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
 import type { CSSProperties } from "vue";
 import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
+import { supportsConnectionDatabaseInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { splitMongoCommandRanges } from "@/lib/mongo/mongoShellCommand";
 import { executableStatementRanges, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
@@ -259,8 +260,12 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
 export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; value: string }[] {
   const connName = connectionDisplayName(tab.connectionId);
   const groupName = connectionGroupDisplayName(tab.connectionId, t);
-  const database = databaseDisplayNameForTab(tab.connectionId, tab.database, t);
-  const lines: { label: string; value: string }[] = [{ label: t("tabs.tooltipConnection"), value: connName }, ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []), { label: t("tabs.tooltipDatabase"), value: database }];
+  const connection = useConnectionStore().getConfig(tab.connectionId);
+  const lines: { label: string; value: string }[] = [
+    { label: t("tabs.tooltipConnection"), value: connName },
+    ...(groupName ? [{ label: t("tabs.tooltipGroup"), value: groupName }] : []),
+    ...(!connection || supportsConnectionDatabaseInfo(connection.db_type) ? [{ label: t("tabs.tooltipDatabase"), value: databaseDisplayNameForTab(tab.connectionId, tab.database, t) }] : []),
+  ];
   if (tab.mode === "query" && queryTitle(tab)) {
     lines.unshift({ label: t("tabs.tooltipTitle"), value: tab.title });
   }

@@ -383,6 +383,7 @@ function createBridge() {
       // bridge; the backend owns EXPLAIN generation, the timeout, and the plan cap.
       getPlanCapabilities: (connectionId) => api.getPluginPlanCapabilities(connectionId),
       explainPlan: (request) => api.getPluginEstimatedPlan(request),
+      getTableMetadata: (context) => api.getPluginTableMetadata(context),
       closeTab: () => emit("closeTab"),
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,

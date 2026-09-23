@@ -1194,6 +1194,11 @@ jobs:
         working-directory: agents
     steps:
       - uses: actions/checkout@v7
+      - name: Install system dependencies
+        if: matrix.driver == 'duckdb'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
       # Pin mold because runner image updates can change bundled DuckDB C++ links.

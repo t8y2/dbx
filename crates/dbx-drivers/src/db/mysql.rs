@@ -24,10 +24,10 @@ use crate::models::connection::{
 };
 use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
-    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, IndexInfo, LargeValueCell, ObjectInfo, ObjectStatistics, QueryMessage, QueryResult,
-    SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
+    CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
+    CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, LargeValueCell, ObjectInfo, ObjectStatistics,
+    QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use dbx_types::metadata_filter::{table_name_filter_matches, TableNameFilter};
 
@@ -3820,10 +3820,18 @@ pub async fn list_objects_with_logical_tables(
     Ok(PagedObjectList { objects, paging_applied })
 }
 
-pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+pub async fn list_object_statistics(
+    pool: &MySqlPool,
+    database: &str,
+    include_mysql_details: bool,
+) -> Result<Vec<ObjectStatistics>, String> {
+    let columns = if include_mysql_details {
+        "TABLE_NAME, TABLE_ROWS, DATA_LENGTH, ENGINE, CREATE_TIME, UPDATE_TIME, TABLE_COLLATION, ROW_FORMAT, AVG_ROW_LENGTH, MAX_DATA_LENGTH, CHECK_TIME, INDEX_LENGTH, AUTO_INCREMENT, DATA_FREE, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES"
+    } else {
+        "TABLE_NAME, TABLE_ROWS, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES"
+    };
     let sql = format!(
-        "SELECT TABLE_NAME, TABLE_ROWS, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
-         FROM information_schema.TABLES \
+        "SELECT {columns} FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = {} AND TABLE_TYPE <> 'VIEW' \
          ORDER BY TABLE_NAME",
         quote_value(database),
@@ -3838,12 +3846,31 @@ pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<
         .iter()
         .filter_map(|row| {
             let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(ObjectStatistics {
+            if name.is_empty() {
+                return None;
+            }
+            let mut statistics = ObjectStatistics {
                 name,
                 schema: Some(database.to_string()),
                 estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
                 total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
-            })
+                ..Default::default()
+            };
+            if include_mysql_details {
+                statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
+                statistics.engine = get_opt_str(row, "ENGINE");
+                statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
+                statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
+                statistics.collation = get_opt_str(row, "TABLE_COLLATION");
+                statistics.row_format = get_opt_str(row, "ROW_FORMAT");
+                statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
+                statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
+                statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
+                statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
+                statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
+                statistics.data_free = get_opt_i64(row, "DATA_FREE");
+            }
+            Some(statistics)
         })
         .collect())
 }
@@ -4238,6 +4265,7 @@ where
                 enum_values,
                 character_set: get_opt_str(row, "CHARACTER_SET_NAME").filter(|s| !s.is_empty()),
                 collation: get_opt_str(row, "COLLATION_NAME").filter(|s| !s.is_empty()),
+                metadata_capabilities: Some(ColumnMetadataCapabilities::all_supported()),
             })
         })
         .collect();
@@ -4294,6 +4322,7 @@ where
                     .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
                     .filter(|s| !s.is_empty()),
                 collation,
+                metadata_capabilities: Some(ColumnMetadataCapabilities::default_only()),
             })
         })
         .collect();

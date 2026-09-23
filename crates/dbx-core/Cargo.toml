@@ -36,6 +36,8 @@ log = "0.4"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
@@ -62,6 +64,7 @@ aes-gcm = "0.10"
 aes = "0.8"
 cbc = "0.1"
 argon2 = "0.5"
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
 sha2 = "0.10"
 async-trait = "0.1"
 bytes = "1"

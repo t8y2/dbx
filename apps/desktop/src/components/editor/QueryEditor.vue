@@ -15,7 +15,7 @@ let lastHandledCompressRequestId = 0;
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Columns3, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { Completion, CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
@@ -26,6 +26,8 @@ import EditorSearchPanel from "./EditorSearchPanel.vue";
 import EditorGotoLinePanel from "./EditorGotoLinePanel.vue";
 import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import DelimitedListDialog from "./DelimitedListDialog.vue";
+import TableStructurePeekDialog from "./TableStructurePeekDialog.vue";
+import type { TableStructurePeekInsertKind } from "./TableStructurePeekDialog.vue";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
@@ -145,6 +147,7 @@ import {
   DBX_TABLE_REFERENCE_DRAG_END_EVENT,
   activeTableReferencePayloadValue,
   clearActiveTableReferencePayload,
+  createColumnReferencePayload,
   hasTableReferencePayloadType,
   parseTableReferencePayload,
   tableReferenceInsertText,
@@ -180,6 +183,7 @@ import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlig
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
+import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { stabilizeUnfocusedQueryEditorPointerDown } from "@/lib/editor/queryEditorUnfocusedPointer";
 import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
@@ -206,6 +210,7 @@ import { analyzeIntentionActions, prepareExpandWildcardContext, buildExpandWildc
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
 import { queryContextObjectActions, queryContextObjectRoute, queryTableCandidateAtSqlPosition, queryTableNavigationTargetAtSqlPosition, resolveQueryContextCandidateDatabase, resolveQueryContextObjectTarget, type QueryContextObjectAction } from "@/lib/sql/queryCursorTableTarget";
 import * as api from "@/lib/backend/api";
 import { oracleDatabaseLinkCompletionContext, oracleDatabaseLinkCompletionItems } from "@/lib/sql/oracleDatabaseLinkCompletion";
@@ -560,6 +565,22 @@ const delimitedListSelectedText = ref("");
 const codeSnapshotOpen = ref(false);
 const codeSnapshotSource = ref<CodeSnapshotSource | null>(null);
 
+interface StructurePeekPanelState {
+  id: string;
+  target: SqlObjectNavigationTarget;
+  columns: ColumnInfo[];
+  loading: boolean;
+  error: string;
+  zIndex: number;
+  cascadeIndex: number;
+  requestId: number;
+}
+
+const structurePeekPanels = ref<StructurePeekPanelState[]>([]);
+let structurePeekRequestSeq = 0;
+let structurePeekZIndexSeq = 50;
+let structurePeekCascadeSeq = 0;
+
 function openDelimitedListDialog() {
   if (props.readOnly) return;
   if (!selectedSql.value.trim()) {
@@ -576,6 +597,134 @@ function applyDelimitedListResult(result: string) {
   if (!currentView || props.readOnly) return;
   if (!replaceSelectedEditorText(currentView, result)) return;
   focusEditor();
+}
+
+function bringStructurePeekToFront(panelId: string) {
+  const panel = structurePeekPanels.value.find((item) => item.id === panelId);
+  if (!panel) return;
+  structurePeekZIndexSeq += 1;
+  panel.zIndex = structurePeekZIndexSeq;
+}
+
+function closeStructurePeekPanel(panelId: string) {
+  structurePeekPanels.value = structurePeekPanels.value.filter((item) => item.id !== panelId);
+}
+
+async function loadStructurePeekColumns(panelId: string, requestId: number, target: SqlObjectNavigationTarget, database: string, schema: string) {
+  if (!props.connectionId) return;
+  try {
+    const objectMetadataRequest = {
+      connectionId: props.connectionId,
+      database,
+      schema,
+      tableName: target.name,
+      catalog: props.catalog,
+      objectType: sqlObjectNavigationSourceKind(target),
+    };
+    const { value } = await loadObjectMetadataFacet(objectMetadataRequest, "columns", () => api.getColumns(props.connectionId!, database, schema, target.name, props.catalog, props.clientSessionId));
+    const current = structurePeekPanels.value.find((item) => item.id === panelId && item.requestId === requestId);
+    if (!current) return;
+    current.columns = value;
+    current.error = "";
+    current.loading = false;
+  } catch (error: unknown) {
+    const current = structurePeekPanels.value.find((item) => item.id === panelId && item.requestId === requestId);
+    if (!current) return;
+    current.error = error instanceof Error ? error.message : String(error);
+    current.columns = [];
+    current.loading = false;
+  }
+}
+
+async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
+  if (!props.connectionId) return;
+  const database = target.database || props.database || "";
+  const schema = target.schema ?? props.schema ?? "";
+  const id = structurePeekPanelId(props.connectionId, database, schema, target.name, props.catalog);
+  const existing = structurePeekPanels.value.find((item) => item.id === id);
+  if (existing) {
+    bringStructurePeekToFront(existing.id);
+    // Retry when a previous open left the panel in an error state.
+    if (existing.error && !existing.loading) {
+      const requestId = ++structurePeekRequestSeq;
+      existing.requestId = requestId;
+      existing.loading = true;
+      existing.error = "";
+      existing.columns = [];
+      await loadStructurePeekColumns(existing.id, requestId, existing.target, database, schema);
+    }
+    return;
+  }
+
+  structurePeekZIndexSeq += 1;
+  const requestId = ++structurePeekRequestSeq;
+  const cascadeIndex = structurePeekCascadeSeq++;
+  const panel: StructurePeekPanelState = {
+    id,
+    target: { ...target, database, schema: schema || target.schema },
+    columns: [],
+    loading: true,
+    error: "",
+    zIndex: structurePeekZIndexSeq,
+    cascadeIndex,
+    requestId,
+  };
+  structurePeekPanels.value = [...structurePeekPanels.value, panel];
+  await loadStructurePeekColumns(id, requestId, panel.target, database, schema);
+}
+
+function syncQueryEditorInsertContext(currentView: EditorViewType | null = view.value) {
+  if (!currentView) return;
+  registerQueryEditorInsertContext(currentView, {
+    connectionId: props.connectionId,
+    database: props.database,
+    schema: props.schema,
+    databaseType: props.databaseType,
+  });
+}
+
+function insertStructurePeekValue(panel: StructurePeekPanelState, value: string, kind: TableStructurePeekInsertKind) {
+  if (!value) return;
+  // Insert into the focused query editor, or the last one if focus is inside peek chrome.
+  // Focus elsewhere (sidebar, etc.) → no-op.
+  const targetView = focusedQueryEditorView();
+  if (!targetView || targetView.state.readOnly) return;
+
+  const targetCtx = queryEditorInsertContext(targetView);
+  const connectionId = targetCtx?.connectionId ?? props.connectionId;
+  const databaseType = targetCtx?.databaseType ?? props.databaseType;
+  const database = panel.target.database || targetCtx?.database || props.database || "";
+
+  let insertText = value;
+  if (kind === "identifier" && connectionId && database != null) {
+    const payload = createColumnReferencePayload({
+      connectionId,
+      database,
+      schema: panel.target.schema ?? targetCtx?.schema ?? props.schema,
+      columnNames: [value],
+      databaseType,
+      columnNameSeparator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    });
+    if (payload) {
+      insertText = tableReferenceInsertText(payload, databaseType, {
+        columnNameSeparator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+      });
+    }
+  }
+
+  // Peek inserts at the caret (or replaces a non-empty selection). Do not use
+  // replaceSelectedEditorText — that helper requires a selection and no-ops on caret.
+  const selection = targetView.state.selection.main;
+  const from = selection.from;
+  const to = selection.empty ? from : selection.to;
+  targetView.dispatch({
+    changes: { from, to, insert: insertText },
+    selection: { anchor: from + insertText.length },
+    scrollIntoView: true,
+    userEvent: "input.type",
+  });
+  focusEditorView(targetView);
+  rememberFocusedQueryEditorView(targetView);
 }
 
 // ==================== Intention Popup ====================
@@ -1573,6 +1722,7 @@ function syncContextMenuStateAtEvent(currentView: EditorViewType, event: MouseEv
 
 function focusEditor() {
   view.value?.focus();
+  rememberFocusedQueryEditorView(view.value);
 }
 
 function clearTableNavigationHover() {
@@ -2140,6 +2290,11 @@ function emitContextObjectAction(action: QueryContextObjectAction) {
     case "viewTableData":
       emit("viewTableData", route.payload[0]);
       break;
+    case "peekTableStructure":
+      // Non-modal floating panel: restore editor focus so typing continues underneath.
+      void openTableStructurePeek(route.payload[0]);
+      focusEditor();
+      return;
     case "editTableStructure":
       emit("editTableStructure", route.payload[0]);
       break;
@@ -2162,6 +2317,13 @@ function contextObjectMenuItem(action: QueryContextObjectAction): ContextMenuIte
         action: () => emitContextObjectAction(action),
         disabled,
         icon: Table2,
+      };
+    case "peek-table-structure":
+      return {
+        label: t("contextMenu.peekStructure"),
+        action: () => emitContextObjectAction(action),
+        disabled,
+        icon: Columns3,
       };
     case "edit-table-structure":
       return {
@@ -7164,6 +7326,9 @@ onMounted(async () => {
         eventFilter: startsQueryEditorRectangularSelection,
       }),
       EditorView.updateListener.of((update) => {
+        if (update.focusChanged && update.view.hasFocus) {
+          rememberFocusedQueryEditorView(update.view);
+        }
         if (update.docChanged) {
           searchPanelRef.value?.scheduleDocumentSearchUpdate();
           if (isEditorComposing(update.view)) {
@@ -7582,6 +7747,7 @@ onMounted(async () => {
   });
 
   view.value = new EditorView({ state, parent: editorElement });
+  syncQueryEditorInsertContext(view.value);
   batchColumnSelectionTooltipParents.set(view.value, tooltipParent);
   postCompositionKeyGuardCleanup = postCompositionKeyGuard.attach(view.value.contentDOM);
   registerEditorScrollbarPointerGuard(view.value);
@@ -7792,6 +7958,11 @@ watch(
 // The editor component is reused across tabs, so a tab switch can change the
 // connection/database without remounting it.
 watch([() => props.connectionId, () => props.database, () => props.catalog, () => props.clientSessionId], () => warmActiveTabConnection());
+
+watch(
+  () => [props.connectionId, props.database, props.schema, props.databaseType] as const,
+  () => syncQueryEditorInsertContext(),
+);
 
 // Restored tabs mount before their connection is established, so the warm-up
 // above is skipped and never retried when connecting finishes later.
@@ -8152,7 +8323,11 @@ onBeforeUnmount(() => {
   document.removeEventListener("mousedown", onBatchColumnSelectionRowGuard, true);
   document.removeEventListener("click", onBatchColumnSelectionRowGuard, true);
   zoomCommitScheduler.dispose();
-  view.value?.destroy();
+  if (view.value) {
+    unregisterQueryEditorInsertContext(view.value);
+    clearRememberedFocusedQueryEditorView(view.value);
+    view.value.destroy();
+  }
 });
 
 function readEditorViewport(currentView: EditorViewType) {
@@ -8378,6 +8553,20 @@ defineExpose({
     <EditorGotoLinePanel ref="gotoLinePanelRef" :view="view" @open="searchPanelRef?.closeSearch()" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
+    <TableStructurePeekDialog
+      v-for="panel in structurePeekPanels"
+      :key="panel.id"
+      :table-name="panel.target.name"
+      :schema="panel.target.schema"
+      :columns="panel.columns"
+      :loading="panel.loading"
+      :error="panel.error"
+      :z-index="panel.zIndex"
+      :cascade-index="panel.cascadeIndex"
+      @close="closeStructurePeekPanel(panel.id)"
+      @activate="bringStructurePeekToFront(panel.id)"
+      @insert-value="(value, kind) => insertStructurePeekValue(panel, value, kind)"
+    />
     <CodeSnapshotDialog v-model:open="codeSnapshotOpen" :source="codeSnapshotSource" />
     <!-- SQL 意图操作弹出菜单（参考 DataGrip Alt+Enter） -->
     <Teleport to="body">

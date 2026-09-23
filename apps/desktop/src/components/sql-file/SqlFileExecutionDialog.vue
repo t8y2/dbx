@@ -39,6 +39,7 @@ const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillFilePath?: string;
+  prefillPreview?: SqlFilePreview;
 }>();
 
 const store = useConnectionStore();
@@ -239,6 +240,7 @@ watch(canUseManualTransaction, (supported) => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  if (!running.value) void releaseManagedPreviews();
   if (running.value && manualTransaction.value) {
     cancelRequested.value = true;
     if (executionStarted.value) void cancelSqlFileExecution(executionId.value).catch(() => {});
@@ -469,6 +471,7 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
 
 async function loadPreviews(filesOrPaths: Array<string | File>) {
   if (executionLocked.value) return;
+  await releaseManagedPreviews();
   loadingPreview.value = true;
   previews.value = [];
   resetExecution();
@@ -482,6 +485,18 @@ async function loadPreviews(filesOrPaths: Array<string | File>) {
     toast(e?.message || String(e), 5000);
   } finally {
     loadingPreview.value = false;
+  }
+}
+
+async function releaseManagedPreviews() {
+  const tokens = previews.value.flatMap((preview) => (preview.cleanupToken ? [preview.cleanupToken] : []));
+  if (!tokens.length) return;
+  previews.value = previews.value.filter((preview) => !preview.cleanupToken);
+  try {
+    const { releaseSqlFilePreview } = await import("@/lib/backend/api");
+    await Promise.all(tokens.map((token) => releaseSqlFilePreview(token)));
+  } catch (error: any) {
+    toast(error?.message || String(error), 5000);
   }
 }
 
@@ -721,6 +736,7 @@ async function startExecution() {
     running.value = false;
     cancelling.value = false;
     executionStarted.value = false;
+    await releaseManagedPreviews();
   }
 }
 
@@ -763,6 +779,7 @@ watch(
   open,
   (value) => {
     if (!value) {
+      if (!running.value) void releaseManagedPreviews();
       if (manualTransaction.value && running.value) void cancelExecution();
       else if (txnSessionId.value) void finishTransaction(false);
       return;
@@ -774,7 +791,9 @@ watch(
     }
     // When opened from the SQL Files panel with a pre-selected file, load its
     // preview automatically so the user can review statements before running.
-    if (props.prefillFilePath) {
+    if (props.prefillPreview) {
+      previews.value = [props.prefillPreview];
+    } else if (props.prefillFilePath) {
       void loadPreviews([props.prefillFilePath]);
     }
   },

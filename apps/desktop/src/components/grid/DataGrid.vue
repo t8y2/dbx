@@ -1329,6 +1329,8 @@ const {
   localFilteredRows,
   localFilterAllOptions,
   localFilterOptions,
+  localFilterSort,
+  toggleLocalFilterSort,
   localFilterTypedValue,
   canApplyTypedLocalFilterValue,
   openLocalFilter,
@@ -13001,6 +13003,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           :draft-mode="localFilterDraft?.mode"
                           :draft-values="localFilterDraft?.values"
                           :options="localFilterOptions"
+                          :sort="localFilterSort"
+                          @sort="toggleLocalFilterSort"
                           :all-options-count="localFilterAllOptions.length"
                           :can-apply-typed-value="canApplyTypedLocalFilterValue"
                           :typed-value="localFilterTypedValue"

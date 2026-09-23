@@ -131,7 +131,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledWith({ repositoryId: "official", pluginId: "example", version: "1.1.0" });
-    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [], blockedPlugins: [] });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
   });
 
   it("shares one update operation between automatic and manual callers", async () => {
@@ -172,7 +172,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).not.toHaveBeenCalled();
     expect(mocks.installMcpServer).not.toHaveBeenCalled();
     expect(mocks.installMarketplacePlugin).not.toHaveBeenCalled();
-    expect(result).toEqual({ drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [], blockedPlugins: [] });
+    expect(result).toEqual({ drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
   });
 
   it("installs every manually selected category when no DBX update exists and automatic updates are disabled", async () => {
@@ -190,7 +190,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
-    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [], blockedPlugins: [] });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
   });
 
   it("resumes a persisted manual update-all plan after restart while automatic updates are disabled", async () => {
@@ -213,7 +213,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
-    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, failed: [], blockedPlugins: [] });
+    expect(result).toEqual({ drivers: 1, jdbc: true, mcp: true, plugins: 1, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
   });
 
   it("keeps the toolbar update action hidden while a persisted restart plan is still installing", async () => {
@@ -247,7 +247,7 @@ describe("useComponentUpdates", () => {
   });
 
   it("skips blocked agent updates while allowing other component updates", async () => {
-    mocks.checkAgentUpdateBlockers.mockResolvedValue([{ db_type: "mysql", label: "MySQL" }]);
+    mocks.checkAgentUpdateBlockers.mockResolvedValue([{ db_type: "mysql", label: "MySQL", connections: ["生产 MySQL", "报表 MySQL"] }]);
     const updates = useComponentUpdates({ isDesktop: true });
 
     const result = await updates.autoUpdateEnabledComponents();
@@ -257,6 +257,7 @@ describe("useComponentUpdates", () => {
     expect(mocks.installMcpServer).toHaveBeenCalledOnce();
     expect(mocks.installMarketplacePlugin).toHaveBeenCalledOnce();
     expect(result.skippedDrivers).toBe(1);
+    expect(result.blockedDrivers).toEqual([{ db_type: "mysql", label: "MySQL", connections: ["生产 MySQL", "报表 MySQL"] }]);
   });
 
   it("does not install from stale state when update detection fails", async () => {
@@ -302,7 +303,7 @@ describe("useComponentUpdates", () => {
     const result = await updates.installCategory("jdbc");
 
     expect(mocks.installJdbcPlugin).toHaveBeenCalledOnce();
-    expect(result).toEqual({ drivers: 0, jdbc: true, mcp: false, plugins: 0, skippedDrivers: 0, failed: [], blockedPlugins: [] });
+    expect(result).toEqual({ drivers: 0, jdbc: true, mcp: false, plugins: 0, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] });
   });
 
   it("reports the blocking connections when a K8S plugin update cannot start", async () => {

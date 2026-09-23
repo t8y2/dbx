@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, nextTick, ref, type Component } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ getIndexOverview: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getIndexOverview: vi.fn(), toast: vi.fn() }));
 
 function passthrough(tag: string): Component {
   return defineComponent({
@@ -21,10 +21,11 @@ vi.mock("@lucide/vue", () => ({
   Copy: passthrough("span"),
   FileText: passthrough("span"),
   ListChecks: passthrough("span"),
+  RefreshCcw: passthrough("span"),
   Settings: passthrough("span"),
 }));
 vi.mock("@/lib/backend/api", () => ({ meilisearchGetIndexOverview: mocks.getIndexOverview }));
-vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/tabs/tabUiState", () => ({ useTabUiState: () => ({ initialState: {}, track: () => {} }) }));
 vi.mock("@/components/meilisearch/MeilisearchDocumentsPage.vue", () => ({ default: passthrough("div") }));
 vi.mock("@/components/meilisearch/MeilisearchSettingsPage.vue", () => ({ default: passthrough("div") }));
@@ -103,5 +104,50 @@ describe("MeilisearchIndexView storage rows", () => {
     expect(text).toContain("meilisearch.instanceDatabaseSize");
     expect(text).not.toContain("meilisearch.documentSize");
     expect(text).toContain("25.7 MB");
+  });
+});
+
+describe("MeilisearchIndexView refresh", () => {
+  const overview = {
+    uid: "report_template",
+    primaryKey: "id",
+    createdAt: "2026-09-21T06:30:00Z",
+    updatedAt: "2026-09-21T06:30:46Z",
+    numberOfDocuments: 256,
+    isIndexing: false,
+    documentSize: 309_329_920,
+    avgDocumentSize: 1_208_320,
+    databaseSize: 4_194_304_000,
+  };
+
+  function refreshButton(mounted: HTMLElement): HTMLButtonElement {
+    const button = mounted.querySelector<HTMLButtonElement>('button[aria-label="meilisearch.refresh"]');
+    expect(button).toBeTruthy();
+    return button!;
+  }
+
+  it("refetches the overview and renders the fresh numbers when clicked", async () => {
+    mocks.getIndexOverview.mockResolvedValueOnce(overview).mockResolvedValueOnce({ ...overview, numberOfDocuments: 512 });
+
+    const mounted = await mountIndexView();
+    expect(mounted.textContent).toContain("256");
+
+    refreshButton(mounted).click();
+    await vi.waitFor(() => expect(mocks.getIndexOverview).toHaveBeenCalledTimes(2));
+    expect(mocks.getIndexOverview).toHaveBeenNthCalledWith(2, "c1", "report_template");
+    await vi.waitFor(() => expect(mounted.textContent).toContain("512"));
+    expect(mounted.textContent).not.toContain("256");
+  });
+
+  it("toasts when a manual refresh fails", async () => {
+    mocks.getIndexOverview.mockResolvedValueOnce(overview).mockRejectedValueOnce(new Error("index unavailable"));
+
+    const mounted = await mountIndexView();
+    expect(mocks.toast).not.toHaveBeenCalled();
+
+    refreshButton(mounted).click();
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("index unavailable", 5000));
+    // The mounted overview stays visible; the failure only notifies.
+    expect(mounted.textContent).toContain("256");
   });
 });

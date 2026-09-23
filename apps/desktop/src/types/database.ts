@@ -857,6 +857,18 @@ export interface ObjectStatistics {
   schema?: string | null;
   estimated_rows?: number | null;
   total_bytes?: number | null;
+  data_length?: number | null;
+  engine?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  collation?: string | null;
+  row_format?: string | null;
+  avg_row_length?: number | null;
+  max_data_length?: number | null;
+  check_time?: string | null;
+  index_length?: number | null;
+  auto_increment?: string | null;
+  data_free?: number | null;
 }
 
 export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";

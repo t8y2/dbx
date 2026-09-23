@@ -19,6 +19,16 @@ vi.mock("@lucide/vue", async () => {
 vi.mock("@/components/ui/badge", async () => ({ Badge: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("Badge", "span") }));
 vi.mock("@/components/ui/button", async () => ({ Button: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("Button", "button") }));
 vi.mock("@/components/ui/input", async () => ({ Input: (await import("@/components/grid/__tests__/vueHostHarness")).createPassthroughStub("Input", "input") }));
+vi.mock("@/components/ui/select", async () => {
+  const { createPassthroughStub } = await import("@/components/grid/__tests__/vueHostHarness");
+  return {
+    Select: createPassthroughStub("Select", "div"),
+    SelectContent: createPassthroughStub("SelectContent", "div"),
+    SelectItem: createPassthroughStub("SelectItem", "div"),
+    SelectTrigger: createPassthroughStub("SelectTrigger", "button"),
+    SelectValue: createPassthroughStub("SelectValue", "span"),
+  };
+});
 
 import McpResourceScopePicker from "@/components/settings/McpResourceScopePicker.vue";
 

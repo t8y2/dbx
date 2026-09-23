@@ -1567,10 +1567,12 @@ mod tests {
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
+            managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
+            migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         });
         (state, dir)
     }

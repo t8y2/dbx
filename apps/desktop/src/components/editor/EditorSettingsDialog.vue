@@ -2914,7 +2914,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
-  ...(isWeb ? [] : [{ value: "backups" as const, label: t("databaseBackup.title") }]),
+  { value: "backups" as const, label: t("databaseBackup.title") },
   { value: "tunnels", label: t("settings.tunnelsTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
   { value: "snippets", label: t("settings.snippetsTab") },
@@ -4293,7 +4293,7 @@ async function testWebDav() {
 
 async function uploadWebDavSnapshot() {
   await runWebDavAction("upload", async () => {
-    const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
+    const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined, webdavSyncSecrets.value);
     return t("settings.syncUploadSuccess", {
       bytes: summary.bytes,
       path: summary.remotePath,
@@ -4304,7 +4304,7 @@ async function uploadWebDavSnapshot() {
 async function downloadWebDavSnapshot() {
   if (!window.confirm(t("settings.syncDownloadConfirm"))) return;
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(currentWebDavConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined);
+    const result = await webdavSyncDownload(currentWebDavConfig(), webdavSyncSecrets.value ? webdavSecretsPassphrase.value : undefined, webdavSyncSecrets.value);
     if (result.editorSettings && typeof result.editorSettings === "object") {
       settingsStore.updateEditorSettings(result.editorSettings as any);
     }
@@ -7730,29 +7730,44 @@ onUnmounted(() => {
                     <Label for="tableOpenSortMode">{{ t("settings.tableOpenSortMode") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.tableOpenSortDescription") }}</p>
                   </div>
-                  <select id="tableOpenSortMode" v-model="editTableOpenSortMode" class="h-8 rounded-md border bg-background px-2 text-xs">
-                    <option value="none">{{ t("settings.tableSortUnchanged") }}</option>
-                    <option value="database">{{ t("settings.tableSortDatabase") }}</option>
-                    <option value="local">{{ t("settings.tableSortLocal") }}</option>
-                  </select>
+                  <Select v-model="editTableOpenSortMode">
+                    <SelectTrigger id="tableOpenSortMode" class="h-8 w-44 shrink-0 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{{ t("settings.tableSortUnchanged") }}</SelectItem>
+                      <SelectItem value="database">{{ t("settings.tableSortDatabase") }}</SelectItem>
+                      <SelectItem value="local">{{ t("settings.tableSortLocal") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="tableDatabaseSortDirection">{{ t("settings.tableDatabaseSortDirection") }}</Label>
                   </div>
-                  <select id="tableDatabaseSortDirection" v-model="editTableDatabaseSortDirection" class="h-8 rounded-md border bg-background px-2 text-xs">
-                    <option value="asc">{{ t("settings.tableSortAscending") }}</option>
-                    <option value="desc">{{ t("settings.tableSortDescending") }}</option>
-                  </select>
+                  <Select v-model="editTableDatabaseSortDirection">
+                    <SelectTrigger id="tableDatabaseSortDirection" class="h-8 w-36 shrink-0 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="asc">{{ t("settings.tableSortAscending") }}</SelectItem>
+                      <SelectItem value="desc">{{ t("settings.tableSortDescending") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="tableLocalSortDirection">{{ t("settings.tableLocalSortDirection") }}</Label>
                   </div>
-                  <select id="tableLocalSortDirection" v-model="editTableLocalSortDirection" class="h-8 rounded-md border bg-background px-2 text-xs">
-                    <option value="asc">{{ t("settings.tableSortAscending") }}</option>
-                    <option value="desc">{{ t("settings.tableSortDescending") }}</option>
-                  </select>
+                  <Select v-model="editTableLocalSortDirection">
+                    <SelectTrigger id="tableLocalSortDirection" class="h-8 w-36 shrink-0 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="asc">{{ t("settings.tableSortAscending") }}</SelectItem>
+                      <SelectItem value="desc">{{ t("settings.tableSortDescending") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div data-settings-search-id="default-auto-keep-results" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('default-auto-keep-results')]">
                   <div class="min-w-0 space-y-1">
@@ -8616,7 +8631,7 @@ LIMIT 100;</pre
               </div>
             </section>
 
-            <section v-else-if="activeSettingsTab === 'backups' && !isWeb" data-settings-search-id="backups" :class="['py-2', settingsSearchTargetClass('backups')]">
+            <section v-else-if="activeSettingsTab === 'backups'" data-settings-search-id="backups" :class="['py-2', settingsSearchTargetClass('backups')]">
               <ScheduledDatabaseBackupSettings />
             </section>
 

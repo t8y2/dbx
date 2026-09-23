@@ -232,15 +232,12 @@ pub async fn mongo_server_version_core(
     }
 }
 
-pub async fn mongo_run_command_core(
-    state: &AppState,
-    connection_id: &str,
+pub(crate) async fn mongo_run_command_with_existing_pool(
+    pool: &PoolKind,
     database: &str,
     command_json: &str,
 ) -> Result<MongoDocumentResult, String> {
-    ensure_document_pool(state, connection_id).await?;
-    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
-    match &pool {
+    match pool {
         PoolKind::MongoDb(client) => mongo_driver::run_command(client, database, command_json).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -259,6 +256,17 @@ pub async fn mongo_run_command_core(
         }
         _ => Err("Not a MongoDB connection".to_string()),
     }
+}
+
+pub async fn mongo_run_command_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    command_json: &str,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    mongo_run_command_with_existing_pool(&pool, database, command_json).await
 }
 
 pub async fn mongo_show_databases_core(state: &AppState, connection_id: &str) -> Result<MongoDocumentResult, String> {

@@ -103,6 +103,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
     "host.filesystem",
     "host.binary",
     "host.plans:read",
+    "host.schema:read",
     "host.storage",
     "host.network:https://s3.example.com:443"
   ],
@@ -120,6 +121,7 @@ Manifest paths are relative to the package root. They cannot start with `/`, con
 - `engines.dbx` is an optional DBX version range; `engines.host_api` is required.
 - `host.workbench` opens another workbench, `host.events` receives host events, `host.binary` enables binary channels, and `host.filesystem` enables filesystem entrypoints.
 - `host.plans:read` allows reading estimated execution plans for DBX's own connections (see [Estimated Execution Plans](#estimated-execution-plans)). It is read-only: it never grants SQL execution, writes, DDL, or actual plans, and it is the only plan scope that exists.
+- `host.schema:read` allows `host.getTableMetadata` to read narrow table schema metadata from an already-open connection; it grants no arbitrary SQL, writes, or implicit reconnect (see [Table Schema Metadata](#table-schema-metadata)).
 - `host.storage` gives the workbench UI a persistent key-value store scoped to this plugin (see [Persistent UI State](#persistent-ui-state)). Values never leave the plugin's own data directory.
 - `host.ai` lets the plugin open a conversation with a data snapshot in the built-in DBX AI panel, using its model selector, history, follow-up messages, cancellation and export. Older DBX builds reject the unknown permission at install time, so plugins that must install everywhere should treat `host.ai` as optional.
 - `host.network:https://host[:port]` declares a browser-accessible HTTPS origin added to CSP `connect-src`; at most eight origins are allowed, with no paths, wildcards, or tokens. The service's CORS rules still apply. This permission is not a native Sidecar network firewall.
@@ -313,7 +315,8 @@ const assetUrl = await window.dbxPlugin.readAssetUrl("assets/empty-state.svg");
 | `openFilesystem(id, context)` | Opens a filesystem entry; requires `host.filesystem`. |
 | `getPlanCapabilities(connectionId)` | Reads what the host and this connection can plan; requires `host.plans:read`. |
 | `explainPlan({ connectionId, database?, schema?, sql, mode, timeoutMs? })` | Returns the estimated plan for `sql`; requires `host.plans:read`. |
-| `capabilities` | `{ downloadFile, planApi, storage, ai }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
+| `getTableMetadata({ connectionId, database?, schema?, table })` | Reads narrow table schema metadata from an already-open connection; requires `host.schema:read`. |
+| `capabilities` | `{ downloadFile, planApi, schemaMetadataApi, storage, ai }` from the init message. A missing or `false` entry means that Host API group is unavailable here, so gate the matching call on it instead of probing with a request. |
 | `ai.openConversation({ title, prompt, context, send? })` | Opens a new plugin conversation in the built-in AI panel; `send` defaults to `false`, or starts analysis when `true`; requires `host.ai` and is advertised as `capabilities.ai` — gate on it instead of probing, since older hosts omit it. |
 | `onInit(fn)` / `onEvent(fn)` | Observes initialization, environment changes, or backend events; forwarding backend events requires `host.events`. |
 | `storage` | Persistent per-plugin key-value state; requires `host.storage`; see below. |
@@ -366,6 +369,59 @@ The plan API is bounded by design:
 Gate on capability rather than probing: read `dbxPlugin.capabilities.planApi` from the init message (an older host omits it), then confirm per-connection support with `getPlanCapabilities` before calling `explainPlan`. Submitting `EXPLAIN` text of your own is neither necessary nor accepted.
 
 The plan API is Host API 1.2. A plugin that cannot work without it declares the floor in its manifest with `"engines": { "host_api": "^1.2" }`. The manifest range is a compatibility floor and `capabilities.planApi` is the runtime check; keep both.
+
+### Table Schema Metadata
+
+A plugin can read narrow schema metadata for one table on a DBX connection that is already open, without owning a driver, connection pool, credential, or SQL string. The request reuses the canonical `PluginTableContext` and contains table identity only:
+
+```json
+{
+  "permissions": ["host.schema:read"]
+}
+```
+
+```js
+if (window.dbxPlugin.capabilities.schemaMetadataApi) {
+  const metadata = await window.dbxPlugin.getTableMetadata({
+    connectionId,
+    database,
+    schema,
+    table: "users"
+  });
+  for (const column of metadata.columns) {
+    renderColumn(column.name, column.dataType, column.nullable);
+  }
+}
+```
+
+`getTableMetadata({ connectionId, database?, schema?, table })` returns:
+
+```json
+{
+  "columns": [
+    {
+      "name": "id",
+      "dataType": "integer",
+      "nullable": false,
+      "precision": 32,
+      "default": "nextval('users_id_seq'::regclass)"
+    }
+  ],
+  "fieldCapabilities": {
+    "length": "supported",
+    "precision": "supported",
+    "scale": "supported",
+    "default": "supported"
+  }
+}
+```
+
+- `columns` contains only `name`, `dataType`, `nullable`, and optional `length`, `precision`, `scale`, and `default`. It never returns comments, keys/indexes, credentials, connection strings, driver objects, or arbitrary SQL results.
+- Optional values remain `null` or are omitted when no value exists; they are never fabricated as `0` or an empty string. `fieldCapabilities` uses `supported`, `unsupported`, and `unknown` to distinguish provider support, an explicitly unavailable field, and missing reliable provenance; plugins must not treat `unknown` as supported.
+- `database` and `schema` are optional and omitted when unavailable; do not use empty strings as public identity. `connectionId` and `table` must be non-empty identity values no longer than 256 characters.
+- This API is read-only. DBX reuses only an already-open Host connection/session; a plugin cannot trigger an implicit reconnect, create a pool, or execute arbitrary SQL. A saved-but-disconnected connection is rejected with `Connection is not open`; a requested database without a matching open session is also rejected instead of being routed to another connection.
+
+This API is part of Host API 1.3. A plugin that cannot work without it should declare `"engines": { "host_api": "^1.3" }` and still read `capabilities.schemaMetadataApi`, because older hosts omit that field. Without `host.schema:read`, the host rejects the request before it reaches the backend.
 
 ### File Transfer and OS Drops
 

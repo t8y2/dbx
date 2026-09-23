@@ -567,6 +567,95 @@ describe("PluginHostBridge", () => {
     expect(messages[2]).toMatchObject({ id: "legacy", error: "Host plan API is unavailable" });
   });
 
+  it("requires host.schema:read, normalizes table identity, and serves narrow metadata", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn().mockResolvedValue({
+      columns: [{ name: "id", dataType: "integer", nullable: false }],
+      fieldCapabilities: { length: "unknown", precision: "unknown", scale: "unknown", default: "unknown" },
+    });
+    const base = { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), getTableMetadata };
+
+    const denied = new PluginHostBridge(plugin(), workbench, {}, () => target, base);
+    planCall(denied, target, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "denied");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "denied", error: "Plugin has not declared permission 'host.schema:read'" });
+    expect(getTableMetadata).not.toHaveBeenCalled();
+
+    const allowed = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, base);
+    allowed.sendInit();
+    planCall(allowed, target, "host.getTableMetadata", { connectionId: "  c1  ", database: " app ", schema: "   ", table: " users " }, "metadata");
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+
+    expect(getTableMetadata).toHaveBeenCalledWith({ connectionId: "c1", database: "app", table: "users" });
+    expect(messages[2]).toMatchObject({ id: "metadata", result: expect.objectContaining({ columns: expect.any(Array) }) });
+  });
+
+  it("rejects malformed table metadata contexts and advertises the adapter capability", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn();
+    const bridge = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getTableMetadata,
+    });
+    bridge.sendInit();
+    expect(messages[0].capabilities).toMatchObject({ schemaMetadataApi: true });
+
+    const cases: [string, unknown, string][] = [
+      ["missing-connection", { table: "users" }, "connectionId"],
+      ["blank-connection", { connectionId: " ", table: "users" }, "connectionId"],
+      ["missing-table", { connectionId: "c1" }, "table"],
+      ["table-type", { connectionId: "c1", table: 7 }, "table"],
+      ["identifier-long", { connectionId: "c1", table: "x".repeat(257) }, "table"],
+      ["scope-type", { connectionId: "c1", table: "users", schema: 1 }, "schema"],
+    ];
+    for (const [id, params] of cases) planCall(bridge, target, "host.getTableMetadata", params, id);
+    planCall(bridge, target, "host.getTableMetadata", "not an object", "params-object");
+    await vi.waitFor(() => expect(messages).toHaveLength(cases.length + 2));
+
+    cases.forEach(([id, , expected], index) => {
+      expect(messages[index + 1]).toMatchObject({ id });
+      expect(messages[index + 1].error).toContain(expected);
+    });
+    expect(messages[messages.length - 1]).toMatchObject({ id: "params-object", error: "host.getTableMetadata params must be an object" });
+    expect(getTableMetadata).not.toHaveBeenCalled();
+
+    const legacyMessages: any[] = [];
+    const legacyTarget = { postMessage: (message: unknown) => legacyMessages.push(message) } as unknown as Window;
+    const legacy = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => legacyTarget, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    legacy.sendInit();
+    expect(legacyMessages[0].capabilities).toMatchObject({ schemaMetadataApi: false });
+    planCall(legacy, legacyTarget, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "legacy");
+    await vi.waitFor(() => expect(legacyMessages).toHaveLength(2));
+    expect(legacyMessages[1]).toMatchObject({ id: "legacy", error: "Host schema metadata API is unavailable" });
+  });
+
+  it.each(["Connection session is not open for the requested database", "Query canceled", "metadata provider denied", "DBX metadata pool is busy; please retry"])("forwards schema metadata failures without retrying: %s", async (error) => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const getTableMetadata = vi.fn().mockRejectedValue(new Error(error));
+    const bridge = new PluginHostBridge(plugin(["host.schema:read"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      getTableMetadata,
+    });
+    planCall(bridge, target, "host.getTableMetadata", { connectionId: "c1", table: "users" }, "failure");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "failure", error });
+    expect(getTableMetadata).toHaveBeenCalledTimes(1);
+  });
+
   it("opens only the owning plugin filesystem with explicit permission", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
@@ -1036,6 +1125,7 @@ describe("plugin SDK source", () => {
       invoke: (method: string, params?: unknown, options?: { timeoutMs?: number }) => Promise<unknown>;
       getPlanCapabilities: (connectionId: string) => Promise<unknown>;
       explainPlan: (request: unknown) => Promise<unknown>;
+      getTableMetadata: (context: unknown) => Promise<unknown>;
     };
   }
 
@@ -1121,6 +1211,17 @@ describe("plugin SDK source", () => {
     // The SDK forwards the mode verbatim: defaulting it would let a plugin reach
     // a plan mode it never asked for.
     expect(requests[1].params).toEqual({ connectionId: "c1", sql: "SELECT 1", mode: "estimated" });
+  });
+
+  it("exposes read-only table metadata through the SDK request surface", () => {
+    const posted: unknown[] = [];
+    const { dbxPlugin } = loadSdk(posted);
+
+    void dbxPlugin!.getTableMetadata({ connectionId: "c1", database: "app", table: "users" });
+
+    const request = firstRequest(posted);
+    expect(request.method).toBe("host.getTableMetadata");
+    expect(request.params).toEqual({ connectionId: "c1", database: "app", table: "users" });
   });
 
   it("forwards fileTransfer requests to the host api", async () => {

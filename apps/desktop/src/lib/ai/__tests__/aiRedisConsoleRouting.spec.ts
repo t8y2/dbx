@@ -16,7 +16,7 @@ describe("AI Redis console routing", () => {
     expect(aiAssistantSource).toContain("seg.isSql || isRedisConnection");
     expect(appSource).toContain("if (routeAiRedisCommand(sql, false, target)) return;");
     expect(appSource).toContain("if (routeAiRedisCommand(sql, true, target)) return;");
-    expect(contentAreaSource).toContain('props.activeTab.mode !== "redis"');
+    expect(contentAreaSource).toContain("if (!isRedisConsoleReady(target)) return false;");
     expect(contentAreaSource).toContain("redisKeyBrowserRef.value?.executeCommand?.(command)");
   });
 
@@ -60,11 +60,11 @@ describe("AI Redis console routing", () => {
   it("still drives the bound console when it is the visible tab", () => {
     // The refusal above must not disable the working case: readiness means the
     // on-screen console belongs to the bound connection.
-    expect(contentAreaSource).toContain('props.activeTab.mode === "redis" && props.activeTab.connectionId === connectionId');
+    expect(contentAreaSource).toContain("isAiRedisConsoleTarget(props.activeTab, target)");
     const start = appSource.indexOf("async function deliverRedisAiCommand");
     const deliver = appSource.slice(start, appSource.indexOf("function aiTargetTabSql", start));
-    expect(deliver).toContain("contentAreaRef.value?.executeRedisCommand(command, target.connectionId)");
-    expect(deliver).toContain("contentAreaRef.value?.insertRedisCommand(command, target.connectionId)");
+    expect(deliver).toContain("contentAreaRef.value?.executeRedisCommand(command, target)");
+    expect(deliver).toContain("contentAreaRef.value?.insertRedisCommand(command, target)");
   });
 
   it("waits for the console to mount without re-issuing the command", () => {
@@ -73,19 +73,19 @@ describe("AI Redis console routing", () => {
     const deliver = appSource.slice(start, appSource.indexOf("\n}", start));
 
     // Readiness is polled through a side-effect-free probe...
-    const probeIdx = deliver.indexOf("isRedisConsoleReady(target.connectionId)");
+    const probeIdx = deliver.indexOf("isRedisConsoleReady(target)");
     expect(probeIdx).toBeGreaterThanOrEqual(0);
     expect(deliver).toContain("REDIS_CONSOLE_READY_TIMEOUT_MS");
     // ...and the single route attempt happens only after the wait, so a command
     // that ran but reported false (e.g. awaiting confirmation) cannot run twice.
-    const routeIdx = deliver.indexOf("executeRedisCommand(command, target.connectionId)");
+    const routeIdx = deliver.indexOf("executeRedisCommand(command, target)");
     expect(routeIdx).toBeGreaterThan(probeIdx);
 
     // The probe itself must not execute anything.
     const probeStart = contentAreaSource.indexOf("function isRedisConsoleReady");
     expect(probeStart).toBeGreaterThanOrEqual(0);
     const probe = contentAreaSource.slice(probeStart, contentAreaSource.indexOf("\n}", probeStart));
-    expect(probe).toContain('props.activeTab.mode === "redis" && props.activeTab.connectionId === connectionId && !!redisKeyBrowserRef.value');
+    expect(probe).toContain("isAiRedisConsoleTarget(props.activeTab, target) && !!redisKeyBrowserRef.value");
     expect(probe).not.toContain("executeCommand");
     expect(probe).not.toContain("insertCommand");
   });

@@ -602,6 +602,15 @@ pub struct AiStreamChunk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AiChatSourceBinding {
+    pub connection_id: String,
+    pub database: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiChatMessage {
     pub role: String,
     pub content: String,
@@ -617,6 +626,10 @@ pub struct AiChatMessage {
     pub failed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covered_messages: Option<usize>,
+    /// Frozen target of the assistant turn. A Web confirmation card can remain
+    /// actionable after the conversation itself is rebound (#9902).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<AiChatSourceBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

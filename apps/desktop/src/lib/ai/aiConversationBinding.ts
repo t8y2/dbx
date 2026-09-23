@@ -1,6 +1,7 @@
 import type { AiConversation } from "@/lib/backend/tauri";
 import type { AiContextTarget } from "@/lib/ai/ai";
 import type { QueryTab } from "@/types/database";
+import type { DesktopAiRunRuntime } from "@/lib/ai/desktopAiRunRegistry";
 
 /**
  * Connection a conversation talks to (#9902).
@@ -77,6 +78,33 @@ export function bindingForSnapshot(conversations: readonly AiConversation[], tar
  */
 export function sameConversationBinding(a: AiConversationBinding, b: AiConversationBinding): boolean {
   return a.connectionId === b.connectionId && (a.database ?? "") === (b.database ?? "") && (a.schema ?? "") === (b.schema ?? "");
+}
+
+/** Only an executing or awaiting run owns a frozen target. An editable
+ *  recovered draft and a terminal run must follow the conversation's current
+ *  binding when the user sends again. */
+export function activeAiRunBinding(
+  conversationBinding: AiConversationBinding,
+  run: Pick<DesktopAiRunRuntime, "connectionId" | "database" | "schema" | "status"> | undefined,
+  messages: readonly { role: string; sourceBinding?: AiConversationBinding }[],
+  foregroundActive: boolean,
+): AiConversationBinding {
+  if (run?.connectionId && (run.status === "preparing" || run.status === "queued" || run.status === "running" || run.status === "awaiting_write_confirmation")) {
+    return { connectionId: run.connectionId, database: run.database, schema: run.schema };
+  }
+  if (foregroundActive) {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (message.role === "assistant" && message.sourceBinding) return message.sourceBinding;
+    }
+  }
+  return conversationBinding;
+}
+
+/** Redis's logical DB is part of the target even when two tabs share one
+ *  connection. A mismatch must be refused before reaching the visible console. */
+export function isAiRedisConsoleTarget(tab: Pick<QueryTab, "mode" | "connectionId" | "database">, target: AiConversationBinding): boolean {
+  return tab.mode === "redis" && tab.connectionId === target.connectionId && tab.database === target.database;
 }
 
 /**

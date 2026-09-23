@@ -3102,7 +3102,7 @@ function ensureQueryTabForConnection(target: AiConversationBinding): string {
   return queryStore.createTab(target.connectionId, database, undefined, "query", schema, undefined, undefined, { activate: false });
 }
 
-/** Bounded wait for the lazily-loaded Redis console to mount after a tab switch. */
+/** Bounded wait for a newly selected Redis console to mount. */
 const REDIS_CONSOLE_READY_TIMEOUT_MS = 2000;
 const REDIS_CONSOLE_READY_POLL_MS = 50;
 
@@ -3130,7 +3130,7 @@ function routeAiRedisCommand(command: string, execute: boolean, target: AiConver
  */
 async function deliverRedisAiCommand(command: string, execute: boolean, target: AiConversationBinding): Promise<void> {
   const deadline = performance.now() + REDIS_CONSOLE_READY_TIMEOUT_MS;
-  while (!contentAreaRef.value?.isRedisConsoleReady(target.connectionId)) {
+  while (!contentAreaRef.value?.isRedisConsoleReady(target)) {
     if (performance.now() >= deadline) {
       // A console.warn is invisible in a desktop app, and the command the user
       // asked for is simply not going to run — say so, and say what to do.
@@ -3141,7 +3141,7 @@ async function deliverRedisAiCommand(command: string, execute: boolean, target: 
     await nextTick();
     await new Promise((resolve) => setTimeout(resolve, REDIS_CONSOLE_READY_POLL_MS));
   }
-  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command, target.connectionId) : contentAreaRef.value?.insertRedisCommand(command, target.connectionId);
+  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command, target) : contentAreaRef.value?.insertRedisCommand(command, target);
   const handled = await routed;
   if (!handled) {
     console.warn("[DBX] Redis AI command was not accepted by the bound Redis console");

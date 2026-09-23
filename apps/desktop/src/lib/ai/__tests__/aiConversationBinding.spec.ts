@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AiConversation } from "@/lib/backend/tauri";
-import { aiContextTargetFor, bindingForSnapshot, isBindingUnresolved, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { activeAiRunBinding, aiContextTargetFor, bindingForSnapshot, isAiRedisConsoleTarget, isBindingUnresolved, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 function conversation(overrides: Partial<AiConversation> & { id: string }): AiConversation {
   return {
@@ -157,5 +157,40 @@ describe("sameConversationBinding", () => {
   it("normalizes an absent database or schema to empty", () => {
     expect(sameConversationBinding({ connectionId: "c", database: "" }, { connectionId: "c" })).toBe(true);
     expect(sameConversationBinding({ connectionId: "c", database: "", schema: "" }, { connectionId: "c", database: "" })).toBe(true);
+  });
+});
+
+describe("activeAiRunBinding", () => {
+  const live: AiConversationBinding = { connectionId: "conn-b", database: "db_b", schema: "private" };
+  const frozen: AiConversationBinding = { connectionId: "conn-a", database: "db_a", schema: "public" };
+  const run = { ...frozen, status: "awaiting_write_confirmation" as const };
+
+  it("continues an awaiting desktop confirmation on its frozen target", () => {
+    expect(activeAiRunBinding(live, run, [], false)).toEqual(frozen);
+    for (const status of ["preparing", "queued", "running"] as const) {
+      expect(activeAiRunBinding(live, { ...run, status }, [], false)).toEqual(frozen);
+    }
+  });
+
+  it("uses the current binding for an editable recovered draft or terminal run", () => {
+    expect(activeAiRunBinding(live, { ...run, status: "pending_recoverable" }, [], false)).toEqual(live);
+    expect(activeAiRunBinding(live, { ...run, status: "completed" }, [], false)).toEqual(live);
+  });
+
+  it("keeps a Web proposal on the assistant message's source after rebinding", () => {
+    const messages = [{ role: "user" }, { role: "assistant", sourceBinding: frozen }];
+    expect(activeAiRunBinding(live, undefined, messages, true)).toEqual(frozen);
+    expect(activeAiRunBinding(live, undefined, messages, false)).toEqual(live);
+  });
+});
+
+describe("isAiRedisConsoleTarget", () => {
+  const target: AiConversationBinding = { connectionId: "redis-a", database: "1" };
+
+  it("requires the exact Redis logical database as well as the connection", () => {
+    expect(isAiRedisConsoleTarget({ mode: "redis", connectionId: "redis-a", database: "1" }, target)).toBe(true);
+    expect(isAiRedisConsoleTarget({ mode: "redis", connectionId: "redis-a", database: "0" }, target)).toBe(false);
+    expect(isAiRedisConsoleTarget({ mode: "redis", connectionId: "redis-b", database: "1" }, target)).toBe(false);
+    expect(isAiRedisConsoleTarget({ mode: "query", connectionId: "redis-a", database: "1" }, target)).toBe(false);
   });
 });

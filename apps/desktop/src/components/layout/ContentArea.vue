@@ -187,6 +187,7 @@ import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlF
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
@@ -1359,24 +1360,20 @@ function applyTableStructureChanges() {
   return tableStructureEditorRef.value?.applyChanges() ?? Promise.resolve(false);
 }
 
-// The Redis console is bound to the visible tab. When a caller names a
-// connection (the AI panel runs against its conversation's bound connection,
-// #9902), refuse a mismatch instead of driving another connection's console.
-async function insertRedisCommand(command: string, connectionId?: string): Promise<boolean> {
-  if (props.activeTab.mode !== "redis") return false;
-  if (connectionId && props.activeTab.connectionId !== connectionId) return false;
+// The Redis console is bound to the visible tab and logical database. Refuse
+// any other AI target before passing a command to the key browser (#9902).
+function isRedisConsoleReady(target: AiConversationBinding): boolean {
+  return isAiRedisConsoleTarget(props.activeTab, target) && !!redisKeyBrowserRef.value;
+}
+
+async function insertRedisCommand(command: string, target: AiConversationBinding): Promise<boolean> {
+  if (!isRedisConsoleReady(target)) return false;
   return (await redisKeyBrowserRef.value?.insertCommand?.(command)) ?? false;
 }
 
-async function executeRedisCommand(command: string, connectionId?: string): Promise<boolean> {
-  if (props.activeTab.mode !== "redis") return false;
-  if (connectionId && props.activeTab.connectionId !== connectionId) return false;
+async function executeRedisCommand(command: string, target: AiConversationBinding): Promise<boolean> {
+  if (!isRedisConsoleReady(target)) return false;
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
-}
-
-/** Side-effect-free readiness probe; see `QueryEditorSurfaceHandle`. */
-function isRedisConsoleReady(connectionId: string): boolean {
-  return props.activeTab.mode === "redis" && props.activeTab.connectionId === connectionId && !!redisKeyBrowserRef.value;
 }
 
 function previewStatementRange(range: { from: number; to: number } | null): boolean {

@@ -5840,6 +5840,7 @@ mod tests {
                 kind: None,
                 failed: None,
                 covered_messages: None,
+                source_binding: None,
             }],
             queued_input: None,
             created_at: updated_at.to_string(),
@@ -6140,11 +6141,22 @@ mod tests {
         let mut conversation = ai_conversation("bound-conv", "0000");
         conversation.connection_id = "conn-prod".to_string();
         conversation.schema = Some("public".to_string());
+        conversation.messages[0].source_binding = Some(crate::ai::AiChatSourceBinding {
+            connection_id: "conn-original".to_string(),
+            database: "db-original".to_string(),
+            schema: Some("legacy".to_string()),
+        });
         storage.save_ai_conversation(&conversation).await.unwrap();
 
         let loaded = storage.load_ai_conversations().await.unwrap();
         assert_eq!(loaded[0].connection_id, "conn-prod");
         assert_eq!(loaded[0].schema.as_deref(), Some("public"));
+        let source = loaded[0].messages[0].source_binding.as_ref().unwrap();
+        assert_eq!(source.connection_id, "conn-original");
+        assert_eq!(source.database, "db-original");
+        assert_eq!(source.schema.as_deref(), Some("legacy"));
+        let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old reply"}"#).unwrap();
+        assert!(legacy.source_binding.is_none());
 
         let _ = std::fs::remove_file(path);
     }

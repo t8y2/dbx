@@ -79,11 +79,7 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     // Confirming a write against the bound database must not be vetted against
     // whichever tab happens to be visible.
     expect(source).toContain("return productionContextForDatabase(connection, target.database);");
-    const productionStart = source.indexOf("const productionContext = computed");
-    expect(productionStart).toBeGreaterThanOrEqual(0);
-    const production = source.slice(productionStart, source.indexOf("});", productionStart));
-    expect(production).toContain("boundConnection.value");
-    expect(production).not.toContain("props.connection");
+    expect(source).toContain("const productionContext = computed(() => productionContextOf(activeRunBinding.value));");
   });
 
   it("clears a staged draft binding when the shown chat changes", () => {
@@ -148,16 +144,32 @@ describe("AI conversation owns its connection binding (#9902)", () => {
 
     // A confirmation resume continues an existing run, so the run's frozen
     // binding wins over the conversation's live one on that path too.
-    expect(body).toContain("const runBinding = auto ? auto.binding : activeRunBinding.value;");
+    expect(body).toContain("const runBinding = auto ? auto.binding : (confirmationTarget ?? resumableBinding ?? conversationBinding.value);");
     expect(body).toContain("aiContextTargetFor(runBinding, props.tab)");
     // A background send has no composer of its own, so its database selection is
     // the conversation's own database rather than the visible composer's.
-    expect(body).toContain("auto ? [runBinding.database] : [...selectedDatabases.value]");
-    // Nothing in the run pipeline may read the live binding: a rebind mid-flight
-    // would otherwise redirect the run's own SQL to the new connection.
+    expect(body).toContain("auto || confirmationRetargets ? [runBinding.database] : [...selectedDatabases.value]");
+    // Only a fresh send reads the live binding; actions emitted by this run
+    // continue to carry the frozen `runBinding` after any rebind.
     expect(body).not.toContain("boundConnection.value");
     expect(body).not.toMatch(/emit\("requestAutoExecuteSql", agentPlan\.handoffSql, conversationBinding\.value\)/);
     expect(body).toContain('emit("requestAutoExecuteSql", agentPlan.handoffSql, runBinding)');
+  });
+
+  it("keeps the composer's own context unless the confirmation retargets", () => {
+    // The composer is live while a card is up (`isGenerating` is already false),
+    // so the user can attach a file and then confirm with "yes". Discarding that
+    // context is only correct when the target actually moved: send() clears all
+    // four arrays afterwards, so a drop here loses the attachment silently.
+    const body = bodyOf("async function send()");
+
+    expect(body).toContain("const confirmationRetargets = !!confirmationTarget && !sameConversationBinding(runBinding, conversationBinding.value);");
+    for (const array of ["selectedTableMentions", "selectedSqlFiles", "csvAttachments", "imageAttachments"]) {
+      const line = body.split("\n").find((l) => l.includes(`const ${array} = `)) ?? "";
+      expect(line).toContain("confirmationRetargets");
+      expect(line).toContain("? [] :");
+      expect(line).not.toContain("confirmationTarget ?");
+    }
   });
 
   it("compares the whole namespace when deciding whether to retarget", () => {
@@ -175,7 +187,7 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     // grant `allowWriteSql` for a production database.
     const runBinding = bodyOf("const activeRunBinding = computed");
     expect(runBinding).toContain("desktopAiRun<ChatMessage>(conversationId.value)");
-    expect(runBinding).toContain("return conversationBinding.value;");
+    expect(runBinding).toContain("activeAiRunBinding(conversationBinding.value, run, messages.value");
 
     expect(source).toContain("const productionContext = computed(() => productionContextOf(activeRunBinding.value));");
     const productionOf = bodyOf("function productionContextOf(binding: AiConversationBinding)");
@@ -204,6 +216,7 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     expect(body).not.toContain("conversationBinding.value");
     expect(body).not.toContain("boundConnection.value");
     expect(body).not.toContain("boundDatabase.value");
+    expect(body).toContain("confirmationBindingForNextRun = runBinding;");
   });
 
   it("keeps the snapshot's connection name and id on the same source", () => {
@@ -216,5 +229,25 @@ describe("AI conversation owns its connection binding (#9902)", () => {
     // The caller-supplied name is only a fallback now, never stored bare next to
     // an id taken from a different source.
     expect(body).toContain(": connectionName," + String.fromCharCode(10));
+  });
+
+  it("uses a run's frozen target for the first desktop snapshot", () => {
+    const persist = bodyOf("async function persistDesktopRunSnapshot(run: DesktopAiRunRuntime<ChatMessage>)");
+    expect(persist).toContain("{ connectionId: run.connectionId, database: run.database, schema: run.schema }");
+    const snapshot = bodyOf("function buildConversationSnapshot(");
+    expect(snapshot).toContain("snapshotBinding(targetConversationId, fallbackBinding)");
+    expect(snapshot).toContain("schema: binding.schema");
+    // Leaving the new chat also invokes this ordinary save path before the
+    // run's scheduled snapshot; it must use the active run's target too.
+    expect(bodyOf("async function persistConversation()")).toContain("const binding = activeRunBinding.value;");
+  });
+
+  it("persists the assistant turn's target for Web confirmation after remount", () => {
+    expect(source).toContain("sourceBinding: runBinding");
+    expect(bodyOf("function buildConversationSnapshot(")).toContain("sourceBinding: m.sourceBinding");
+    expect(bodyOf("function chatMessagesFromConversation(conv: AiConversation)")).toContain("sourceBinding: m.sourceBinding ??");
+    const sendBody = bodyOf("async function send()");
+    expect(sendBody).toContain("typedConfirmationBinding");
+    expect(sendBody).toContain("productionContextOf(runBinding).active");
   });
 });

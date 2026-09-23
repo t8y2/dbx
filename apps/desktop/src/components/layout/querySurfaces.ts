@@ -3,6 +3,7 @@ import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import type { SqlExecutionOverride, SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 export interface StatementRange {
   from: number;
@@ -25,19 +26,17 @@ export interface QueryEditorSurfaceHandle {
   acceptQueryEditorExecutionViewport(requestId: number): boolean;
   pasteClipboardAsSqlInCondition(): Promise<boolean>;
   applyTableStructureChanges(): Promise<boolean>;
-  /** `connectionId` (the AI panel's conversation binding, #9902) makes the Redis
-   *  console refuse a target that is not the visible tab, instead of driving
-   *  another connection's console. */
-  insertRedisCommand(command: string, connectionId?: string): Promise<boolean>;
-  executeRedisCommand(command: string, connectionId?: string): Promise<boolean>;
+  /** A Redis logical database is part of the execution target. */
+  insertRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
+  executeRedisCommand(command: string, target: AiConversationBinding): Promise<boolean>;
   /**
    * Whether this surface's Redis console is mounted, on screen, and pointed at
-   * `connectionId`. Side-effect free — the AI panel polls it before routing a
+   * `target`. Side-effect free — the AI panel polls it before routing a
    * command, because the console is a lazily-loaded component rendered only for
    * the active tab, and retrying the *command* to detect readiness could run it
    * twice.
    */
-  isRedisConsoleReady(connectionId: string): boolean;
+  isRedisConsoleReady(target: AiConversationBinding): boolean;
   previewStatementRange(range: StatementRange | null): boolean;
   focusStatementRange(range: StatementRange | null): boolean;
   focusErrorPosition(offset: number): boolean;

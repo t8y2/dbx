@@ -96,7 +96,7 @@ import {
   type AiSqlFileContext,
   type CustomPromptContext,
 } from "@/lib/ai/ai";
-import { aiContextTargetFor, bindingForSnapshot, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import { activeAiRunBinding, aiContextTargetFor, bindingForSnapshot, resolveConversationBinding, sameConversationBinding, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import {
   AI_IMAGE_ATTACHMENT_MAX_BYTES,
   AI_IMAGE_ATTACHMENT_TYPES_BY_EXTENSION,
@@ -256,6 +256,8 @@ interface ChatMessage {
   content: string;
   /** Connection that produced this assistant response; ephemeral export metadata. */
   sourceConnectionName?: string;
+  /** Frozen target for this assistant turn, including a pending Web confirmation. */
+  sourceBinding?: AiConversationBinding;
   mentions?: AiMessageMention[];
   /** Ephemeral text file content used only when this message is edited in the current session. */
   csvAttachments?: AiCsvFileContext[];
@@ -380,8 +382,9 @@ const boundSchema = computed(() => conversationBinding.value.schema);
  */
 const activeRunBinding = computed<AiConversationBinding>(() => {
   const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conversationId.value) : undefined;
-  if (run?.connectionId) return { connectionId: run.connectionId, database: run.database, schema: run.schema };
-  return conversationBinding.value;
+  // Web has no run registry. The assistant turn carries its original target so
+  // a visible confirmation keeps that target after rebinding or panel remount.
+  return activeAiRunBinding(conversationBinding.value, run, messages.value, !backgroundAiRunsEnabled && !!proposalConfirmMessage.value);
 });
 
 const aiContextTarget = computed<AiContextTarget>(() => aiContextTargetFor(conversationBinding.value, props.tab));
@@ -1554,6 +1557,8 @@ let confirmedWriteSqlText: string | undefined = undefined;
 let confirmedConnectionId: string | undefined = undefined;
 let confirmedDatabase: string | undefined = undefined;
 let confirmedSchema: string | undefined = undefined;
+/** One-shot target passed from a proposal button into the normal send path. */
+let confirmationBindingForNextRun: AiConversationBinding | undefined;
 
 /** Clear all pending write-confirmation state. Call on every early-return
  *  and failure path so a stale grant cannot leak into a subsequent send(). */
@@ -1563,6 +1568,7 @@ function clearPendingWriteGrant() {
   confirmedConnectionId = undefined;
   confirmedDatabase = undefined;
   confirmedSchema = undefined;
+  confirmationBindingForNextRun = undefined;
 }
 
 /** Production context of a specific binding — the connection a write would land on. */
@@ -1627,6 +1633,7 @@ function sendProposalReply(positive: boolean) {
     // specific SQL statement, so we must not grant blanket write access.
   }
   // Use the existing send pipeline so the message is added to history, persisted, etc.
+  confirmationBindingForNextRun = runBinding;
   send();
 }
 
@@ -3158,6 +3165,8 @@ function onTableReferenceDropEvent(event: Event) {
 }
 
 async function send() {
+  const confirmationBinding = confirmationBindingForNextRun;
+  confirmationBindingForNextRun = undefined;
   // Auto-send (queued input / retry) overrides the view: the send runs against
   // the target conversation's own history instead of the visible chat. Consumed
   // once so a second unrelated send() cannot inherit a stale target.
@@ -3171,22 +3180,41 @@ async function send() {
     // `isGenerating` (slots arbitrate concurrency); only block when it would
     // stream into the visible conversation that is busy.
     if (autoSendVisible && isGenerating.value) return;
-  } else if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length && !selectedCsvAttachments.value.length && !selectedImageAttachments.value.length) || isGenerating.value) return;
-  if (isAttachmentProcessing.value) return;
+  } else if ((!text && !selectedMentions.value.length && !selectedSqlFileMentions.value.length && !selectedCsvAttachments.value.length && !selectedImageAttachments.value.length) || isGenerating.value) {
+    if (confirmationBinding) clearPendingWriteGrant();
+    return;
+  }
+  if (isAttachmentProcessing.value) {
+    if (confirmationBinding) clearPendingWriteGrant();
+    return;
+  }
 
   // Snapshot the target connection/database before any async work so that
   // suspension points during context loading cannot cause a TOCTOU target switch.
   const runPluginContext = auto ? (pluginContextFromMessages(auto.messages) ?? auto.pluginContext) : pluginContext.value;
-  // The request targets the *run's* binding — not the visible tab, and not
-  // whatever the visible conversation has been rebound to since (#9902). Two
-  // cases need the frozen copy: a background auto-send belongs to another
-  // conversation than the one on screen, and a run that is rebound mid-flight
-  // must keep emitting against the connection it actually started on.
-  // A confirmation resume continues an *existing* run, and `resumingConfirmedWrite`
-  // is only known a few lines below — so the run being continued must win here,
-  // not the conversation's live binding. With no run in flight activeRunBinding
-  // is just the conversation's own binding, so a fresh send is unaffected.
-  const runBinding = auto ? auto.binding : activeRunBinding.value;
+  // A fresh send uses the current conversation. A queued send or confirmation
+  // continuation uses its own frozen target, including typed short replies.
+  const resumableBinding = backgroundAiRunsEnabled && desktopAiRun<ChatMessage>(conversationId.value)?.status === "awaiting_write_confirmation" ? activeRunBinding.value : undefined;
+  const typedConfirmation =
+    !auto &&
+    !confirmationBinding &&
+    shouldGrantWriteSqlOnShortAffirmative({
+      mode: assistantMode.value,
+      alreadyGranted: false,
+      isProduction: false,
+      userText: text,
+      messages: messages.value,
+    });
+  const typedConfirmationBinding = typedConfirmation ? activeAiRunBinding(conversationBinding.value, undefined, messages.value, true) : undefined;
+  const confirmationTarget = confirmationBinding ?? typedConfirmationBinding;
+  const runBinding = auto ? auto.binding : (confirmationTarget ?? resumableBinding ?? conversationBinding.value);
+  // A confirmation continues the target its card was created on. The composer's
+  // own context (mentions, attachments, database selection) still describes
+  // that target only while the chat has not been rebound since — otherwise it
+  // belongs to another namespace, and sending it would answer from the wrong
+  // database. When it still matches, dropping it would silently discard what
+  // the user attached alongside the affirmative.
+  const confirmationRetargets = !!confirmationTarget && !sameConversationBinding(runBinding, conversationBinding.value);
   const connection = runPluginContext ? undefined : runBinding.connectionId ? connectionStore.getConfig(runBinding.connectionId) : undefined;
   const tab = runPluginContext ? undefined : aiContextTargetFor(runBinding, props.tab);
   const runSourceName = runPluginContext?.pluginName ?? connection?.name ?? "";
@@ -3198,7 +3226,7 @@ async function send() {
   // yield to another conversation. Dameng's top-level selector is a schema.
   // A background auto-send has no composer of its own, so it runs on the
   // conversation's own database.
-  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? (auto ? [runBinding.database] : [...selectedDatabases.value]) : [];
+  const runDatabases = connection && tab && resolveAiNamespaceSelection(tab, connection).kind === "database" ? (auto || confirmationRetargets ? [runBinding.database] : [...selectedDatabases.value]) : [];
   const activeConfig = activeFullConfig.value;
   if (!activeConfig) {
     clearPendingWriteGrant();
@@ -3209,7 +3237,7 @@ async function send() {
     toast(t("ai.pluginHttpModelOnly"));
     return;
   }
-  const imageError = imageAttachmentSupportError(activeConfig.provider, auto ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
+  const imageError = imageAttachmentSupportError(activeConfig.provider, auto || confirmationTarget ? [] : selectedImageAttachments.value.map((attachment) => attachment.mediaType));
   if (imageError) {
     toast(imageAttachmentSupportErrorMessage(imageError), 5000);
     return;
@@ -3372,10 +3400,10 @@ async function send() {
     settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);
   }
 
-  const selectedTableMentions = auto || runPluginContext ? [] : [...selectedMentions.value];
-  const selectedSqlFiles = auto || runPluginContext ? [] : [...selectedSqlFileMentions.value];
-  const csvAttachments = auto ? [] : [...selectedCsvAttachments.value];
-  const imageAttachments = auto ? [] : [...selectedImageAttachments.value];
+  const selectedTableMentions = auto || confirmationRetargets || runPluginContext ? [] : [...selectedMentions.value];
+  const selectedSqlFiles = auto || confirmationRetargets || runPluginContext ? [] : [...selectedSqlFileMentions.value];
+  const csvAttachments = auto || confirmationRetargets ? [] : [...selectedCsvAttachments.value];
+  const imageAttachments = auto || confirmationRetargets ? [] : [...selectedImageAttachments.value];
   const mentionedTables = [...selectedTableMentions, ...parseAiTableMentions(text)];
   const modelInstruction = buildAiModelInstruction({
     tableMentionRaws: selectedTableMentions.map((mention) => mention.raw),
@@ -3454,7 +3482,7 @@ async function send() {
     allowWriteSqlForNextRun = shouldGrantWriteSqlOnShortAffirmative({
       mode: requestedMode,
       alreadyGranted: false,
-      isProduction: productionContext.value.active,
+      isProduction: productionContextOf(runBinding).active,
       userText: text,
       // Pass the history BEFORE the just-pushed user message so the function skips it.
       messages: runMessages.slice(0, -1),
@@ -3492,7 +3520,7 @@ async function send() {
     }
   }
   // Agent confirmation cannot grant autonomous writes while the active database is production.
-  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContext.value.active;
+  const allowWriteSql = requestedMode === "agent" && allowWriteSqlForNextRun && !productionContextOf(runBinding).active;
   const confirmedWriteSql = allowWriteSql ? confirmedWriteSqlText : undefined;
   // Capture the confirmed target snapshot before clearing the one-shot grant
   // state, so the values survive to be passed through to the backend.
@@ -3533,7 +3561,7 @@ async function send() {
       return;
     }
   }
-  runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName });
+  runMessages.push({ role: "assistant", content: "", sourceConnectionName: runSourceName, sourceBinding: runBinding });
   const assistantIdx = runMessages.length - 1;
   if (requestedMode === "agent" && sendSkillSnapshot?.length) {
     runMessages[assistantIdx].agentSteps = [selectedSkillsAgentStep(sendSkillSnapshot)];
@@ -4349,15 +4377,15 @@ function clearAttachmentDraftState() {
  * already exists keeps its own binding; a chat that has not been saved yet takes
  * the composer's current choice.
  */
-function snapshotBinding(targetConversationId: string): AiConversationBinding {
-  return bindingForSnapshot(conversations.value, targetConversationId, conversationBinding.value);
+function snapshotBinding(targetConversationId: string, fallback = conversationBinding.value): AiConversationBinding {
+  return bindingForSnapshot(conversations.value, targetConversationId, fallback);
 }
 
-function buildConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString()): AiConversation | null {
+function buildConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString(), fallbackBinding = conversationBinding.value): AiConversation | null {
   if (!targetConversationId || !targetMessages.length) return null;
   const first = targetMessages.find((m) => m.role === "user" && m.kind !== "contextSummary");
   const existingConversation = conversations.value.find((conversation) => conversation.id === targetConversationId);
-  const binding = snapshotBinding(targetConversationId);
+  const binding = snapshotBinding(targetConversationId, fallbackBinding);
   return {
     id: targetConversationId,
     title: first?.pluginContext?.title || renamedConversationTitles.get(targetConversationId) || existingConversation?.title || (first ? messageTitle(first).slice(0, 50) : "Untitled"),
@@ -4369,7 +4397,7 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
     connectionName: binding.connectionId ? (connectionStore.getConfig(binding.connectionId)?.name ?? connectionName) : connectionName,
     connectionId: binding.connectionId,
     database: existingConversation ? binding.database : database,
-    schema: existingConversation ? binding.schema : boundSchema.value,
+    schema: binding.schema,
     messages: targetMessages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -4377,6 +4405,7 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
       ...(m.failed ? { failed: true } : {}),
+      ...(m.sourceBinding ? { sourceBinding: m.sourceBinding } : {}),
     })),
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
@@ -4386,8 +4415,8 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
   };
 }
 
-async function persistConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString()) {
-  const conversation = buildConversationSnapshot(targetConversationId, targetMessages, connectionName, database, createdAt);
+async function persistConversationSnapshot(targetConversationId: string, targetMessages: ChatMessage[], connectionName: string, database: string, createdAt = new Date().toISOString(), fallbackBinding = conversationBinding.value) {
+  const conversation = buildConversationSnapshot(targetConversationId, targetMessages, connectionName, database, createdAt, fallbackBinding);
   if (!conversation) return;
   await saveAiConversation(conversation)
     .then(() => syncPersistedConversation(conversation))
@@ -4395,7 +4424,9 @@ async function persistConversationSnapshot(targetConversationId: string, targetM
 }
 
 async function persistDesktopRunSnapshot(run: DesktopAiRunRuntime<ChatMessage>) {
-  const conversation = buildConversationSnapshot(run.conversationId, run.messages, run.connectionName, run.database, run.createdAt);
+  // The first snapshot can land after the visible editor or conversation changed.
+  // A not-yet-persisted conversation must take the run's frozen target.
+  const conversation = buildConversationSnapshot(run.conversationId, run.messages, run.connectionName, run.database, run.createdAt, { connectionId: run.connectionId, database: run.database, schema: run.schema });
   if (!conversation) return;
   await saveAiRunState(conversation, {
     runId: run.runId,
@@ -4500,6 +4531,7 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
       ...(m.failed ? { failed: true } : {}),
+      ...(m.sourceBinding ? { sourceBinding: m.sourceBinding } : {}),
     })),
     queuedInput: conversation.queuedInput,
     createdAt: conversation.createdAt,
@@ -4513,9 +4545,11 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
 }
 
 async function persistConversation() {
-  if (!messages.value.length || (!pluginContext.value && !boundConnection.value)) return;
+  const binding = activeRunBinding.value;
+  const connection = binding.connectionId ? connectionStore.getConfig(binding.connectionId) : undefined;
+  if (!messages.value.length || (!pluginContext.value && !connection)) return;
   if (!conversationId.value) conversationId.value = uuid();
-  await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? boundConnection.value?.name ?? "", pluginContext.value ? "" : boundDatabase.value);
+  await persistConversationSnapshot(conversationId.value, messages.value, pluginContext.value?.pluginName ?? connection?.name ?? "", pluginContext.value ? "" : binding.database, new Date().toISOString(), binding);
 }
 
 async function setConversationListOpen(open: boolean) {
@@ -4573,6 +4607,9 @@ function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
     reasoning: m.reasoning,
     kind: m.kind,
     failed: m.failed === true ? true : undefined,
+    // Old transcripts have no per-turn target. Capture the conversation's
+    // current binding on load so a later rebind cannot retarget a pending card.
+    sourceBinding: m.sourceBinding ?? (m.role === "assistant" && conv.connectionId ? { connectionId: conv.connectionId, database: conv.database, schema: conv.schema } : undefined),
   }));
 }
 

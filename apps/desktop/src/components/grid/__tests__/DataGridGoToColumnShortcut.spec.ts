@@ -50,7 +50,7 @@ const RecycleScroller = defineComponent({
   },
 });
 
-function mountGrid(options: { displayableColumns?: boolean; columns?: string[] } = {}) {
+function mountGrid(options: { displayableColumns?: boolean; columns?: string[]; slots?: Record<string, () => ReturnType<typeof h>>; withTableMetadata?: boolean } = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -79,11 +79,22 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[] }
           { delayDuration: 0 },
           {
             default: () =>
-              h(DataGrid, {
-                result,
-                databaseType: "mysql",
-                context: "table-data",
-              }),
+              h(
+                DataGrid,
+                {
+                  result,
+                  databaseType: "mysql",
+                  context: "table-data",
+                  ...(options.withTableMetadata
+                    ? {
+                        connectionId: "test-connection",
+                        database: "test-database",
+                        tableMeta: { tableName: "users", schema: "test-database", columns: [], primaryKeys: [] },
+                      }
+                    : {}),
+                },
+                options.slots,
+              ),
           },
         );
     },
@@ -95,7 +106,7 @@ function mountGrid(options: { displayableColumns?: boolean; columns?: string[] }
   app.mount(host);
   const mounted = { app, host };
   mountedApps.push(mounted);
-  return mounted;
+  return { ...mounted, settingsStore };
 }
 
 async function settle() {
@@ -129,6 +140,7 @@ function goToColumnEvent(target: HTMLElement): KeyboardEvent {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const { app, host } of mountedApps.splice(0)) {
     app.unmount();
     host.remove();
@@ -142,6 +154,53 @@ function functionBody(name: string, nextName: string): string {
 }
 
 describe("DataGrid go-to-column shortcut", () => {
+  it("switches between the split and original single-row toolbar layouts", async () => {
+    const { host, settingsStore } = mountGrid();
+    await settle();
+
+    const topbar = host.querySelector<HTMLElement>("[data-grid-toolbar-layout]");
+    expect(topbar?.dataset.gridToolbarLayout).toBe("split");
+    expect(topbar?.classList.contains("grid")).toBe(true);
+
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "single" });
+    await settle();
+
+    expect(topbar?.dataset.gridToolbarLayout).toBe("single");
+    expect(topbar?.classList.contains("flex")).toBe(true);
+    expect(host.querySelector('[data-grid-topbar-row="actions"].ml-auto')).not.toBeNull();
+
+    settingsStore.updateEditorSettings({ dataGridToolbarLayout: "split" });
+    await settle();
+
+    expect(topbar?.dataset.gridToolbarLayout).toBe("split");
+    expect(topbar?.classList.contains("grid")).toBe(true);
+    expect(host.querySelector('[data-grid-topbar-row="filters"].data-grid-topbar-scroll--row-divider')).not.toBeNull();
+  });
+
+  it("does not show a DDL action in the result action toolbar", async () => {
+    const { host } = mountGrid({ withTableMetadata: true });
+    await settle();
+
+    expect(host.querySelector('[data-toolbar-action="tableInfo"]')).toBeNull();
+  });
+
+  it("keeps result actions and query filters in their separate toolbar rows", async () => {
+    const { host } = mountGrid({
+      slots: {
+        "result-toolbar-leading": () => h("span", { "data-testid": "result-view" }, "结果视图"),
+        "result-toolbar-actions": () => h("span", { "data-testid": "result-actions" }, "结果操作"),
+        "search-bar": () => h("span", { "data-testid": "search-controls" }, "文档筛选"),
+      },
+    });
+    await settle();
+
+    const actionRowSelector = '[data-grid-topbar-row="actions"]';
+    const filterRowSelector = '[data-grid-topbar-row="filters"]';
+    expect(host.querySelector('[data-testid="result-view"]')?.closest(actionRowSelector)).not.toBeNull();
+    expect(host.querySelector('[data-testid="result-actions"]')?.closest(actionRowSelector)).not.toBeNull();
+    expect(host.querySelector('[data-testid="search-controls"]')?.closest(filterRowSelector)).not.toBeNull();
+  });
+
   it("opens and consumes the configured shortcut when a column is displayable", async () => {
     const { host } = mountGrid();
     await settle();

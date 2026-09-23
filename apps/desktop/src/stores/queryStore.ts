@@ -1,5 +1,5 @@
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
-import { defineStore } from "pinia";
+import { defineStore, getActivePinia } from "pinia";
 import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, toRaw, watch } from "vue";
@@ -160,6 +160,8 @@ export interface EditorWorkspacePersistState {
   orientation: "vertical" | "horizontal";
   sizes: number[];
 }
+
+export type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
 
 interface BatchSqlResumeOptions {
   batch: BatchSqlExecution;
@@ -649,6 +651,32 @@ function annotateQueryResultSource(result: QueryResult, sourceStatement: string,
   const label = databaseType ? queryResultSourceLabel(sourceStatement, { database, databaseType }) : undefined;
   if (label) result.sourceLabel = label;
   return result;
+}
+
+export function canonicalizeQueryResultSourceLabel(currentLabel: string, sourceStatement: string, tableMeta: { tableName: string; schema?: string; database?: string }, options: { database?: string; databaseType?: DatabaseType } = {}): string | undefined {
+  const canonicalTableName = tableMeta.tableName?.trim();
+  if (!canonicalTableName) return undefined;
+
+  const autoLabel = queryResultSourceLabel(sourceStatement, options);
+  if (!autoLabel || autoLabel.toLowerCase() !== currentLabel.toLowerCase()) {
+    return undefined;
+  }
+
+  const lastDot = currentLabel.lastIndexOf(".");
+  if (lastDot < 0) {
+    return canonicalTableName;
+  }
+
+  const existingQualifier = currentLabel.slice(0, lastDot);
+  const lowerQualifier = existingQualifier.toLowerCase();
+  let qualifier = existingQualifier;
+  if (tableMeta.schema?.trim() && tableMeta.schema.trim().toLowerCase() === lowerQualifier) {
+    qualifier = tableMeta.schema.trim();
+  } else if (tableMeta.database?.trim() && tableMeta.database.trim().toLowerCase() === lowerQualifier) {
+    qualifier = tableMeta.database.trim();
+  }
+
+  return `${qualifier}.${canonicalTableName}`;
 }
 
 function elasticsearchHttpErrorStatus(result: QueryResult): number | undefined {
@@ -5600,8 +5628,6 @@ export const useQueryStore = defineStore("query", () => {
     return producedResult;
   }
 
-  type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
-
   type LoadedEditableSource = {
     source: EditableQuerySource;
     analysis: EditableQueryInfo;
@@ -5710,7 +5736,7 @@ export const useQueryStore = defineStore("query", () => {
     return databaseType !== "oracle" || !!loaded.tableMeta.tableType?.trim();
   }
 
-  function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
+  function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch, databaseType?: DatabaseType, database?: string) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
     tab.queryWriteTargets = patch.queryWriteTargets;
@@ -5719,6 +5745,23 @@ export const useQueryStore = defineStore("query", () => {
     tab.tableMeta = patch.tableMeta;
     tab.resultColumnComments = patch.resultColumnComments;
     tab.queryDisplaySourceColumns = patch.queryDisplaySourceColumns;
+
+    if (patch.tableMeta?.tableName && tab.result?.sourceStatement && tab.result?.sourceLabel) {
+      const effectiveDbType = databaseType ?? (getActivePinia() && tab.connectionId ? effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)) : undefined);
+      const nextLabel = canonicalizeQueryResultSourceLabel(tab.result.sourceLabel, tab.result.sourceStatement, patch.tableMeta, {
+        database: database ?? tab.database,
+        databaseType: effectiveDbType,
+      });
+      if (nextLabel) {
+        tab.result.sourceLabel = nextLabel;
+        if (tab.results?.length) {
+          const matching = tab.results.find((r) => r === tab.result) ?? (typeof tab.activeResultIndex === "number" ? tab.results[tab.activeResultIndex] : undefined) ?? tab.results.find((r) => r.sourceStatement && r.sourceStatement === tab.result?.sourceStatement);
+          if (matching) {
+            matching.sourceLabel = nextLabel;
+          }
+        }
+      }
+    }
   }
 
   function resolveEditableSourceMetadataTarget(tab: QueryTab, analysis: EditableQueryInfo, source: EditableQuerySource, conn: ConnectionConfig | undefined, dbType: string, executionDatabase: string): EditableSourceMetadataTarget {
@@ -6331,7 +6374,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       const current = tabs.value.find((t) => t.id === tabId);
       if (patch && current?.result === result) {
-        applyQueryMetadataPatch(current, patch);
+        applyQueryMetadataPatch(current, patch, databaseType, executionDatabase);
         syncActiveResultRunFromDisplayed(current);
         queryExecutionLog("info", "metadata:done", { traceId, elapsed: elapsed() });
       } else {
@@ -9248,6 +9291,7 @@ export const useQueryStore = defineStore("query", () => {
     countTabResultRows,
     buildQueryResultExportRequest,
     exportQuerySqlDirect,
+    applyQueryMetadataPatch,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),
     notifyConnectionMayBeLost,
   };

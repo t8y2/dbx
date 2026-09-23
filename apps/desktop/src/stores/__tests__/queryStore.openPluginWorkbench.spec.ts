@@ -217,3 +217,62 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect(bridged?.connectionId).toBe("conn-1");
   });
 });
+
+describe("queryStore localizePluginTabTitles", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal("window", { dispatchEvent: vi.fn() });
+    setActivePinia(createPinia());
+  });
+
+  it("relocalizes connectionless workbench titles on locale change, preserving session suffixes and skipping bound, renamed, or unresolvable tabs", () => {
+    const queryStore = useQueryStore();
+
+    // Two connectionless workbench tabs: bare title + session-suffixed title.
+    const bareId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", { title: "Workbench", forceNew: true });
+    const suffixedId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", { title: "Workbench", forceNew: true });
+    // Connection-bound session tab is titled after the connection and stays as-is.
+    const boundId = queryStore.openPluginWorkbench("io.dbx.ssh", "workbench", { title: "prod-server", connectionId: "conn-1", context: { connectionId: "conn-1" }, forceNew: true });
+    // A contribution whose label is unavailable in the new locale keeps its title.
+    const unresolvableId = queryStore.openPluginWorkbench("io.dbx.mystery", "workbench", { title: "Mystery", forceNew: true });
+    // An explicitly renamed tab: customTitle wins over the locale refresh.
+    // (Session numbering is plugin-wide per connection, so this third
+    // connectionless io.dbx.ssh tab is created as "Pinned (2)".)
+    const renamedId = queryStore.openPluginWorkbench("io.dbx.ssh", "result-view", { title: "Pinned", forceNew: true });
+    const renamedTab = queryStore.tabs.find((tab) => tab.id === renamedId);
+    expect(renamedTab).toBeDefined();
+    renamedTab!.customTitle = true;
+    const renamedTitleBefore = renamedTab!.title;
+
+    queryStore.localizePluginTabTitles((pluginId, contributionId, surface) => (pluginId === "io.dbx.ssh" && contributionId === "workbench" && surface === "ui" ? "工作台" : undefined));
+
+    const titles = Object.fromEntries(queryStore.tabs.map((tab) => [tab.id, tab.title]));
+    expect(titles[bareId]).toBe("工作台");
+    expect(titles[suffixedId]).toBe("工作台 (1)");
+    expect(titles[boundId]).toBe("prod-server");
+    expect(titles[unresolvableId]).toBe("Mystery");
+    expect(titles[renamedId]).toBe(renamedTitleBefore);
+  });
+
+  it("relocalizes connectionless plugin-filesystem titles on locale change, skipping connection-bound ones", () => {
+    const queryStore = useQueryStore();
+
+    // PluginWorkbenchTab.vue opens the filesystem browse with the localized
+    // provider label and no connection binding; that title must follow the
+    // app locale like the workbench tabs do.
+    const freeId = queryStore.openPluginFilesystem("io.dbx.ssh", "ssh.files", { title: "Files", forceNew: true });
+    const boundId = queryStore.openPluginFilesystem("io.dbx.ssh", "ssh.files", { title: "prod-server · SFTP", connectionId: "conn-1", forceNew: true });
+
+    queryStore.localizePluginTabTitles((pluginId, contributionId, surface) => (pluginId === "io.dbx.ssh" && contributionId === "ssh.files" && surface === "filesystem" ? "文件" : undefined));
+
+    const titles = Object.fromEntries(queryStore.tabs.map((tab) => [tab.id, tab.title]));
+    expect(titles[freeId]).toBe("文件");
+    expect(titles[boundId]).toBe("prod-server · SFTP");
+  });
+});

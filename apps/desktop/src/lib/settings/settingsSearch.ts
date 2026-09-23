@@ -50,9 +50,12 @@ export interface SettingsSearchRoute {
 
 export type Translate = (key: string) => string;
 
-type ToolbarVisibilityItemKey = "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "github";
+type ToolbarVisibilityItemKey = "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "github" | "alwaysOnTop";
 
-export type ToolbarVisibilityItem = { key: ToolbarVisibilityItemKey; titleKey: string; title?: never } | { key: ToolbarVisibilityItemKey; title: string; titleKey?: never };
+export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: string; title?: never } | { key: ToolbarVisibilityItemKey; title: string; titleKey?: never }) & {
+  /** The matching toolbar button can only exist in the desktop app, so the Web build hides the switch. */
+  desktopOnly?: true;
+};
 
 /**
  * The toolbar visibility controls and their search entries use this same list.
@@ -73,10 +76,16 @@ export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
   { key: "ai", title: "AI" },
   { key: "theme", titleKey: "toolbar.theme" },
   { key: "github", title: "GitHub" },
+  { key: "alwaysOnTop", titleKey: "toolbar.alwaysOnTop", desktopOnly: true },
 ];
 
 export function toolbarVisibilityItemLabel(item: ToolbarVisibilityItem, translate: Translate): string {
   return item.titleKey ? translate(item.titleKey) : (item.title ?? "");
+}
+
+/** Desktop-only toolbar switches are hidden in the Web build, where the matching button can never render. */
+export function visibleToolbarVisibilityItems(items: readonly ToolbarVisibilityItem[], isWeb: boolean): ToolbarVisibilityItem[] {
+  return items.filter((item) => !item.desktopOnly || !isWeb);
 }
 
 export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly ToolbarVisibilityItem[] = TOOLBAR_VISIBILITY_ITEMS): SettingsSearchDefinition[] {
@@ -85,6 +94,7 @@ export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly
     category: "appearance",
     ...(item.titleKey ? { titleKey: item.titleKey } : { title: item.title }),
     targetId: "appearance",
+    ...(item.desktopOnly ? { visible: desktopOnly } : {}),
   }));
 }
 
@@ -221,6 +231,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "redis-key-templates", category: "data", titleKey: "settings.redisKeyTemplates", descriptionKey: "settings.redisKeyTemplatesDescription", targetId: "redis-key-templates" },
   { id: "data-grid-auto-transpose", category: "data", titleKey: "settings.dataGridAutoTransposeSingleRow", descriptionKey: "settings.dataGridAutoTransposeSingleRowDescription", targetId: "data" },
   { id: "data-grid-quick-entry", category: "data", titleKey: "settings.dataGridQuickEntry", descriptionKey: "settings.dataGridQuickEntryDescription", targetId: "data" },
+  { id: "data-grid-toolbar-layout", category: "data", titleKey: "settings.dataGridToolbarLayout", descriptionKey: "settings.dataGridToolbarLayoutDescription", targetId: "data-grid-toolbar-layout" },
   { id: "data-grid-filter-view", category: "data", titleKey: "settings.dataGridFilterView", descriptionKey: "settings.dataGridFilterViewDescription", targetId: "data-grid-filter-view" },
   { id: "data-grid-flattening-multi-line", category: "data", titleKey: "settings.flatteningMultiLineText", descriptionKey: "settings.flatteningMultiLineTextDescription", targetId: "data" },
   { id: "data-grid-show-whitespace", category: "data", titleKey: "settings.dataGridShowWhitespace", descriptionKey: "settings.dataGridShowWhitespaceDescription", targetId: "data" },

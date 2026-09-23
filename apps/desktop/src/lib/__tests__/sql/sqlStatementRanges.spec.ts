@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { executionCandidateForMode } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, currentExecutableStatementRange, executableStatementRanges, fullSqlRange, hasMultipleExecutionTargets, splitSqlStatementRanges, statementRangeAtCursor, stripMysqlClientDisplayCommand, supportsExecutionTargetPicker } from "@/lib/sql/sqlStatementRanges";
 
@@ -422,6 +422,48 @@ describe("stripMysqlClientDisplayCommand", () => {
 });
 
 describe("splitSqlStatementRanges", () => {
+  it.each([
+    { databaseType: "postgres" as const, lineEnding: "\n" },
+    { databaseType: "postgres" as const, lineEnding: "\r" },
+    { databaseType: "sqlserver" as const, lineEnding: "\n" },
+    { databaseType: "sqlserver" as const, lineEnding: "\r" },
+    { databaseType: "mysql" as const, lineEnding: "\n" },
+    { databaseType: "mysql" as const, lineEnding: "\r" },
+  ])("does not rescan the remaining script for an absent line ending: %j", ({ databaseType, lineEnding }) => {
+    const statements = Array.from({ length: 500 }, (_, index) => `${databaseType === "mysql" ? "/* trace */ " : ""}SELECT ${index};`);
+    const sql = statements.join(lineEnding);
+    const originalIndexOf = String.prototype.indexOf;
+    let absentLineEndingSearches = 0;
+    const indexOfSpy = vi.spyOn(String.prototype, "indexOf").mockImplementation(function (this: string, searchString: string, position?: number) {
+      const found = originalIndexOf.call(this, searchString, position);
+      if (String(this) === sql && (searchString === "\r" || searchString === "\n") && found === -1) absentLineEndingSearches += 1;
+      return found;
+    });
+    let ranges: ReturnType<typeof splitSqlStatementRanges>;
+    try {
+      ranges = splitSqlStatementRanges(sql, databaseType);
+    } finally {
+      indexOfSpy.mockRestore();
+    }
+
+    expect(absentLineEndingSearches).toBeLessThanOrEqual(1);
+    expect(ranges.map((range) => range.sql)).toEqual(statements.map((statement) => statement.slice(0, -1)));
+    for (const range of ranges) expect(sql.slice(range.from, range.to)).toBe(range.sql);
+  });
+
+  it.each(["\n", "\r", "\r\n"])("preserves standalone slash, GO, and DELIMITER lines with %j", (lineEnding) => {
+    const slashSql = ["SELECT '/ literal';", "\t /  ", "SELECT 2;"].join(lineEnding);
+    expect(rangeSqlTexts(splitSqlStatementRanges(slashSql, "postgres"))).toEqual(["SELECT '/ literal'", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(slashSql, "oracle"))).toEqual(["SELECT '/ literal'", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(["SELECT 1", "  GO  ", "SELECT 2"].join(lineEnding), "sqlserver"))).toEqual(["SELECT 1", "SELECT 2"]);
+    expect(rangeSqlTexts(splitSqlStatementRanges(["DELIMITER //", "SELECT ';'//", "DELIMITER ;", "SELECT 2;"].join(lineEnding), "mysql"))).toEqual(["SELECT ';'", "SELECT 2"]);
+  });
+
+  it("preserves mixed line endings and a final delimiter without a newline", () => {
+    const sql = "SELECT 1;\r\n /\rSELECT 2;\n\t/\r\nSELECT 3;\r/";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "postgres"))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
+  });
+
   it("splits multiple top-level statements", () => {
     const sql = "SELECT 1;\nSELECT 2;\nSELECT 3;";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);

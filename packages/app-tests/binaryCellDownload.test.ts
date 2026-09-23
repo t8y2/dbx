@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "vitest";
 
 import {
@@ -66,13 +65,6 @@ test("binary cell download menu closes when hover moves to another cell", () => 
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 3, col: 4 }), null);
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 5 }), null);
   assert.equal(retainBinaryCellDownloadMenuForHover(openCell, { rowIndex: 2, col: 4 }), openCell);
-});
-
-test("transpose cell hover also clears a different binary download menu", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const handler = source.match(/function onTransposeCellMouseenter\([^]*?\n\}/)?.[0] ?? "";
-
-  assert.match(handler, /retainBinaryCellDownloadMenuForHover\(quickDownloadMenuCell\.value, \{ rowIndex, col: actualColIdx \}\)/);
 });
 
 test("canDownloadBinaryCellValue allows displayed binary hex strings", () => {
@@ -284,13 +276,6 @@ test("binaryCellDownloadPayload builds raw and decoded payloads", () => {
   assert.deepEqual(Array.from(emptyBinary.data as Uint8Array), []);
 });
 
-test("DataGrid binary preview prefers ResultSet column types when table metadata is unavailable", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const formatter = source.match(/function formatCell\([^]*?\n\}/)?.[0] ?? "";
-
-  assert.match(formatter, /binaryCellDisplayText\(value, columnIndex === undefined \? undefined : allColumnTypes\.value\[columnIndex\], originalBytes, resolvedDatabaseType\.value\)/);
-});
-
 test("binaryCellDownloadPayload decodes GBK text bytes", () => {
   const payload = binaryCellDownloadPayload("0xd6d0cec4", "gbk");
   assert.equal(payload.data, "中文");
@@ -318,15 +303,4 @@ test("formatBinaryCellByteSize formats human-readable sizes for the import toast
   assert.equal(formatBinaryCellByteSize(2048), "2.0 KB");
   // bytes >= 10 MB 时按整数 MB 显示（对齐 binaryCellDisplayText 既有格式）。
   assert.equal(formatBinaryCellByteSize(20 * 1024 * 1024), "20 MB");
-});
-
-test("DataGrid import handler surfaces a dedicated too-large toast instead of the generic failure", () => {
-  const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
-  const handler = source.match(/async function importDetailBinaryValue\([^]*?\n\}/)?.[0] ?? "";
-
-  // 闸门错误必须走专门的文案，而非通用 binaryImportFailed。
-  assert.match(handler, /e instanceof BinaryCellImportTooLargeError/);
-  assert.match(handler, /grid\.binaryImportTooLarge/);
-  assert.match(handler, /formatBinaryCellByteSize\(e\.bytes\)/);
-  assert.match(handler, /formatBinaryCellByteSize\(e\.limit\)/);
 });

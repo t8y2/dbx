@@ -7,7 +7,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
-import type { ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import {
   filterLocallySearchedTables,
@@ -94,7 +94,7 @@ import { createSidebarLayoutMonitor, type SidebarExpandedConnectionInfo } from "
 import { disconnectSidebarConnections } from "@/lib/sidebar/sidebarConnectionDisconnect";
 import { compileSearchRegex } from "@/lib/common/searchPattern";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
 const savedSqlStore = useSavedSqlStore();
@@ -383,25 +383,28 @@ async function loadSidebarSearchTargets(query: string, preservesNodeSubtree?: (n
 function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearchTask[], refreshedNodeIds?: Set<string>, preservesNodeSubtree?: (node: TreeNode) => boolean, ancestorPreservesSearchSubtree = false, scheduledNodeIds?: Set<string>) {
   const preservesSearchSubtree = ancestorPreservesSearchSubtree || (!!refreshedNodeIds && !!preservesNodeSubtree?.(node));
   if (refreshedNodeIds && node.type === "connection" && node.connectionId) {
-    if (store.connectedIds.has(node.connectionId) && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
+    const connectionIsConnected = store.connectedIds.has(node.connectionId);
+    if (connectionIsConnected && (!scheduledNodeIds || !scheduledNodeIds.has(node.id))) {
       const connectionId = node.connectionId;
       scheduledNodeIds?.add(node.id);
-      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId));
+      tasks.push(() => store.loadConnectedConnectionRootForSidebarSearch(connectionId, { sidebarSearch: true }));
     }
-    if (node.connectionId !== store.activeConnectionId) return;
+    // 搜索不得替用户建连：只有连接中的连接（含当前激活的那个）才继续刷新子树。
+    // 断开或连不上的连接直接跳过，后台搜索不会因此弹出凭据输入或写入整段连接错误。
+    if (!connectionIsConnected || node.connectionId !== store.activeConnectionId) return;
   }
   if (refreshedNodeIds && isSimpleObjectSearchParent(node)) {
     if (!scheduledNodeIds || !scheduledNodeIds.has(node.id)) {
       scheduledNodeIds?.add(node.id);
       if (preservesSearchSubtree) {
         if (refreshedNodeIds.delete(node.id)) {
-          tasks.push(() => store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+          tasks.push(() => store.loadTreeNodeChildren(node, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true }));
         }
       } else {
         const wasCollapsed = node.isExpanded !== true;
         refreshedNodeIds.add(node.id);
         if (wasCollapsed) searchExpansionState.markFiltered(node.id, true);
-        tasks.push(() => store.refreshTreeNode(node));
+        tasks.push(() => store.refreshTreeNode(node, { sidebarSearch: true }));
       }
     }
     return;
@@ -410,7 +413,7 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     scheduledNodeIds?.add(node.id);
     const wasCollapsed = node.isExpanded !== true;
     searchExpansionState.markFiltered(node.id, wasCollapsed);
-    tasks.push(() => store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+    tasks.push(() => store.loadTreeNodeChildren(node, { force: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true }));
   }
   if (refreshedNodeIds && node.children) {
     for (const child of node.children) {
@@ -419,11 +422,11 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
         scheduledNodeIds?.add(child.id);
         if (preservesSearchSubtree) {
           if (searchExpansionState.markUnfiltered(child.id)) {
-            tasks.push(() => store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery }));
+            tasks.push(() => store.loadObjectGroupChildren(child, { force: true, searchFilter: "", allowGlobalSearchMismatch: true, expectedSidebarSearchQuery: store.sidebarSearchQuery, sidebarSearch: true }));
           }
         } else {
           searchExpansionState.markFiltered(child.id, !child.isExpanded);
-          tasks.push(() => store.loadObjectGroupChildren(child, { force: true }));
+          tasks.push(() => store.loadObjectGroupChildren(child, { force: true, sidebarSearch: true }));
         }
       }
     }
@@ -438,12 +441,12 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
       } else if (!store.restoreFilteredObjectGroupChildren(node)) {
         // Nothing was captured because the group had not been loaded before the
         // search, so there is no previous list to put back.
-        tasks.push(() => store.loadObjectGroupChildren(node, { force: true }));
+        tasks.push(() => store.loadObjectGroupChildren(node, { force: true, sidebarSearch: true }));
       }
     } else if (simpleObjectParentTypes.has(node.type)) {
       const shouldCollapse = searchAutoExpandedNodeIds.has(node.id);
       tasks.push(async () => {
-        await store.refreshTreeNode(node);
+        await store.refreshTreeNode(node, { sidebarSearch: true });
         if (shouldCollapse) node.isExpanded = false;
       });
     }
@@ -884,6 +887,10 @@ function measureSidebarCommentLabelWidths() {
   const context = document.createElement("canvas").getContext("2d");
   if (!context) return;
   const style = window.getComputedStyle(rootRef.value);
+  context.font = `${style.fontWeight} 10px ${style.fontFamily}`;
+  const badgePaddingAndGapWidth = 16;
+  const nullableBadgeWidth = context.measureText(t("structureEditor.nullable")).width + badgePaddingAndGapWidth;
+  const notNullBadgeWidth = context.measureText(t("structureEditor.notNull")).width + badgePaddingAndGapWidth;
   context.font = style.font || `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
   sidebarCommentLabelWidths.value = alignedSidebarCommentLabelWidths(
     flatNodes.value.map(({ id, depth, node }) => ({
@@ -891,7 +898,7 @@ function measureSidebarCommentLabelWidths() {
       depth,
       alignable: isSidebarCommentAlignableNode(node),
       hasComment: !!sidebarTreeNodeComment(node, settingsStore.editorSettings.sidebarShowConnectionNotes),
-      labelWidth: context.measureText(sidebarCommentLabel(node)).width,
+      labelWidth: context.measureText(sidebarCommentLabel(node)).width + (node.type === "column" && node.meta ? ((node.meta as ColumnInfo).is_nullable ? nullableBadgeWidth : notNullBadgeWidth) : 0),
     })),
   );
 }
@@ -947,6 +954,7 @@ function scheduleSidebarTreeContentWidthMeasure() {
 watch(
   [
     flatNodes,
+    locale,
     () => settingsStore.editorSettings.sidebarObjectInfoMode,
     () => settingsStore.editorSettings.sidebarShowConnectionNotes,
     () => settingsStore.editorSettings.sidebarHiddenTablePrefixes,

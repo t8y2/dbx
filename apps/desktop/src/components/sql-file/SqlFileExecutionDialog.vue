@@ -39,6 +39,7 @@ const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillFilePath?: string;
+  prefillPreview?: SqlFilePreview;
 }>();
 
 const store = useConnectionStore();
@@ -62,6 +63,7 @@ watch(previews, (list) => {
 const activePreview = computed<SqlFilePreview | null>(() => {
   return previews.value.find((item) => item.filePath === activePreviewPath.value) ?? previews.value[0] ?? null;
 });
+const activePreviewHtml = computed(() => (activePreview.value ? highlight(activePreview.value.preview) : ""));
 
 // Disambiguate files that share the same fileName.
 // Desktop: prepend parent directory segments until unique (e.g. migration/create.sql).
@@ -238,6 +240,7 @@ watch(canUseManualTransaction, (supported) => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  if (!running.value) void releaseManagedPreviews();
   if (running.value && manualTransaction.value) {
     cancelRequested.value = true;
     if (executionStarted.value) void cancelSqlFileExecution(executionId.value).catch(() => {});
@@ -468,6 +471,7 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
 
 async function loadPreviews(filesOrPaths: Array<string | File>) {
   if (executionLocked.value) return;
+  await releaseManagedPreviews();
   loadingPreview.value = true;
   previews.value = [];
   resetExecution();
@@ -481,6 +485,18 @@ async function loadPreviews(filesOrPaths: Array<string | File>) {
     toast(e?.message || String(e), 5000);
   } finally {
     loadingPreview.value = false;
+  }
+}
+
+async function releaseManagedPreviews() {
+  const tokens = previews.value.flatMap((preview) => (preview.cleanupToken ? [preview.cleanupToken] : []));
+  if (!tokens.length) return;
+  previews.value = previews.value.filter((preview) => !preview.cleanupToken);
+  try {
+    const { releaseSqlFilePreview } = await import("@/lib/backend/api");
+    await Promise.all(tokens.map((token) => releaseSqlFilePreview(token)));
+  } catch (error: any) {
+    toast(error?.message || String(error), 5000);
   }
 }
 
@@ -720,6 +736,7 @@ async function startExecution() {
     running.value = false;
     cancelling.value = false;
     executionStarted.value = false;
+    await releaseManagedPreviews();
   }
 }
 
@@ -762,6 +779,7 @@ watch(
   open,
   (value) => {
     if (!value) {
+      if (!running.value) void releaseManagedPreviews();
       if (manualTransaction.value && running.value) void cancelExecution();
       else if (txnSessionId.value) void finishTransaction(false);
       return;
@@ -773,7 +791,9 @@ watch(
     }
     // When opened from the SQL Files panel with a pre-selected file, load its
     // preview automatically so the user can review statements before running.
-    if (props.prefillFilePath) {
+    if (props.prefillPreview) {
+      previews.value = [props.prefillPreview];
+    } else if (props.prefillFilePath) {
       void loadPreviews([props.prefillFilePath]);
     }
   },
@@ -847,7 +867,7 @@ watch(
                 <div class="sticky left-0 z-10 select-none border-r bg-background/95 px-2 py-3 text-right font-mono leading-5 text-muted-foreground/70">
                   <div v-for="n in previewLineCount(activePreview)" :key="n">{{ n }}</div>
                 </div>
-                <pre class="min-w-max flex-1 p-3 font-mono leading-5 whitespace-pre" v-html="highlight(activePreview.preview)"></pre>
+                <pre class="min-w-max flex-1 p-3 font-mono leading-5 whitespace-pre" v-html="activePreviewHtml"></pre>
               </div>
             </div>
           </div>

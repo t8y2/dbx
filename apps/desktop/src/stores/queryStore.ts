@@ -2,13 +2,29 @@ import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/upd
 import { defineStore } from "pinia";
 import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
-import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, watch } from "vue";
+import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
 import type { DeletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionTabs";
-import type { BatchSqlExecution, ConnectionConfig, DatabaseType, IndexInfo, NacosConfigEditorViewport, ObjectBrowserFilter, ObjectBrowserViewport, ObjectSource, ObjectSourceKind, QueryResult, QueryResultSourceColumnRef, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
+import type {
+  BatchSqlExecution,
+  BatchStatementExecutionItem,
+  ConnectionConfig,
+  DatabaseType,
+  IndexInfo,
+  NacosConfigEditorViewport,
+  ObjectBrowserFilter,
+  ObjectBrowserViewport,
+  ObjectSource,
+  ObjectSourceKind,
+  QueryResult,
+  QueryResultSourceColumnRef,
+  QueryTab,
+  TableInfoTab,
+  TableStructureEditorTarget,
+} from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/sql/queryExecutionState";
 import { isSqlErrorPositionDebugEnabled, logSqlErrorPosition, sqlErrorHasMessagePosition, sqlErrorMessageText } from "@/lib/sql/errorPosition";
@@ -95,7 +111,6 @@ import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSaved
 import { isDetachedWindow, resolveWindowContext } from "@/lib/app/windowContext";
 import { normalizeDetachedTabRuntime, type DetachedTabHandoff, type DetachedTabRuntimeState } from "@/lib/app/detachedTabHandoff";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
@@ -369,6 +384,18 @@ function preservedResultIndex(results: QueryResult[], currentIndex: number | und
   return currentIndex;
 }
 
+function findSourceDocumentStatement(statements: ReturnType<typeof splitSqlStatementRanges>, sourceFrom: number) {
+  let lower = 0;
+  let upper = statements.length;
+  while (lower < upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    if (statements[middle].to < sourceFrom) lower = middle + 1;
+    else upper = middle;
+  }
+  const statement = statements[lower];
+  return statement && statement.from <= sourceFrom ? statement : undefined;
+}
+
 function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType, sourceOffset?: number, parameterOptions?: SqlParameterOptions, executedSql?: string, sourceDocumentSql?: string): { results: QueryResult[]; useDatabase?: string } {
   const statements = splitSqlStatementRanges(sql, databaseType, parameterOptions);
   // The backend positions errors against the SQL it actually received. When the
@@ -401,13 +428,7 @@ function annotateQueryResultSources(results: QueryResult[], sql: string, databas
         });
       }
     }
-    const documentStatement =
-      sourceOffset === undefined
-        ? undefined
-        : documentStatements.find((candidate) => {
-            const sourceFrom = sourceOffset + statement.from;
-            return candidate.from === sourceFrom || (sourceFrom >= candidate.from && sourceFrom <= candidate.to);
-          });
+    const documentStatement = sourceOffset === undefined ? undefined : findSourceDocumentStatement(documentStatements, sourceOffset + statement.from);
     const preamble = documentStatement ? sourceDocumentSql!.slice(documentStatement.hitFrom, documentStatement.from) : sql.slice(statement.hitFrom, statement.from);
     const customName = queryResultNameFromPreamble(preamble, { databaseType });
     if (customName) result.sourceLabel = customName;
@@ -439,6 +460,13 @@ function annotateSingleStatementErrorResult(errorResult: QueryResult, sourceSql:
 
 const NON_STREAMING_BATCH_DATABASE_TYPES = new Set<DatabaseType>(["sqlserver", "turso", "cloudflare-d1"]);
 const liveBatchSqlExecutions = new WeakMap<QueryTab, BatchSqlExecution>();
+// Per running batch: statements before this index are already settled by an
+// earlier progress event of the same run.
+const batchSqlProgressSettledEnds = new WeakMap<BatchSqlExecution, number>();
+
+function isCompletedBatchStatement(item: BatchStatementExecutionItem): boolean {
+  return item.status === "success" || item.status === "error";
+}
 
 function cloneBatchSqlExecution(batch: BatchSqlExecution | undefined): BatchSqlExecution | undefined {
   return batch ? { ...batch, executionTarget: batch.executionTarget ? { ...batch.executionTarget } : undefined, items: batch.items.map((item) => ({ ...item })) } : undefined;
@@ -498,20 +526,29 @@ function applyBatchSqlProgress(
   const statementIndex = statementOffset + progress.statementIndex;
   const item = batch.items[statementIndex];
   if (!item) return;
-  if (progress.completed > 1) {
-    for (let index = statementOffset; index < statementOffset + progress.completed - 1; index += 1) {
-      const completedItem = batch.items[index];
-      if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
-        completedItem.status = "success";
-      }
+  // Statements complete in order and the desktop backend coalesces successful
+  // ones, so an event also settles every statement since the previous event.
+  // Walking only that gap and counting incrementally keeps a batch linear;
+  // rescanning every statement per event made large scripts O(N²).
+  const rawBatch = toRaw(batch);
+  const settledStart = Math.max(statementOffset, batchSqlProgressSettledEnds.get(rawBatch) ?? statementOffset);
+  const settledEnd = statementOffset + progress.completed - 1;
+  let completed = batch.completed;
+  for (let index = settledStart; index < settledEnd; index += 1) {
+    const completedItem = batch.items[index];
+    if (completedItem && (completedItem.status === "pending" || completedItem.status === "running")) {
+      completedItem.status = "success";
+      completed += 1;
     }
   }
+  if (settledEnd > settledStart) batchSqlProgressSettledEnds.set(rawBatch, settledEnd);
+  if (!isCompletedBatchStatement(item)) completed += 1;
   item.status = progress.success ? "success" : "error";
   item.executionTimeMs = progress.executionTimeMs;
   item.affectedRows = progress.affectedRows;
   item.errorDetails = progress.error;
   item.error = progress.error ? translateBackendError(i18n.global.t, progress.error) : undefined;
-  batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
+  batch.completed = completed;
   if ((progress.success || continueOnError) && progress.completed < progress.total) {
     const next = batch.items[statementOffset + progress.completed];
     if (next?.status === "pending") next.status = "running";
@@ -534,7 +571,7 @@ function reconcileBatchSqlResults(tab: QueryTab, executionId: string, results: Q
     item.errorDetails = failed ? result.error : undefined;
     item.error = failed ? (result.error ? translateBackendError(i18n.global.t, result.error, result.rows[0]?.[0]) : String(result.rows[0]?.[0] ?? "")) : undefined;
   }
-  batch.completed = batch.items.filter((item) => item.status === "success" || item.status === "error").length;
+  batch.completed = batch.items.filter(isCompletedBatchStatement).length;
 }
 
 function failBatchSqlExecution(tab: QueryTab, executionId: string, error: unknown, cancelled: boolean) {
@@ -545,7 +582,7 @@ function failBatchSqlExecution(tab: QueryTab, executionId: string, error: unknow
   item.status = cancelled ? "cancelled" : "error";
   item.errorDetails = cancelled ? undefined : (normalizeBackendError(error) ?? undefined);
   item.error = cancelled ? undefined : translateBackendError(i18n.global.t, error, error instanceof Error ? error.message : undefined);
-  batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
+  batch.completed = batch.items.filter(isCompletedBatchStatement).length;
 }
 
 function finishBatchSqlExecution(tab: QueryTab, executionId: string, cancelled: boolean) {
@@ -567,7 +604,7 @@ function finishBatchSqlExecution(tab: QueryTab, executionId: string, cancelled: 
       item.status = "skipped";
     }
   }
-  batch.completed = batch.items.filter((item) => item.status === "success" || item.status === "error").length;
+  batch.completed = batch.items.filter(isCompletedBatchStatement).length;
   batch.finishedAt = Date.now();
 }
 
@@ -3652,6 +3689,28 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  // Connectionless plugin tabs inherit their title from the localized
+  // contribution label (sidebar/webview workbench opens and filesystem
+  // browse), so a locale switch leaves them showing the previous language.
+  // Re-resolve them on locale change: connection-bound tabs keep the
+  // connection name, explicit renames (customTitle) win, and a missing
+  // localized label leaves the current title untouched.
+  function localizePluginTabTitles(resolveTitle: (pluginId: string, contributionId: string, surface: "ui" | "filesystem") => string | undefined): void {
+    for (const tab of tabs.value) {
+      const target =
+        tab.mode === "plugin-workbench" && tab.pluginWorkbench
+          ? { pluginId: tab.pluginWorkbench.pluginId, contributionId: tab.pluginWorkbench.contributionId, surface: "ui" as const }
+          : tab.mode === "plugin-filesystem" && tab.pluginFilesystem
+            ? { pluginId: tab.pluginFilesystem.pluginId, contributionId: tab.pluginFilesystem.providerId, surface: "filesystem" as const }
+            : undefined;
+      if (!target || tab.customTitle || pluginTabConnectionId(tab)) continue;
+      const localizedTitle = resolveTitle(target.pluginId, target.contributionId, target.surface)?.trim();
+      if (!localizedTitle) continue;
+      const suffix = / \((\d+)\)$/.exec(tab.title)?.[0] || "";
+      tab.title = `${localizedTitle}${suffix}`;
+    }
+  }
+
   function openPluginFilesystem(pluginId: string, providerId: string, options: { title?: string; connectionId?: string; rootUri?: string; currentUri?: string; forceNew?: boolean } = {}) {
     if (!options.forceNew) {
       const existing = tabs.value.find((tab) => tab.mode === "plugin-filesystem" && tab.pluginFilesystem?.pluginId === pluginId && tab.pluginFilesystem?.providerId === providerId && tab.connectionId === (options.connectionId || ""));
@@ -4925,6 +4984,20 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.txnPossiblyDirty !== undefined) tab.txnPossiblyDirty = false;
   }
 
+  /** Whether an expired manual transaction still owes the user the
+   *  `toolbar.txnAutoRolledBack` notice.
+   *
+   *  Sticky proven-read-only dialects (Oracle / OceanBase-Oracle / MySQL /
+   *  PostgreSQL) track whether the session ever ran a statement that is not
+   *  proven read-only: `txnPossiblyDirty` stays unset while every batch was
+   *  proven read-only, so an idle expiry discarded no uncommitted work and the
+   *  session can be rebuilt silently (#9831). Dialects without that tracking
+   *  cannot tell a clean session from a dirty one, so they keep the notice. */
+  function manualTransactionRollbackNoticeRequired(tab: { txnPossiblyDirty?: boolean }, dbType?: string): boolean {
+    if (!usesProvenReadOnlyStickyTransactionState(dbType)) return true;
+    return tab.txnPossiblyDirty === true;
+  }
+
   /** Auto-commit tabs mirror the backend's report of an open explicit
    *  transaction. The flag is dropped whenever the tab stops pointing at the
    *  connection that reported it (target switch, tab close), so a stale badge
@@ -5078,20 +5151,8 @@ export const useQueryStore = defineStore("query", () => {
     if (!trimmed) return false;
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.mode !== "query") return false;
-    const normalizedTitle = tab.savedSqlId ? ensureSqlExtension(trimmed) : trimmed;
-    const previousTitle = tab.title;
-    tab.title = normalizedTitle;
+    tab.title = trimmed;
     tab.customTitle = true;
-    if (tab.savedSqlId) {
-      const savedSqlStore = useSavedSqlStore();
-      const existing = savedSqlStore.getFile(tab.savedSqlId);
-      if (existing && existing.name !== normalizedTitle) {
-        void savedSqlStore.renameFile(tab.savedSqlId, normalizedTitle).catch((error) => {
-          console.warn("[DBX][saved-sql:rename:error]", error);
-          tab.title = previousTitle;
-        });
-      }
-    }
     return true;
   }
 
@@ -7517,11 +7578,14 @@ export const useQueryStore = defineStore("query", () => {
               if (options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
               if (tab.executionId !== executionId || tab.autoCommit !== false || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) throw error;
               manualTransactionRecoveryAttempted = true;
+              // A session that only ever ran proven read-only statements lost
+              // nothing to the idle rollback, so it restarts without the notice.
+              const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDbType);
               // The expired session was discarded by the backend; the replacement
               // session starts fresh, so the old sticky state resets with it.
               clearTxnPossiblyDirty(tab);
               tab.txnSessionId = undefined;
-              tab.txnAutoRolledBack = true;
+              tab.txnAutoRolledBack = rollbackNoticeRequired;
               queryExecutionLog("info", "manual-txn:expired-recover", { traceId, elapsed: elapsed() });
               const refreshedSessionId = await ensureManualTransactionSession(id, executionDatabase, executionSchema, executionCatalog);
               if (tab.executionId !== executionId || tab.autoCommit !== false || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) {
@@ -7803,10 +7867,12 @@ export const useQueryStore = defineStore("query", () => {
         const idleTimeout = /5 minutes of inactivity/i.test(errMsg) || errMsg.includes("5 分钟无操作") || errMsg.includes("已自动回滚");
         if (idleTimeout) {
           // Backend session was removed and rolled back after idle expiry: clear
-          // the sticky dirty state together with the session.
+          // the sticky dirty state together with the session. Same rule as the
+          // restart path: a session proven read-only reports no lost work.
+          const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
           clearTxnPossiblyDirty(tab);
           tab.txnSessionId = undefined;
-          tab.txnAutoRolledBack = true;
+          tab.txnAutoRolledBack = rollbackNoticeRequired;
         } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
           // Statement failure that disposed the manual session: the `rolled back`
           // message fragment is a frontend cleanup compatibility contract.
@@ -9121,6 +9187,7 @@ export const useQueryStore = defineStore("query", () => {
     openMqttAdmin,
     openNacosAdmin,
     openPluginWorkbench,
+    localizePluginTabTitles,
     openPluginFilesystem,
     reconnectRestoredPluginTabs,
     openPluginConnection,

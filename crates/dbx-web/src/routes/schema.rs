@@ -462,6 +462,15 @@ fn should_cache_columns(client_session_id: Option<&str>) -> bool {
     client_session_id.is_none()
 }
 
+pub async fn get_plugin_table_metadata(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::schema::plugin_metadata::PluginTableContext>,
+) -> Result<Json<dbx_core::schema::plugin_metadata::PluginTableMetadata>, AppError> {
+    let result =
+        dbx_core::schema::plugin_metadata::get_table_metadata(&state.app, request).await.map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn list_columns(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

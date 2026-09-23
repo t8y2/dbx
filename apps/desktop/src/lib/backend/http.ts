@@ -1,6 +1,26 @@
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
+import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+
+export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
+  return post("/api/database-backups", command);
+}
+
+export async function databaseBackupBackground(enabled?: boolean): Promise<DatabaseBackupBackgroundStatus> {
+  if (enabled !== undefined) throw new Error("The server manages background backups");
+  return { enabled: true, platform: "server" };
+}
+
+export async function downloadDatabaseBackupFile(runId: string, index: number): Promise<void> {
+  const anchor = document.createElement("a");
+  anchor.href = apiUrl(`/api/database-backups/${encodeURIComponent(runId)}/files/${index}`);
+  anchor.click();
+}
+
+export function prepareDatabaseBackupRestore(runId: string, index: number): Promise<SqlFilePreview> {
+  return post(`/api/database-backups/${encodeURIComponent(runId)}/files/${index}/restore`, {});
+}
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -170,11 +190,19 @@ import type {
   PromptTemplate,
   SshPromptResolution,
   MeilisearchIndexOverview,
+  MeilisearchIndexSettings,
   ElasticsearchIndexMetadataKind,
   ElasticsearchDeleteByQueryResult,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
+import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pluginSchemaMetadata";
 import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import type { MigrationPreflight, MigrationReport } from "./migration";
+export type { MigrationPreflight, MigrationReport } from "./migration";
+export const migrationStatus = (): Promise<MigrationPreflight> => get("/api/migration/status");
+export const migrationStart = (): Promise<MigrationReport> => post("/api/migration/start", {});
+export const migrationRetry = (): Promise<MigrationReport> => post("/api/migration/retry", {});
+export const migrationCleanupBackups = (): Promise<void> => post("/api/migration/cleanup-backups", {});
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   DataGridColumnDistinctValuesSqlOptions,
@@ -316,6 +344,7 @@ async function post<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw await backendResponseError(res);
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -1137,6 +1166,10 @@ export async function getCustomTypeDetails(connectionId: string, database: strin
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
   return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId })}`);
+}
+
+export async function getPluginTableMetadata(request: PluginTableMetadataRequest): Promise<PluginTableMetadata> {
+  return post("/api/plugin/table-metadata", request);
 }
 
 export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
@@ -2380,16 +2413,17 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return post("/api/cloud-sync/webdav/forget-sync-secrets-passphrase", {});
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<WebDavSyncSummary> {
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
   return post("/api/cloud-sync/webdav/upload", {
     config,
     editorSettings,
     secretsPassphrase,
+    includeSecrets,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string): Promise<WebDavDownloadResult> {
-  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
+  return post("/api/cloud-sync/webdav/download", { config, secretsPassphrase, restoreSecrets });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -2518,6 +2552,10 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
   });
   if (!res.ok) throw await backendResponseError(res);
   return res.json();
+}
+
+export async function releaseSqlFilePreview(cleanupToken: string): Promise<void> {
+  return post("/api/sql-file/preview/release", { cleanupToken });
 }
 
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
@@ -4896,14 +4934,14 @@ export async function meilisearchGetDocument(connectionId: string, index: string
   });
 }
 
-export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<Record<string, any>> {
+export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<MeilisearchIndexSettings> {
   return post("/api/document-store/meilisearch/settings/get", {
     connectionId,
     index,
   });
 }
 
-export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, any>): Promise<void> {
+export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, unknown>): Promise<void> {
   return post("/api/document-store/meilisearch/settings/update", {
     connectionId,
     index,
@@ -4911,7 +4949,7 @@ export async function meilisearchUpdateIndexSettings(connectionId: string, index
   });
 }
 
-export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, any>> {
+export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, unknown>> {
   return post("/api/document-store/meilisearch/stats", {
     connectionId,
     index,

@@ -310,23 +310,84 @@ pub async fn connect_with_port_explicit(
         Err(encrypted_error) => {
             try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
                 .await
-                .map_err(|plain_error| {
-                    if is_sqlserver_tls_handshake_error(&encrypted_error) {
-                        format!(
-                        "{encrypted_error}\n\nThis may be caused by an old SQL Server TLS/encryption configuration. \
-                         If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
-                         try SQL Server legacy compatibility mode. It first behaves like encrypt=false and, \
-                         when explicitly enabled, DBX can also fall back to the SQL Server legacy compatibility \
-                         driver for TLS 1.0 encrypted transport. Only use this mode on trusted networks, VPNs, \
-                         or SSH tunnels.\n\n\
-                         Automatic native legacy fallback also failed: {plain_error}"
-                    )
-                    } else {
-                        plain_error
-                    }
-                })
+                .map_err(|fallback_errors| sqlserver_connect_failure_message(&encrypted_error, &fallback_errors))
         }
     }
+}
+
+const SQLSERVER_LEGACY_TLS_HINT: &str = "This may be caused by an old SQL Server TLS/encryption configuration. \
+     If you are connecting to SQL Server 2008/2008 R2/2012 or another legacy instance, \
+     try SQL Server legacy compatibility mode. It first behaves like encrypt=false and, \
+     when explicitly enabled, DBX can also fall back to the SQL Server legacy compatibility \
+     driver for TLS 1.0 encrypted transport. Only use this mode on trusted networks, VPNs, \
+     or SSH tunnels.";
+
+/// Login/catalog error numbers reported by the server itself. They mean the TDS transport was
+/// established, so the actionable fix is the login or the configured database, not TLS.
+const SQLSERVER_LOGIN_OR_CATALOG_ERROR_NUMBERS: [u32; 8] = [4060, 18452, 18456, 18470, 18486, 18487, 18488, 18489];
+
+fn sqlserver_legacy_fallback_summary(errors: &[(&'static str, String)]) -> String {
+    errors.iter().map(|(label, error)| format!("{label} failed: {error}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Extracts the error number from a driver message such as
+/// `... on server dbx executing on line 1 (code: 4060, state: 1, class: 11)`.
+fn sqlserver_error_number(error: &str) -> Option<u32> {
+    let lower = error.to_ascii_lowercase();
+    let rest = lower.split_once("(code:")?.1;
+    let digits = rest.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>();
+    digits.parse().ok()
+}
+
+fn is_sqlserver_login_or_catalog_error(error: &str) -> bool {
+    if sqlserver_error_number(error).is_some_and(|code| SQLSERVER_LOGIN_OR_CATALOG_ERROR_NUMBERS.contains(&code)) {
+        return true;
+    }
+    let lower = error.to_ascii_lowercase();
+    [
+        "login failed",
+        "cannot open database",
+        "not allowed to access",
+        "is not able to access the database",
+        "token error",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Builds the final `connect` error for the encryption cascade.
+///
+/// A fallback that reached the login/catalog stage proves the transport works without modern
+/// encryption, so that error is the real cause and belongs on the first line: the TLS hint would
+/// otherwise send users to their TLS configuration while the actual failure is a database that
+/// cannot be opened (issue: SQL Server 2014 with a saved database that no longer exists).
+fn sqlserver_connect_failure_message(encrypted_error: &str, fallback_errors: &[(&'static str, String)]) -> String {
+    let legacy_summary = sqlserver_legacy_fallback_summary(fallback_errors);
+    if let Some((label, error)) =
+        fallback_errors.iter().rev().find(|(_, error)| is_sqlserver_login_or_catalog_error(error))
+    {
+        let mut message = error.clone();
+        if is_sqlserver_tls_handshake_error(encrypted_error) {
+            message.push_str(&format!(
+                "\n\nDBX reached the server through the SQL Server legacy compatibility fallbacks ({label}), \
+                 so this failure is not caused by TLS/encryption settings. Check the database name, the login, \
+                 and its permissions for this connection; enable SQL Server legacy compatibility mode to skip \
+                 the failing encrypted handshake.\n\nInitial encrypted connection failed with: {encrypted_error}"
+            ));
+        }
+        return message;
+    }
+    if is_sqlserver_login_or_catalog_error(encrypted_error) {
+        return format!(
+            "{encrypted_error}\n\nThe SQL Server legacy compatibility fallbacks also failed:\n{legacy_summary}"
+        );
+    }
+    if is_sqlserver_tls_handshake_error(encrypted_error) {
+        return format!(
+            "{encrypted_error}\n\n{SQLSERVER_LEGACY_TLS_HINT}\n\nAutomatic native legacy fallback also failed: {legacy_summary}"
+        );
+    }
+    legacy_summary
 }
 
 async fn try_connect_legacy_sqlserver_encryption(
@@ -337,16 +398,16 @@ async fn try_connect_legacy_sqlserver_encryption(
     pass: &str,
     database: Option<&str>,
     timeout: Duration,
-) -> Result<SqlServerClient, String> {
+) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
         match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
             Ok(client) => return Ok(client),
-            Err(error) => errors.push(format!("{label} failed: {error}")),
+            Err(error) => errors.push((label, error)),
         }
     }
 
-    Err(errors.join("\n"))
+    Err(errors)
 }
 
 pub fn sqlserver_native_encryption_disabled(url_params: Option<&str>) -> bool {
@@ -1972,9 +2033,7 @@ fn sqlserver_cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
         return super::safe_i64_to_json(v);
     }
     if let Ok(Some(v)) = <f32 as FromSql>::from_sql(cell) {
-        return serde_json::Number::from_f64(v as f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null);
+        return serde_json::Value::from(v);
     }
     if let Ok(Some(v)) = <f64 as FromSql>::from_sql(cell) {
         return serde_json::Number::from_f64(v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null);
@@ -2838,6 +2897,7 @@ pub async fn list_object_statistics(
                 .ok()
                 .flatten()
                 .or_else(|| row.try_get::<i32, _>(2).ok().flatten().map(i64::from)),
+            ..Default::default()
         })
         .filter(|stat| !stat.name.is_empty())
         .collect())
@@ -4380,6 +4440,94 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_login_error_detection_covers_server_codes_and_messages() {
+        assert!(super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: Token error: 'Cannot open database \"cwxt2025\" requested by the login. \
+             The login failed.' on server dbx executing  on line 1 (code: 4060, state: 1, class: 11)"
+        ));
+        assert!(super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: Login failed for user 'sa'. (code: 18456, state: 1, class: 14)"
+        ));
+        assert!(super::is_sqlserver_login_or_catalog_error("Login failed for user 'readonly'."));
+        // Localized server text (zh-CN) keeps no english needle, so "token error" has to carry it.
+        assert!(super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: Token error: '\u{65e0}\u{6cd5}\u{6253}\u{5f00}\u{767b}\u{5f55}\u{6240}\u{8bf7}\u{6c42}\u{7684}\u{6570}\u{636e}\u{5e93} \"cwxt2025\"\u{3002}\u{767b}\u{5f55}\u{5931}\u{8d25}\u{3002}'"
+        ));
+        assert!(!super::is_sqlserver_login_or_catalog_error(
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+        ));
+        assert!(!super::is_sqlserver_login_or_catalog_error("SQL Server connection timed out (30s)"));
+    }
+
+    #[test]
+    fn sqlserver_login_failure_outranks_the_legacy_tls_hint() {
+        // The reported case: the encrypted handshake fails, but the no-encryption fallback reaches
+        // the login stage and the server rejects the configured database (4060). The catalog error is
+        // the actionable one and must not be buried under the TLS hint. The same instance reports the
+        // server text in its own language (zh-CN here), so both spellings have to win.
+        let encrypted_error =
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof";
+        let catalog_failures = [
+            "SQL Server connection failed: Token error: 'Cannot open database \"cwxt2025\" requested by the login. \
+             The login failed.' on server dbx executing  on line 1 (code: 4060, state: 1, class: 11)",
+            "SQL Server connection failed: Token error: '\u{65e0}\u{6cd5}\u{6253}\u{5f00}\u{767b}\u{5f55}\u{6240}\u{8bf7}\u{6c42}\u{7684}\u{6570}\u{636e}\u{5e93} \"cwxt2025\"\u{3002}\u{767b}\u{5f55}\u{5931}\u{8d25}\u{3002}' on server iZw1wl8nyooomlZ executing  on line 1 (code: 4060, state: 1, class: 11)",
+        ];
+
+        for catalog_failure in catalog_failures {
+            let fallback_errors = vec![
+                ("login-only encryption", encrypted_error.to_string()),
+                ("no-encryption compatibility fallback", catalog_failure.to_string()),
+            ];
+
+            let message = super::sqlserver_connect_failure_message(encrypted_error, &fallback_errors);
+
+            assert!(message.starts_with(catalog_failure), "{message}");
+            assert!(message.contains("not caused by TLS/encryption settings"));
+            assert!(message.contains("Initial encrypted connection failed with:"));
+            assert!(!message.contains("This may be caused by an old SQL Server TLS/encryption configuration"));
+        }
+    }
+
+    #[test]
+    fn sqlserver_initial_login_failure_keeps_its_priority_over_fallback_transport_errors() {
+        let login_error =
+            "SQL Server connection failed: Login failed for user 'sa'. (code: 18456, state: 1, class: 14)";
+        let fallback_errors = vec![
+            (
+                "login-only encryption",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+            (
+                "no-encryption compatibility fallback",
+                "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof"
+                    .to_string(),
+            ),
+        ];
+
+        let message = super::sqlserver_connect_failure_message(login_error, &fallback_errors);
+
+        assert!(message.starts_with("SQL Server connection failed: Login failed for user 'sa'."));
+        assert!(message.contains("legacy compatibility fallbacks also failed"));
+    }
+
+    #[test]
+    fn sqlserver_all_tls_failures_keep_the_legacy_compatibility_hint() {
+        let encrypted_error =
+            "SQL Server connection failed: An error occured during the attempt of performing I/O: tls handshake eof";
+        let fallback_errors = vec![
+            ("login-only encryption", encrypted_error.to_string()),
+            ("no-encryption compatibility fallback", encrypted_error.to_string()),
+        ];
+
+        let message = super::sqlserver_connect_failure_message(encrypted_error, &fallback_errors);
+
+        assert!(message.starts_with(encrypted_error));
+        assert!(message.contains("This may be caused by an old SQL Server TLS/encryption configuration"));
+        assert!(message.contains("Automatic native legacy fallback also failed:"));
+    }
+
+    #[test]
     fn sqlserver_module_definitions_require_simple_query_batch() {
         assert!(requires_simple_query_batch("SET SHOWPLAN_XML ON;"));
         assert!(requires_simple_query_batch("SET SHOWPLAN_XML OFF;"));
@@ -5300,6 +5448,105 @@ mod tests {
     #[test]
     fn sqlserver_tinyint_cells_are_json_numbers() {
         assert_eq!(sqlserver_cell_to_json(&ColumnData::U8(Some(7))), serde_json::json!(7));
+    }
+
+    #[test]
+    fn sqlserver_real_cells_use_shortest_round_trip_numbers() {
+        for (value, expected) in [
+            (18.2_f32, "18.2"),
+            (18.3, "18.3"),
+            (59.3, "59.3"),
+            (4.6, "4.6"),
+            (-18.2, "-18.2"),
+            (-59.3, "-59.3"),
+            (18.5, "18.5"),
+            (1.2345678, "1.2345678"),
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0e-20, "1e-20"),
+            (1.0e20, "1e+20"),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F32(Some(value)));
+            assert!(converted.is_number(), "{value}: {converted:?}");
+            assert_eq!(converted.to_string(), expected, "{value}");
+            assert_eq!(serde_json::from_value::<f32>(converted).unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_cells_preserve_extremes_and_subnormals() {
+        for value in [
+            f32::MIN,
+            f32::MAX,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            f32::from_bits(0x007f_ffff),
+            f32::from_bits(0x3f80_0001),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F32(Some(value)));
+            assert!(converted.is_number(), "{value}: {converted:?}");
+            let serialized = converted.to_string();
+            assert_eq!(serialized.parse::<f32>().unwrap().to_bits(), value.to_bits());
+            assert_eq!((converted.as_f64().unwrap() as f32).to_bits(), value.to_bits());
+            assert_eq!(serde_json::from_str::<f32>(&serialized).unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_and_float_null_and_non_finite_cells_remain_null() {
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::F32(None)), serde_json::Value::Null);
+        assert_eq!(sqlserver_cell_to_json(&ColumnData::F64(None)), serde_json::Value::Null);
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(sqlserver_cell_to_json(&ColumnData::F32(Some(value))), serde_json::Value::Null);
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(sqlserver_cell_to_json(&ColumnData::F64(Some(value))), serde_json::Value::Null);
+        }
+    }
+
+    #[test]
+    fn sqlserver_float_cells_keep_double_precision() {
+        for value in [
+            18.200000762939453_f64,
+            18.299999237060547,
+            59.29999923706055,
+            4.599999904632568,
+            1.2345678901234567,
+            -1.2345678901234567,
+            0.0,
+            -0.0,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::from_bits(1),
+        ] {
+            let converted = sqlserver_cell_to_json(&ColumnData::F64(Some(value)));
+            assert_eq!(converted, serde_json::json!(value));
+            assert_eq!(converted.as_f64().unwrap().to_bits(), value.to_bits());
+        }
+    }
+
+    #[test]
+    fn sqlserver_real_conversion_keeps_other_cell_types_unchanged() {
+        for (cell, expected) in [
+            (ColumnData::I16(Some(-18)), serde_json::json!(-18)),
+            (ColumnData::I32(Some(59)), serde_json::json!(59)),
+            (ColumnData::I64(Some(9_007_199_254_740_991)), serde_json::json!(9_007_199_254_740_991_i64)),
+            (ColumnData::I64(Some(i64::MAX)), serde_json::json!(i64::MAX.to_string())),
+            (ColumnData::I32(None), serde_json::Value::Null),
+            (ColumnData::String(Some(Cow::Borrowed("18.200000762939453"))), serde_json::json!("18.200000762939453")),
+            (ColumnData::String(None), serde_json::Value::Null),
+            (ColumnData::Bit(Some(true)), serde_json::json!(true)),
+            (ColumnData::Bit(None), serde_json::Value::Null),
+            (
+                ColumnData::Numeric(Some(tiberius::numeric::Numeric::new_with_scale(18200, 3))),
+                serde_json::json!("18.200"),
+            ),
+            (ColumnData::Numeric(None), serde_json::Value::Null),
+        ] {
+            assert_eq!(sqlserver_cell_to_json(&cell), expected, "{cell:?}");
+        }
     }
 
     #[test]

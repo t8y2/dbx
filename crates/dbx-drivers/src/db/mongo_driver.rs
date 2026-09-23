@@ -321,6 +321,7 @@ pub fn object_statistics_from_collection_stats(name: &str, database: &str, resul
             (None, None) => None,
             (data, index) => Some(data.unwrap_or(0).saturating_add(index.unwrap_or(0))),
         },
+        ..Default::default()
     }
 }
 

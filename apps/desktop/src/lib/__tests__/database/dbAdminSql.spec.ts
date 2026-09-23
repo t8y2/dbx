@@ -408,19 +408,77 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
   });
 
-  it("keeps representative non-Dameng clones on the generic path", async () => {
+  it("loads Vastbase source comments without rebuilding constraints or defaults", async () => {
+    const columns = [
+      { name: '备"注', comment: "  客户's;备注  ", data_type: "text", is_nullable: true, column_default: "'default'", is_primary_key: false },
+      ...[null, "", " \t\n ", undefined].map((comment, index) => ({ name: `empty_${index}`, comment, data_type: "text", is_nullable: true, column_default: null, is_primary_key: false })),
+    ];
+    apiMock.getColumns.mockResolvedValue(columns);
+    const sql = 'CREATE TABLE "copy" AS SELECT * FROM "source" WHERE 1=0;\nCOMMENT ON TABLE "copy" IS \'订单\';\nCOMMENT ON COLUMN "copy"."note" IS \'备注\';';
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue(sql);
+
+    const plan = await buildDuplicateTableStructurePlan({
+      connectionId: "vastbase-1",
+      database: "app",
+      catalog: "catalog",
+      databaseType: "vastbase",
+      schema: '业"务',
+      sourceName: '订"单',
+      targetName: '订"单_副本',
+      tableComment: "  客户's;订单  ",
+      identifierQuote: '"',
+    });
+
+    expect(apiMock.getColumns).toHaveBeenCalledExactlyOnceWith("vastbase-1", "app", '业"务', '订"单', "catalog");
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledExactlyOnceWith({
+      databaseType: "vastbase",
+      schema: '业"务',
+      sourceName: '订"单',
+      targetName: '订"单_副本',
+      tableComment: "  客户's;订单  ",
+      columnComments: [{ name: '备"注', comment: "  客户's;备注  " }],
+      identifierQuote: '"',
+    });
+    expect(plan).toEqual({ sql, sourceColumns: columns, executeAsScript: true });
+    expect(apiMock.listIndexes).not.toHaveBeenCalled();
+    expect(apiMock.buildCreateTableSql).not.toHaveBeenCalled();
+    expect(apiMock.getTableComment).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "", " \t\n "])("reuses Vastbase columns and keeps absent comments optional: %j", async (comment) => {
+    const columns = [{ name: "note", comment, data_type: "text", is_nullable: true, column_default: null, is_primary_key: false }];
+    const sql = 'CREATE TABLE "copy" AS SELECT * FROM "source" WHERE 1=0;';
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue(sql);
+
+    const plan = await buildDuplicateTableStructurePlan({ connectionId: "vastbase-1", database: "app", databaseType: "vastbase", sourceName: "source", targetName: "copy", tableComment: comment, sourceColumns: columns });
+
+    expect(apiMock.getColumns).not.toHaveBeenCalled();
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: comment, columnComments: [] }));
+    expect(plan).toEqual({ sql, sourceColumns: columns, executeAsScript: false });
+  });
+
+  it("does not silently clone Vastbase without comments when column metadata fails", async () => {
+    const error = new Error("column metadata unavailable");
+    apiMock.getColumns.mockRejectedValueOnce(error);
+
+    await expect(buildDuplicateTableStructurePlan({ connectionId: "vastbase-1", database: "app", databaseType: "vastbase", sourceName: "source", targetName: "copy" })).rejects.toBe(error);
+    expect(apiMock.getColumns).toHaveBeenCalledExactlyOnceWith("vastbase-1", "app", "", "source", undefined);
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
+  it.each(["postgres", "mysql", "highgo", "kingbase", undefined] as const)("keeps %s clones on the generic path", async (databaseType) => {
     apiMock.buildDuplicateTableStructureSql.mockResolvedValue('CREATE TABLE "copy" (LIKE "source" INCLUDING ALL);');
 
     const plan = await buildDuplicateTableStructurePlan({
       connectionId: "postgres-1",
       database: "app",
-      databaseType: "postgres",
+      databaseType,
       schema: "public",
       sourceName: "source",
       targetName: "copy",
     });
 
-    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "postgres", sourceName: "source", targetName: "copy" }));
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType, sourceName: "source", targetName: "copy", columnComments: [] }));
     expect(apiMock.getColumns).not.toHaveBeenCalled();
     expect(apiMock.listIndexes).not.toHaveBeenCalled();
     expect(apiMock.buildCreateTableSql).not.toHaveBeenCalled();

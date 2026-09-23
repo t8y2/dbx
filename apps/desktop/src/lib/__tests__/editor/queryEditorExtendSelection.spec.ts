@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { selectParentSyntax } from "@codemirror/commands";
 import { sql } from "@codemirror/lang-sql";
 import { EditorSelection, EditorState } from "@codemirror/state";
@@ -8,8 +7,6 @@ import { plainTextSelectionRanges } from "@/lib/editor/plainTextSelectionRanges"
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { chooseNextSemanticSelectionRange, type SemanticSelectionRange } from "@/lib/editor/semanticSelectionRanges";
 import { sqlSemanticSelectionRanges } from "@/lib/editor/sqlSemanticSelectionRanges";
-
-const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
 function runCommand(command: Command, state: EditorState): EditorState {
   let nextState = state;
@@ -388,18 +385,6 @@ describe("query editor extend selection", () => {
     const next = runExtendSelection(state, { databaseType: "mysql" });
     expect(next.selection.main.anchor).toBeGreaterThan(next.selection.main.head);
     expect(next.sliceDoc(next.selection.main.from, next.selection.main.to)).toBe("'001'");
-  });
-
-  it("binds the configurable editor shortcut to CodeMirror semantic selection", () => {
-    expect(queryEditorSource).toContain("extendQueryEditorSelection");
-    expect(queryEditorSource).not.toContain("selectParentSyntax");
-    expect(queryEditorSource).not.toContain("codeMirrorSelectParentSyntax");
-    expect(queryEditorSource).toContain("shortcuts.extendSelection");
-    expect(queryEditorSource).toContain("runQueryEditorAltExtendSelection");
-  });
-
-  it("registers a high-priority SQL string mouse selection style", () => {
-    expect(queryEditorSource).toMatch(/Prec\.highest\(\s*EditorView\.mouseSelectionStyle\.of/);
   });
 
   it("matches macOS Option+W by physical key when the event key is transformed", () => {

@@ -3,7 +3,7 @@ title: AI Assistant
 description: Connect cloud, compatible API, or local CLI models to generate SQL, analyze data, and run controlled Agent workflows with schema context.
 ---
 
-The AI Assistant combines the active database, schema, SQL, errors, result preview, and explicitly mentioned objects into context for SQL generation, explanation, optimization, error repair, and data analysis.
+The AI Assistant combines the connection, database, and schema bound to the current conversation with editor SQL, errors, result preview, and explicitly mentioned objects into context for SQL generation, explanation, optimization, error repair, and data analysis. Each conversation keeps its own binding, so conversations on different connections never share a target.
 
 <Callout type="warn">Ask mode produces suggestions. Agent mode can call query tools when the user explicitly requests real data. Any model output can be wrong. Review the target, fields, filters, parameters, and affected scope before executing SQL.</Callout>
 
@@ -89,7 +89,7 @@ Increasing the turn limit raises latency, database reads, and model cost. Prefer
 AI context can include:
 
 - Database type, connection name, database, and schema
-- Current or selected editor SQL and the latest error
+- Current or selected editor SQL and the latest error, once the open editor is on the conversation's own connection and database
 - Tables, columns, indexes, foreign keys, and limited sample rows
 - A bounded preview of the current result
 - Selected prompt templates
@@ -151,7 +151,7 @@ Do not assume one UI label has identical semantics across providers.
 ## Conversations, History, and Export
 
 - Use ↑ and ↓ to navigate prompt history
-- Conversations can be saved with connection and database context
+- Each conversation is saved with its own connection, database, and schema binding, and restores it when reopened
 - Final AI analysis messages can be exported as Markdown with connection name and timestamp
 - Markdown export contains the final answer only; internal reasoning and Agent steps are not appended
 

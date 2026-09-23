@@ -6,7 +6,7 @@ import { mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isUpdatePreviewMockEnabled, previewDriverUpdates, previewJdbcUpdate, previewMcpUpdate, previewPluginUpdates } from "@/lib/updates/updatePreviewMock";
 import type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
-import type { AgentDriverInfo, McpServerStatus } from "@/lib/backend/tauri";
+import type { AgentDriverInfo, AgentUpdateBlocker, McpServerStatus } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
 
 export type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
@@ -19,6 +19,7 @@ export interface ComponentUpdateResult {
   mcp: boolean;
   plugins: number;
   skippedDrivers: number;
+  blockedDrivers: AgentUpdateBlocker[];
   failed: string[];
   blockedPlugins: PluginUpdateBlock[];
 }
@@ -28,7 +29,7 @@ interface ComponentUpdateRefreshOptions {
 }
 
 function emptyResult(): ComponentUpdateResult {
-  return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, failed: [], blockedPlugins: [] };
+  return { drivers: 0, jdbc: false, mcp: false, plugins: 0, skippedDrivers: 0, blockedDrivers: [], failed: [], blockedPlugins: [] };
 }
 
 function pluginUpdateBlock(pluginName: string, message: string): PluginUpdateBlock | null {
@@ -139,6 +140,7 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     const blockers = await api.checkAgentUpdateBlockers(updatable);
     if (blockers.length) {
       result.skippedDrivers = blockers.length;
+      result.blockedDrivers = blockers;
       return;
     }
     const upgraded = await api.upgradeAllAgents();

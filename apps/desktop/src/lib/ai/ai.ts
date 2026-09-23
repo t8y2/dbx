@@ -746,8 +746,35 @@ function formatAttachedTextData(context: AiContext, isZh: boolean): string {
   ].join("\n\n");
 }
 
+/** The namespace-defining subset of a query tab: what identifies the database /
+ *  schema an AI request targets. A `QueryTab` satisfies this structurally, so
+ *  editor-tab callers are unaffected; the AI panel passes a conversation-bound
+ *  target instead (#9902). */
+export interface AiNamespaceSource {
+  database?: string;
+  schema?: string;
+}
+
+/** Everything `buildAiContext` needs to describe what the AI is looking at.
+ *
+ *  A `QueryTab` satisfies this structurally, so passing one still works. The AI
+ *  panel passes a *conversation-bound* target instead: the namespace must follow
+ *  the conversation, not whichever editor tab happens to be active, otherwise
+ *  two conversations share one connection (#9902).
+ *
+ *  `sql` / `result` / `tableMeta` describe the editor the user is looking at, so
+ *  the panel only attaches them when that tab is on the bound connection —
+ *  another connection's SQL and results are not context for this conversation.
+ */
+export interface AiContextTarget extends AiNamespaceSource {
+  connectionId: string;
+  sql?: string;
+  result?: QueryResult;
+  tableMeta?: QueryTab["tableMeta"];
+}
+
 export async function buildAiContext(
-  tab: QueryTab,
+  tab: AiContextTarget,
   connection: ConnectionConfig,
   options: { maxTables?: number; maxColumnsPerTable?: number; maxIndexesPerTable?: number; maxFksPerTable?: number; mentionedTables?: AiTableMention[]; sqlFiles?: AiSqlFileContext[]; csvFiles?: AiCsvFileContext[] } = {},
 ): Promise<AiContext> {
@@ -873,7 +900,7 @@ export async function buildAiContext(
     databaseType,
     database,
     schema,
-    currentSql: currentCollectionName ?? tab.sql,
+    currentSql: currentCollectionName ?? tab.sql ?? "",
     lastError: extractLastError(tab.result),
     lastResultPreview: formatResultPreview(tab.result),
     tables,
@@ -884,7 +911,7 @@ export async function buildAiContext(
   };
 }
 
-async function loadMentionedTableContext(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number, maxIndexesPerTable: number, maxFksPerTable: number): Promise<AiSchemaTable | undefined> {
+async function loadMentionedTableContext(tab: AiContextTarget, connection: ConnectionConfig, mention: AiTableMention, maxColumnsPerTable: number, maxIndexesPerTable: number, maxFksPerTable: number): Promise<AiSchemaTable | undefined> {
   const databaseType = aiDatabaseTypeForConnection(connection);
   const database = aiDatabaseNamespace(tab, connection);
   const schema = await resolveMentionedTableSchema(tab, connection, mention);
@@ -910,7 +937,7 @@ async function loadTableComment(connectionId: string, database: string, schema: 
   return tables.find((table) => table.name.toLowerCase() === tableName.toLowerCase())?.comment?.trim() || undefined;
 }
 
-async function resolveMentionedTableSchema(tab: QueryTab, connection: ConnectionConfig, mention: AiTableMention): Promise<string> {
+async function resolveMentionedTableSchema(tab: AiContextTarget, connection: ConnectionConfig, mention: AiTableMention): Promise<string> {
   if (mention.schema) return mention.schema;
   if (tab.tableMeta?.tableName.toLowerCase() === mention.table.toLowerCase() && tab.tableMeta.schema) {
     return tab.tableMeta.schema;
@@ -926,7 +953,7 @@ async function resolveMentionedTableSchema(tab: QueryTab, connection: Connection
   return aiDatabaseNamespace(tab, connection);
 }
 
-async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig): Promise<string[]> {
+async function loadCandidateSchemas(tab: AiContextTarget, connection: ConnectionConfig): Promise<string[]> {
   const { database, schema } = resolveAiDatabaseTarget(tab, connection);
   if (schema) return [schema];
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
@@ -951,11 +978,11 @@ export function aiSchemaSelectionSupported(connection: ConnectionConfig): boolea
   return isSchemaAware(aiDatabaseTypeForConnection(connection));
 }
 
-function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
+function aiDatabaseNamespace(tab: AiNamespaceSource, connection: ConnectionConfig): string {
   return resolveAiDatabaseTarget(tab, connection).database;
 }
 
-export function resolveAiNamespaceSelection(tab: QueryTab, connection: ConnectionConfig): AiNamespaceSelection {
+export function resolveAiNamespaceSelection(tab: AiNamespaceSource, connection: ConnectionConfig): AiNamespaceSelection {
   if (connection.db_type === "dameng") {
     return { kind: "schema", value: tab.schema?.trim() || "" };
   }
@@ -967,7 +994,7 @@ export function resolveAiNamespaceSelection(tab: QueryTab, connection: Connectio
  * to match the request database (`selectedDatabases[0] ?? tab.database`), so a
  * database picked in the composer wins over the query tab's own database.
  */
-export function resolveAiMentionDatabase(tab: QueryTab, connection: ConnectionConfig, selectedDatabases: string[]): string {
+export function resolveAiMentionDatabase(tab: AiNamespaceSource, connection: ConnectionConfig, selectedDatabases: string[]): string {
   const namespace = resolveAiNamespaceSelection(tab, connection);
   if (namespace.kind !== "database") return tab.database || "";
   return selectedDatabases[0] ?? tab.database ?? "";
@@ -985,7 +1012,7 @@ export function resolveDefaultAiSchema(connection: ConnectionConfig, schemaOptio
  * their configured database while the query tab's selection scopes metadata and
  * SQL execution through the schema parameter.
  */
-export function resolveAiDatabaseTarget(tab: QueryTab, connection: ConnectionConfig): { database: string; schema?: string } {
+export function resolveAiDatabaseTarget(tab: AiNamespaceSource, connection: ConnectionConfig): { database: string; schema?: string } {
   const database = tab.database || connection.database || "main";
   if (connection.db_type === "dameng") {
     return {

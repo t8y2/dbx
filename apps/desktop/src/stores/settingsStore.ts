@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
@@ -663,6 +664,7 @@ export type DataGridRenderMode = (typeof DATA_GRID_RENDER_MODES)[number];
 const DATA_GRID_SEARCH_MODES = ["filter", "highlight"] as const;
 export type DataGridSearchMode = (typeof DATA_GRID_SEARCH_MODES)[number];
 export type DataGridFilterEditorView = "quick" | "conditions" | "text";
+export type DataGridToolbarLayout = "single" | "split";
 const RESULT_RUN_DISPLAY_MODES = ["tabs", "list"] as const;
 export type ResultRunDisplayMode = (typeof RESULT_RUN_DISPLAY_MODES)[number];
 const MULTI_STATEMENT_DEFAULT_VIEWS = ["result", "summary"] as const;
@@ -844,6 +846,7 @@ export interface EditorSettings {
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
+  dataGridToolbarLayout: DataGridToolbarLayout;
   dataGridKeepFilterEditorExpanded: boolean;
   dataGridTextFilterPanelHeight: number;
   localFilterPopoverWidth: number;
@@ -967,6 +970,10 @@ export interface ToolbarItems {
   ai: boolean;
   theme: boolean;
   github: boolean;
+  /** Always-on-top window control. Off by default: the toolbar's right side is
+   *  the most crowded strip in the app and keeping a window above every other
+   *  application is not a day-to-day action, so the button is opt-in. */
+  alwaysOnTop: boolean;
   exclusiveRightSidebarPanels: boolean;
 }
 
@@ -984,6 +991,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   ai: true,
   theme: true,
   github: true,
+  alwaysOnTop: false,
   exclusiveRightSidebarPanels: true,
 };
 
@@ -1113,6 +1121,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
+  dataGridToolbarLayout: "single",
   dataGridKeepFilterEditorExpanded: false,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   localFilterPopoverWidth: 360,
@@ -1293,6 +1302,10 @@ function normalizeDataGridSearchMode(value: unknown): DataGridSearchMode {
 
 function normalizeDataGridFilterEditorView(value: unknown): DataGridFilterEditorView {
   return value === "conditions" || value === "text" ? value : DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
+}
+
+function normalizeDataGridToolbarLayout(value: unknown): DataGridToolbarLayout {
+  return value === "single" || value === "split" ? value : DEFAULT_EDITOR_SETTINGS.dataGridToolbarLayout;
 }
 
 function normalizeResultRunDisplayMode(value: unknown): ResultRunDisplayMode {
@@ -1506,6 +1519,10 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,
     github: items.github ?? defaults.github,
+    // Unlike the entries above, a newly added toolbar button stays hidden until
+    // the user asks for it, so upgrading never adds another control to the
+    // crowded right side of the toolbar.
+    alwaysOnTop: items.alwaysOnTop === true,
     // Saved settings from before right-sidebar exclusivity must adopt the new default.
     exclusiveRightSidebarPanels: items.exclusiveRightSidebarPanels !== false,
   };
@@ -1652,6 +1669,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
+    dataGridToolbarLayout: normalizeDataGridToolbarLayout(settings.dataGridToolbarLayout),
     dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
@@ -1901,6 +1919,25 @@ export const useSettingsStore = defineStore("settings", () => {
   let aiChatSelectionSaveRunning = false;
 
   const editorSettings = ref<EditorSettings>(normalizeEditorSettings({}));
+  let persistedAlwaysOnTopToolbarVisibility = editorSettings.value.toolbarItems.alwaysOnTop;
+
+  function syncAlwaysOnTopToolbarVisibility(visible: boolean) {
+    editorSettings.value.toolbarItems.alwaysOnTop = visible;
+    persistedAlwaysOnTopToolbarVisibility = visible;
+  }
+
+  // Whether the editor-settings blob loaded from disk actually carried a global
+  // timeout value. A normalized number is not enough to tell a user's saved
+  // choice apart from the built-in default filled in by normalizeEditorSettings,
+  // and the timeout-inheritance migration relies on that distinction: a persisted
+  // value must win over the localStorage backup, while a value that was never on
+  // disk (a downgrade, where the older build predated the setting) is recovered
+  // from the backup. Tracked here at load time and read by the migration.
+  const persistedGlobalTimeoutScopes = ref({ connect: false, query: false });
+
+  function hasPersistedGlobalTimeout(scope: "connect" | "query"): boolean {
+    return persistedGlobalTimeoutScopes.value[scope];
+  }
 
   function enqueueEditorSettingsOperation<T>(operation: () => Promise<T>): Promise<T> {
     const queuedOperation = editorSettingsOperationQueue ? editorSettingsOperationQueue.then(operation) : operation();
@@ -1915,8 +1952,14 @@ export const useSettingsStore = defineStore("settings", () => {
     return queuedOperation;
   }
 
-  function persistCurrentEditorSettings(): Promise<void> {
-    return api.saveEditorSettings(editorSettingsSnapshot(editorSettings.value));
+  async function persistCurrentEditorSettings(): Promise<void> {
+    const snapshot = editorSettingsSnapshot(editorSettings.value);
+    await api.saveEditorSettings(snapshot);
+    const visible = snapshot.toolbarItems.alwaysOnTop;
+    if (visible !== persistedAlwaysOnTopToolbarVisibility) {
+      persistedAlwaysOnTopToolbarVisibility = visible;
+      await emitAlwaysOnTopToolbarVisibilityChanged(visible);
+    }
   }
 
   function enqueueEditorSettingsSave(): Promise<void> {
@@ -1973,6 +2016,11 @@ export const useSettingsStore = defineStore("settings", () => {
             normalized.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion = SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
           }
           editorSettings.value = normalized;
+          persistedAlwaysOnTopToolbarVisibility = normalized.toolbarItems.alwaysOnTop;
+          persistedGlobalTimeoutScopes.value = {
+            connect: typeof savedSettings.globalConnectTimeoutSecs === "number",
+            query: typeof savedSettings.globalQueryTimeoutSecs === "number" || typeof (savedSettings as { queryTimeoutSecs?: unknown }).queryTimeoutSecs === "number",
+          };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
@@ -1989,6 +2037,7 @@ export const useSettingsStore = defineStore("settings", () => {
         const legacy = loadLegacyEditorSettings();
         if (legacy) {
           editorSettings.value = legacy;
+          persistedAlwaysOnTopToolbarVisibility = legacy.toolbarItems.alwaysOnTop;
           try {
             await enqueueEditorSettingsSave();
             // Existing desktop users keep settings in localStorage; remove them only
@@ -2444,6 +2493,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
+    if (partial.dataGridToolbarLayout !== undefined) editorSettings.value.dataGridToolbarLayout = normalizeDataGridToolbarLayout(partial.dataGridToolbarLayout);
     if (partial.dataGridKeepFilterEditorExpanded !== undefined) editorSettings.value.dataGridKeepFilterEditorExpanded = partial.dataGridKeepFilterEditorExpanded === true;
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
     if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
@@ -2781,9 +2831,11 @@ export const useSettingsStore = defineStore("settings", () => {
     isConfigured,
     isEditorSettingsLoaded,
     editorSettings,
+    hasPersistedGlobalTimeout,
     desktopSettings,
     mcpGlobalPolicy,
     initEditorSettings,
+    syncAlwaysOnTopToolbarVisibility,
     updateEditorSettings,
     updateEditorSettingsAndPersist,
     persistEditorSettings,

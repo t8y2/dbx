@@ -322,6 +322,24 @@ describe("tab group presentation", () => {
     ]);
   });
 
+  it("omits the database row from tooltips for connections without a database target", () => {
+    const store = useConnectionStore();
+    store.sidebarLayout = {
+      groups: [],
+      order: [{ type: "connection", id: "conn-1" }],
+    };
+
+    for (const dbType of ["dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "weaviate", "chromadb", "etcd", "zookeeper", "nacos", "consul", "mq", "mqtt", "victoriametrics"] as const) {
+      store.connections = [{ id: "conn-1", name: "Local", db_type: dbType, database: "default" } as ConnectionConfig];
+
+      const lines = tabTooltipLines(queryTab({ database: "default" }), translate);
+
+      expect(lines, dbType).toContainEqual({ label: "Connection:", value: "Local" });
+      expect(lines, dbType).toContainEqual({ label: "Group:", value: "Ungrouped" });
+      expect(lines, dbType).not.toContainEqual({ label: "Database:", value: "default" });
+    }
+  });
+
   it("labels a top-level connection as ungrouped", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", database: "app" } as ConnectionConfig];

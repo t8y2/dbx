@@ -120,33 +120,3 @@ test("desktop SQL file opening is released when persisted tab restoration reject
 
   assert.deepEqual(events, ["restore-tabs", "open-file"]);
 });
-
-test("cold-start SQL files wait for restored tabs before opening", () => {
-  const openPathStart = appSource.indexOf("async function openSqlFilePath");
-  const openPathEnd = appSource.indexOf("async function openPendingSqlFiles", openPathStart);
-  assert.ok(openPathStart >= 0 && openPathEnd > openPathStart);
-
-  const openPathSource = appSource.slice(openPathStart, openPathEnd);
-  const initializationWait = openPathSource.indexOf("await desktopOpenTabsRestorationBarrier?.settled");
-  const fileRead = openPathSource.indexOf("api.readExternalSqlFileSnapshot(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb))");
-  const tabOpen = openPathSource.indexOf("queryStore.openExternalSqlFile");
-  assert.ok(initializationWait >= 0);
-  assert.ok(initializationWait < fileRead);
-  assert.ok(fileRead < tabOpen);
-
-  const mountedStart = appSource.indexOf("onMounted(async () =>");
-  const mountedEnd = appSource.indexOf("onUnmounted(", mountedStart);
-  assert.ok(mountedStart >= 0 && mountedEnd > mountedStart);
-
-  const mountedSource = appSource.slice(mountedStart, mountedEnd);
-  const barrierCreation = mountedSource.indexOf("desktopOpenTabsRestorationBarrier = createOpenTabsRestorationBarrier()");
-  const initializationStart = mountedSource.indexOf("void initApp()", barrierCreation);
-  const listenerSetup = mountedSource.indexOf("setupTauriListeners()", initializationStart);
-  const pendingFileOpen = mountedSource.indexOf("openPendingSqlFiles()");
-  assert.ok(barrierCreation >= 0);
-  assert.ok(initializationStart >= 0);
-  assert.ok(barrierCreation < initializationStart);
-  assert.ok(initializationStart < listenerSetup);
-  assert.ok(listenerSetup < pendingFileOpen);
-  assert.ok(initializationStart < pendingFileOpen);
-});

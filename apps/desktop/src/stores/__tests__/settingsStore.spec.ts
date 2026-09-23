@@ -47,6 +47,9 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridFilterEditorView: "conditions" }).dataGridFilterEditorView).toBe("conditions");
     expect(normalizeEditorSettings({ dataGridFilterEditorView: "text" }).dataGridFilterEditorView).toBe("text");
     expect(normalizeEditorSettings({ dataGridFilterEditorView: "invalid" } as any).dataGridFilterEditorView).toBe("quick");
+    expect(normalizeEditorSettings({}).dataGridToolbarLayout).toBe("single");
+    expect(normalizeEditorSettings({ dataGridToolbarLayout: "split" }).dataGridToolbarLayout).toBe("split");
+    expect(normalizeEditorSettings({ dataGridToolbarLayout: "invalid" } as any).dataGridToolbarLayout).toBe("single");
   });
 
   it("keeps filter editor expansion disabled unless explicitly enabled", () => {
@@ -526,7 +529,17 @@ describe("normalizeEditorSettings", () => {
     expect(settings.toolbarItems.sqlFileTree).toBe(false);
     expect(settings.toolbarItems.history).toBe(false);
     expect(settings.toolbarItems.sqlLibrary).toBe(true);
+    expect(settings.toolbarItems.alwaysOnTop).toBe(false);
     expect(settings.toolbarItems.exclusiveRightSidebarPanels).toBe(true);
+  });
+
+  it("keeps the always-on-top toolbar button hidden unless it is opted into", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.toolbarItems.alwaysOnTop).toBe(false);
+    expect(normalizeEditorSettings({}).toolbarItems.alwaysOnTop).toBe(false);
+    expect(normalizeEditorSettings({ toolbarItems: { alwaysOnTop: true } }).toolbarItems.alwaysOnTop).toBe(true);
+    // Anything that is not a boolean opt-in must fall back to hidden, so restored
+    // drafts from before the setting existed cannot turn the button on.
+    expect(normalizeEditorSettings({ toolbarItems: { alwaysOnTop: "yes" } } as any).toolbarItems.alwaysOnTop).toBe(false);
   });
 
   it("preserves disabled right sidebar panel exclusivity", () => {

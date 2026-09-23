@@ -395,6 +395,7 @@ pub async fn get_columns(client: &MeilisearchClient, index: &str) -> Result<Vec<
             enum_values: None,
             character_set: None,
             collation: None,
+            metadata_capabilities: None,
         })
         .collect())
 }

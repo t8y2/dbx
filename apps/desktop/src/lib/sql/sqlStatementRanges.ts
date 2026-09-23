@@ -385,14 +385,6 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   };
 
   const isWhitespace = (ch: string) => ch === " " || ch === "\t" || ch === "\r" || ch === "\n";
-  const nextLineBreak = (from: number) => {
-    const carriageReturn = sql.indexOf("\r", from);
-    const lineFeed = sql.indexOf("\n", from);
-    if (carriageReturn === -1) return lineFeed === -1 ? len : lineFeed;
-    if (lineFeed === -1) return carriageReturn;
-    return Math.min(carriageReturn, lineFeed);
-  };
-
   const markContent = (pos: number) => {
     if (statementStart === -1) {
       // TDSQL accepts arbitrary leading block directives on the SQL line. The
@@ -554,7 +546,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
         if (databaseType === "mysql") {
           if (pendingMysqlDirectiveStart === -1 || i > pendingMysqlDirectiveLineEnd) {
             pendingMysqlDirectiveStart = i;
-            pendingMysqlDirectiveLineEnd = nextLineBreak(i);
+            pendingMysqlDirectiveLineEnd = findLineEnd(sql, i);
           }
         } else {
           pendingMysqlDirectiveStart = -1;
@@ -2506,11 +2498,10 @@ function mysqlDelimiterDirectiveCursorRange(sql: string, pos: number, databaseTy
 }
 
 function findLineEnd(sql: string, pos: number): number {
-  const newline = sql.indexOf("\n", pos);
-  const carriageReturn = sql.indexOf("\r", pos);
-  if (newline === -1) return carriageReturn === -1 ? sql.length : carriageReturn;
-  if (carriageReturn === -1) return newline;
-  return Math.min(newline, carriageReturn);
+  for (let cursor = pos; cursor < sql.length; cursor += 1) {
+    if (sql[cursor] === "\n" || sql[cursor] === "\r") return cursor;
+  }
+  return sql.length;
 }
 
 function nextLineStart(sql: string, lineEnd: number): number {

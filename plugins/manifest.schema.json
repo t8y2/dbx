@@ -30,7 +30,7 @@
       "uniqueItems": true,
       "items": {
         "anyOf": [
-          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.storage", "host.ai"] },
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem", "host.plans:read", "host.schema:read", "host.storage", "host.ai"] },
           { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
         ]
       }

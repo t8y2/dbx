@@ -24,10 +24,10 @@ use crate::models::connection::{
 };
 use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_for_database};
 use crate::types::{
-    ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
-    CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, IndexInfo, LargeValueCell, ObjectInfo, ObjectStatistics, QueryMessage, QueryResult,
-    SpatialColumnBuilder, TableInfo, TriggerInfo,
+    ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
+    CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
+    CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, LargeValueCell, ObjectInfo, ObjectStatistics,
+    QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use dbx_types::metadata_filter::{table_name_filter_matches, TableNameFilter};
 
@@ -1484,11 +1484,18 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || lower.contains("syntax error")
         || lower.contains("not supported");
     let setup_value_rejected = lower.contains("error 1231") && lower.contains("can't be set to");
+    // TDDL rejects the dynamic floor expression as an incorrect argument type (issue #10111).
+    let setup_argument_rejected = lower.contains("incorrect argument type") || lower.contains("error 1232");
     // Gaea tries to parse the built-in floor expression as an integer literal.
     let gaea_setup_expression_rejected = lower.contains("error 1105 (hy000)")
         && compact.contains(&format!(
             "strconv.parseint:parsing\"cast(greatest(@@session.group_concat_max_len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)\":invalidsyntax"
         ));
+    // StarRocks 3.1 can fail expression folding without echoing the SET statement.
+    let starrocks_setup_expression_rejected = lower.contains("error 1064 (hy000)")
+        && lower.contains(
+            "class com.starrocks.analysis.castexpr cannot be cast to class com.starrocks.analysis.literalexpr",
+        );
     // SphinxQL / Manticore reject the built-in `group_concat_max_len` setup with a
     // boolean-typed 1064 error. The quoted token after `near` depends on the exact
     // statement text, so accept any boolean rejection from SphinxQL that mentions
@@ -1505,8 +1512,9 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
     // without broadly matching user-supplied `cast(` expressions.
     let floor_statement_rejected = lower.contains("group_concat_max_len")
         || compact.contains(&format!("..._len,{MYSQL_GROUP_CONCAT_MAX_LEN})asunsigned)"));
-    if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected))
+    if (floor_statement_rejected && (setup_query_rejected || setup_value_rejected || setup_argument_rejected))
         || gaea_setup_expression_rejected
+        || starrocks_setup_expression_rejected
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
     {
@@ -3820,10 +3828,18 @@ pub async fn list_objects_with_logical_tables(
     Ok(PagedObjectList { objects, paging_applied })
 }
 
-pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<Vec<ObjectStatistics>, String> {
+pub async fn list_object_statistics(
+    pool: &MySqlPool,
+    database: &str,
+    include_mysql_details: bool,
+) -> Result<Vec<ObjectStatistics>, String> {
+    let columns = if include_mysql_details {
+        "TABLE_NAME, TABLE_ROWS, DATA_LENGTH, ENGINE, CREATE_TIME, UPDATE_TIME, TABLE_COLLATION, ROW_FORMAT, AVG_ROW_LENGTH, MAX_DATA_LENGTH, CHECK_TIME, INDEX_LENGTH, AUTO_INCREMENT, DATA_FREE, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES"
+    } else {
+        "TABLE_NAME, TABLE_ROWS, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES"
+    };
     let sql = format!(
-        "SELECT TABLE_NAME, TABLE_ROWS, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES \
-         FROM information_schema.TABLES \
+        "SELECT {columns} FROM information_schema.TABLES \
          WHERE TABLE_SCHEMA = {} AND TABLE_TYPE <> 'VIEW' \
          ORDER BY TABLE_NAME",
         quote_value(database),
@@ -3838,12 +3854,31 @@ pub async fn list_object_statistics(pool: &MySqlPool, database: &str) -> Result<
         .iter()
         .filter_map(|row| {
             let name = get_str_by_name(row, "TABLE_NAME").trim().to_string();
-            (!name.is_empty()).then_some(ObjectStatistics {
+            if name.is_empty() {
+                return None;
+            }
+            let mut statistics = ObjectStatistics {
                 name,
                 schema: Some(database.to_string()),
                 estimated_rows: get_opt_i64(row, "TABLE_ROWS"),
                 total_bytes: get_opt_i64(row, "TOTAL_BYTES"),
-            })
+                ..Default::default()
+            };
+            if include_mysql_details {
+                statistics.data_length = get_opt_i64(row, "DATA_LENGTH");
+                statistics.engine = get_opt_str(row, "ENGINE");
+                statistics.created_at = get_opt_metadata_string(row, "CREATE_TIME");
+                statistics.updated_at = get_opt_metadata_string(row, "UPDATE_TIME");
+                statistics.collation = get_opt_str(row, "TABLE_COLLATION");
+                statistics.row_format = get_opt_str(row, "ROW_FORMAT");
+                statistics.avg_row_length = get_opt_i64(row, "AVG_ROW_LENGTH");
+                statistics.max_data_length = get_opt_i64(row, "MAX_DATA_LENGTH");
+                statistics.check_time = get_opt_metadata_string(row, "CHECK_TIME");
+                statistics.index_length = get_opt_i64(row, "INDEX_LENGTH");
+                statistics.auto_increment = get_opt_unsigned_metadata_string(row, "AUTO_INCREMENT");
+                statistics.data_free = get_opt_i64(row, "DATA_FREE");
+            }
+            Some(statistics)
         })
         .collect())
 }
@@ -4238,6 +4273,7 @@ where
                 enum_values,
                 character_set: get_opt_str(row, "CHARACTER_SET_NAME").filter(|s| !s.is_empty()),
                 collation: get_opt_str(row, "COLLATION_NAME").filter(|s| !s.is_empty()),
+                metadata_capabilities: Some(ColumnMetadataCapabilities::all_supported()),
             })
         })
         .collect();
@@ -4294,6 +4330,7 @@ where
                     .and_then(|c| c.split_once('_').map(|(charset, _)| charset.to_string()))
                     .filter(|s| !s.is_empty()),
                 collation,
+                metadata_capabilities: Some(ColumnMetadataCapabilities::default_only()),
             })
         })
         .collect();
@@ -8360,6 +8397,26 @@ mod tests {
     }
 
     #[test]
+    fn mysql_group_concat_tddl_incorrect_argument_type_retries_without_session_variable() {
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 1232 (HY000): Incorrect argument type to variable 'group_concat_max_len''",
+            "MySQL connection failed: Server error: `ERROR 1232 (HY000): [trace][host][tddl]Incorrect argument type to variable 'group_concat_max_len''",
+            "ERROR 1232 (HY000): Incorrect argument type to variable 'group_concat_max_len'",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible),
+                "{error}"
+            );
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
+                None,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn mysql_group_concat_gaea_parse_int_error_retries_without_session_variable() {
         let error = "MySQL connection failed: Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid syntax'";
 
@@ -8378,6 +8435,31 @@ mod tests {
             "Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid value'",
             "Server error: `ERROR 1105 (HY000): strconv.ParseInt: parsing \"1048576\": invalid syntax'",
             "Server error: `ERROR 1231 (HY000): strconv.ParseInt: parsing \"cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)\": invalid syntax'",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn mysql_group_concat_starrocks_cast_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr (com.starrocks.analysis.CastExpr and com.starrocks.analysis.LiteralExpr are in unnamed module of loader 'app')'";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None);
+    }
+
+    #[test]
+    fn mysql_group_concat_starrocks_cast_retry_requires_exact_error() {
+        for error in [
+            "Server error: `ERROR 1105 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "Server error: `ERROR 1064 (42000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.SlotRef cannot be cast to class com.starrocks.analysis.LiteralExpr'",
+            "Server error: `ERROR 1064 (HY000): class com.starrocks.analysis.CastExpr cannot be cast to class com.starrocks.analysis.SlotRef'",
+            "Server error: `ERROR 1064 (HY000): class com.example.CastExpr cannot be cast to class com.example.LiteralExpr'",
+            "Server error: `ERROR 1064 (HY000): You have an error in your SQL syntax'",
         ] {
             assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None, "{error}");
         }
@@ -8457,6 +8539,13 @@ mod tests {
             mysql_group_concat_setup_fallback_mode(
                 MySqlSetupMode::Standard,
                 "MySQL connection failed: Server error: `ERROR 1105 (HY000): Syntax error near ..._len,2097152) as unsigned)'",
+            ),
+            None
+        );
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(
+                MySqlSetupMode::Standard,
+                "MySQL connection failed: Server error: `ERROR 1232 (HY000): Incorrect argument type to variable 'sql_mode''",
             ),
             None
         );

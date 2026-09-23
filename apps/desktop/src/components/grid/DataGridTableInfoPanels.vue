@@ -59,6 +59,18 @@ const overviewRows = computed(() => {
     { label: t("structureEditor.comment"), value: props.overviewComment ?? "" },
     { label: t("grid.tableInfoEstimatedRows"), value: formatObjectBrowserCount(props.overviewStats?.estimated_rows), mono: true },
     { label: t("grid.tableInfoTotalSize"), value: formatObjectBrowserBytes(props.overviewStats?.total_bytes), mono: true },
+    { label: t("grid.tableInfoDataLength"), value: formatObjectBrowserBytes(props.overviewStats?.data_length), mono: true },
+    { label: t("grid.tableInfoEngine"), value: props.overviewStats?.engine ?? "", mono: true },
+    { label: t("grid.tableInfoCreatedAt"), value: props.overviewStats?.created_at ?? "", mono: true },
+    { label: t("grid.tableInfoUpdatedAt"), value: props.overviewStats?.updated_at ?? "", mono: true },
+    { label: t("grid.tableInfoCollation"), value: props.overviewStats?.collation ?? "", mono: true },
+    { label: t("grid.tableInfoRowFormat"), value: props.overviewStats?.row_format ?? "", mono: true },
+    { label: t("grid.tableInfoAvgRowLength"), value: formatObjectBrowserBytes(props.overviewStats?.avg_row_length), mono: true },
+    { label: t("grid.tableInfoMaxDataLength"), value: formatObjectBrowserBytes(props.overviewStats?.max_data_length), mono: true },
+    { label: t("grid.tableInfoCheckTime"), value: props.overviewStats?.check_time ?? "", mono: true },
+    { label: t("grid.tableInfoIndexLength"), value: formatObjectBrowserBytes(props.overviewStats?.index_length), mono: true },
+    { label: t("grid.tableInfoAutoIncrement"), value: props.overviewStats?.auto_increment ?? "", mono: true },
+    { label: t("grid.tableInfoDataFree"), value: formatObjectBrowserBytes(props.overviewStats?.data_free), mono: true },
   ];
   const query = props.searchQuery.trim().toLowerCase();
   return rows.filter((row) => row.value && (!query || row.label.toLowerCase().includes(query) || row.value.toLowerCase().includes(query)));

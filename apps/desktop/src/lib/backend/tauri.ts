@@ -2,16 +2,41 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
+import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
+
+export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
+  return invoke("database_backup_command", { command });
+}
+
+export function databaseBackupBackground(enabled?: boolean): Promise<DatabaseBackupBackgroundStatus> {
+  return invoke("database_backup_background", { enabled });
+}
+
+export async function downloadDatabaseBackupFile(_runId: string, _index: number): Promise<void> {
+  throw new Error("Use the file manager to access desktop backup files");
+}
+
+export function prepareDatabaseBackupRestore(id: string, index: number): Promise<string | SqlFilePreview> {
+  return invoke("database_backup_command", { command: { action: "file", id, index } });
+}
 import { assertUpdateAllowsCommand } from "@/lib/app/updatePreparation";
 import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 // Re-exported below so the HTTP transport shares one definition; imported here
 // for this module's own signatures (a re-export does not bind local names).
 import type { PluginPlanCapabilities, PluginPlanRequest, PluginPlanResult } from "@/types/pluginPlan";
+import type { PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pluginSchemaMetadata";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   assertUpdateAllowsCommand(command);
   return tauriInvoke<T>(command, args);
 }
+
+import type { MigrationPreflight, MigrationReport } from "./migration";
+export type { MigrationPreflight, MigrationReport } from "./migration";
+export const migrationStatus = (): Promise<MigrationPreflight> => invoke("migration_status");
+export const migrationStart = (): Promise<MigrationReport> => invoke("migration_start");
+export const migrationRetry = (): Promise<MigrationReport> => invoke("migration_retry");
+export const migrationCleanupBackups = (): Promise<void> => invoke("migration_cleanup_backups");
 import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -179,6 +204,7 @@ export interface UpgradeAllAgentDriversResult {
 export interface AgentUpdateBlocker {
   db_type: string;
   label: string;
+  connections: string[];
 }
 
 export type AgentOfflineArtifactKind = "jar" | "native";
@@ -808,6 +834,7 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
 export type { OpenTabsStatePayload, PersistedEditorGroup } from "@/lib/app/openTabsPersistence";
 /** Shared with `@/lib/plugins/pluginHostBridge`; re-exported so the HTTP transport reuses one definition. */
 export type { PluginPlanCapabilities, PluginPlanRequest, PluginPlanResult } from "@/types/pluginPlan";
+export type { PluginColumnMetadata, PluginMetadataFieldAvailability, PluginMetadataFieldCapabilities, PluginTableMetadata, PluginTableMetadataRequest } from "@/types/pluginSchemaMetadata";
 import type { OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
 import { uuid } from "@/lib/common/utils";
 
@@ -967,16 +994,17 @@ export async function forgetWebdavSyncSecretsPassphrase(): Promise<void> {
   return invoke("forget_webdav_sync_secrets_passphrase");
 }
 
-export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<WebDavSyncSummary> {
+export async function webdavSyncUpload(config: WebDavConfig, editorSettings?: unknown, secretsPassphrase?: string, includeSecrets = false): Promise<WebDavSyncSummary> {
   return invoke("webdav_sync_upload", {
     config,
     editorSettings,
     secretsPassphrase,
+    includeSecrets,
   });
 }
 
-export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string): Promise<WebDavDownloadResult> {
-  return invoke("webdav_sync_download", { config, secretsPassphrase });
+export async function webdavSyncDownload(config: WebDavConfig, secretsPassphrase?: string, restoreSecrets = true): Promise<WebDavDownloadResult> {
+  return invoke("webdav_sync_download", { config, secretsPassphrase, restoreSecrets });
 }
 
 export async function snippetSyncTest(config: SnippetSyncConfig): Promise<void> {
@@ -1157,6 +1185,8 @@ export interface AiChatMessage {
   kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
   /** Set on the assistant message whose generation failed; persisted (mirrors dbx-core `AiChatMessage.failed`). */
   failed?: boolean;
+  /** Target frozen when this assistant turn started, retained for confirmation. */
+  sourceBinding?: import("@/lib/ai/aiConversationBinding").AiConversationBinding;
 }
 
 export interface AiConversation {
@@ -1164,7 +1194,16 @@ export interface AiConversation {
   id: string;
   title: string;
   connectionName: string;
+  /** Connection this conversation is bound to (#9902). The binding belongs to
+   *  the conversation, not to whichever editor tab is active.
+   *  Empty means "unbound": either persisted before session-scoped binding
+   *  existed and its `connectionName` matched zero or several saved connections
+   *  (names are not unique), or the bound connection was deleted. Consumers must
+   *  ask the user rather than fall back to the active tab. */
+  connectionId: string;
   database: string;
+  /** Schema for schema-scoped engines (Postgres, Dameng); absent otherwise. */
+  schema?: string;
   messages: AiChatMessage[];
   /** One editable "send later" input saved while an active run occupies the
    *  conversation (parent PRD §5). Persisted with the conversation. */
@@ -1513,6 +1552,10 @@ export async function getColumns(connectionId: string, database: string, schema:
     catalog,
     clientSessionId,
   });
+}
+
+export async function getPluginTableMetadata(request: PluginTableMetadataRequest): Promise<PluginTableMetadata> {
+  return invoke("get_plugin_table_metadata", { request });
 }
 
 export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
@@ -4740,14 +4783,14 @@ export async function meilisearchGetDocument(connectionId: string, index: string
   });
 }
 
-export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<Record<string, any>> {
+export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<MeilisearchIndexSettings> {
   return invoke("meilisearch_get_index_settings", {
     connectionId,
     index,
   });
 }
 
-export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, any>): Promise<void> {
+export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, unknown>): Promise<void> {
   return invoke("meilisearch_update_index_settings", {
     connectionId,
     index,
@@ -4755,11 +4798,18 @@ export async function meilisearchUpdateIndexSettings(connectionId: string, index
   });
 }
 
-export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, any>> {
+export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, unknown>> {
   return invoke("meilisearch_get_index_stats", {
     connectionId,
     index,
   });
+}
+
+export interface MeilisearchIndexSettings {
+  [key: string]: unknown;
+  pagination?: {
+    maxTotalHits?: number;
+  };
 }
 
 export interface MeilisearchIndexOverview {
@@ -5010,7 +5060,10 @@ export interface SqlFilePreview {
   establishesDatabaseContext?: boolean;
   packageFilePaths?: string[];
   packagePartCount?: number;
+  cleanupToken?: string;
 }
+
+export async function releaseSqlFilePreview(_cleanupToken: string): Promise<void> {}
 
 export interface SqlFileProgress {
   executionId: string;

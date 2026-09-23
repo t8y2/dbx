@@ -48,6 +48,7 @@ fn generate_details(tables: &[TableInfo], columns_per_table: usize) -> Vec<Table
                     enum_values: None,
                     character_set: None,
                     collation: None,
+                    metadata_capabilities: None,
                 })
                 .collect(),
             indexes: vec![],

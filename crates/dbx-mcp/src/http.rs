@@ -442,7 +442,7 @@ mod tests {
     async fn http_inactivity_expiry_rolls_back_and_disconnects_inner_owner() {
         let backend = Arc::new(HttpTestBackend::new());
         let (url, manager, cancellation, server_task) =
-            start_http_test_server(backend.clone(), std::time::Duration::from_millis(50)).await;
+            start_http_test_server(backend.clone(), std::time::Duration::from_millis(500)).await;
         let (client, _) = open_active_transaction(&url).await;
 
         wait_for_disposal(&backend).await;

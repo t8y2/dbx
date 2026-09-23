@@ -20,6 +20,7 @@ pub(super) fn write_dsv(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
     options: &DataGridDsvOptions,
+    quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     validate_dsv_options(options, true)?;
     let mut first_row = true;
@@ -29,6 +30,7 @@ pub(super) fn write_dsv(
             context.selected_columns.iter().map(|column| Cow::Borrowed(column.display_name.as_str())),
             options,
             options.include_row_header.then(|| "#".to_string()),
+            quote_char_triggers_quoting,
         )?;
         first_row = false;
     }
@@ -48,6 +50,7 @@ pub(super) fn write_dsv(
             }),
             options,
             options.include_row_header.then(|| (row_index + 1).to_string()),
+            quote_char_triggers_quoting,
         )?;
         first_row = false;
     }
@@ -61,17 +64,18 @@ fn write_dsv_row<'a>(
     values: impl Iterator<Item = Cow<'a, str>>,
     options: &DataGridDsvOptions,
     row_header: Option<String>,
+    quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     let mut first = true;
     if let Some(header) = row_header {
-        write_dsv_field(output, &header, options)?;
+        write_dsv_field(output, &header, options, quote_char_triggers_quoting)?;
         first = false;
     }
     for value in values {
         if !first {
             write_bytes(output, options.column_separator.as_bytes())?;
         }
-        write_dsv_field(output, &value, options)?;
+        write_dsv_field(output, &value, options, quote_char_triggers_quoting)?;
         first = false;
     }
     Ok(())
@@ -83,26 +87,35 @@ fn write_dsv_data_row<'a>(
     cells: impl Iterator<Item = DsvCell<'a>>,
     options: &DataGridDsvOptions,
     row_header: Option<String>,
+    quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     let mut first = true;
     if let Some(header) = row_header {
-        write_dsv_field(output, &header, options)?;
+        write_dsv_field(output, &header, options, quote_char_triggers_quoting)?;
         first = false;
     }
     for cell in cells {
         if !first {
             write_bytes(output, options.column_separator.as_bytes())?;
         }
-        write_dsv_data_field(output, &cell, options)?;
+        write_dsv_data_field(output, &cell, options, quote_char_triggers_quoting)?;
         first = false;
     }
     Ok(())
 }
 
-fn dsv_needs_quote(value: &str, options: &DataGridDsvOptions) -> bool {
+/// Whether a value must be wrapped in quotes. A value is always quoted when it
+/// contains a separator or a line break, because those would otherwise corrupt
+/// the record shape. Whether a bare quote character forces quoting is
+/// format-dependent: RFC4180 formats (CSV/DSV/one-row) must escape an embedded
+/// quote, but plain delimited formats such as TSV are parsed by splitting on the
+/// separator alone (there is no quote state machine on paste-back), so a value
+/// that merely contains `"` must be emitted verbatim rather than wrapped and
+/// doubled.
+fn dsv_needs_quote(value: &str, options: &DataGridDsvOptions, quote_char_triggers_quoting: bool) -> bool {
     value.contains(&options.column_separator)
         || value.contains(&options.row_separator)
-        || value.contains(options.quote)
+        || (quote_char_triggers_quoting && value.contains(options.quote))
         || value.contains('\r')
         || value.contains('\n')
 }
@@ -134,11 +147,12 @@ fn write_dsv_field(
     output: &mut dyn Write,
     value: &str,
     options: &DataGridDsvOptions,
+    quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     let should_quote = match options.quote_policy {
         DataGridQuotePolicy::Always => true,
         DataGridQuotePolicy::Never => false,
-        DataGridQuotePolicy::Minimal => dsv_needs_quote(value, options),
+        DataGridQuotePolicy::Minimal => dsv_needs_quote(value, options, quote_char_triggers_quoting),
     };
     if !should_quote {
         return write_bytes(output, value.as_bytes());
@@ -155,6 +169,7 @@ fn write_dsv_data_field(
     output: &mut dyn Write,
     cell: &DsvCell<'_>,
     options: &DataGridDsvOptions,
+    quote_char_triggers_quoting: bool,
 ) -> Result<(), DataGridExtractError> {
     match cell {
         DsvCell::Null => write_bytes(output, options.null_text.as_bytes()),
@@ -163,7 +178,8 @@ fn write_dsv_data_field(
                 DataGridQuotePolicy::Always => true,
                 DataGridQuotePolicy::Never => false,
                 DataGridQuotePolicy::Minimal => {
-                    dsv_needs_quote(value, options) || value.as_ref() == options.null_text.as_str()
+                    dsv_needs_quote(value, options, quote_char_triggers_quoting)
+                        || value.as_ref() == options.null_text.as_str()
                 }
             };
             if !should_quote {
@@ -188,7 +204,9 @@ pub(super) fn write_one_row(context: &ExtractContext<'_>, output: &mut dyn Write
             write_bytes(output, options.column_separator.as_bytes())?;
         }
         let cell = if value.is_null() { DsvCell::Null } else { DsvCell::Text(value_text(value)) };
-        write_dsv_data_field(output, &cell, &options)?;
+        // A one-row extraction is an RFC4180 CSV record, so embedded quotes must
+        // be escaped.
+        write_dsv_data_field(output, &cell, &options, true)?;
         first = false;
     }
     Ok(())

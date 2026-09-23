@@ -18,6 +18,8 @@ import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
+import type { MultiDbExecutionContext } from "@/composables/useMultiDbExecution";
+import type { MultiDbExecutionTarget } from "@/types/sqlExecution";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { enforceRightSidebarPanelExclusivity, RIGHT_SIDEBAR_PANEL_IDS, transitionRightSidebarPanels, useSettingsStore, type RightSidebarPanelId, type RightSidebarPanelState } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -31,6 +33,7 @@ import type { PluginUpdateBlock } from "@/composables/useComponentUpdates";
 import { COMPONENT_UPDATES_CHANGED_EVENT, notifyComponentPluginsUpdated, notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import { driverStoreUpdateBadgeCount, showMcpUpdateBadge, showToolbarUpdateAction } from "@/lib/updates/updateBadges";
 import {
+  continuePreparedAppUpdate,
   hasPendingComponentUpdatesAfterAppRestart,
   markPendingComponentUpdatesAfterAppUpdate,
   resolveUpdateAllAction,
@@ -38,6 +41,7 @@ import {
   runPendingComponentUpdatePlan,
   shouldCloseUpdateCenterAfterComponentUpdate,
   takePendingComponentUpdatesAfterAppRestart,
+  updateBlockerLabels,
   type PendingComponentUpdatePlan,
 } from "@/lib/updates/componentUpdateOrchestration";
 import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
@@ -89,10 +93,12 @@ import { externalSqlFileOpenErrorMessage, externalSqlEditorMaxBytes, isSqlFilePa
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TabOutputView, TreeNode } from "@/types/database";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
+import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import { resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
+
 import {
   isBrowserReloadShortcut,
   isCloseOtherTabsShortcut,
@@ -151,6 +157,7 @@ import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { objectBrowserTablesToAiTreeNodes } from "@/lib/ai/objectBrowserToAiTargets";
+import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 import { isSchemaAware, isSingleDatabase, supportsConnectionQueryActions, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -180,6 +187,7 @@ const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/S
 const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const PluginCenterPage = defineAsyncComponent(() => import("@/components/plugins/PluginContributionsPanel.vue"));
+const PluginBottomDock = defineAsyncComponent(() => import("@/components/plugins/PluginBottomDock.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
@@ -194,7 +202,9 @@ type AiAssistantHandle = {
   openPluginConversation: (request: AiPluginConversationRequest) => void;
   triggerAction: (action: AiAction, instruction?: string) => void;
   setPrompt: (text: string) => void;
-  addTableMention: (target: { schema?: string; table: string }) => void;
+  addTableMention: (target: { schema?: string; table: string }, binding?: AiConversationBinding) => void;
+  /** Retarget the conversation on its own, for entries that add no mention. */
+  bindConversation: (binding: AiConversationBinding) => Promise<void>;
   clearContextReferences: () => void;
   focusSearch: () => boolean;
   /** Opens a conversation by id (used by the background-run toast, §9). */
@@ -203,7 +213,7 @@ type AiAssistantHandle = {
 
 type AuxiliarySearchSurface = "ai" | "history" | "sqlLibrary" | null;
 
-const { t } = useI18n();
+const { t, locale: appLocale } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
@@ -211,6 +221,19 @@ const { active: appBackgroundActive, backgroundObjectUrl: appBackgroundObjectUrl
 const { uiFontFamilyPreview } = useUiFontFamilyPreview();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
+let pluginTitleLocaleGeneration = 0;
+watch(appLocale, async (locale) => {
+  const generation = ++pluginTitleLocaleGeneration;
+  try {
+    const registry = createFrontendPluginRegistry(await api.listPlugins(), locale);
+    if (generation !== pluginTitleLocaleGeneration) return;
+    queryStore.localizePluginTabTitles((pluginId, contributionId, surface) =>
+      surface === "filesystem" ? registry.listFilesystemProviders().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId)?.contribution.label : registry.findUiContribution(pluginId, contributionId)?.contribution.label,
+    );
+  } catch (error) {
+    console.warn("Failed to refresh localized plugin tab titles", error);
+  }
+});
 const recentConnectionIds = ref<readonly string[]>(parseRecentConnectionIds(safeLocalStorageGet(RECENT_CONNECTION_IDS_STORAGE_KEY)));
 connectionStore.setBeforeConnectHandler(async (config) => {
   const jdbcxRuntime = await ensureJdbcxRuntimeDrivers(config, api);
@@ -1005,7 +1028,7 @@ function multiExecuteTargetLabel(target: { connectionId: string; catalog?: strin
   return [connection?.name || target.connectionId, target.catalog, target.database, target.schema].filter((value) => value !== undefined && value !== "").join(" / ");
 }
 
-async function executeMultiDbTarget(input: { target: { connectionId: string; catalog?: string; database: string; schema?: string }; sourceTabId: string; sql: string; scopeId: string; context: { sourceOffset?: number; manualTransaction?: boolean }; isCancellationRequested: () => boolean }) {
+async function executeMultiDbTarget(input: { target: MultiDbExecutionTarget; sourceTabId: string; sql: string; scopeId: string; context: Readonly<MultiDbExecutionContext>; isCancellationRequested: () => boolean }) {
   const tab = queryStore.tabs.find((candidate) => candidate.id === input.sourceTabId);
   const connection = connectionStore.getConfig(input.target.connectionId);
   if (!tab || !connection) return { status: "failed" as const, errorMessage: t("multiDbExecute.targetMissingConnection") };
@@ -1023,6 +1046,8 @@ async function executeMultiDbTarget(input: { target: { connectionId: string; cat
     manualTransaction: input.context.manualTransaction,
     blockDangerousRedisCommands: blockDangerousRedisCommands.value,
     targetLabel: multiExecuteTargetLabel(input.target),
+    // The confirmation must list the whole fan-out, not just this target.
+    batchTargetLabels: input.context.targets.map(multiExecuteTargetLabel),
     scopeId: input.scopeId,
     isCancellationRequested: input.isCancellationRequested,
     targetContext: sqlExecutionTargetCapabilities(connection)?.provider.toExecutionContext(input.target, connection),
@@ -1284,7 +1309,9 @@ function reportComponentUpdateResult(result: Awaited<ReturnType<typeof component
   if (result.failed.length === 0) syncToolbarComponentUpdateState();
   if (result.plugins > 0) notifyComponentPluginsUpdated();
   if (updatedComponents.length) toast(t("updates.componentsAutoUpdated", { components: updatedComponents.join(t("updates.componentListSeparator")) }));
-  if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
+  if (result.blockedDrivers.length) {
+    toast(t("driverStore.driverUpdateBlocked", { labels: updateBlockerLabels(result.blockedDrivers).join(", ") }), 8000);
+  } else if (result.skippedDrivers > 0) toast(t("updates.componentsAutoUpdateSkipped"), 6000);
   const otherFailureCount = result.failed.length - result.blockedPlugins.length;
   const failureMessages = [result.blockedPlugins.map(pluginUpdateBlockMessage).join("\n"), otherFailureCount > 0 ? t("updates.componentsAutoUpdateFailed", { count: otherFailureCount }) : ""].filter(Boolean);
   if (failureMessages.length) toast(failureMessages.join("\n"), 8000);
@@ -1337,6 +1364,19 @@ function availableComponentUpdateCategories(): ComponentUpdateCategory[] {
   return categories;
 }
 
+function continueAppUpdateWithComponents(categories: ComponentUpdateCategory[]) {
+  return continuePreparedAppUpdate({
+    hasComponentUpdates: categories.length > 0,
+    restartOnly: updateReady.value,
+    rememberComponentUpdates: () => rememberComponentUpdatesForRestartedApp({ kind: "manual", categories }),
+    installComponents: async () => {
+      reportComponentUpdateResult(await componentUpdates.installCategories(categories));
+    },
+    installDownloadedUpdate,
+    restartApp,
+  });
+}
+
 async function updateAllAvailable() {
   if (updatingAllUpdates.value) return;
   updatingAllUpdates.value = true;
@@ -1354,17 +1394,9 @@ async function updateAllAvailable() {
       reportComponentUpdateResult(await componentUpdates.installCategories(categories));
       return;
     }
-    if (action === "defer-components") {
-      const remembered = await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
-      if (remembered) {
-        toast(t("settings.updateRestartHint"), 6000);
-        return;
-      }
-      reportComponentUpdateResult(await componentUpdates.installCategories(categories));
-      return;
-    }
+    if (action === "install-app") return continueAppUpdateWithComponents(categories);
     if (action === "download-app") await downloadUpdateInBackground();
-    if (updateDownloaded.value || updateReady.value) await rememberComponentUpdatesForRestartedApp({ kind: "manual", categories });
+    if (updateDownloaded.value || updateReady.value) await continueAppUpdateWithComponents(categories);
   } finally {
     updatingAllUpdates.value = false;
   }
@@ -1717,7 +1749,6 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
   try {
     await connectionStore.ensureConnected(node.connectionId);
     if (requestId !== addToAiRequestId) return;
-    connectionStore.activeConnectionId = node.connectionId;
 
     let target: { database: string; schema?: string; catalog?: string } | null = null;
     if (node.type === "connection") {
@@ -1738,22 +1769,19 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
     }
     if (!target) return;
 
-    const currentTab = activeTab.value;
-    const contextChanged = currentTab?.connectionId !== node.connectionId || currentTab?.database !== target.database || (currentTab?.schema || "") !== (target.schema || "") || (currentTab?.catalog || "") !== (target.catalog || "");
-
-    const contextTab = queryStore.tabs.find((tab) => tab.connectionId === node.connectionId && tab.database === target.database && (tab.schema || "") === (target.schema || "") && (tab.catalog || "") === (target.catalog || ""));
-    if (contextTab) {
-      queryStore.switchTab(contextTab.id);
-    } else {
-      queryStore.createTab(node.connectionId, target.database, undefined, "query", target.schema, undefined, target.catalog);
-    }
-
+    // The *conversation* is retargeted, not the editor: asking about a table must
+    // not move the workspace's active connection or steal/create a tab (#9902).
+    // The previous connection's mentions are cleared inside applyExternalBinding().
+    const binding: AiConversationBinding = { connectionId: node.connectionId, database: target.database, schema: target.schema };
     const tableMentions = nodes.filter((entry) => entry.type === "table" && !!entry.label).map((entry) => ({ schema: entry.schema, table: entry.label }));
 
     openRightSidebarPanel("ai");
     invokeWhenAiReady((handle) => {
-      if (contextChanged) handle.clearContextReferences();
-      for (const mention of tableMentions) handle.addTableMention(mention);
+      // Applied independently of the mentions: "Ask AI" on a *connection* or
+      // *database* node carries a target but adds no table mention, and it still
+      // has to retarget the conversation (#9902).
+      void handle.bindConversation(binding);
+      for (const mention of tableMentions) handle.addTableMention(mention, binding);
     });
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
@@ -3077,74 +3105,127 @@ async function locateTabInSidebar(tab: QueryTab) {
   await appSidebarRef.value?.locateTabInSidebar(tab);
 }
 
-function ensureQueryTab(): string {
-  const tab = activeTab.value;
-  if (tab && tab.mode === "query") return tab.id;
-  const connId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
-  const sameConnectionTab = tab?.connectionId === connId ? tab : undefined;
-  const db = sameConnectionTab?.database || connectionStore.getConfig(connId)?.database || "";
-  const schema = sameConnectionTab?.schema ?? sameConnectionTab?.objectBrowser?.schema ?? sameConnectionTab?.tableMeta?.schema;
-  const catalog = sameConnectionTab?.catalog ?? sameConnectionTab?.objectBrowser?.catalog ?? sameConnectionTab?.tableMeta?.catalog;
-  return queryStore.createTab(connId, db, undefined, "query", schema, undefined, catalog);
+/**
+ * Query tab an AI-initiated action must run in: the one belonging to the
+ * *requested* connection, created on demand.
+ *
+ * Deliberately not `ensureQueryTab()` — that returns whichever query tab happens
+ * to be active, which is how a conversation bound to one database appended its
+ * SQL to, and executed it on, another connection's editor (#9902). Focus is left
+ * alone (`activate: false`), so running a conversation never yanks the user's
+ * editor away.
+ */
+function ensureQueryTabForConnection(target: AiConversationBinding): string {
+  if (!target.connectionId) return "";
+  const database = target.database || "";
+  const schema = target.schema || undefined;
+  // Schema is matched exactly, empty included. Skipping the comparison when the
+  // target has no schema would reuse a tab on any schema, and execution inherits
+  // that tab's schema — silently running in the wrong namespace.
+  const existing = queryStore.tabs.find((tab) => tab.mode === "query" && tab.connectionId === target.connectionId && (tab.database || "") === database && (tab.schema || undefined) === schema);
+  if (existing) return existing.id;
+  return queryStore.createTab(target.connectionId, database, undefined, "query", schema, undefined, undefined, { activate: false });
 }
 
-function routeAiRedisCommand(command: string, execute: boolean): boolean {
-  if (activeConnection.value?.db_type !== "redis") return false;
+/** Bounded wait for a newly selected Redis console to mount. */
+const REDIS_CONSOLE_READY_TIMEOUT_MS = 2000;
+const REDIS_CONSOLE_READY_POLL_MS = 50;
 
-  // Redis has a dedicated console. Falling through to ensureQueryTab() would
-  // recreate the original bug by opening a SQL tab for a Redis command.
-  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command) : contentAreaRef.value?.insertRedisCommand(command);
-  if (!routed) {
-    console.warn("[DBX] Redis AI command could not reach the active Redis console");
-    return true;
-  }
-  void routed.then((handled: any) => {
-    if (!handled) console.warn("[DBX] Redis AI command could not reach the active Redis console");
-  });
+function routeAiRedisCommand(command: string, execute: boolean, target: AiConversationBinding): boolean {
+  const connection = target.connectionId ? connectionStore.getConfig(target.connectionId) : undefined;
+  if (connection?.db_type !== "redis") return false;
+
+  // Redis has no headless command path — the console *is* the execution vehicle,
+  // and it renders only for the active tab. We deliberately do NOT switch to the
+  // bound connection's console: "an AI action never moves the workspace" is the
+  // whole point of #9902, and an exception here would reintroduce exactly the
+  // behaviour it removes. The user opens that console and retries instead.
+  void deliverRedisAiCommand(command, execute, target);
   return true;
 }
 
-function onAiAppendSql(sql: string) {
-  if (routeAiRedisCommand(sql, false)) return;
-  const tabId = ensureQueryTab();
-  const currentSql = queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+/**
+ * Delivers to the bound connection's console when it is already on screen, and
+ * otherwise refuses with a visible reason.
+ *
+ * The bounded wait covers the one benign case — the user just switched to that
+ * console and it is still mounting. Readiness is polled through a side-effect-free
+ * probe rather than re-issuing the command: a command that ran but reported
+ * `false` (e.g. a dangerous command awaiting confirmation) must not execute twice.
+ */
+async function deliverRedisAiCommand(command: string, execute: boolean, target: AiConversationBinding): Promise<void> {
+  const deadline = performance.now() + REDIS_CONSOLE_READY_TIMEOUT_MS;
+  while (!contentAreaRef.value?.isRedisConsoleReady(target)) {
+    if (performance.now() >= deadline) {
+      // A console.warn is invisible in a desktop app, and the command the user
+      // asked for is simply not going to run — say so, and say what to do.
+      console.warn("[DBX] Redis AI command could not reach the bound Redis console");
+      toast(t("ai.redisConsoleUnreachable"), 5000);
+      return;
+    }
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, REDIS_CONSOLE_READY_POLL_MS));
+  }
+  const routed = execute ? contentAreaRef.value?.executeRedisCommand(command, target) : contentAreaRef.value?.insertRedisCommand(command, target);
+  const handled = await routed;
+  if (!handled) {
+    console.warn("[DBX] Redis AI command was not accepted by the bound Redis console");
+    toast(t("ai.redisConsoleUnreachable"), 5000);
+  }
+}
+
+/** Current editor text of the tab an AI action targets. */
+function aiTargetTabSql(tabId: string): string {
+  return queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+}
+
+function onAiAppendSql(sql: string, target: AiConversationBinding) {
+  if (routeAiRedisCommand(sql, false, target)) return;
+  const tabId = ensureQueryTabForConnection(target);
+  if (!tabId) return;
+  const currentSql = aiTargetTabSql(tabId);
   const appendedSql = buildDeduplicatedAppendedEditorSql(currentSql, sql);
   if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);
 }
 
-function runAiGeneratedSql(sql: string, tabId = activeTab.value?.id) {
+function runAiGeneratedSql(sql: string, tabId: string) {
+  if (!tabId) return;
   selectedSql.value = "";
   nextTick(() => tryExecute(sql, { tabId }));
 }
 
-function onAiExecuteSql(sql: string) {
-  if (routeAiRedisCommand(sql, true)) return;
-  const tabId = ensureQueryTab();
-  const currentSql = queryStore.tabs.find((tab) => tab.id === tabId)?.sql ?? "";
+function onAiExecuteSql(sql: string, target: AiConversationBinding) {
+  if (routeAiRedisCommand(sql, true, target)) return;
+  const tabId = ensureQueryTabForConnection(target);
+  if (!tabId) return;
+  const currentSql = aiTargetTabSql(tabId);
   const appendedSql = buildDeduplicatedAppendedEditorSql(currentSql, sql);
   if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);
   runAiGeneratedSql(sql, tabId);
 }
 
-function onAiTempRunSql(sql: string) {
-  if (routeAiRedisCommand(sql, true)) return;
-  const tabId = ensureQueryTab();
-  runAiGeneratedSql(sql, tabId);
+function onAiTempRunSql(sql: string, target: AiConversationBinding) {
+  if (routeAiRedisCommand(sql, true, target)) return;
+  runAiGeneratedSql(sql, ensureQueryTabForConnection(target));
 }
 
-function onAiRequestAutoExecuteSql(sql: string) {
-  if (routeAiRedisCommand(sql, true)) return;
-  const tabId = ensureQueryTab();
-  queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
+function onAiRequestAutoExecuteSql(sql: string, target: AiConversationBinding) {
+  if (routeAiRedisCommand(sql, true, target)) return;
+  const tabId = ensureQueryTabForConnection(target);
+  if (!tabId) return;
+  // The production gate and the danger classifier must judge the connection the
+  // SQL will actually run on, not whichever tab is visible (#9902).
+  const connection = target.connectionId ? connectionStore.getConfig(target.connectionId) : undefined;
+  queryStore.updateSql(tabId, buildAppendedEditorSql(aiTargetTabSql(tabId), sql));
   selectedSql.value = "";
 
-  const productionAssessment = assessProductionSql(sql, activeConnection.value, activeTab.value?.database);
+  const productionAssessment = assessProductionSql(sql, connection, target.database);
   if (productionAssessment.active && productionAssessment.isMutation) {
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
 
-  const decision = classifyAiSqlExecution(sql, activeConnection.value);
+  const decision = classifyAiSqlExecution(sql, connection);
   if (decision.action === "block") {
     toast(t("ai.autoSqlBlocked"), 5000);
     return;
@@ -3159,9 +3240,10 @@ function onAiRequestAutoExecuteSql(sql: string) {
   });
 }
 
-function onAiOpenExplainPlan(sql: string) {
-  const tabId = ensureQueryTab();
-  queryStore.updateSql(tabId, buildAppendedEditorSql(activeTab.value?.sql || "", sql));
+function onAiOpenExplainPlan(sql: string, target: AiConversationBinding) {
+  const tabId = ensureQueryTabForConnection(target);
+  if (!tabId) return;
+  queryStore.updateSql(tabId, buildAppendedEditorSql(aiTargetTabSql(tabId), sql));
   selectedSql.value = "";
   nextTick(() => {
     void tryExplain(sql, { tabId });
@@ -4348,6 +4430,7 @@ onUnmounted(() => {
                   />
                 </div>
               </div>
+              <PluginBottomDock v-if="!isDetachedWindowContext" />
             </div>
           </div>
 
@@ -4369,8 +4452,8 @@ onUnmounted(() => {
                 @execute-sql="onAiExecuteSql"
                 @temp-run-sql="onAiTempRunSql"
                 @request-auto-execute-sql="onAiRequestAutoExecuteSql"
-                @insert-redis-command="(command: string) => routeAiRedisCommand(command, false)"
-                @execute-redis-command="(command: string) => routeAiRedisCommand(command, true)"
+                @insert-redis-command="(command: string, target: AiConversationBinding) => routeAiRedisCommand(command, false, target)"
+                @execute-redis-command="(command: string, target: AiConversationBinding) => routeAiRedisCommand(command, true, target)"
                 @open-explain-plan="onAiOpenExplainPlan"
                 @toggle-maximize="toggleAiPanelMaximized"
                 @open-settings="activateSettingsPage"

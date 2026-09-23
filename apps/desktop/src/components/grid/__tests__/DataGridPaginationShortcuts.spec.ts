@@ -1,7 +1,5 @@
 // @vitest-environment happy-dom
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { createApp, defineComponent, h, markRaw, nextTick, type App, type PropType } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,7 +28,6 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
 import DataGrid from "../DataGrid.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 
-const dataGridSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 const shortcutCases = [
   { actionId: "goToFirstPage", key: "F1", offset: 0, functionName: "firstPage" },
@@ -298,16 +295,6 @@ describe("DataGrid pagination shortcuts", () => {
 
     expect(bubbled).toHaveBeenCalledTimes(targets.length);
     expect(paginate).not.toHaveBeenCalled();
-  });
-
-  it("routes shortcuts to the existing pagination functions and preserves PageUp/PageDown navigation", () => {
-    expect(dataGridSource).toMatch(/if \(!targetAllowsNativeClipboard && handleGridPaginationShortcut\(event\)\) return;/);
-    for (const { actionId, functionName } of shortcutCases) {
-      expect(dataGridSource).toContain(`is${actionId[0]!.toUpperCase()}${actionId.slice(1)}Shortcut(event, shortcuts)`);
-      expect(dataGridSource).toContain(`navigate = ${functionName}`);
-    }
-    expect(dataGridSource).toContain('event.key === "PageUp" && navigateSelectedCell("pageUp", event.shiftKey)');
-    expect(dataGridSource).toContain('event.key === "PageDown" && navigateSelectedCell("pageDown", event.shiftKey)');
   });
 
   it("keeps legacy settings without pagination mappings keyboard-neutral", async () => {

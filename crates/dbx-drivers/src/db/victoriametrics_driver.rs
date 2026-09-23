@@ -270,6 +270,7 @@ pub async fn list_object_statistics(client: &VictoriaMetricsClient) -> Result<Ve
             estimated_rows: item.value.as_i64().or_else(|| item.value.as_str().and_then(|value| value.parse().ok())),
             // VictoriaMetrics exposes series counts here, but no per-metric storage size.
             total_bytes: None,
+            ..Default::default()
         })
         .collect())
 }

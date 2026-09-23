@@ -57,6 +57,7 @@ async fn list_databases(
                 database_scope,
                 allowed_databases,
                 database_policies: Vec::new(),
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         })

@@ -695,6 +695,13 @@ pub fn classify_sql_risk(sql: &str, dialect: &str) -> Result<SqlRisk, String> {
 /// Classify SQL risk using both the parser dialect and the concrete database
 /// type so dialect-specific write forms cannot be mistaken for read queries.
 pub fn classify_sql_risk_for_database(sql: &str, database_type: DatabaseType) -> Result<SqlRisk, String> {
+    if database_type == DatabaseType::Salesforce {
+        // SOQL is not SQL: sqlparser either misreads it or fails, and the
+        // keyword fallback would then judge a statement by the words inside its
+        // string literals. The Salesforce classifier knows the only two shapes
+        // the driver accepts.
+        return Ok(salesforce_risk_to_sql_risk(crate::query_execution_sql::classify_salesforce_statement_risk(sql)));
+    }
     if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type) {
         return Ok(match risk {
             crate::query_execution_sql::SearchEngineQueryRisk::ReadOnly => SqlRisk::ReadOnly,
@@ -707,11 +714,28 @@ pub fn classify_sql_risk_for_database(sql: &str, database_type: DatabaseType) ->
     classify_sql_risk_with_database(sql, normalized, Some(database_type))
 }
 
+/// Map the Salesforce classifier onto the shared risk tiers. A single-record DML
+/// that names its record is an ordinary write, so "safe write" permission is
+/// enough for it; an unscoped or unrecognized statement takes the high-risk tier
+/// and needs the central dangerous-operation permission.
+fn salesforce_risk_to_sql_risk(risk: crate::query_execution_sql::SalesforceStatementRisk) -> SqlRisk {
+    use crate::query_execution_sql::SalesforceStatementRisk;
+    match risk {
+        SalesforceStatementRisk::Read => SqlRisk::ReadOnly,
+        SalesforceStatementRisk::ScopedWrite => SqlRisk::Write,
+        SalesforceStatementRisk::OpaqueWrite => SqlRisk::Ddl,
+    }
+}
+
 /// Return whether MCP must require the central dangerous-operation permission.
 /// Parse failures fail closed for writes. Safe-write mode permits plain INSERT
 /// and single-table UPDATE/DELETE statements with an effective predicate;
 /// broader or opaque mutations require central high-risk permission.
 pub fn is_dangerous_sql_for_database(sql: &str, database_type: DatabaseType) -> bool {
+    if database_type == DatabaseType::Salesforce {
+        return crate::query_execution_sql::classify_salesforce_statement_risk(sql)
+            == crate::query_execution_sql::SalesforceStatementRisk::OpaqueWrite;
+    }
     if let Some(risk) = crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type) {
         return risk == crate::query_execution_sql::SearchEngineQueryRisk::Dangerous;
     }
@@ -742,6 +766,12 @@ pub fn is_dangerous_sql_for_database(sql: &str, database_type: DatabaseType) -> 
 /// so it is forbidden independently of read/write and high-risk permissions.
 pub fn mcp_sql_has_forbidden_database_switch(sql: &str, database_type: DatabaseType) -> bool {
     if crate::query_execution_sql::classify_search_engine_query_risk(sql, database_type).is_some() {
+        return false;
+    }
+    if database_type == DatabaseType::Salesforce {
+        // SOQL has no USE, and the Salesforce pool is keyed per connection rather
+        // than per database, so no statement can redirect a later call. Returning
+        // early also keeps the SQL parser off the JSON body of a pseudo-command.
         return false;
     }
     let database_type_name = format!("{database_type:?}");
@@ -1218,6 +1248,7 @@ impl Visitor for ProofFunctionVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_execution_sql::is_write_sql_for_database;
 
     #[test]
     fn mysql_proof_accepts_plain_reads_and_allowlisted_functions() {
@@ -1859,6 +1890,72 @@ mod tests {
             assert!(!is_dangerous_sql_for_database("PUT /products/_doc/1\n{}", database_type));
             assert_eq!(classify_sql_risk_for_database("DELETE /products", database_type).unwrap(), SqlRisk::Ddl);
             assert!(is_dangerous_sql_for_database("DELETE /products", database_type));
+        }
+    }
+
+    #[test]
+    fn classifies_salesforce_soql_as_read_even_when_sqlparser_cannot() {
+        let database_type = DatabaseType::Salesforce;
+        for soql in [
+            "SELECT Id, Name FROM Account",
+            // SOQL-only forms: FIELDS(), date literals, relationship subqueries.
+            "SELECT FIELDS(ALL) FROM Account LIMIT 200",
+            "SELECT Id FROM Opportunity WHERE CloseDate = LAST_N_DAYS:7",
+            "SELECT Id, (SELECT Id FROM Contacts) FROM Account",
+            // A literal that names a write verb is still a read.
+            "SELECT Id FROM Case WHERE Subject = 'Delete request'",
+        ] {
+            assert_eq!(classify_sql_risk_for_database(soql, database_type).unwrap(), SqlRisk::ReadOnly, "{soql}");
+            assert!(!is_dangerous_sql_for_database(soql, database_type), "{soql}");
+            assert!(!is_write_sql_for_database(soql, database_type), "{soql}");
+            assert!(!mcp_sql_has_forbidden_database_switch(soql, database_type), "{soql}");
+        }
+    }
+
+    #[test]
+    fn classifies_scoped_salesforce_dml_as_a_safe_write() {
+        let database_type = DatabaseType::Salesforce;
+        let update = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Opportunity\",\"id\":\"006x\",\"fields\":{\"StageName\":\"Closed Won\"}}";
+        let insert = "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Lead\",\"fields\":{\"Company\":\"Acme\"}}";
+        let delete = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Lead\",\"id\":\"00Qx\"}";
+        for dml in [update, insert, delete] {
+            // A single identified record is a scoped write: "safe write" permission
+            // is enough, the central dangerous-operation permission is not.
+            assert_eq!(classify_sql_risk_for_database(dml, database_type).unwrap(), SqlRisk::Write, "{dml}");
+            assert!(!is_dangerous_sql_for_database(dml, database_type), "{dml}");
+            assert!(is_write_sql_for_database(dml, database_type), "{dml}");
+            // The JSON body is never parsed as SQL, so a `USE`-shaped value inside
+            // it cannot trip the database-switch guard.
+            assert!(!mcp_sql_has_forbidden_database_switch(dml, database_type), "{dml}");
+        }
+        assert!(!mcp_sql_has_forbidden_database_switch(
+            "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Description\":\"USE prod\"}}",
+            database_type
+        ));
+        // The tokenizer fallback treats a `;` inside a JSON value as a statement
+        // boundary, so without the Salesforce branch this write would be refused
+        // as a database switch. SOQL cannot switch databases at all.
+        assert!(!mcp_sql_has_forbidden_database_switch(
+            "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Description\":\"a; USE prod\"}}",
+            database_type
+        ));
+    }
+
+    #[test]
+    fn classifies_unscoped_salesforce_writes_as_high_risk() {
+        let database_type = DatabaseType::Salesforce;
+        for statement in [
+            // No Id: nothing bounds the write.
+            "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"fields\":{\"Name\":\"x\"}}",
+            // Unknown operation and unknown pseudo-command headers fail closed.
+            "DBX SALESFORCE DML\n{\"op\":\"upsert\",\"object\":\"Account\",\"externalId\":\"E-1\"}",
+            "DBX SALESFORCE BULK\n{}",
+            // Non-SOQL text the driver would reject anyway.
+            "DELETE FROM Account",
+        ] {
+            assert_eq!(classify_sql_risk_for_database(statement, database_type).unwrap(), SqlRisk::Ddl, "{statement}");
+            assert!(is_dangerous_sql_for_database(statement, database_type), "{statement}");
+            assert!(is_write_sql_for_database(statement, database_type), "{statement}");
         }
     }
 }

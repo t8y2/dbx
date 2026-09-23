@@ -321,6 +321,8 @@ export interface McpConnectionPolicy {
   databaseScope: "all" | "selected" | "none";
   allowedDatabases: string[];
   databasePolicies: McpDatabasePolicy[];
+  /** Opt-in for AI-agent DML against a Salesforce org; forced off by `readOnly`. */
+  allowSalesforceDml: boolean;
 }
 
 export interface McpDatabasePolicy {

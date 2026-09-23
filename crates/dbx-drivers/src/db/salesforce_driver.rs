@@ -976,7 +976,10 @@ pub enum SfDmlOp {
 }
 
 impl SfDmlOp {
-    fn as_str(&self) -> &'static str {
+    /// Lowercase wire name, as it appears in the statement's `op` field. Public
+    /// so callers that render a statement back to a human (MCP write
+    /// confirmations) cannot drift from what the parser accepts.
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Insert => "insert",
             Self::Update => "update",

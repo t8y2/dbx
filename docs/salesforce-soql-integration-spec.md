@@ -215,9 +215,47 @@ capabilities 覆盖（MVP）：
 
 ## 10. MCP 暴露（**已决策 D3：只读默认暴露；DML 连接级开关 + 人工确认，默认关**）
 
-- `mcpMode: bridge`，与 Elasticsearch/MongoDB 同路径。
-- 默认暴露：`query`（SOQL 只读）、schema 浏览工具、`current_user` 上下文。
-- DML 工具：仅当连接级开关显式打开时暴露，且每次写操作要求人工确认。默认关闭。
+### 10.1 已实现（M5）
+
+清单里的 `mcpMode: bridge` 是**声明性字段**：全仓无运行时消费者（`grep mcp_mode` 只命中 `crates/dbx-types/src/database_manifest.rs`），Salesforce 走 `runtimeMode: native` 进程内路径（`PoolKind::Salesforce`），因此 Local 与 Web 两种 MCP 后端都能直接用同一批工具，不需要 bridge 进程。
+
+只读面（默认暴露，无需额外授权）：
+
+| 工具 | Salesforce 行为 |
+|---|---|
+| `dbx_list_tables` | 列出 org 对象（describe global 缓存） |
+| `dbx_describe_table` | 列出对象字段 |
+| `dbx_execute_query` | 执行 SOQL；`dbx-sql` 的 Salesforce 分类器把 SOQL 判为 `Read` |
+| `dbx_list_databases` | 不返回数据库，而是说明「一个 org 就是一个作用域」并指向 `dbx_list_tables` + SOQL 示例 |
+| `dbx_execute_batch` | 拒绝（`DBX_BATCH_UNSUPPORTED`）：SOQL 只读，无多语句脚本可批 |
+| `dbx_open_session` | 拒绝（`SESSION_UNSUPPORTED`）：每次调用都是无状态 REST，无会话可固定、无事务 |
+| `dbx_salesforce_current_user` | 新增：连接用户 / 简档 / org 显示名 / 是否具备 “Modify All Data” |
+
+写入面（**通道 B：两步确认**，新增三个工具中的后两个）：
+
+1. `dbx_salesforce_prepare_write { op, object, id?, fields? }` — 只构造并校验 `DBX SALESFORCE DML` 伪命令，**不发送任何请求**。返回人类可读摘要（操作 / 对象 / 记录 Id / 逐字段值 / 连接 / 身份）+ 一次性 `confirm_token`。
+2. `dbx_salesforce_apply_write { confirm_token }` — 只执行令牌对应的那一条语句；令牌单次有效、TTL 300 秒、与语句绑定，进程内最多 64 条待确认（超出淘汰最旧）。
+
+服务端强制点（agent 无法绕过）：
+
+- `dbx_execute_query` 对 Salesforce 连接显式拒绝写入伪命令（`SALESFORCE_DML_REQUIRES_CONFIRMATION`）。没有这一条，可写策略下的 agent 能直接把伪命令当「查询」发出去，同时绕过连接级开关和两步确认——而 Salesforce 无法回滚。
+- 连接级开关 `allowSalesforceDml`（`McpConnectionRule`，`#[serde(default)]`，默认 `false`；老策略反序列化后自然为关）。未开启 → `SALESFORCE_DML_DISABLED`。
+- `read_only` 是硬上限：`connection_allows_salesforce_dml` 要求 `allow_salesforce_dml && !read_only`，`effective_mcp_policy_with_legacy_allow_writes(…, Some(false))` 会连同 `allow_dangerous_sql` 一起清掉该开关；前端 `normalizeMcpGlobalPolicy` 与 `onMcpConnectionExecutionModeChange` 同样在切到只读时撤销它。
+- prepare 与 apply **各自**跑一遍完整 `validate_sql_policy`（全局/连接/数据库只读、高风险分级、`targets_production_database`），所以两次调用之间撤销权限立即生效。
+- prepare 时以驱动的 `parse_salesforce_statement` 为权威校验，保证不会为 org 必然拒绝的语句发令牌；`upsert`/bulk/composite 一律 `SALESFORCE_DML_INVALID`（一次只碰一条记录）。
+- 身份查询是 best-effort：失败只在摘要里写「身份未知」，仍然完成 prepare，把是否 apply 的决定权留给人。
+
+风险分级（`crates/dbx-sql/src/query_execution_sql.rs`，fail-closed）：SOQL → `Read`；带 Id 的单记录 DML → `ScopedWrite`（映射 `SqlRisk::Write`，只需 safe_write）；无 Id / 无法判定 → `OpaqueWrite`（映射 `SqlRisk::Ddl`，需 allow_dangerous_sql）。
+
+前端开关位置：**设置 → MCP → 连接范围**，仅对 `db_type === "salesforce"` 的连接行渲染（`McpResourceScopePicker.vue`），文案 `settings.mcpConnectionPolicyAllowSalesforceDml`；有效执行模式为只读时点击只提示不保存。工具白名单里三个新工具可独立勾选，因此可以只给 agent 读能力（`current_user` + SOQL）而不给写通道。
+
+历史与活动标签：`mcp_sql_activity_kind` / `mcp_sql_operation` 增加了 Salesforce 分支（`Read` → `query`/`SELECT`；写入 → `data_change`/对应 DML 动词）。通用路径按 SQL 风险档推断标签，而 Salesforce 的无范围写入 fail-closed 落在 DDL 档，会把一次记录写入误标成 `schema_change`；`mcp_sql_operation` 也只会取到伪命令首词 `DBX`。同理 `mcp_sql_has_forbidden_database_switch` 对 Salesforce 直接返回 `false`：SOQL 没有 `USE`、pool 按连接而非库分键，而通用 tokenizer 回退会把 JSON 字段值里的 `;` 当成语句边界，从而把 `{"Description":"a; USE prod"}` 这样的合法写入误判为切库。
+
+### 10.2 未做（有意留待后续）
+
+- 每次 apply 前弹出**桌面端**确认对话框（当前确认发生在 agent ↔ 人之间，DBX 只做服务端强制 + 摘要）。
+- 对象级 createable/updateable/deletable 预检（现在靠 org 自身逐行报错）。
+- External-ID upsert、Composite/Graph 原子多记录写入。
 
 ---
 
@@ -228,9 +266,9 @@ capabilities 覆盖（MVP）：
 | ✅ **M0 骨架** | salesforce.yaml + sync 脚本 + PoolKind/分发接线 + 图标 + 表单（token 粘贴模式）| manifest 三测试通过（`cargo test -p dbx-core --test database_capabilities` + 两个 `driver-manifest.test.ts`），能用粘贴 token 连上 dev org |
 | ✅ **M1 查询闭环** | execute_query（SOQL→QueryResult）+ 分页 + 错误映射 + listTables/listColumns（describe 缓存）+ userinfo/admin 探测 | 对象树可浏览，SOQL 查询出结果，配额友好 |
 | ✅ **M2 OAuth** | PKCE 浏览器流（桌面）+ Device Flow（web）+ token 持久化与刷新 | 桌面一键授权，重启不丢登录 |
-| **M3 编辑体验** | SOQL 方言高亮 + 补全（对象/字段/关系/picklist）+ 展开全部字段 | 补全基于 describe 缓存，无重复 API 消耗 |
-| **M4 DML** | 网格行级编辑（§8.2）+ tableDataEdit capability 打开 + 只读/警示联动 | 编辑-保存-逐行错误反馈闭环 |
-| **M5 MCP** | bridge 暴露只读工具（DML 视 D3 决策） | agent 可通过 MCP 查询 org |
+| ✅ **M3 编辑体验** | SOQL 方言高亮 + 补全（对象/字段/关系/picklist）+ 展开全部字段 | 补全基于 describe 缓存，无重复 API 消耗 |
+| ✅ **M4 DML** | 网格行级编辑（§8.2）+ tableDataEdit capability 打开 + 只读/警示联动 + 状态栏身份徽章 | 编辑-保存-逐行错误反馈闭环 |
+| ✅ **M5 MCP** | 只读工具 Salesforce 化（§10.1）+ `dbx_salesforce_current_user` + SOQL 风险分级 + 拒绝 batch/session + 两步确认 DML 通道（连接级开关默认关） | agent 可通过 MCP 查询 org；写入必须 prepare→人工确认→apply，且无法从 `dbx_execute_query` 绕过 |
 
 依赖关系：M1 是核心；M2/M3 可并行；M4 依赖 M1 的 describe 元数据；M5 依赖 M1。
 **最短可演示路径：M0+M1（token 粘贴 + 查询 + 浏览）。**
@@ -242,6 +280,7 @@ capabilities 覆盖（MVP）：
 - **手工/集成**：注册 Free Developer Edition org（developer.salesforce.com/signup）作为固定测试环境；seed 若干 Account/Contact/自定义对象。
 - **Rust 单测**：HTTP 层 mock（照 Elasticsearch 驱动现有测试方式）；OAuth 流程用 mock token endpoint；SOQL→QueryResult 映射用录制的真实响应 fixture。
 - **前端**：补全 scanner 单测（vitest）；DataGrid 编辑链路沿用现有测试模式。
+- **MCP**：`cargo test -p dbx-mcp --lib salesforce` 覆盖两步确认通道（令牌单次有效/过期/上限、连接级开关、只读与生产规则、伪命令不能从 `dbx_execute_query` 偷渡、batch/session 拒绝、身份摘要）；前端 `mcpPolicySelection.spec.ts` 用正则从 `crates/dbx-mcp/src/server.rs` 抓取已注册工具名，断言工具目录与后端严格同步——新增工具若忘记加进 `MCP_TOOL_OPTIONS`，该测试会失败。
 - **manifest 一致性**：CLAUDE.md 规定的三个测试进 CI 必跑。
 - CI 不连真实 org（无 secret 依赖），真实 org 验证走手工 checklist。
 
@@ -253,7 +292,7 @@ capabilities 覆盖（MVP）：
 |---|---|---|
 | **D1** | Connected App 分发 | ✅ 官方内置为主 + BYO 高级选项 + token 粘贴兜底 |
 | **D2** | DML 机制 | ✅ 网格行级编辑（JSON 伪命令通道）为主，单记录 JSON 编辑器 Phase 3 补充（§8.2） |
-| **D3** | MCP DML 暴露 | ✅ 只读工具默认暴露；DML 连接级开关 + 人工确认，默认关 |
+| **D3** | MCP DML 暴露 | ✅ 只读工具默认暴露；DML 连接级开关 + 人工确认，默认关（实现为两步 `prepare_write`/`apply_write` 令牌通道，见 §10.1） |
 | D4 | refresh_token 明文落盘 | ✅ 接受（与现状一致），文档标注；未来 secret 加密时首批迁移 |
 | D5 | queryAll（回收站） | ✅ Phase 2，不进 MVP |
 | D6 | 伪命令载荷格式 | ✅ JSON（可校验、可扩展） |

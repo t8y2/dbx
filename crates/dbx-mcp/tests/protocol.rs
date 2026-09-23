@@ -328,9 +328,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 25);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 23);
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_peek_messages"));
     #[cfg(not(feature = "mq-admin"))]
@@ -339,6 +339,9 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
+    assert!(names.contains(&"dbx_salesforce_current_user"));
+    assert!(names.contains(&"dbx_salesforce_prepare_write"));
+    assert!(names.contains(&"dbx_salesforce_apply_write"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_execute_batch"));
     assert!(names.contains(&"dbx_list_routines"));

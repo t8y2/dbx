@@ -109,6 +109,9 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_rollback_transaction` | Roll back the active session transaction |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_salesforce_current_user` | Show the Salesforce user and org behind a connection, including whether the profile holds "Modify All Data" |
+| `dbx_salesforce_prepare_write` | Prepare one Salesforce record write and return a summary plus a single-use confirm token |
+| `dbx_salesforce_apply_write` | Apply a prepared Salesforce write using its confirm token |
 | `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
 | `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
@@ -175,6 +178,31 @@ This opt-in mode is available only for local native MySQL connections. DBX Web/`
 Responses include `transaction_state` (`idle`, `active`, or `unknown`) and, when known, `transaction_outcome` (`committed`, `rolled_back`, or `unknown`). A normal MySQL statement error can leave the transaction active; DBX probes fresh state on the same connection before reporting it. A timeout, cancellation, transport failure, or lost `COMMIT` acknowledgement makes the outcome `unknown`, permanently blocks more SQL on that session, and disposes the connection without replaying the statement or `COMMIT`. A positive connection query timeout applies to transaction operations; when the connection is configured as unlimited (`0`), transaction owners still apply their default 300-second operation cap so busy work remains bounded. Closing, expiry, protocol-session deletion, and server shutdown attempt bounded rollback for a known active transaction and then dispose the connection.
 
 <Callout type="warn">Rollback guarantees require transactional storage such as InnoDB. Triggers, stored functions, nontransactional tables, and external side effects can have effects that MySQL cannot roll back. DBX rechecks the current connection/database scope, tool allowlist, read-only and production protections, and confirmed SQL after queue waiting. Rollback and close remain available for cleanup after write permission is revoked.</Callout>
+
+## Salesforce SOQL and DML
+
+Salesforce connections speak SOQL, not SQL, and DBX shapes the MCP surface around that:
+
+- `dbx_list_tables` lists the org's objects, `dbx_describe_table` lists an object's fields, and `dbx_execute_query` runs SOQL (`SELECT Id, Name FROM Account LIMIT 10`).
+- `dbx_list_databases` explains that one Salesforce org is one scope instead of inventing databases.
+- `dbx_execute_batch` and `dbx_open_session` are refused: SOQL is read-only so there is no multi-statement script to batch, and every call is a stateless REST request — there is no session to pin and no transaction to open.
+- A record write is never a query. `dbx_execute_query` rejects write attempts with `SALESFORCE_DML_REQUIRES_CONFIRMATION` so the confirmation below cannot be bypassed.
+
+### Confirming a write
+
+Writing goes through two calls, and the second one only works if a human saw the first one's summary:
+
+1. `dbx_salesforce_prepare_write` with `connection_id` (or `connection_name`), `op` (`insert`, `update`, or `delete`), `object` (an API name such as `Account` or `Invoice__c`), the record `id` for `update`/`delete`, and `fields` for `insert`/`update`. Nothing is sent to Salesforce.
+2. Show the returned summary to the user: the operation, object, record Id, every field value, the connection, and the identity the change will be attributed to.
+3. `dbx_salesforce_apply_write` with the `confirm_token` from step 1.
+
+The token is single-use, expires 5 minutes after it was issued, and is bound to that exact statement — a changed write needs a new prepare. A replayed, expired, or never-issued token fails with `CONFIRM_TOKEN_INVALID`. DBX re-checks the connection scope, tool allowlist, read-only and production protections, and the DML opt-in at apply time, so revoking permission between the two calls takes effect immediately.
+
+<Callout type="warn">Salesforce writes are not transactional. Once `dbx_salesforce_apply_write` returns, the record has changed in the org and DBX cannot roll it back. Each call touches exactly one record: `upsert`, bulk, and composite writes are rejected at prepare time with `SALESFORCE_DML_INVALID`. Preparing a write needs the per-connection **Allow DML** switch in **Settings → MCP**, which is off by default and returns `SALESFORCE_DML_DISABLED` until a person turns it on; a read-only execution mode ignores the switch entirely.</Callout>
+
+### Who the write is attributed to
+
+`dbx_salesforce_current_user` returns the connected user, their profile, the org display name, and whether that profile holds **Modify All Data** — the flag that decides whether field-level security and record sharing apply at all. Call it before preparing a write, and use it to tell a permission failure apart from a bad record Id. `dbx_salesforce_prepare_write` includes the same identity in its summary; if the lookup fails the summary says the identity is unknown and still prepares the write, leaving the decision with the user.
 
 ## Database Access
 

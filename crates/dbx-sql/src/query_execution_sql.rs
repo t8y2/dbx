@@ -298,9 +298,11 @@ pub fn is_write_sql_for_database(sql: &str, database_type: DatabaseType) -> bool
         }
     }
     if database_type == DatabaseType::Salesforce {
-        if let Some(is_write) = classify_salesforce_statement_write(sql) {
-            return is_write;
-        }
+        // SOQL has no write verbs — every write arrives as a DBX pseudo-command —
+        // so the keyword scan below would misread a string literal
+        // (`Subject = 'Delete request'`) or a custom field (`Update__c`) as a
+        // write and lock a read-only session out of an ordinary SELECT.
+        return classify_salesforce_statement_risk(sql) != SalesforceStatementRisk::Read;
     }
     if let Some(risk) = classify_search_engine_query_risk(sql, database_type) {
         return risk != SearchEngineQueryRisk::ReadOnly;
@@ -318,18 +320,66 @@ fn classify_dynamodb_statement_write(source: &str) -> Option<bool> {
     }
 }
 
-/// Classify a `DBX SALESFORCE` pseudo-command as a write or non-write.
-/// `DBX SALESFORCE DML` → `Some(true)`; any other `DBX SALESFORCE` header →
-/// `Some(true)` (fail closed); plain SOQL → `None` (fall through to generic
-/// classification where SELECT is read).
-fn classify_salesforce_statement_write(source: &str) -> Option<bool> {
-    let header = source.lines().find(|line| !line.trim().is_empty())?.trim().to_ascii_uppercase();
-    if !header.starts_with("DBX SALESFORCE") {
-        return None;
+/// How a Salesforce statement must be treated by write and risk classification.
+///
+/// `SfClient::execute_query` accepts exactly two shapes: a SOQL `SELECT`, which
+/// the REST query endpoint runs read-only, and a `DBX SALESFORCE <…>`
+/// pseudo-command carrying a JSON body. Anything else is rejected by Salesforce
+/// anyway, so it is classified as an opaque write and fails closed rather than
+/// being guessed at by the SQL keyword scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalesforceStatementRisk {
+    /// SOQL `SELECT` — always a read, whatever its literals and field names say.
+    Read,
+    /// Single-record DML naming its object and, for update/delete, its record Id.
+    ScopedWrite,
+    /// Unscoped or unknown DML, unrecognized pseudo-commands, non-SOQL text.
+    OpaqueWrite,
+}
+
+pub fn classify_salesforce_statement_risk(source: &str) -> SalesforceStatementRisk {
+    use SalesforceStatementRisk::{OpaqueWrite, Read, ScopedWrite};
+
+    let header = source.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    if header.to_ascii_uppercase().starts_with("DBX SALESFORCE") {
+        return if salesforce_dml_is_scoped(source) { ScopedWrite } else { OpaqueWrite };
     }
-    // Every DBX SALESFORCE pseudo-command is a write: only DML exists today,
-    // and unknown future headers should fail closed rather than slip through.
-    Some(true)
+    // Comments are stripped before the verb check, but the pseudo-command branch
+    // above deliberately reads the raw text: a `--` inside a JSON field value
+    // must not be mistaken for a line comment and truncate the payload.
+    let first_word = strip_sql_comments(source)
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .find(|token| !token.is_empty())
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if first_word == "SELECT" {
+        Read
+    } else {
+        OpaqueWrite
+    }
+}
+
+/// Whether a `DBX SALESFORCE DML` body targets exactly one identified record:
+/// an insert needs only its object, while an update or delete without an Id has
+/// nothing bounding it and stays opaque.
+fn salesforce_dml_is_scoped(source: &str) -> bool {
+    // The header line never contains a brace, so the JSON body starts at the first `{`.
+    let Some(start) = source.find('{') else { return false };
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&source[start..]) else {
+        return false;
+    };
+    let names_object =
+        body.get("object").and_then(|value| value.as_str()).is_some_and(|object| !object.trim().is_empty());
+    if !names_object {
+        return false;
+    }
+    match body.get("op").and_then(|value| value.as_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("insert") => true,
+        Some("update") | Some("delete") => {
+            body.get("id").and_then(|value| value.as_str()).is_some_and(|id| !id.trim().is_empty())
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1997,26 +2047,98 @@ mod tests {
     }
 
     #[test]
-    fn classify_salesforce_statement_write_dml_is_write() {
-        let dml = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"x\",\"fields\":{}}";
-        assert_eq!(classify_salesforce_statement_write(dml), Some(true));
+    fn classify_salesforce_statement_risk_scoped_dml() {
+        let update = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Name\":\"Acme\"}}";
+        assert_eq!(classify_salesforce_statement_risk(update), SalesforceStatementRisk::ScopedWrite);
+        let delete = "DBX SALESFORCE DML\n{\"op\":\"delete\",\"object\":\"Account\",\"id\":\"001x\"}";
+        assert_eq!(classify_salesforce_statement_risk(delete), SalesforceStatementRisk::ScopedWrite);
+        let insert = "DBX SALESFORCE DML\n{\"op\":\"insert\",\"object\":\"Lead\",\"fields\":{\"Company\":\"Acme\"}}";
+        assert_eq!(classify_salesforce_statement_risk(insert), SalesforceStatementRisk::ScopedWrite);
     }
 
     #[test]
-    fn classify_salesforce_statement_write_unknown_header_fails_closed() {
-        let unknown = "DBX SALESFORCE FUTURE\n{}";
-        assert_eq!(classify_salesforce_statement_write(unknown), Some(true));
+    fn classify_salesforce_statement_risk_unscoped_dml_fails_closed() {
+        // No Id: nothing bounds the write, so it is not a safe write.
+        assert_eq!(
+            classify_salesforce_statement_risk(
+                "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"fields\":{}}"
+            ),
+            SalesforceStatementRisk::OpaqueWrite
+        );
+        // Unknown op / unknown header / unparseable body all fail closed.
+        assert_eq!(
+            classify_salesforce_statement_risk(
+                "DBX SALESFORCE DML\n{\"op\":\"upsert\",\"object\":\"Account\",\"id\":\"001x\"}"
+            ),
+            SalesforceStatementRisk::OpaqueWrite
+        );
+        assert_eq!(
+            classify_salesforce_statement_risk("DBX SALESFORCE FUTURE\n{}"),
+            SalesforceStatementRisk::OpaqueWrite
+        );
+        assert_eq!(
+            classify_salesforce_statement_risk("DBX SALESFORCE DML\n{not json"),
+            SalesforceStatementRisk::OpaqueWrite
+        );
     }
 
     #[test]
-    fn classify_salesforce_statement_write_soql_is_not_classified() {
-        assert_eq!(classify_salesforce_statement_write("SELECT Id FROM Account"), None);
-        assert_eq!(classify_salesforce_statement_write("  SELECT Name FROM Lead  "), None);
+    fn classify_salesforce_statement_risk_dml_body_survives_comment_lookalikes() {
+        // A `--` inside a field value must not be stripped as a line comment:
+        // the pseudo-command branch reads the raw text, so the body still parses
+        // and the write stays scoped.
+        let dml = "DBX SALESFORCE DML\n{\"op\":\"update\",\"object\":\"Account\",\"id\":\"001x\",\"fields\":{\"Description\":\"a--b\"}}";
+        assert_eq!(classify_salesforce_statement_risk(dml), SalesforceStatementRisk::ScopedWrite);
+    }
+
+    #[test]
+    fn classify_salesforce_statement_risk_soql_is_read() {
+        assert_eq!(classify_salesforce_statement_risk("SELECT Id FROM Account"), SalesforceStatementRisk::Read);
+        assert_eq!(classify_salesforce_statement_risk("  select Name from Lead  "), SalesforceStatementRisk::Read);
+        // SOQL forms sqlparser cannot parse must still read as reads.
+        assert_eq!(
+            classify_salesforce_statement_risk("SELECT FIELDS(ALL) FROM Account LIMIT 200"),
+            SalesforceStatementRisk::Read
+        );
+        assert_eq!(
+            classify_salesforce_statement_risk("SELECT Id FROM Opportunity WHERE CloseDate = LAST_N_DAYS:7"),
+            SalesforceStatementRisk::Read
+        );
+        assert_eq!(
+            classify_salesforce_statement_risk("SELECT Id, (SELECT Id FROM Contacts) FROM Account"),
+            SalesforceStatementRisk::Read
+        );
+        assert_eq!(
+            classify_salesforce_statement_risk("/* report */ SELECT Id FROM Account"),
+            SalesforceStatementRisk::Read
+        );
+    }
+
+    #[test]
+    fn classify_salesforce_statement_risk_non_soql_is_opaque_write() {
+        // The driver only accepts SELECT and DBX pseudo-commands; anything else
+        // is a client error, not something to classify as a harmless read.
+        assert_eq!(classify_salesforce_statement_risk("DELETE FROM Account"), SalesforceStatementRisk::OpaqueWrite);
+        assert_eq!(
+            classify_salesforce_statement_risk("FIND {Acme} IN ALL FIELDS"),
+            SalesforceStatementRisk::OpaqueWrite
+        );
+        assert_eq!(classify_salesforce_statement_risk(""), SalesforceStatementRisk::OpaqueWrite);
     }
 
     #[test]
     fn is_write_sql_for_database_salesforce_soql_is_read() {
         assert!(!is_write_sql_for_database("SELECT Id FROM Account", DatabaseType::Salesforce));
+    }
+
+    #[test]
+    fn is_write_sql_for_database_salesforce_literals_are_not_writes() {
+        // The generic keyword scan would see DELETE/UPDATE here; SOQL cannot write.
+        assert!(!is_write_sql_for_database(
+            "SELECT Id FROM Case WHERE Subject = 'Delete request'",
+            DatabaseType::Salesforce
+        ));
+        assert!(!is_write_sql_for_database("SELECT Update__c FROM Lead", DatabaseType::Salesforce));
     }
 
     #[test]

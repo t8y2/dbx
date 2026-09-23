@@ -166,6 +166,21 @@ fn apply_ceiling(current: (bool, bool), ceiling: (bool, bool)) -> (bool, bool) {
     (read_only, !read_only && current.1 && ceiling.1)
 }
 
+/// Whether an AI agent may write to this Salesforce connection through MCP.
+///
+/// A pure per-connection opt-in: no global or group setting can turn it on, and
+/// a connection without a saved rule stays off. Callers still run every write
+/// through the ordinary execution policy, so the global/connection read-only
+/// modes, connection read-only protection and production protection all remain
+/// upper bounds on top of this switch.
+pub fn connection_allows_salesforce_dml(policy: &McpGlobalPolicy, connection_id: &str) -> bool {
+    policy
+        .connection_policies
+        .iter()
+        .find(|rule| rule.connection_id == connection_id)
+        .is_some_and(|rule| rule.allow_salesforce_dml && !rule.read_only)
+}
+
 /// Reject qualified SQL references when database-specific execution rules are
 /// present and individual referenced databases have not been evaluated.
 pub fn ensure_sql_database_execution_scope(
@@ -251,7 +266,10 @@ pub fn ensure_mongo_database_execution_scope(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_database_execution_policy, resolve_database, MCP_EXECUTION_POLICY_VERSION};
+    use super::{
+        connection_allows_salesforce_dml, effective_database_execution_policy, resolve_database,
+        MCP_EXECUTION_POLICY_VERSION,
+    };
     use crate::storage::{McpConnectionPolicy, McpDatabasePolicy, McpGlobalPolicy};
 
     fn policy(version: Option<u8>) -> McpGlobalPolicy {
@@ -270,6 +288,7 @@ mod tests {
                     read_only: false,
                     allow_dangerous_sql: true,
                 }],
+                allow_salesforce_dml: false,
             }],
             ..Default::default()
         }
@@ -315,5 +334,27 @@ mod tests {
     fn blank_database_uses_connection_default() {
         assert_eq!(resolve_database("  ", Some("sample")), "sample");
         assert_eq!(resolve_database("analytics", Some("sample")), "analytics");
+    }
+
+    #[test]
+    fn salesforce_dml_needs_an_explicit_connection_opt_in() {
+        // No rule for the connection at all → off, whatever the global mode says.
+        let mut open = policy(Some(MCP_EXECUTION_POLICY_VERSION));
+        open.read_only = false;
+        assert!(!connection_allows_salesforce_dml(&open, "other"));
+        assert!(!connection_allows_salesforce_dml(&open, "conn"));
+
+        open.connection_policies[0].allow_salesforce_dml = true;
+        assert!(connection_allows_salesforce_dml(&open, "conn"));
+    }
+
+    #[test]
+    fn salesforce_dml_opt_in_is_void_on_a_read_only_connection_rule() {
+        let mut policy = policy(Some(MCP_EXECUTION_POLICY_VERSION));
+        policy.connection_policies[0].allow_salesforce_dml = true;
+        policy.connection_policies[0].read_only = true;
+        // `normalized()` already clears the flag for read-only rules; this keeps a
+        // hand-built or legacy policy from sneaking a write through.
+        assert!(!connection_allows_salesforce_dml(&policy, "conn"));
     }
 }

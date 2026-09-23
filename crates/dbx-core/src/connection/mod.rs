@@ -363,8 +363,9 @@ struct SharedResourceBudget {
 }
 
 /// Cached Salesforce connected-user identity + org display name, serialized
-/// with camelCase field names for the frontend.
-#[derive(Debug, Clone, serde::Serialize)]
+/// with camelCase field names for the frontend. `Deserialize` is derived too so
+/// the Web-mode MCP backend can decode the same JSON the desktop route emits.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SalesforceCurrentUser {
     pub user_id: String,
@@ -372,9 +373,9 @@ pub struct SalesforceCurrentUser {
     pub email: String,
     pub organization_id: String,
     pub username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_admin: Option<bool>,
     pub org_name: String,
 }

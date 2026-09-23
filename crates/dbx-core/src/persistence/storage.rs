@@ -314,6 +314,15 @@ pub struct McpConnectionPolicy {
     /// connection default, while a present entry takes priority over it.
     #[serde(default)]
     pub database_policies: Vec<McpDatabasePolicy>,
+    /// Opt-in switch letting an AI agent write to this Salesforce org through
+    /// MCP. Absent on every policy saved before the switch existed, and `false`
+    /// by default: SOQL reads need no permission beyond the execution mode, but
+    /// Salesforce DML has no transaction and no rollback, so an agent may only
+    /// reach it after a person turns this on for the connection and confirms
+    /// each write (`dbx_salesforce_prepare_write` → `dbx_salesforce_apply_write`).
+    /// Forced back to false whenever `read_only` is set.
+    #[serde(default)]
+    pub allow_salesforce_dml: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,6 +498,9 @@ impl McpGlobalPolicy {
                     current.allowed_databases = databases;
                     current.database_policies =
                         merge_mcp_database_policies(&current.database_policies, &rule.database_policies);
+                    // Same conjunction as high-risk SQL: every duplicate rule has
+                    // to opt in before an agent may write to the org.
+                    current.allow_salesforce_dml &= rule.allow_salesforce_dml;
                 })
                 .or_insert_with(|| McpConnectionPolicy {
                     connection_id: connection_id.to_string(),
@@ -499,6 +511,7 @@ impl McpGlobalPolicy {
                     database_scope: rule.database_scope,
                     allowed_databases: normalize_mcp_database_names(&rule.allowed_databases),
                     database_policies: normalize_mcp_database_policies(&rule.database_policies),
+                    allow_salesforce_dml: rule.allow_salesforce_dml,
                 });
         }
         let mut connection_policies = policies.into_values().collect::<Vec<_>>();
@@ -506,6 +519,9 @@ impl McpGlobalPolicy {
         for rule in &mut connection_policies {
             if rule.read_only {
                 rule.allow_dangerous_sql = false;
+                // A read-only connection cannot carry a Salesforce write opt-in,
+                // however the saved rules were merged.
+                rule.allow_salesforce_dml = false;
             }
             rule.allowed_databases = normalize_mcp_database_names(&rule.allowed_databases);
             if rule.database_scope != McpDatabaseScope::Selected {
